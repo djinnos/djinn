@@ -258,6 +258,419 @@ pub fn format_reopen_ledger(entries: &[ReopenLedgerEntry]) -> Option<String> {
     Some(truncate_feedback(&raw, LEDGER_BUDGET_CHARS))
 }
 
+/// Maximum characters for a single attempt summary line before redaction.
+const ATTEMPT_SUMMARY_MAX_CHARS: usize = 300;
+
+/// Deterministic truncation note appended when attempt history is over budget.
+const ATTEMPT_TRUNCATION_NOTE: &str =
+    "\n[... older attempt entries dropped to fit feedback budget ...]";
+
+/// Normalize text for deduplication comparison: lowercase, collapse whitespace,
+/// strip markdown formatting and common prefixes.
+fn normalize_for_dedup(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for word in text.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        // Strip markdown bold/italic markers.
+        let clean = word
+            .trim_start_matches('*')
+            .trim_start_matches('_')
+            .trim_end_matches('*')
+            .trim_end_matches('_');
+        out.push_str(&clean.to_lowercase());
+    }
+    out
+}
+
+/// Return `true` when `candidate` text is already present (normalized) in
+/// `existing`.  Used to prevent rendering the same rejection/summary twice.
+fn is_duplicated(candidate: &str, existing: &str) -> bool {
+    if candidate.is_empty() {
+        return false;
+    }
+    let norm_candidate = normalize_for_dedup(candidate);
+    let norm_existing = normalize_for_dedup(existing);
+    // A candidate of fewer than 20 chars is too short to reliably deduplicate.
+    if norm_candidate.len() < 20 {
+        return false;
+    }
+    norm_existing.contains(&norm_candidate)
+}
+
+/// Redact a summary/fallback string for prompt safety.
+///
+/// - Truncates to [`ATTEMPT_SUMMARY_MAX_CHARS`] with an ellipsis marker.
+/// - Strips any raw `log_tail:` prefix or inline log-tail content to prevent
+///   unbounded log output from leaking into prompts.
+fn redact_attempt_summary(text: &str) -> String {
+    // Strip any log_tail prefix that may have leaked into the summary.
+    let stripped = if let Some(rest) = text.strip_prefix("log_tail:") {
+        rest.trim_start()
+    } else if let Some(rest) = text.strip_prefix("log_tail: ") {
+        rest.trim_start()
+    } else {
+        text
+    };
+    // Also strip common raw log patterns (stack traces, panics) that are not
+    // useful in prompts.
+    let cleaned =
+        if stripped.contains("thread 'main' panicked at") || stripped.contains("RUST_BACKTRACE=") {
+            // Extract just the panic message line if present.
+            stripped
+                .lines()
+                .find(|l| l.contains("panicked at"))
+                .map(|l| l.trim())
+                .unwrap_or("attempt panicked (raw backtrace redacted)")
+        } else {
+            stripped
+        };
+    truncate_feedback(cleaned, ATTEMPT_SUMMARY_MAX_CHARS)
+}
+
+/// Strip any `log_tail` content from a summary_json value.  Only structured
+/// non-log fields (`failure_class`, `last_verify`) are preserved; raw log
+/// output is never rendered into prompts.
+fn sanitize_summary_json(json_str: &str) -> Option<serde_json::Value> {
+    let json: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let mut out = serde_json::Map::new();
+    // Only forward known safe structured fields.
+    for key in &["failure_class", "last_verify"] {
+        if let Some(val) = json.get(*key) {
+            out.insert((*key).to_string(), val.clone());
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(out))
+    }
+}
+
+/// Format prior attempt history and completed dependency-parent summaries
+/// as an extension of the existing feedback/activity narrative.
+///
+/// `existing_feedback` is the already-rendered reviewer/CI/ledger text that
+/// will appear in the same prompt.  Attempt summaries that duplicate content
+/// already present in `existing_feedback` are reduced to non-duplicative refs
+/// and a short `what_was_tried` note when available.
+///
+/// `remaining_budget` is the number of characters still available within
+/// [`COMBINED_BRIEF_TOTAL_CHARS`] after existing feedback sections have been
+/// rendered.  When the formatted output exceeds this budget, oldest current-
+/// task attempt entries are dropped first, then oldest dependency-parent
+/// entries, and a deterministic truncation note is appended.
+///
+/// Returns `None` when both `prior_attempts` and `completed_parents` are
+/// empty, or when the entire formatted output is deduplicated away.
+pub fn format_attempt_history(
+    prior_attempts: &[djinn_core::models::task_attempt::TaskAttemptPromptSummary],
+    completed_parents: &[djinn_db::CompletedParentSummary],
+    existing_feedback: &str,
+    remaining_budget: usize,
+) -> Option<String> {
+    if prior_attempts.is_empty() && completed_parents.is_empty() {
+        return None;
+    }
+
+    // Phase 1: Format all entries with redaction and dedup applied.
+    let mut attempt_lines: Vec<String> = Vec::new();
+    for attempt in prior_attempts {
+        let formatted = format_single_attempt_deduped(attempt, existing_feedback);
+        if let Some(line) = formatted {
+            attempt_lines.push(line);
+        }
+    }
+
+    let mut parent_lines: Vec<String> = Vec::new();
+    for parent in completed_parents {
+        let formatted = format_completed_parent_deduped(parent, existing_feedback);
+        if let Some(line) = formatted {
+            parent_lines.push(line);
+        }
+    }
+
+    if attempt_lines.is_empty() && parent_lines.is_empty() {
+        return None;
+    }
+
+    // Phase 2: Assemble the section with budget enforcement.
+    // Drop oldest attempts first, then oldest parents, when over budget.
+    budget_and_assemble_attempt_history(&attempt_lines, &parent_lines, remaining_budget)
+}
+
+/// Assemble attempt history from pre-formatted lines, enforcing the budget by
+/// dropping oldest entries first (attempts, then parents) and appending a
+/// deterministic truncation note when entries were dropped.
+fn budget_and_assemble_attempt_history(
+    attempt_lines: &[String],
+    parent_lines: &[String],
+    budget: usize,
+) -> Option<String> {
+    if budget == 0 {
+        return None;
+    }
+
+    let header_attempts = "**Prior attempts (newest first):**";
+    let header_parents = "**Completed dependency parents:**";
+    let truncation_note = ATTEMPT_TRUNCATION_NOTE;
+
+    // Start with all entries and measure.
+    let mut included_attempts: Vec<&String> = attempt_lines.iter().collect();
+    let mut included_parents: Vec<&String> = parent_lines.iter().collect();
+    let mut truncated = false;
+
+    loop {
+        let total = measure_assembled_size(
+            header_attempts,
+            &included_attempts,
+            header_parents,
+            &included_parents,
+            if truncated { truncation_note } else { "" },
+        );
+        if total <= budget {
+            break;
+        }
+        // Drop oldest attempt first (last in the vec, since input is newest-first).
+        if !included_attempts.is_empty() {
+            included_attempts.pop();
+            truncated = true;
+            continue;
+        }
+        // Then drop oldest parent (last in vec).
+        if !included_parents.is_empty() {
+            included_parents.pop();
+            truncated = true;
+            continue;
+        }
+        // Nothing left to drop.
+        break;
+    }
+
+    if included_attempts.is_empty() && included_parents.is_empty() {
+        return None;
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    if !included_attempts.is_empty() {
+        lines.push(header_attempts.to_string());
+        for line in &included_attempts {
+            lines.push(line.to_string());
+        }
+    }
+    if !included_parents.is_empty() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(header_parents.to_string());
+        for line in &included_parents {
+            lines.push(line.to_string());
+        }
+    }
+    if truncated {
+        lines.push(truncation_note.to_string());
+    }
+    Some(lines.join("\n"))
+}
+
+/// Measure the character count of the assembled attempt history section.
+fn measure_assembled_size(
+    header_attempts: &str,
+    attempts: &[&String],
+    header_parents: &str,
+    parents: &[&String],
+    truncation_note: &str,
+) -> usize {
+    let mut size = 0usize;
+    if !attempts.is_empty() {
+        size += header_attempts.len() + 1; // +1 for newline
+        for line in attempts {
+            size += line.len() + 1;
+        }
+    }
+    if !parents.is_empty() {
+        if !attempts.is_empty() {
+            size += 1; // blank separator line
+        }
+        size += header_parents.len() + 1;
+        for line in parents {
+            size += line.len() + 1;
+        }
+    }
+    if !truncation_note.is_empty() {
+        size += truncation_note.len() + 1;
+    }
+    size
+}
+
+/// Format a single prior attempt entry with redaction and dedup applied.
+///
+/// Returns `None` when the summary text is fully duplicated in `existing_feedback`
+/// and there are no non-duplicative refs to render.
+fn format_single_attempt_deduped(
+    a: &djinn_core::models::task_attempt::TaskAttemptPromptSummary,
+    existing_feedback: &str,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "- Attempt #{} ({}): {}",
+        a.attempt_seq, a.role, a.outcome
+    ));
+
+    // Guard decision/reason (present for deferred attempts).
+    if let Some(decision) = &a.guard_decision
+        && !decision.is_empty()
+    {
+        let reason = a
+            .guard_reason
+            .as_deref()
+            .filter(|r| !r.is_empty())
+            .unwrap_or("—");
+        parts.push(format!("  guard: {decision} ({reason})"));
+    }
+
+    // Timestamps.
+    parts.push(format!("  created: {}", a.created_at));
+    if let Some(terminal) = &a.terminal_at {
+        parts.push(format!("  terminal: {terminal}"));
+    }
+
+    // Summary or deterministic fallback, with redaction and dedup.
+    let raw_summary = match &a.summary {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => attempt_fallback_for_outcome(&a.outcome),
+    };
+    let summary_is_dup = is_duplicated(&raw_summary, existing_feedback);
+    if summary_is_dup {
+        // Summary already rendered verbatim in existing feedback.
+        // Render a short note instead of repeating the text.
+        parts.push("  summary: (see rejection/feedback above)".to_string());
+    } else {
+        let redacted = redact_attempt_summary(&raw_summary);
+        parts.push(format!("  summary: {redacted}"));
+    }
+
+    // Selected summary_json fields (sanitized — no raw log_tail).
+    if let Some(json_str) = &a.summary_json
+        && let Some(json) = sanitize_summary_json(json_str)
+    {
+        if let Some(fc) = json.get("failure_class").and_then(|v| v.as_str()) {
+            parts.push(format!("  failure_class: {fc}"));
+        }
+        if let Some(lv) = json.get("last_verify").and_then(|v| v.as_str()) {
+            parts.push(format!("  last_verify: {lv}"));
+        }
+    }
+
+    // Checkpoint/submit/PR refs (always rendered — non-duplicative).
+    let mut has_ref = false;
+    if let Some(cr) = &a.checkpoint_ref
+        && !cr.is_empty()
+    {
+        parts.push(format!("  checkpoint: `{cr}`"));
+        has_ref = true;
+    }
+    if let Some(sr) = &a.submit_ref
+        && !sr.is_empty()
+    {
+        parts.push(format!("  submit_ref: `{sr}`"));
+        has_ref = true;
+    }
+    if let Some(pr) = &a.pr_url
+        && !pr.is_empty()
+    {
+        parts.push(format!("  PR: {pr}"));
+        has_ref = true;
+    }
+
+    // If the summary is duplicated AND there are no refs, skip this entry entirely.
+    if summary_is_dup && !has_ref && a.guard_decision.is_none() {
+        return None;
+    }
+
+    Some(parts.join("\n"))
+}
+
+/// Format a completed dependency-parent entry with dedup and redaction.
+///
+/// Returns `None` when the parent's summary is fully duplicated and there are
+/// no non-duplicative details to render.
+fn format_completed_parent_deduped(
+    parent: &djinn_db::CompletedParentSummary,
+    existing_feedback: &str,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "- Parent {} ({}): closed {}",
+        parent.short_id, parent.title, parent.terminal_at
+    ));
+    if let Some(attempt) = &parent.latest_completed_attempt {
+        let raw_summary = match &attempt.summary {
+            Some(s) if !s.is_empty() => s.clone(),
+            _ => "completed (no summary available)".to_string(),
+        };
+        let summary_is_dup = is_duplicated(&raw_summary, existing_feedback);
+        if summary_is_dup {
+            parts.push(format!(
+                "  latest completed attempt #{}: (see feedback above)",
+                attempt.attempt_seq
+            ));
+        } else {
+            let redacted = redact_attempt_summary(&raw_summary);
+            parts.push(format!(
+                "  latest completed attempt #{}: {}",
+                attempt.attempt_seq, redacted
+            ));
+        }
+        if let Some(sr) = &attempt.submit_ref
+            && !sr.is_empty()
+        {
+            parts.push(format!("  submit_ref: `{sr}`"));
+        }
+        if let Some(pr) = &attempt.pr_url
+            && !pr.is_empty()
+        {
+            parts.push(format!("  PR: {pr}"));
+        }
+        // Summary_json fields for parent attempts (sanitized).
+        if let Some(json_str) = &attempt.summary_json
+            && let Some(json) = sanitize_summary_json(json_str)
+        {
+            if let Some(fc) = json.get("failure_class").and_then(|v| v.as_str()) {
+                parts.push(format!("  failure_class: {fc}"));
+            }
+            if let Some(lv) = json.get("last_verify").and_then(|v| v.as_str()) {
+                parts.push(format!("  last_verify: {lv}"));
+            }
+        }
+    }
+    Some(parts.join("\n"))
+}
+
+/// Deterministic fallback text for attempts without a summary, differentiated
+/// by outcome.
+fn attempt_fallback_for_outcome(outcome: &str) -> String {
+    match outcome {
+        "crashed" => "attempt crashed (no summary recorded)".to_string(),
+        "timed_out" => "attempt timed out (no summary recorded)".to_string(),
+        "spawn_failed" => {
+            "attempt spawn failed — worker process did not start (no summary recorded)".to_string()
+        }
+        "deferred" => "attempt deferred by guard (no summary recorded)".to_string(),
+        "completed" => "completed (no summary recorded)".to_string(),
+        "reopened" => "attempt reopened (no summary recorded)".to_string(),
+        "cancelled" => "attempt cancelled (no summary recorded)".to_string(),
+        "loop_guard_tripped" => {
+            "attempt terminated by loop guard (no summary recorded)".to_string()
+        }
+        "force_closed" => "attempt force-closed (no summary recorded)".to_string(),
+        "handoff" => "attempt handed off (no summary recorded)".to_string(),
+        "adopted_pr" => "attempt adopted existing PR (no summary recorded)".to_string(),
+        _ => format!("attempt {outcome} (no summary recorded)"),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn log_snippet(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();

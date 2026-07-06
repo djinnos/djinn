@@ -7,8 +7,9 @@ use super::*;
 
 pub(crate) use djinn_slot::helpers::{
     COMBINED_BRIEF_SECTION_FLOOR_CHARS, COMBINED_BRIEF_TOTAL_CHARS, budget_combined_sections,
-    extract_worker_context, format_command_details, parse_conflict_metadata,
-    raw_ci_feedback_in_cycle, recent_feedback, runtime_env_diagnostics, runtime_fs_diagnostics,
+    extract_worker_context, format_attempt_history, format_command_details,
+    parse_conflict_metadata, raw_ci_feedback_in_cycle, recent_feedback, runtime_env_diagnostics,
+    runtime_fs_diagnostics,
 };
 
 #[allow(dead_code)] // facade export; currently only called via `initial_user_message_for_task`

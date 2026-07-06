@@ -66,7 +66,7 @@ pub(crate) use feedback::log_snippet;
 pub use feedback::{
     COMBINED_BRIEF_SECTION_FLOOR_CHARS, COMBINED_BRIEF_TOTAL_CHARS, LEDGER_BUDGET_CHARS,
     budget_combined_sections, conflict_context_for_dispatch, default_target_branch,
-    extract_worker_context, format_command_details, format_reopen_ledger,
+    extract_worker_context, format_attempt_history, format_command_details, format_reopen_ledger,
     initial_user_message_for_task, load_task, parse_conflict_metadata, pr_review_feedback_context,
     raw_ci_feedback_in_cycle, recent_feedback, runtime_env_diagnostics, runtime_fs_diagnostics,
 };

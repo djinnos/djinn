@@ -168,11 +168,14 @@ fn resolve_zombie_running_session(
     inputs: &ZombieRunningSessionInputs,
 ) -> ZombieRunningSessionOutputs {
     // Helper: echo persisted classifier fields into the output.
-    let persisted = |is_zombie: bool, reason: ZombieRunningSessionReason| {
-        ZombieRunningSessionOutputs {
+    let persisted =
+        |is_zombie: bool, reason: ZombieRunningSessionReason| ZombieRunningSessionOutputs {
             is_zombie,
             reason,
-            liveness_verdict: inputs.liveness_state.as_ref().and_then(|s| s.liveness_verdict.clone()),
+            liveness_verdict: inputs
+                .liveness_state
+                .as_ref()
+                .and_then(|s| s.liveness_verdict.clone()),
             liveness_outcome: inputs
                 .liveness_state
                 .as_ref()
@@ -181,8 +184,7 @@ fn resolve_zombie_running_session(
                 .liveness_state
                 .as_ref()
                 .and_then(|s| s.liveness_outcome_reason.clone()),
-        }
-    };
+        };
 
     if inputs.db_status != "running" {
         return persisted(false, ZombieRunningSessionReason::NotRunning);
@@ -423,7 +425,12 @@ impl SnapshotZombieRunningSessionSource {
 
             let Some(task_id) = session.task_id.as_deref() else {
                 candidates.push(ZombieRunningSessionCandidate::from_session(
-                    &session, false, false, false, false, liveness_state,
+                    &session,
+                    false,
+                    false,
+                    false,
+                    false,
+                    liveness_state,
                 ));
                 continue;
             };
@@ -562,7 +569,10 @@ mod tests {
             Some("task-zombie")
         );
         assert_eq!(finding.evidence["db_row"]["status"], "running");
-        assert_eq!(finding.evidence["resolver_outputs"]["reason"], "classifier_dead");
+        assert_eq!(
+            finding.evidence["resolver_outputs"]["reason"],
+            "classifier_dead"
+        );
         assert!(
             !finding.evidence["live_state"]["slot_pool_has_session"]
                 .as_bool()
@@ -607,8 +617,14 @@ mod tests {
             finding.resolver_snapshot.inputs["live_state"]["pod_present"],
             false
         );
-        assert_eq!(finding.resolver_snapshot.outputs["reason"], "classifier_dead");
-        assert_eq!(finding.resolver_snapshot.outputs["liveness_verdict"], "dead");
+        assert_eq!(
+            finding.resolver_snapshot.outputs["reason"],
+            "classifier_dead"
+        );
+        assert_eq!(
+            finding.resolver_snapshot.outputs["liveness_verdict"],
+            "dead"
+        );
         assert_eq!(
             finding.resolver_snapshot.outputs["liveness_outcome"],
             "dead_reclaimed"

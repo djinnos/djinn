@@ -3559,9 +3559,10 @@ async fn consumed_arbitration_advances_to_next_cycle_and_dispatches() {
         2,
         "consumed cycle must produce exactly two rows (cycle 0 consumed + cycle 1 unconsumed)"
     );
-    let new_arb = all_arbs.iter().find(|a| a.hold_cycle == 1).expect(
-        "cycle 1 arbitration must exist",
-    );
+    let new_arb = all_arbs
+        .iter()
+        .find(|a| a.hold_cycle == 1)
+        .expect("cycle 1 arbitration must exist");
     assert_eq!(
         new_arb.state, "unconsumed",
         "new arbitration must be unconsumed"
@@ -3792,8 +3793,16 @@ async fn repeated_consumed_cycles_do_not_create_duplicate_arbitration_rows() {
 
     let arbs_after_1 = arb_repo.list_for_task(&task.id).await.unwrap();
     assert_eq!(arbs_after_1.len(), 2, "cycle 0 + cycle 1");
-    assert!(arbs_after_1.iter().any(|a| a.hold_cycle == 0 && a.state == "consumed"));
-    assert!(arbs_after_1.iter().any(|a| a.hold_cycle == 1 && a.state == "unconsumed"));
+    assert!(
+        arbs_after_1
+            .iter()
+            .any(|a| a.hold_cycle == 0 && a.state == "consumed")
+    );
+    assert!(
+        arbs_after_1
+            .iter()
+            .any(|a| a.hold_cycle == 1 && a.state == "unconsumed")
+    );
 
     // Mark cycle 1 consumed (simulate arbiter completing).
     arb_repo.mark_consumed(&task.id, 1).await.unwrap();
@@ -3809,7 +3818,9 @@ async fn repeated_consumed_cycles_do_not_create_duplicate_arbitration_rows() {
     let arbs_after_2 = arb_repo.list_for_task(&task.id).await.unwrap();
     assert_eq!(arbs_after_2.len(), 3, "cycle 0 + cycle 1 + cycle 2");
     assert!(
-        arbs_after_2.iter().any(|a| a.hold_cycle == 2 && a.state == "unconsumed"),
+        arbs_after_2
+            .iter()
+            .any(|a| a.hold_cycle == 2 && a.state == "unconsumed"),
         "cycle 2 must be unconsumed"
     );
 
@@ -3876,7 +3887,9 @@ async fn try_create_returns_already_exists_consumed_for_consumed_row() {
         .unwrap();
 
     match result {
-        djinn_db::repositories::task_arbitration::TryCreateResult::AlreadyExistsConsumed(record) => {
+        djinn_db::repositories::task_arbitration::TryCreateResult::AlreadyExistsConsumed(
+            record,
+        ) => {
             assert_eq!(record.state, "consumed");
             // The stored dossier is available for the re-entry dossier path.
             let dossier = record
@@ -3915,7 +3928,9 @@ async fn try_create_returns_already_exists_failed_for_failed_row() {
             github_head_sha: Some("sha2"),
             pr_url: Some("https://github.com/x/y/pull/1"),
             failing_ci_job_ids: &serde_json::json!([42]),
-            dossier: Some(&serde_json::json!({"kind": "arbiter_consumed_dossier", "state": "failed"})),
+            dossier: Some(
+                &serde_json::json!({"kind": "arbiter_consumed_dossier", "state": "failed"}),
+            ),
             directive: None,
             verification_command: None,
             excluded_models: &serde_json::json!([]),
@@ -3966,8 +3981,7 @@ async fn park_reason_never_uses_old_static_template() {
     // exercised.  We use the `make_task_with_reopen_count` helper and seed
     // terminated post-intervention sessions to exercise the history-based
     // reason path.
-    let task =
-        make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // Build the post-intervention history and compute the park reason.
@@ -3979,8 +3993,5 @@ async fn park_reason_never_uses_old_static_template() {
         !reason.contains("same acceptance criteria kept failing"),
         "park reason must NEVER contain the old static template; got: {reason}"
     );
-    assert!(
-        !reason.is_empty(),
-        "park reason must not be empty"
-    );
+    assert!(!reason.is_empty(), "park reason must not be empty");
 }
