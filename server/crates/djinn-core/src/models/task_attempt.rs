@@ -88,6 +88,19 @@ impl TaskAttemptOutcome {
         matches!(self, Self::Pending | Self::Submitted)
     }
 
+    /// True if this terminal outcome represents an infrastructure /
+    /// provider-attempt failure that should be classified as
+    /// [`ReopenClass::Infra`](crate::models::ReopenClass::Infra) and excluded
+    /// from quality-strike, intervention, and park escalation counters.
+    ///
+    /// Covers worker handshake timeouts, provider stalls, spawn failures,
+    /// timed-out attempts, and crashed infra attempts. Sourced from the `7w2i`
+    /// `task_attempts.outcome` contract; matches the set mapped by
+    /// `outcome_to_reopen_class`.
+    pub fn is_infra(&self) -> bool {
+        matches!(self, Self::TimedOut | Self::SpawnFailed | Self::Crashed)
+    }
+
     /// Lifecycle rank used for forward-only ordering.
     ///
     /// Non-terminal outcomes are ordered before terminal outcomes. Within each
