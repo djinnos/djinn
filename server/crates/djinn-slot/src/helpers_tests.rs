@@ -862,7 +862,7 @@ fn make_prompt_summary(
 
 #[test]
 fn format_attempt_history_returns_none_for_empty_inputs() {
-    assert!(format_attempt_history(&[], &[]).is_none());
+    assert!(format_attempt_history(&[], &[], "", 10_000).is_none());
 }
 
 #[test]
@@ -873,7 +873,7 @@ fn format_attempt_history_renders_prior_attempts_with_summary() {
         "completed",
         Some("Implemented widget"),
     )];
-    let result = format_attempt_history(&attempts, &[]).expect("should produce Some");
+    let result = format_attempt_history(&attempts, &[], "", 10_000).expect("should produce Some");
     assert!(result.contains("**Prior attempts (newest first):**"));
     assert!(result.contains("Attempt #1 (worker): completed"));
     assert!(result.contains("summary: Implemented widget"));
@@ -891,7 +891,7 @@ fn format_attempt_history_uses_fallback_for_missing_summary() {
         make_prompt_summary(4, "worker", "deferred", None),
         make_prompt_summary(5, "worker", "reopened", None),
     ];
-    let result = format_attempt_history(&attempts, &[]).expect("should produce Some");
+    let result = format_attempt_history(&attempts, &[], "", 10_000).expect("should produce Some");
     assert!(result.contains("attempt crashed (no summary recorded)"));
     assert!(result.contains("attempt timed out (no summary recorded)"));
     assert!(
@@ -907,7 +907,7 @@ fn format_attempt_history_renders_guard_decision_and_reason() {
     let mut attempt = make_prompt_summary(1, "worker", "deferred", None);
     attempt.guard_decision = Some("defer".to_string());
     attempt.guard_reason = Some("loop_guard".to_string());
-    let result = format_attempt_history(&[attempt], &[]).expect("should produce Some");
+    let result = format_attempt_history(&[attempt], &[], "", 10_000).expect("should produce Some");
     assert!(result.contains("guard: defer (loop_guard)"));
 }
 
@@ -916,7 +916,7 @@ fn format_attempt_history_renders_summary_json_fields() {
     let mut attempt = make_prompt_summary(1, "worker", "completed", Some("done"));
     attempt.summary_json =
         Some(r#"{"failure_class":"compile_error","last_verify":"cargo clippy"}"#.to_string());
-    let result = format_attempt_history(&[attempt], &[]).expect("should produce Some");
+    let result = format_attempt_history(&[attempt], &[], "", 10_000).expect("should produce Some");
     assert!(result.contains("failure_class: compile_error"));
     assert!(result.contains("last_verify: cargo clippy"));
 }
@@ -925,7 +925,7 @@ fn format_attempt_history_renders_summary_json_fields() {
 fn format_attempt_history_omits_summary_json_when_absent() {
     let attempt = make_prompt_summary(1, "worker", "completed", Some("done"));
     // summary_json is None by default
-    let result = format_attempt_history(&[attempt], &[]).expect("should produce Some");
+    let result = format_attempt_history(&[attempt], &[], "", 10_000).expect("should produce Some");
     assert!(!result.contains("failure_class:"));
     assert!(!result.contains("last_verify:"));
 }
@@ -944,7 +944,7 @@ fn format_attempt_history_renders_completed_dependency_parents() {
             Some("Parent done"),
         )),
     }];
-    let result = format_attempt_history(&[], &parents).expect("should produce Some");
+    let result = format_attempt_history(&[], &parents, "", 10_000).expect("should produce Some");
     assert!(result.contains("**Completed dependency parents:**"));
     assert!(result.contains("Parent p1 (Parent task): closed 2026-01-01T02:00:00Z"));
     assert!(result.contains("latest completed attempt #1: Parent done"));
@@ -961,7 +961,7 @@ fn format_attempt_history_renders_parent_without_attempt() {
         terminal_at: "2026-01-02T00:00:00Z".to_string(),
         latest_completed_attempt: None,
     }];
-    let result = format_attempt_history(&[], &parents).expect("should produce Some");
+    let result = format_attempt_history(&[], &parents, "", 10_000).expect("should produce Some");
     assert!(result.contains("Parent p2 (Orphan parent): closed 2026-01-02T00:00:00Z"));
     // Should not crash or include attempt details
     assert!(!result.contains("latest completed attempt"));
@@ -979,7 +979,7 @@ fn format_attempt_history_parent_renders_summary_json_fields() {
         terminal_at: "2026-01-01T02:00:00Z".to_string(),
         latest_completed_attempt: Some(attempt),
     }];
-    let result = format_attempt_history(&[], &parents).expect("should produce Some");
+    let result = format_attempt_history(&[], &parents, "", 10_000).expect("should produce Some");
     assert!(result.contains("failure_class: test_failure"));
     assert!(result.contains("last_verify: cargo test"));
 }
@@ -999,7 +999,8 @@ fn format_attempt_history_combined_attempts_and_parents() {
             Some("Parent done"),
         )),
     }];
-    let result = format_attempt_history(&attempts, &parents).expect("should produce Some");
+    let result =
+        format_attempt_history(&attempts, &parents, "", 10_000).expect("should produce Some");
     assert!(result.contains("**Prior attempts (newest first):**"));
     assert!(result.contains("Attempt #1 (worker): completed"));
     assert!(result.contains("**Completed dependency parents:**"));
@@ -1022,10 +1023,244 @@ fn format_attempt_history_omits_refs_when_absent() {
         checkpoint_ref: None,
         summary_json: None,
     };
-    let result = format_attempt_history(&[attempt], &[]).expect("should produce Some");
+    let result = format_attempt_history(&[attempt], &[], "", 10_000).expect("should produce Some");
     assert!(!result.contains("submit_ref:"));
     assert!(!result.contains("PR:"));
     assert!(!result.contains("checkpoint:"));
     assert!(!result.contains("guard:"));
     assert!(!result.contains("failure_class:"));
+}
+
+// ── Shared budget, truncation, redaction, and dedup tests (16vq) ──────────────
+
+/// When over budget, oldest attempt entries are dropped first, then parents.
+#[test]
+fn format_attempt_history_drops_oldest_attempts_first_when_over_budget() {
+    let attempts = vec![
+        make_prompt_summary(3, "worker", "completed", Some("newest attempt")),
+        make_prompt_summary(2, "worker", "crashed", None),
+        make_prompt_summary(1, "worker", "timed_out", None),
+    ];
+    // Very small budget — only newest should survive.
+    let result = format_attempt_history(&attempts, &[], "", 400)
+        .expect("should produce Some with truncation");
+    assert!(
+        result.contains("newest attempt"),
+        "newest attempt should survive: {result}"
+    );
+    assert!(
+        result.contains("dropped to fit feedback budget"),
+        "should include truncation note: {result}"
+    );
+    // Oldest (attempt #1) should be dropped.
+    assert!(
+        !result.contains("Attempt #1 (worker): timed_out"),
+        "oldest attempt should be dropped: {result}"
+    );
+}
+
+/// When over budget with both attempts and parents, attempts are dropped first.
+#[test]
+fn format_attempt_history_drops_attempts_before_parents() {
+    let attempts = vec![
+        make_prompt_summary(2, "worker", "completed", Some("attempt two")),
+        make_prompt_summary(1, "worker", "crashed", Some("attempt one")),
+    ];
+    let parents = vec![CompletedParentSummary {
+        task_id: "tp".to_string(),
+        short_id: "p1".to_string(),
+        title: "Parent".to_string(),
+        terminal_at: "2026-01-01T02:00:00Z".to_string(),
+        latest_completed_attempt: Some(make_prompt_summary(
+            1,
+            "worker",
+            "completed",
+            Some("parent completed summary"),
+        )),
+    }];
+    // Budget enough for parents + newest attempt but not oldest attempt.
+    let result = format_attempt_history(&attempts, &parents, "", 500).expect("should produce Some");
+    // Parent should survive since attempts are dropped first.
+    assert!(
+        result.contains("Parent p1"),
+        "parent should survive when attempts are dropped first: {result}"
+    );
+    assert!(
+        result.contains("dropped to fit feedback budget"),
+        "should include truncation note: {result}"
+    );
+}
+
+/// Deterministic truncation note is present when entries are dropped.
+#[test]
+fn format_attempt_history_truncation_note_is_deterministic() {
+    let attempts = vec![
+        make_prompt_summary(2, "worker", "completed", Some("second")),
+        make_prompt_summary(1, "worker", "completed", Some("first")),
+    ];
+    // Budget enough for newest entry but not both.
+    let result = format_attempt_history(&attempts, &[], "", 350).expect("should produce Some");
+    assert!(
+        result.contains("[... older attempt entries dropped to fit feedback budget ...]"),
+        "deterministic truncation note expected: {result}"
+    );
+}
+
+/// Attempt summaries are redacted: long summaries are truncated.
+#[test]
+fn format_attempt_history_redacts_long_summaries() {
+    let long_summary = "x".repeat(500);
+    let attempts = vec![make_prompt_summary(
+        1,
+        "worker",
+        "completed",
+        Some(&long_summary),
+    )];
+    let result = format_attempt_history(&attempts, &[], "", 10_000).expect("should produce Some");
+    // The summary line should be truncated (the raw 500 chars should not appear).
+    let summary_line = result
+        .lines()
+        .find(|l| l.contains("summary:"))
+        .expect("should have summary line");
+    assert!(
+        summary_line.len() < 400,
+        "summary should be redacted/truncated: len={}",
+        summary_line.len()
+    );
+}
+
+/// Raw `log_tail` prefix is stripped from summaries.
+#[test]
+fn format_attempt_history_strips_log_tail_prefix() {
+    let attempts = vec![make_prompt_summary(
+        1,
+        "worker",
+        "crashed",
+        Some("log_tail: thread 'main' panicked at src/main.rs:42"),
+    )];
+    let result = format_attempt_history(&attempts, &[], "", 10_000).expect("should produce Some");
+    assert!(
+        !result.contains("log_tail:"),
+        "log_tail prefix should be stripped: {result}"
+    );
+    assert!(
+        result.contains("panicked at"),
+        "panic message should be preserved: {result}"
+    );
+}
+
+/// Raw backtrace content in summaries is redacted to a safe message.
+#[test]
+fn format_attempt_history_redacts_raw_backtrace() {
+    let panic_text = "thread 'main' panicked at 'oops', src/main.rs:42\nstack backtrace:\n   0: std::backtrace::Backtrace::capture\nRUST_BACKTRACE=1";
+    let attempts = vec![make_prompt_summary(
+        1,
+        "worker",
+        "crashed",
+        Some(panic_text),
+    )];
+    let result = format_attempt_history(&attempts, &[], "", 10_000).expect("should produce Some");
+    assert!(
+        !result.contains("RUST_BACKTRACE="),
+        "raw backtrace should be redacted: {result}"
+    );
+}
+
+/// `log_tail` in summary_json is never forwarded.
+#[test]
+fn format_attempt_history_sanitizes_log_tail_from_summary_json() {
+    let mut attempt = make_prompt_summary(1, "worker", "completed", Some("done"));
+    attempt.summary_json = Some(
+        r#"{"failure_class":"compile_error","log_tail":"massive log output here"}"#.to_string(),
+    );
+    let result = format_attempt_history(&[attempt], &[], "", 10_000).expect("should produce Some");
+    assert!(
+        result.contains("failure_class: compile_error"),
+        "failure_class should be preserved: {result}"
+    );
+    assert!(
+        !result.contains("log_tail"),
+        "log_tail should not appear in output: {result}"
+    );
+    assert!(
+        !result.contains("massive log output"),
+        "log_tail content should not appear: {result}"
+    );
+}
+
+/// Duplicate rejection text in existing feedback is not rendered again.
+#[test]
+fn format_attempt_history_deduplicates_against_existing_feedback() {
+    let rejection_text = "Missing null check in parse_config function causes panic on empty input";
+    let attempts = vec![make_prompt_summary(
+        1,
+        "worker",
+        "reopened",
+        Some(rejection_text),
+    )];
+    // Simulate existing feedback that already contains the rejection.
+    let existing = format!("**Reviewer rejection:**\n{rejection_text}");
+    let result =
+        format_attempt_history(&attempts, &[], &existing, 10_000).expect("should produce Some");
+    // The rejection text should NOT appear verbatim a second time.
+    assert!(
+        result.contains("(see rejection/feedback above)"),
+        "should use dedup placeholder instead of repeating: {result}"
+    );
+    // Refs should still be present.
+    assert!(
+        result.contains("submit_ref: `abc123`"),
+        "refs should remain: {result}"
+    );
+}
+
+/// When summary is duplicated AND there are no refs, the entry is omitted.
+#[test]
+fn format_attempt_history_omits_fully_duplicate_entry() {
+    let rejection_text = "Missing null check in parse_config function causes panic on empty input";
+    let attempt = TaskAttemptPromptSummary {
+        attempt_seq: 1,
+        role: "worker".to_string(),
+        outcome: "reopened".to_string(),
+        summary: Some(rejection_text.to_string()),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        terminal_at: Some("2026-01-01T01:00:00Z".to_string()),
+        submit_ref: None,
+        pr_url: None,
+        guard_decision: None,
+        guard_reason: None,
+        checkpoint_ref: None,
+        summary_json: None,
+    };
+    let existing = format!("**Reviewer rejection:**\n{rejection_text}");
+    let result = format_attempt_history(&[attempt], &[], &existing, 10_000);
+    assert!(
+        result.is_none(),
+        "fully duplicate entry with no refs should be omitted"
+    );
+}
+
+/// Zero budget returns None.
+#[test]
+fn format_attempt_history_returns_none_for_zero_budget() {
+    let attempts = vec![make_prompt_summary(1, "worker", "completed", Some("done"))];
+    assert!(format_attempt_history(&attempts, &[], "", 0).is_none());
+}
+
+/// Non-duplicative short summary with refs is preserved even against large existing text.
+#[test]
+fn format_attempt_history_preserves_non_duplicate_content() {
+    let attempts = vec![make_prompt_summary(
+        1,
+        "worker",
+        "completed",
+        Some("Implemented the widget feature successfully"),
+    )];
+    let existing = "**Reviewer rejection:**\nSomething completely different about lint errors";
+    let result =
+        format_attempt_history(&attempts, &[], existing, 10_000).expect("should produce Some");
+    assert!(
+        result.contains("Implemented the widget feature successfully"),
+        "non-duplicate summary should be preserved: {result}"
+    );
 }
