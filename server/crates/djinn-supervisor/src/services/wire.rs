@@ -425,6 +425,15 @@ pub enum ServiceRpcRequest {
     /// gate as the PR-open path but without firing a board transition on
     /// red.  Appended at the enum tail for bincode stability.
     RunArbiterPreapprovalGate { task: Task },
+    /// [`crate::SupervisorServices::record_arbiter_decision`].
+    /// Persists an arbiter decision on the arbitration row and emits
+    /// an `arbiter_decision` activity event.  Appended at the enum
+    /// tail for bincode stability.
+    RecordArbiterDecision {
+        task_id: String,
+        decision: String,
+        evidence_json: String,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -497,6 +506,9 @@ pub enum ServiceRpcResponse {
     /// `Err` is a transport/infra failure.  Appended at the enum tail for
     /// bincode stability.
     RunArbiterPreapprovalGate(Result<ArbiterGateResult, String>),
+    /// Arbiter decision persistence ack.  `Err` carries the host's
+    /// error.  Appended at the enum tail for bincode stability.
+    RecordArbiterDecision(Result<(), String>),
 }
 
 #[cfg(test)]

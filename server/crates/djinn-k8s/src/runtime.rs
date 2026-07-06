@@ -1997,6 +1997,15 @@ mod tests {
             ) -> Result<djinn_supervisor::ArbiterGateResult, String> {
                 unimplemented!()
             }
+
+            async fn record_arbiter_decision(
+                &self,
+                _task_id: String,
+                _decision: String,
+                _evidence_json: String,
+            ) -> Result<(), String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

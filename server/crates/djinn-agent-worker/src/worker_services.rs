@@ -572,6 +572,17 @@ impl SupervisorServices for WorkerSupervisorServices {
     ) -> Result<djinn_supervisor::ArbiterGateResult, String> {
         self.rpc.run_arbiter_preapproval_gate(task).await
     }
+
+    async fn record_arbiter_decision(
+        &self,
+        task_id: String,
+        decision: String,
+        evidence_json: String,
+    ) -> Result<(), String> {
+        self.rpc
+            .record_arbiter_decision(task_id, decision, evidence_json)
+            .await
+    }
 }
 
 #[cfg(test)]

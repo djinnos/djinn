@@ -171,13 +171,28 @@ pub enum StageOutcome {
     /// (in_lead_intervention → approved); the supervisor then opens/updates the
     /// PR (same terminal path as a reviewer approval). NOT terminal: it falls
     /// through to the post-loop `open_pr`.
-    LeadApproved,
+    ///
+    /// `evidence` is a JSON-serialized evidence object (with at minimum
+    /// a non-empty `summary` field) required by the arbiter decision
+    /// contract.  It is persisted on the arbitration row and logged as
+    /// an `arbiter_decision` activity event before the approval transition.
+    LeadApproved {
+        /// JSON-serialized evidence object (e.g. `{"summary": "..."}`).
+        #[serde(default)]
+        evidence: String,
+    },
     /// Lead `submit_decision(decision="approve_conflict")` — approved, but a
     /// merge conflict was found. Maps to `lead_approve_conflict`
     /// (in_lead_intervention → open + conflict metadata) so the coordinator
     /// re-dispatches a conflict-retry run.
+    ///
+    /// `evidence` is a JSON-serialized evidence object, same contract as
+    /// [`LeadApproved`].
     LeadApproveConflict {
         reason: String,
+        /// JSON-serialized evidence object (e.g. `{"summary": "..."}`).
+        #[serde(default)]
+        evidence: String,
     },
     /// Lead `submit_decision(decision="reopen")` — the arbiter rescoped /
     /// guided / blocked-on-deps and the task should retry with a fresh worker.
@@ -313,7 +328,7 @@ fn emit_stage_outcome_event(
         StageOutcome::VerifierFailed { .. } => "verifier_failed",
         StageOutcome::ArchitectDone => "architect_done",
         StageOutcome::Escalate { .. } => "escalate",
-        StageOutcome::LeadApproved => "lead_approved",
+        StageOutcome::LeadApproved { .. } => "lead_approved",
         StageOutcome::LeadApproveConflict { .. } => "lead_approve_conflict",
         StageOutcome::LeadReopen { .. } => "lead_reopen",
         StageOutcome::LeadClose { .. } => "lead_close",
@@ -1883,7 +1898,7 @@ impl TaskRunSupervisor {
                     // and the agent may still emit a late outcome. We must NOT
                     // transition the board on a cancelled run — leave the task
                     // in `in_lead_intervention` for a clean redispatch.
-                    StageOutcome::LeadApproved => {
+                    StageOutcome::LeadApproved { ref evidence } => {
                         // Work is complete + correct; the worker just couldn't
                         // self-certify. lead_approve: in_lead_intervention →
                         // approved. Do NOT set `result` — fall through to the
@@ -1931,6 +1946,27 @@ impl TaskRunSupervisor {
                                 );
                             }
                         }
+                        // ── Persist arbiter decision on arbitration row ────
+                        // Record the decision and evidence before the board
+                        // transition so the arbitration row carries the
+                        // decision payload and an arbiter_decision activity
+                        // event is emitted (AC2).
+                        if let Err(e) = self
+                            .services
+                            .record_arbiter_decision(
+                                spec.task_id.clone(),
+                                "approve".into(),
+                                evidence.clone(),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: record_arbiter_decision failed — proceeding with lead_approve"
+                            );
+                        }
                         if let Err(e) = self
                             .services
                             .transition_task(spec.task_id.clone(), "lead_approve".into(), None)
@@ -1944,7 +1980,10 @@ impl TaskRunSupervisor {
                             );
                         }
                     }
-                    StageOutcome::LeadApproveConflict { reason } => {
+                    StageOutcome::LeadApproveConflict {
+                        reason,
+                        ref evidence,
+                    } => {
                         if self.services.cancel().is_cancelled() {
                             tracing::debug!(
                                 task_run_id = %run_id,
@@ -1980,6 +2019,25 @@ impl TaskRunSupervisor {
                                     "supervisor: arbiter pre-approval gate infra error — proceeding (fail-open)"
                                 );
                             }
+                        }
+                        // ── Persist arbiter decision on arbitration row ────
+                        // Record the decision and evidence before the board
+                        // transition (AC2).
+                        if let Err(e) = self
+                            .services
+                            .record_arbiter_decision(
+                                spec.task_id.clone(),
+                                "approve_conflict".into(),
+                                evidence.clone(),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: record_arbiter_decision for approve_conflict failed — proceeding with transition"
+                            );
                         }
                         if let Err(e) = self
                             .services
@@ -2832,6 +2890,15 @@ mod tests {
         ) -> Result<ArbiterGateResult, String> {
             // Test stub: always pass.
             Ok(ArbiterGateResult::Pass)
+        }
+
+        async fn record_arbiter_decision(
+            &self,
+            _task_id: String,
+            _decision: String,
+            _evidence_json: String,
+        ) -> Result<(), String> {
+            Ok(())
         }
     }
 
@@ -4440,9 +4507,12 @@ mod tests {
             StageOutcome::Escalate {
                 reason: "blocked".to_string(),
             },
-            StageOutcome::LeadApproved,
+            StageOutcome::LeadApproved {
+                evidence: String::new(),
+            },
             StageOutcome::LeadApproveConflict {
                 reason: "conflict".to_string(),
+                evidence: String::new(),
             },
             StageOutcome::LeadReopen {
                 reason: "retry".to_string(),
@@ -5184,6 +5254,15 @@ mod tests {
             // Test stub: always pass.
             Ok(ArbiterGateResult::Pass)
         }
+
+        async fn record_arbiter_decision(
+            &self,
+            _task_id: String,
+            _decision: String,
+            _evidence_json: String,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     // ── Arbiter pre-approval gate tests ──────────────────────────────────────
@@ -5368,6 +5447,15 @@ mod tests {
         ) -> Result<ArbiterGateResult, String> {
             self.gate_result.clone()
         }
+
+        async fn record_arbiter_decision(
+            &self,
+            _task_id: String,
+            _decision: String,
+            _evidence_json: String,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     /// Build a minimal mirror + supervisor for arbiter gate tests.
@@ -5436,7 +5524,9 @@ mod tests {
             build_arbiter_gate_test_env(
                 "T-gate-green",
                 "proj-gate",
-                StageOutcome::LeadApproved,
+                StageOutcome::LeadApproved {
+                    evidence: String::new(),
+                },
                 Ok(ArbiterGateResult::Pass),
             )
             .await;
@@ -5467,7 +5557,9 @@ mod tests {
             build_arbiter_gate_test_env(
                 "T-gate-red",
                 "proj-gate",
-                StageOutcome::LeadApproved,
+                StageOutcome::LeadApproved {
+                    evidence: String::new(),
+                },
                 Ok(ArbiterGateResult::Blocked {
                     feedback: "clippy failed: error[E0425]".into(),
                 }),
@@ -5511,6 +5603,7 @@ mod tests {
                 "proj-gate",
                 StageOutcome::LeadApproveConflict {
                     reason: "merge conflict".into(),
+                    evidence: String::new(),
                 },
                 Ok(ArbiterGateResult::Pass),
             )
@@ -5545,6 +5638,7 @@ mod tests {
                 "proj-gate",
                 StageOutcome::LeadApproveConflict {
                     reason: "merge conflict".into(),
+                    evidence: String::new(),
                 },
                 Ok(ArbiterGateResult::Blocked {
                     feedback: "test target build failed".into(),
@@ -5557,9 +5651,7 @@ mod tests {
         // Gate blocked → NO lead_approve_conflict transition.
         let calls = transition_calls.lock().unwrap();
         assert!(
-            !calls
-                .iter()
-                .any(|c| c.action == "lead_approve_conflict"),
+            !calls.iter().any(|c| c.action == "lead_approve_conflict"),
             "red gate must NOT fire lead_approve_conflict transition, got: {calls:?}"
         );
         // Must surface Escalated with the gate feedback.
@@ -5584,7 +5676,9 @@ mod tests {
             build_arbiter_gate_test_env(
                 "T-gate-no-strike",
                 "proj-gate",
-                StageOutcome::LeadApproved,
+                StageOutcome::LeadApproved {
+                    evidence: String::new(),
+                },
                 Ok(ArbiterGateResult::Blocked {
                     feedback: "sqlx cache check failed".into(),
                 }),
@@ -5616,7 +5710,9 @@ mod tests {
             build_arbiter_gate_test_env(
                 "T-gate-infra-err",
                 "proj-gate",
-                StageOutcome::LeadApproved,
+                StageOutcome::LeadApproved {
+                    evidence: String::new(),
+                },
                 Err("db connection timeout".into()),
             )
             .await;

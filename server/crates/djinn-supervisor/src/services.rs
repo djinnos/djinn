@@ -330,4 +330,19 @@ pub trait SupervisorServices: Send + Sync + 'static {
         &self,
         task: &crate::Task,
     ) -> Result<crate::ArbiterGateResult, String>;
+
+    /// Persist an arbiter decision (approve or approve_conflict) on the
+    /// current unconsumed arbitration row and emit an `arbiter_decision`
+    /// activity event.
+    ///
+    /// Called after the pre-approval gate passes and before the board
+    /// transition so the arbitration row carries the decision payload
+    /// and evidence (AC2).  Failures are non-fatal — callers log and
+    /// proceed with the transition.
+    async fn record_arbiter_decision(
+        &self,
+        task_id: String,
+        decision: String,
+        evidence_json: String,
+    ) -> Result<(), String>;
 }
