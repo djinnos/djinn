@@ -566,30 +566,55 @@ async fn clone_postgres_test_template(server_prefix: &str, test_db: &str) -> DbR
     let opts = sqlx::postgres::PgConnectOptions::from_str(&admin_url).map_err(DbError::from)?;
     let mut conn = opts.connect().await.map_err(DbError::from)?;
 
+    // Take the template advisory lock in SHARED mode for the terminate+clone
+    // window. `ensure_test_template` holds the same lock EXCLUSIVELY while it
+    // has a live client connection to the template (migrate/verify), so this
+    // shared acquisition blocks until that bootstrap connection is gone — our
+    // `pg_terminate_backend` below can therefore never kill a live bootstrap
+    // connection (the `57P01 "terminating connection due to administrator
+    // command"` flake). Concurrent clones all take shared, so they never block
+    // each other.
+    sqlx::query("SELECT pg_advisory_lock_shared($1)")
+        .bind(template_bootstrap::TEMPLATE_ADVISORY_LOCK_ID)
+        .execute(&mut conn)
+        .await
+        .map_err(DbError::from)?;
+
     // Boot any stragglers off the template. Without this, parallel tests
     // racing on the template see `ERROR: source database "djinn_test_template"
     // is being accessed by other users`.
     // Non-macro: this is a side-effecting `SELECT pg_terminate_backend(...)`
     // executed for effect only. The `query!` macro types it as a row-returning
     // query (no `.execute()`), so we keep the plain form here.
-    sqlx::query(
-        "SELECT pg_terminate_backend(pid) \
-           FROM pg_stat_activity \
-          WHERE datname = 'djinn_test_template' \
-            AND pid <> pg_backend_pid()",
-    )
-    .execute(&mut conn)
-    .await
-    .map_err(DbError::from)?;
-
-    let stmt = format!(r#"CREATE DATABASE "{test_db}" TEMPLATE djinn_test_template"#);
-    sqlx::query(stmt.as_str())
+    let clone_result = async {
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid) \
+               FROM pg_stat_activity \
+              WHERE datname = 'djinn_test_template' \
+                AND pid <> pg_backend_pid()",
+        )
         .execute(&mut conn)
         .await
         .map_err(DbError::from)?;
 
+        let stmt = format!(r#"CREATE DATABASE "{test_db}" TEMPLATE djinn_test_template"#);
+        sqlx::query(stmt.as_str())
+            .execute(&mut conn)
+            .await
+            .map_err(DbError::from)?;
+        Ok::<(), DbError>(())
+    }
+    .await;
+
+    // Always release the shared advisory lock, even if the clone failed, so a
+    // failed clone never wedges a bootstrap waiting on the exclusive lock.
+    let _ = sqlx::query("SELECT pg_advisory_unlock_shared($1)")
+        .bind(template_bootstrap::TEMPLATE_ADVISORY_LOCK_ID)
+        .execute(&mut conn)
+        .await;
+
     drop(conn);
-    Ok(())
+    clone_result
 }
 
 fn is_safe_database_identifier(name: &str) -> bool {
