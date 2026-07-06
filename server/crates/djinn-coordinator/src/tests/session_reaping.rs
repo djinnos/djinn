@@ -4788,3 +4788,774 @@ async fn recovery_terminalization_does_not_move_terminal_attempt_backward() {
         "late terminalization must not create a duplicate row"
     );
 }
+
+// ── Coordinator liveness race / idempotency regressions (ecwp) ────────────────
+//
+// These tests cover the race and idempotency edges across the landed
+// classifier, session recovery, terminalization, and evidence-persistence paths.
+// They are deliberately additive — they exercise existing fixtures and assert
+// the resulting task/session state and liveness evidence/outcome, so future
+// raw-signal shortcuts cannot satisfy them accidentally. Each test header
+// names the invariant it protects.
+
+// ── AC 1: Slow verdict + concurrent/already-landed terminal transition ────────
+//
+// Invariant: when the task transitions to terminal AFTER the liveness
+// classifier would have returned a Slow verdict, the stall-timeout path must
+// NOT grant a Slow extension (the extension would be a no-op against an already
+// finished task) and must NOT reopen or release the task. The session stays
+// running so the next zombie-reap tick can finalize it via KillNoop.
+
+/// A Slow-classified session whose task transitions to terminal before
+/// `enforce_session_stall_timeout` runs must NOT have a Slow extension
+/// recorded. The classifier returns `Verdict::Live` with `KillNoop` outcome
+/// for terminal tasks (precedence rule #1 — terminal-task precedence wins
+/// over Slow), and the stall-timeout branch treats `Live` as "spare, do not
+/// extend, do not kill".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_verdict_with_concurrent_terminal_transition_does_not_grant_extension() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "slow-term-race").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-slow-term-race";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    // Keep the session within its claim window so the Slow verdict (if reached)
+    // would normally be extension-eligible. The stall is driven by aged activity
+    // tracker, not started_at.
+    session_repo
+        .backdate_started_at(&session.id, "2 minutes")
+        .await
+        .unwrap();
+
+    // Dispatch to a live pool slot so the liveness classifier sees a Running pod.
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(std::sync::Arc::new(RecordingRuntimeOps::new(true)));
+    let active_tasks = app_state.active_tasks.clone();
+    let cancel = CancellationToken::new();
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: "openai/gpt-5.5".to_string(),
+                max_slots: 1,
+                roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
+                    Box::pin(async move {
+                        kill.cancelled().await;
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    pool.dispatch(&task.id, "test-project", "openai/gpt-5.5")
+        .await
+        .expect("dispatch should create a slot mapping");
+
+    // Age the activity tracker so idle exceeds the 30-minute stall threshold.
+    let old = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(35 * 60))
+        .unwrap_or(0);
+    {
+        let guard = active_tasks.lock().expect("active_tasks mutex");
+        if let Some(ts) = guard.get(&task.id) {
+            ts.store(old, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    // Concurrent terminal transition BEFORE the stall-timeout tick runs.
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "closed")
+        .await
+        .unwrap();
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.pool = pool;
+    // Slow extension is enabled by default. Without the terminal-task precedence
+    // rule, the classifier would return Slow + extension_eligible=true and the
+    // stall-timeout branch would grant an extension against an already-closed
+    // task (a real race that the precedence rule is designed to prevent).
+    assert!(
+        actor.worker_lifecycle_config.slow_extension.enabled,
+        "precondition: slow extension is enabled by default"
+    );
+
+    actor.enforce_session_stall_timeout().await;
+
+    // The session must NOT have been killed (terminal-task precedence wins).
+    assert!(
+        !actor.stall_killed.contains(&session.id),
+        "stall-timeout must NOT kill a session whose task is already terminal (terminal-task precedence)"
+    );
+
+    // The extension count for this session must be 0 (no Slow extension granted).
+    let ext_count = actor
+        .stall_extension_count
+        .get(&session.id)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        ext_count, 0,
+        "stall-timeout must NOT grant a Slow extension for a terminal-task session"
+    );
+
+    // No slow_extended evidence row may have been persisted.
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let slow_extended = liveness_repo
+        .count_evidence_for_session(&session.id, Some("slow_extended"))
+        .await
+        .unwrap();
+    assert_eq!(
+        slow_extended, 0,
+        "no slow_extended evidence row may be persisted for a terminal-task Slow+terminal race"
+    );
+
+    // The classifier pass inside the stall-timeout path persisted KillNoop
+    // evidence (verdict=live, outcome=kill_noop) — that is the
+    // terminal-task-precedence recording. Confirm that the outcome_kind is
+    // kill_noop, NOT slow_extended.
+    let (verdict, outcome) = liveness_repo
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        verdict.as_deref(),
+        Some("live"),
+        "terminal-task precedence: classifier verdict is Live (moot), not Slow"
+    );
+    assert_eq!(
+        outcome.as_deref(),
+        Some("kill_noop"),
+        "terminal-task precedence: outcome is kill_noop, NOT slow_extended"
+    );
+
+    // The task stays closed — not reopened by the stall-timeout path.
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "closed",
+        "task must remain closed — stall-timeout must NOT reopen a terminal task via the Slow extension path"
+    );
+
+    cancel.cancel();
+}
+
+// ── AC 2: Dead verdict + fresh DB activity ───────────────────────────────────
+//
+// Invariant: a session that looks Dead on raw signals (absent pod, no recent
+// in-memory activity, zero tokens on the DB row) but has FRESH DB activity
+// (recent started_at with nonzero tokens flushed mid-flight) is NOT reaped.
+// The landed `reap_zombie_sessions` path must consult the liveness classifier
+// and trust its verdict over raw heuristics — a Slow verdict (or Live) suppresses
+// the reap even when the underlying raw signals would otherwise look Dead.
+
+/// A session that is past the zombie hard cap and would look Dead on raw
+/// signals, but whose DB token counters advanced since the previous sweep
+/// (independent evidence of liveness that the raw heuristic cannot fake) is
+/// NOT reaped by the zombie reaper. The classifier sees fresh DB activity as
+/// authoritative liveness and spares the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dead_verdict_with_fresh_db_activity_suppresses_reap() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "dead-fresh-db").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-dead-fresh-db";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    // Backdate past the 10-minute zombie hard cap so the raw age gate fires.
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
+    // Flush nonzero tokens to the DB row — independent evidence of progress that
+    // a raw "zero tokens + past cap" heuristic would have reaped.
+    session_repo
+        .flush_tokens(&session.id, 5000, 1500, 0, 0)
+        .await
+        .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(true);
+    // Hold a clone for inspection after `actor.runtime_ops` takes ownership.
+    let runtime_for_calls = runtime.clone();
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(Arc::new(runtime));
+    actor.reap_zombie_sessions().await;
+
+    // ── Invariant: the zombie reaper did NOT finalize the session ──
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "a session with fresh DB token progress past the zombie hard cap must NOT be reaped (DB-truth liveness backstop)"
+    );
+
+    // The teardown runtime_ops must NOT have been invoked — a regression that
+    // bypassed the DB-truth backstop would call teardown_taskrun_job even
+    // though the session was not reaped.
+    assert!(
+        runtime_for_calls.calls().is_empty(),
+        "zombie reaper must NOT call teardown_taskrun_job when DB progress suppresses the reap"
+    );
+
+    // No dead_reclaimed evidence row may have been persisted.
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let dead_reclaimed = liveness_repo
+        .count_evidence_for_session(&session.id, Some("dead_reclaimed"))
+        .await
+        .unwrap();
+    assert_eq!(
+        dead_reclaimed, 0,
+        "a Dead reclaim must NOT be persisted when the session shows fresh DB activity"
+    );
+
+    // The task must NOT have been released to `open` (no reclaim happened).
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "in_progress",
+        "task must remain in_progress — DB-truth liveness backstop suppresses Dead reclaim"
+    );
+}
+
+// ── AC 3: hard runtime cap takes precedence over Slow extension budget ───────
+//
+// Invariant: hard-runtime-cap precedence (classifier rule #2) forbids
+// extension unconditionally, even when the slow-extension budget is NOT
+// exhausted. A session classified Slow + extension_eligible on raw signals
+// but past the hard cap must be Dead/Timeout with `extension_eligible=false`,
+// and the stall-timeout path must kill it instead of granting an extension.
+// The session is killed on the first tick even though it has remaining
+// extension budget available.
+
+/// Hard runtime cap overrides Slow extension eligibility: a session whose
+/// hard-runtime cap is exceeded is Dead/Timeout, not Slow, and the
+/// stall-timeout path kills it instead of granting an extension — even though
+/// the slow-extension budget is fully available.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hard_cap_takes_precedence_over_slow_extension_budget_in_stall_path() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "hard-cap-precedence").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-hard-cap-precedence";
+    let (pool, _cancel, session) = dispatch_stalled_worker_session(&db, &tx, &task, run_id).await;
+
+    // Backdate the task_run's started_at so `hard_runtime_deadline_exceeded`
+    // is true. Without this, the classifier sees a fresh task_run and would
+    // return Slow + extension_eligible — the slow-extension branch would fire,
+    // and the hard-cap precedence invariant would not be exercised.
+    TaskRunRepository::new(db.clone())
+        .backdate_started_at(run_id, "20 minutes")
+        .await
+        .unwrap();
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.pool = pool;
+    // Sanity: budget is fully available (count = 0, max_extensions = 3).
+    assert!(
+        actor.worker_lifecycle_config.slow_extension.enabled,
+        "precondition: slow extension is enabled"
+    );
+    let max_ext = actor.worker_lifecycle_config.slow_extension.max_extensions;
+    assert_eq!(max_ext, 3, "precondition: default max_extensions = 3");
+    assert_eq!(
+        actor
+            .stall_extension_count
+            .get(&session.id)
+            .copied()
+            .unwrap_or(0),
+        0,
+        "precondition: extension budget fully available (0 of 3 used)"
+    );
+
+    actor.enforce_session_stall_timeout().await;
+
+    // The hard cap forces Dead, not Slow → extension is NOT granted and the
+    // session is killed instead.
+    assert!(
+        actor.stall_killed.contains(&session.id),
+        "hard cap must take precedence: session is killed, NOT Slow-extended"
+    );
+
+    // The extension count for this session must still be 0 (the budget was not
+    // touched — the cap fired before the Slow branch).
+    let ext_count = actor
+        .stall_extension_count
+        .get(&session.id)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        ext_count, 0,
+        "slow extension budget must NOT be decremented when hard cap fires"
+    );
+
+    // No slow_extended evidence row may have been persisted.
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let slow_extended = liveness_repo
+        .count_evidence_for_session(&session.id, Some("slow_extended"))
+        .await
+        .unwrap();
+    assert_eq!(
+        slow_extended, 0,
+        "no slow_extended evidence row may be persisted when the hard cap fires"
+    );
+}
+
+// ── AC 4: clean-exit nonterminal vs already-terminal task paths ──────────────
+//
+// Invariant: `classify_session_exit_liveness` produces TWO distinct, non-overlapping
+// verdicts depending on the task's terminal state at the moment of the call.
+// The same `(session_status="completed", session_status="failed")` input produces
+// ProtocolViolation/CleanExitNonterminal when the task is nonterminal and
+// KillNoop when the task is already terminal. These are distinct outcomes with
+// distinct evidence — the protocol-violation path increments retry accounting,
+// while KillNoop preserves terminal state and does not. A regression that
+// short-circuits the terminal check would merge them.
+
+/// `classify_session_exit_liveness` produces two distinct, non-overlapping
+/// verdicts for the same session status depending on whether the task is
+/// nonterminal (ProtocolViolation with CleanExitNonterminal) or already
+/// terminal (KillNoop). Calling the same input twice on a nonterminal task
+/// is idempotent — no extra evidence rows are appended beyond the per-call
+/// record (because the second call sees the same task state and produces the
+/// same verdict). After the task transitions to terminal, the next call
+/// produces KillNoop instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_idempotent() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "pv-distinct-idempotent").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-pv-distinct-idempotent";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    // ── Path A: clean exit on nonterminal task → ProtocolViolation ──
+    let r1 = actor
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed")
+        .await
+        .expect("first classification must succeed");
+    assert_eq!(
+        r1.verdict,
+        crate::dispatch::liveness::Verdict::ProtocolViolation,
+        "nonterminal task + clean exit must produce ProtocolViolation"
+    );
+    assert_eq!(
+        r1.outcome,
+        Some(crate::dispatch::liveness::LivenessOutcome::Success),
+        "nonterminal + clean exit outcome is Success (retry accounting sees this as a failed attempt)"
+    );
+
+    // ── Idempotency on the nonterminal path: second call sees same task state ──
+    let r1_again = actor
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed")
+        .await
+        .expect("repeat classification must succeed");
+    assert_eq!(
+        r1_again.verdict,
+        crate::dispatch::liveness::Verdict::ProtocolViolation,
+        "repeat call on nonterminal task must produce the same ProtocolViolation verdict"
+    );
+
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let pv_count = liveness_repo
+        .count_evidence_for_session(&session.id, Some("success"))
+        .await
+        .unwrap();
+    assert_eq!(
+        pv_count, 2,
+        "two calls on the nonterminal path produce two evidence rows (one per call) — no extra rows from a regression that loops the classifier"
+    );
+    let kill_noop_count = liveness_repo
+        .count_evidence_for_session(&session.id, Some("kill_noop"))
+        .await
+        .unwrap();
+    assert_eq!(
+        kill_noop_count, 0,
+        "nonterminal path must NOT produce any kill_noop rows"
+    );
+
+    // ── Path B: task transitions to terminal, same input → KillNoop (distinct) ──
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "closed")
+        .await
+        .unwrap();
+
+    let r2 = actor
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed")
+        .await
+        .expect("terminal classification must succeed");
+    assert_eq!(
+        r2.outcome,
+        Some(crate::dispatch::liveness::LivenessOutcome::KillNoop),
+        "terminal task + clean exit must produce KillNoop, NOT ProtocolViolation"
+    );
+    assert_ne!(
+        r2.verdict,
+        crate::dispatch::liveness::Verdict::ProtocolViolation,
+        "terminal-task clean-exit must NOT regress to ProtocolViolation"
+    );
+    assert_eq!(
+        r2.verdict,
+        crate::dispatch::liveness::Verdict::Live,
+        "terminal-task precedence returns verdict=Live (moot), outcome=KillNoop"
+    );
+
+    // The terminal-task classification appended exactly one kill_noop row.
+    let kill_noop_after = liveness_repo
+        .count_evidence_for_session(&session.id, Some("kill_noop"))
+        .await
+        .unwrap();
+    assert_eq!(
+        kill_noop_after, 1,
+        "terminal-task classification must append exactly one kill_noop row (idempotent on the terminal path)"
+    );
+    let pv_count_after = liveness_repo
+        .count_evidence_for_session(&session.id, Some("success"))
+        .await
+        .unwrap();
+    assert_eq!(
+        pv_count_after, 2,
+        "terminal-task classification must NOT append more ProtocolViolation rows — the path is distinct"
+    );
+
+    // ── Idempotency on the terminal path: a third call appends another row ──
+    // (Each call to classify_session_exit_liveness is intentionally append-only;
+    //  idempotency here means the verdict/outcome are stable, not that the
+    //  evidence row count is fixed. The append-only chain is the audit trail.)
+    let r3 = actor
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed")
+        .await
+        .expect("repeat terminal classification must succeed");
+    assert_eq!(
+        r3.outcome,
+        Some(crate::dispatch::liveness::LivenessOutcome::KillNoop),
+        "repeat call on terminal task must produce the same KillNoop outcome"
+    );
+    let kill_noop_third = liveness_repo
+        .count_evidence_for_session(&session.id, Some("kill_noop"))
+        .await
+        .unwrap();
+    assert_eq!(
+        kill_noop_third, 2,
+        "append-only evidence chain: each call appends one row; verdict/outcome are stable"
+    );
+}
+
+// ── AC 5: repeated tick/idempotency ──────────────────────────────────────────
+//
+// Invariant: re-running `reap_zombie_sessions` and `enforce_session_stall_timeout`
+// on an already-reaped/already-killed task does NOT duplicate terminalization,
+// task-release, or liveness-evidence rows beyond the intended append-only
+// record. A regression that re-runs the reap on every tick would explode
+// the evidence table and (worse) re-release the task multiple times.
+
+/// Repeated reap ticks on the same zombie session do not duplicate
+/// terminalization, task-release, or liveness-evidence rows beyond the
+/// intended append-only record. Each tick is idempotent on a fully
+/// settled session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_recovery_ticks_do_not_duplicate_terminalization_or_release() {
+    use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "tick-idempotency").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-tick-idempotency";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
+
+    // Seed a pending attempt that the recovery path will terminalize.
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+
+    let runtime = RecordingRuntimeOps::new(true);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(Arc::new(runtime));
+
+    // ── Tick 1: reap the zombie, terminalize the attempt, release the task ──
+    actor.reap_zombie_sessions().await;
+
+    let repo = TaskAttemptRepository::new(db.clone());
+    let attempt_after_tick1 = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        attempt_after_tick1.outcome, "crashed",
+        "tick 1 must terminalize the attempt as crashed"
+    );
+    let attempts_after_tick1: Vec<_> = repo
+        .list_for_task(&task.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        attempts_after_tick1.len(),
+        1,
+        "tick 1 must produce exactly one attempt row"
+    );
+
+    let updated_after_tick1 = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated_after_tick1.status, "open",
+        "tick 1 must release the task for redispatch"
+    );
+
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let dead_after_tick1 = liveness_repo
+        .count_evidence_for_session(&session.id, Some("dead_reclaimed"))
+        .await
+        .unwrap();
+    let total_after_tick1 = liveness_repo
+        .count_evidence_for_session(&session.id, None)
+        .await
+        .unwrap();
+    assert!(
+        dead_after_tick1 >= 1,
+        "tick 1 must persist at least one dead_reclaimed evidence row"
+    );
+
+    // ── Tick 2: reap again. The session is already finalized (no longer in
+    //             list_active), so reap_zombie_sessions is a no-op. ──
+    actor.reap_zombie_sessions().await;
+
+    // Attempt count must NOT have grown.
+    let attempts_after_tick2: Vec<_> = repo
+        .list_for_task(&task.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        attempts_after_tick2.len(),
+        1,
+        "tick 2 must NOT create a duplicate attempt row (recovery is idempotent on settled sessions)"
+    );
+
+    // Attempt outcome must NOT have moved.
+    let attempt_after_tick2 = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        attempt_after_tick2.outcome, "crashed",
+        "tick 2 must NOT move the terminal attempt backward or sideways"
+    );
+    assert_eq!(
+        attempt_after_tick2.terminal_at, attempt_after_tick1.terminal_at,
+        "terminal_at timestamp must NOT be re-stamped by an idempotent tick"
+    );
+
+    // Task must remain open (NOT re-released — release already happened).
+    let updated_after_tick2 = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated_after_tick2.status, "open",
+        "tick 2 must keep the task open — a second release would re-touch updated_at"
+    );
+
+    // ── Tick 3: also drive stall-timeout (which uses list_active and the
+    //             stall_killed prune). No session is active, so this is a no-op. ──
+    actor.enforce_session_stall_timeout().await;
+    let attempts_after_tick3: Vec<_> = repo
+        .list_for_task(&task.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        attempts_after_tick3.len(),
+        1,
+        "tick 3 (stall-timeout) must NOT create a duplicate attempt row either"
+    );
+
+    // ── Idempotency check: total evidence row count is bounded. ──
+    // The first reap pass writes a small bounded number of rows (the
+    // classifier pass writes one classifier row, the reap pass writes one
+    // dead_reclaimed row). Subsequent ticks must not add more for this session
+    // — the reap operates on list_active, and a finalized session is absent.
+    let total_after_tick3 = liveness_repo
+        .count_evidence_for_session(&session.id, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_after_tick3, total_after_tick1,
+        "tick 2 and tick 3 must NOT append any new evidence rows for an already-settled session (reap loop would explode the audit table)"
+    );
+    let dead_after_tick3 = liveness_repo
+        .count_evidence_for_session(&session.id, Some("dead_reclaimed"))
+        .await
+        .unwrap();
+    assert_eq!(
+        dead_after_tick3, dead_after_tick1,
+        "tick 2 and tick 3 must NOT append additional dead_reclaimed rows"
+    );
+}
