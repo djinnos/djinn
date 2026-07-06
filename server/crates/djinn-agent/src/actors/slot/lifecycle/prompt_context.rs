@@ -713,14 +713,19 @@ pub(crate) fn build_worker_resume_note(
         .prior_session_lineage
         .as_ref()
         .is_some_and(|s| !s.trim().is_empty());
-    if !has_checkpoint && !has_submit_or_review && !has_prior_session {
+    let has_failover_context = metadata.new_model.is_some() || metadata.failover_reason.is_some();
+    if !has_checkpoint && !has_submit_or_review && !has_prior_session && !has_failover_context {
         return None;
     }
     let mut parts: Vec<String> = Vec::new();
+    // ── Resume source details ──────────────────────────────────────────
     if let Some(session) = &metadata.prior_session_lineage
         && !session.trim().is_empty()
     {
         parts.push(format!("prior session `{session}`"));
+    }
+    if let Some(source_kind) = &metadata.source_kind {
+        parts.push(format!("source: {}", source_kind_label(*source_kind)));
     }
     if let Some(sha) = &metadata.commit_sha
         && !sha.trim().is_empty()
@@ -731,14 +736,32 @@ pub(crate) fn build_worker_resume_note(
     {
         parts.push(format!("submit/review `{id}`"));
     }
+    if let Some(target_ref) = &metadata.target_ref
+        && !target_ref.trim().is_empty()
+    {
+        parts.push(format!("target ref `{target_ref}`"));
+    }
+    // ── Termination / failover context ─────────────────────────────────
     if let Some(reason) = metadata.selection_reason {
         parts.push(format!("terminated: {}", termination_label(reason)));
     }
+    if let Some(failover_reason) = &metadata.failover_reason
+        && !failover_reason.trim().is_empty()
+    {
+        parts.push(format!("failover reason: {failover_reason}"));
+    }
+    // ── Model context ──────────────────────────────────────────────────
     if let Some(prev_model) = &metadata.previous_model
         && !prev_model.trim().is_empty()
     {
         parts.push(format!("prev model `{prev_model}`"));
     }
+    if let Some(new_model) = &metadata.new_model
+        && !new_model.trim().is_empty()
+    {
+        parts.push(format!("current model `{new_model}`"));
+    }
+    // ── Progress / verification ────────────────────────────────────────
     if let Some(summary) = &metadata.last_durable_progress_summary
         && !summary.trim().is_empty()
     {
@@ -776,6 +799,17 @@ fn termination_label(reason: djinn_runtime::ResumeSelectionReason) -> &'static s
         R::CheckpointUnsafe => "checkpoint unsafe",
         R::MergeConflict => "merge conflict",
         R::Disabled => "resume disabled",
+    }
+}
+
+/// Map a [`ResumeSourceKind`] to a concise human-readable label.
+fn source_kind_label(kind: djinn_runtime::ResumeSourceKind) -> &'static str {
+    use djinn_runtime::ResumeSourceKind as K;
+    match kind {
+        K::AutoSubmit => "auto-submit",
+        K::TaskBranchCheckpoint => "task-branch checkpoint",
+        K::AlternateCheckpointRef => "alternate checkpoint ref",
+        K::CleanTaskBranch => "clean task branch",
     }
 }
 

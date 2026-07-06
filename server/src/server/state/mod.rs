@@ -1287,6 +1287,13 @@ impl AppState {
         // dispatch.
         crate::git_maintenance::spawn(self.clone());
 
+        // Periodic Codex OAuth keep-alive. ChatGPT/Codex refresh tokens rotate
+        // single-use on a sliding window, so a connected-but-idle plan silently
+        // dies once OpenAI expires its unused refresh token. This leader-only
+        // loop refreshes idle Codex credentials to keep the rotation chain warm
+        // and proactively flags genuinely-dead ones for reconnect.
+        crate::codex_keepalive::spawn(self.clone());
+
         // One-time recovery sweep: backfill post-session knowledge extraction
         // over completed task-runs whose sessions were never extracted. Opt-in
         // via `DJINN_BACKFILL_EXTRACTION`; idempotent (skips already-extracted

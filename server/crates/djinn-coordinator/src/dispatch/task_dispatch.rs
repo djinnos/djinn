@@ -299,6 +299,20 @@ impl CoordinatorActor {
                 .extra
                 .insert("previous_model".to_string(), serde_json::json!(prev));
         }
+        // Thread model-rotation target model and reason so the worker
+        // resume-prompt note can report failover context.
+        if let Some(model_rotation) = &lifecycle.model_rotation {
+            if let Some(next) = &model_rotation.next_model {
+                metadata
+                    .extra
+                    .insert("new_model".to_string(), serde_json::json!(next));
+            }
+            if let Some(reason) = &model_rotation.reason {
+                metadata
+                    .extra
+                    .insert("failover_reason".to_string(), serde_json::json!(reason));
+            }
+        }
         if let Some(auto_submit) = &lifecycle.auto_submit
             && let Some(cmd) = &auto_submit.verification_command
         {
