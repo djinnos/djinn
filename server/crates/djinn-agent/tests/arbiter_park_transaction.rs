@@ -547,7 +547,7 @@ async fn direct_services_arbiter_park_fail_closed_corrupt_arbitration_state() {
     transition_to_in_lead_intervention(&db, &task.id).await;
 
     // Create a valid unconsumed arbitration row, then corrupt its state
-    // column to an unrecognised value via raw SQL.
+    // column to an unrecognised value via the db repository boundary.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
     let ci = serde_json::json!([]);
     let ex = serde_json::json!([]);
@@ -571,11 +571,13 @@ async fn direct_services_arbiter_park_fail_closed_corrupt_arbitration_state() {
     // Corrupt the state to an unrecognised value.  ArbitrationState only
     // recognises "unconsumed", "consumed", and "failed"; anything else
     // makes arbitration_state() return None and the row unusable.
-    sqlx::query("UPDATE task_arbitrations SET state = 'corrupt_invalid_state' WHERE task_id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
-        .await
-        .expect("corrupt arbitration state");
+    assert!(
+        arb_repo
+            .force_state_for_testing(&task.id, 0, "corrupt_invalid_state")
+            .await
+            .expect("corrupt arbitration state"),
+        "corrupting arbitration state must update the fixture row"
+    );
 
     // Verify the row is present but its state parses as None.
     let corrupted = arb_repo
