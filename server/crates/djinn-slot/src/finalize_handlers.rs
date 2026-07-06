@@ -681,6 +681,11 @@ pub(crate) async fn handle_submit_decision(
     let activity_payload = serde_json::json!({
         "decision": decision.decision,
         "rationale": decision.rationale,
+        "evidence": decision.evidence,
+        "directive": decision.directive,
+        "verification_command": decision.verification_command,
+        "exclude_models": decision.exclude_models,
+        "park_dossier": decision.park_dossier,
         "created_tasks": decision.created_tasks,
     })
     .to_string();

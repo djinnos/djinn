@@ -54,16 +54,27 @@ pub struct SubmitReview {
     pub feedback: Option<String>,
 }
 
-/// Payload for a Lead submitting an intervention decision.
+/// Payload for a Lead/arbiter submitting an intervention decision.
 #[derive(Debug, Deserialize)]
 pub struct SubmitDecision {
     pub task_id: String,
-    /// Decision taken: "approve", "approve_conflict", "reopen", "decompose",
-    /// "force_close", or "escalate". The supervisor maps this to the terminal
-    /// board transition (see `StageOutcome` Lead variants); the Lead does NOT
+    /// Decision taken: "approve", "approve_conflict", "reopen", or "park".
+    /// The supervisor maps this to the terminal board transition
+    /// (see `StageOutcome` Lead variants); the Lead does NOT
     /// call `task_transition` for the terminal move itself.
     pub decision: String,
     pub rationale: Option<String>,
+    /// Evidence citation — required for `approve` and `approve_conflict`.
+    pub evidence: Option<serde_json::Value>,
+    /// Park dossier — required for `park`.
+    pub park_dossier: Option<serde_json::Value>,
+    /// Directive — required for `reopen`.
+    pub directive: Option<String>,
+    /// Verification command — required for `reopen`.
+    pub verification_command: Option<String>,
+    /// Models excluded from next dispatch — optional for `reopen`.
+    #[serde(default)]
+    pub exclude_models: Vec<String>,
     /// IDs of tasks created during this Lead intervention (for decompose decisions).
     #[serde(default)]
     pub created_tasks: Vec<String>,
