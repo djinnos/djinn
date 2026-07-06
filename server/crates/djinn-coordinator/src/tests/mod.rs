@@ -1363,10 +1363,15 @@ async fn seed_terminated_post_intervention_sessions(
             })
             .await
             .unwrap();
+        // Use `Cancelled` (a non-infra pre-submission terminal) so the attempt
+        // counts toward the non-attempt park escalation threshold. `Crashed`,
+        // `TimedOut`, and `SpawnFailed` are now classified as infra (excluded
+        // from `non_attempt_models`), so they must NOT be used here when the
+        // test expects the park gate to fire on attempted-remediation evidence.
         attempt_repo
             .advance_to_terminal(TerminalTaskAttemptParams {
                 id: &attempt.id,
-                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
+                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Cancelled,
                 pr_url: None,
                 submit_ref: None,
                 checkpoint_ref: None,

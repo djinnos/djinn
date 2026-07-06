@@ -25,6 +25,14 @@ pub enum ReopenClass {
     MergeConflict,
     /// Task was superseded by newer work.
     Superseded,
+    /// Infrastructure / provider-attempt failure that should NOT count as a
+    /// worker/task-quality strike. Covers worker handshake timeouts, provider
+    /// stalls, spawn failures, timed-out attempts, and crashed infra attempts
+    /// (sourced from `task_attempts.outcome` values such as `timed_out`,
+    /// `spawn_failed`, `crashed`). Excluded from quality-strike counts,
+    /// intervention counters, and park escalation thresholds while still
+    /// appearing in truthful park/retry diagnostics.
+    Infra,
     /// Catch-all for reopen events whose specific class is unknown or
     /// missing from the activity payload (historical default).
     #[default]
@@ -38,6 +46,7 @@ impl ReopenClass {
             Self::MergeQueueFailed => "merge_queue_failed",
             Self::MergeConflict => "merge_conflict",
             Self::Superseded => "superseded",
+            Self::Infra => "infra",
             Self::Other => "other",
         }
     }
@@ -50,6 +59,7 @@ impl ReopenClass {
             "merge_queue_failed" => Self::MergeQueueFailed,
             "merge_conflict" => Self::MergeConflict,
             "superseded" => Self::Superseded,
+            "infra" => Self::Infra,
             _ => Self::Other,
         }
     }
@@ -1751,6 +1761,7 @@ mod tests {
             ReopenClass::MergeQueueFailed,
             ReopenClass::MergeConflict,
             ReopenClass::Superseded,
+            ReopenClass::Infra,
             ReopenClass::Other,
         ] {
             let s = class.as_str();
@@ -1771,6 +1782,10 @@ mod tests {
         assert!(ReopenClass::Other.is_quality_strike());
         assert!(!ReopenClass::MergeConflict.is_quality_strike());
         assert!(!ReopenClass::Superseded.is_quality_strike());
+        assert!(
+            !ReopenClass::Infra.is_quality_strike(),
+            "infra must NOT count as a quality strike"
+        );
     }
 
     #[test]
@@ -1780,12 +1795,25 @@ mod tests {
             ReopenClass::MergeQueueFailed,
             ReopenClass::MergeConflict,
             ReopenClass::Superseded,
+            ReopenClass::Infra,
             ReopenClass::Other,
         ] {
             let json = serde_json::to_string(&class).unwrap();
             let parsed: ReopenClass = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, class);
         }
+    }
+
+    #[test]
+    fn reopen_class_infra_round_trips_as_snake_case_string() {
+        // AC: Infra round-trips through parse/display/serde.
+        assert_eq!(ReopenClass::Infra.as_str(), "infra");
+        assert_eq!(ReopenClass::parse("infra"), ReopenClass::Infra);
+        assert_eq!(ReopenClass::Infra.to_string(), "infra");
+        let json = serde_json::to_string(&ReopenClass::Infra).unwrap();
+        assert_eq!(json, "\"infra\"");
+        let parsed: ReopenClass = serde_json::from_str("\"infra\"").unwrap();
+        assert_eq!(parsed, ReopenClass::Infra);
     }
 
     #[test]

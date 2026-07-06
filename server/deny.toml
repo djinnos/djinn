@@ -55,6 +55,11 @@ ignore = [
     # (transitive via many crates). Patched in anyhow >= 1.0.103; remove on
     # upgrade.
     "RUSTSEC-2026-0190",
+    # crossbeam-epoch: invalid pointer dereference in fmt::Pointer impl for
+    # Atomic and Shared when the underlying pointer is invalid (transitive via
+    # crossbeam-deque → rayon → candle-core/tokenizers/metrics). Patched in
+    # crossbeam-epoch >= 0.9.20; remove on upgrade.
+    "RUSTSEC-2026-0204",
 ]
 
 # ---------------------------------------------------------------------------

@@ -182,6 +182,10 @@ impl TaskRepository {
     pub async fn quality_reopen_count(&self, task_id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
         // NOTE: dynamic SQL with JSONB operators — compile-time check not possible.
+        //
+        // The `reopen_class` allow-list excludes `merge_conflict`, `superseded`,
+        // AND `infra` (infrastructure / provider-attempt failures that must not
+        // count as worker/task-quality strikes).
         let count = sqlx::query_scalar::<_, i64>(
             r#"SELECT COUNT(*)::bigint FROM activity_log
              WHERE task_id = $1
