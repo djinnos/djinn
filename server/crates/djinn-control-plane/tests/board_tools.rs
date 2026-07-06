@@ -250,6 +250,187 @@ async fn board_health_liveness_outcomes_match_seeded_evidence() {
     );
 }
 
+/// Comprehensive backward-compatibility regression through the MCP surface:
+/// legacy coarse fields (stale_tasks, epic_stats, review_queue,
+/// stale_threshold_hours) must remain present and deserializable alongside
+/// all additive liveness_outcomes, protocol_violations, stranded_ready, and
+/// dispatch-gate sections.
+///
+/// Seeds all three categories of additive data and verifies every field
+/// coexists in a single MCP board_health response.
+#[tokio::test]
+async fn board_health_mcp_legacy_and_additive_fields_coexist() {
+    let harness = McpTestHarness::new().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epic = common::create_test_epic(harness.db(), &project.id).await;
+    let task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
+    let session = common::create_test_session(harness.db(), &project.id, &task.id).await;
+
+    // ── Seed liveness evidence (dead verdict) ──────────────────────────
+    let liveness_repo = LivenessRepository::new(harness.db().clone());
+    let _evidence_id = liveness_repo
+        .persist_evidence(&LivenessEvidenceSnapshot {
+            session_id: session.id.clone(),
+            task_id: Some(task.id.clone()),
+            task_run_id: None,
+            verdict: "dead".to_owned(),
+            outcome_kind: Some("dead_reclaimed".to_owned()),
+            outcome_reason: Some("hard_runtime_exceeded".to_owned()),
+            evidence: serde_json::json!({
+                "pod_phase": "Succeeded",
+                "claim_ttl_expired": true,
+            }),
+        })
+        .await
+        .expect("persist dead liveness evidence");
+
+    // ── Seed protocol-violation evidence ───────────────────────────────
+    let _pv_evidence_id = liveness_repo
+        .persist_evidence(&LivenessEvidenceSnapshot {
+            session_id: session.id.clone(),
+            task_id: Some(task.id.clone()),
+            task_run_id: None,
+            verdict: "protocol_violation".to_owned(),
+            outcome_kind: Some("protocol_violation".to_owned()),
+            outcome_reason: None,
+            evidence: serde_json::json!({
+                "reason": "unexpected_message_type",
+            }),
+        })
+        .await
+        .expect("persist protocol violation evidence");
+
+    // ── Seed stranded-ready task (separate from liveness task) ──────────
+    let stranded_task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
+    djinn_db::test_support::backdate_task_updated_at(harness.db(), &stranded_task.id, "90 minutes")
+        .await;
+
+    // ── Single MCP board_health call ───────────────────────────────────
+    let response = harness
+        .call_tool("board_health", json!({ "project": project.slug() }))
+        .await
+        .expect("board_health should dispatch");
+
+    // ── Legacy coarse fields must remain present ───────────────────────
+    assert!(
+        response.get("stale_tasks").is_some(),
+        "legacy stale_tasks must remain present"
+    );
+    assert!(
+        response.get("epic_stats").is_some(),
+        "legacy epic_stats must remain present"
+    );
+    assert!(
+        response.get("review_queue").is_some(),
+        "legacy review_queue must remain present"
+    );
+    assert!(
+        response.get("stale_threshold_hours").is_some(),
+        "legacy stale_threshold_hours must remain present"
+    );
+
+    // ── Additive liveness_outcomes ─────────────────────────────────────
+    let liveness_outcomes = response
+        .get("liveness_outcomes")
+        .expect("liveness_outcomes section must be present");
+    assert!(
+        liveness_outcomes
+            .get("total")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            >= 2,
+        "must surface at least 2 liveness outcomes"
+    );
+    assert!(liveness_outcomes.get("by_verdict").is_some());
+    let recent = liveness_outcomes
+        .get("recent")
+        .and_then(|v| v.as_array())
+        .expect("recent must be an array");
+    // Verify classifier outcome/evidence fields on the dead verdict item.
+    let dead_item = recent
+        .iter()
+        .find(|i| {
+            i.get("task_id").and_then(|v| v.as_str()) == Some(&task.id)
+                && i.get("verdict").and_then(|v| v.as_str()) == Some("dead")
+        })
+        .expect("dead verdict for task must be present");
+    assert_eq!(
+        dead_item.get("outcome_kind").and_then(|v| v.as_str()),
+        Some("dead_reclaimed"),
+        "classifier outcome_kind must be present on the MCP surface"
+    );
+    assert_eq!(
+        dead_item.get("outcome_reason").and_then(|v| v.as_str()),
+        Some("hard_runtime_exceeded"),
+        "classifier outcome_reason must be present on the MCP surface"
+    );
+
+    // ── Additive protocol_violations ───────────────────────────────────
+    let protocol_violations = response
+        .get("protocol_violations")
+        .expect("protocol_violations section must be present");
+    assert!(
+        protocol_violations
+            .get("total")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            >= 1,
+        "must surface at least 1 protocol violation"
+    );
+
+    // ── Additive stranded_ready ────────────────────────────────────────
+    let stranded_ready = response
+        .get("stranded_ready")
+        .expect("stranded_ready section must be present");
+    assert_eq!(
+        stranded_ready
+            .get("threshold_minutes")
+            .and_then(|v| v.as_i64()),
+        Some(30),
+        "must echo the base 30-minute threshold"
+    );
+    let findings = stranded_ready
+        .get("findings")
+        .and_then(|v| v.as_array())
+        .expect("findings must be an array");
+    let stranded_finding = findings
+        .iter()
+        .find(|f| f.get("id").and_then(|v| v.as_str()) == Some(&stranded_task.id))
+        .expect("stranded_task must appear in findings");
+    assert_eq!(
+        stranded_finding.get("severity").and_then(|v| v.as_str()),
+        Some("error"),
+        "90-minute backdate must produce error severity"
+    );
+    // Dispatch-gate evidence must be present with expected fields.
+    let gate = stranded_finding
+        .get("dispatch_gate")
+        .expect("dispatch_gate must be present on stranded finding");
+    assert!(gate.get("evaluated_role").is_some());
+    assert!(gate.get("gate_verdict").is_some());
+    assert!(gate.get("breaker_open").is_some());
+    assert!(gate.get("manually_paused").is_some());
+    assert!(gate.get("rate_limited").is_some());
+    assert!(gate.get("credential_available").is_some());
+    assert!(gate.get("reasons").is_some());
+    // Threshold ladder.
+    let threshold = stranded_finding
+        .get("threshold")
+        .expect("threshold must be present");
+    assert_eq!(
+        threshold.get("warning_minutes").and_then(|v| v.as_i64()),
+        Some(30)
+    );
+    assert_eq!(
+        threshold.get("error_minutes").and_then(|v| v.as_i64()),
+        Some(60)
+    );
+    assert_eq!(
+        threshold.get("critical_minutes").and_then(|v| v.as_i64()),
+        Some(180)
+    );
+}
+
 /// Consistency test: a stranded-ready task surfaced by `board_health` must
 /// carry the expected severity, threshold ladder, and dispatch-gate evidence
 /// matching the jk7v DB contract.
