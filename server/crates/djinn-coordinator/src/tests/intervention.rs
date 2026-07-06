@@ -1,7 +1,7 @@
 // djinn:allow-oversize
 use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
-use djinn_core::models::{ReopenClass, TransitionAction};
+use djinn_core::models::{ReopenClass, TaskStatus, TransitionAction};
 use djinn_core::run_progress::RunProgress;
 use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
 use djinn_db::repositories::task_arbitration::CreateArbitrationParams;
@@ -5020,5 +5020,372 @@ async fn completed_close_reason_is_not_force_close_terminalized() {
     assert_eq!(
         attempt.outcome, "pending",
         "completed close_reason must not be terminalized by the force-close path"
+    );
+}
+
+// ── Arbiter park transaction tests ──────────────────────────────────────────
+
+/// Verify a valid arbiter park decision persists the decision payload and
+/// structured dossier on the current arbitration row, marks the row consumed,
+/// creates a HumanReview remediation hold whose description includes the
+/// structured dossier content, and the ArbiterPark transition moves
+/// in_lead_intervention → open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arbiter_park_persists_decision_creates_human_review_hold() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = make_task_with_reopen_count(&db, &tx, 3).await;
+
+    // Transition to in_lead_intervention.
+    repo.transition(
+        &task.id,
+        TransitionAction::Escalate,
+        "system",
+        "coordinator",
+        Some("test escalate"),
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        &task.id,
+        TransitionAction::LeadInterventionStart,
+        "system",
+        "coordinator",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.status, "in_lead_intervention");
+
+    // Create an unconsumed arbitration row.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let ci = serde_json::json!([]);
+    let ex = serde_json::json!([]);
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &ci,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &ex,
+        })
+        .await
+        .unwrap();
+    let (cycle, unconsumed) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert_eq!(cycle, 0);
+    assert!(unconsumed.is_some());
+
+    // Simulate the arbiter park transaction (mirrors DirectServices::execute_arbiter_park_transaction).
+    let dossier = serde_json::json!({
+        "hold_description": "Requires senior engineer review of auth flow",
+        "failure_analysis": "Three attempts failed; auth logic needs domain expertise",
+        "attempted_decisions": ["reopen", "reopen"],
+        "recommended_action": "Assign to auth-team lead"
+    });
+    let dossier_summary = "Requires senior engineer review of auth flow";
+
+    // 1. Update the arbitration row with dossier and mark consumed.
+    use djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams;
+    let decision_json = serde_json::json!({"decision": "park", "dossier_summary": dossier_summary});
+    arb_repo
+        .update_dispatch_ledger(UpdateDispatchLedgerParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: None,
+            dossier: Some(&dossier),
+            directive: Some(&decision_json),
+            verification_command: None,
+            excluded_models: None,
+        })
+        .await
+        .unwrap();
+    let consumed = arb_repo.mark_consumed(&task.id, 0).await.unwrap();
+    assert!(consumed, "mark_consumed must succeed on unconsumed row");
+
+    // 2. Create a HumanReview remediation task blocking the source.
+    let hold_description = format!(
+        "Arbiter park decision \u{2014} human review required.\n\n{}",
+        serde_json::to_string_pretty(&dossier).unwrap()
+    );
+    let source_label = format!("{} ({})", task.title, task.short_id);
+    let review_desc = format!(
+        "Escalated from task {source_label}. Arbiter decided to park \u{2014} \
+         this requires HUMAN review.\n\nDo NOT auto-resolve: a human must \
+         close THIS task to release the blocked source task.\n\nReason: {hold_description}"
+    );
+    let review_task = repo
+        .create_in_project(
+            &task.project_id,
+            None,
+            &format!(
+                "Planner remediation [{}]: {}",
+                task.short_id,
+                task.title.chars().take(70).collect::<String>()
+            ),
+            &review_desc,
+            "Arbiter parked this task. Requires human review.",
+            "review",
+            0,
+            "system",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    repo.add_blocker(&task.id, &review_task.id).await.unwrap();
+    repo.update_labels(&review_task.id, r#"["human-review-hold"]"#)
+        .await
+        .unwrap();
+
+    // 3. Park the source via ArbiterPark transition.
+    let task = repo
+        .transition(
+            &task.id,
+            TransitionAction::ArbiterPark,
+            "system",
+            "supervisor",
+            Some(&serde_json::to_string(&dossier).unwrap()),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(task.status, "open", "ArbiterPark must land at open");
+
+    // Verify the arbitration row is consumed with dossier.
+    let record = arb_repo
+        .get_by_task_and_cycle(&task.id, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.arbitration_state(),
+        Some(djinn_db::repositories::task_arbitration::ArbitrationState::Consumed)
+    );
+    assert!(record.consumed_at.is_some());
+    let stored = record.dossier.unwrap();
+    assert_eq!(
+        stored["hold_description"],
+        "Requires senior engineer review of auth flow"
+    );
+    assert_eq!(
+        stored["failure_analysis"],
+        "Three attempts failed; auth logic needs domain expertise"
+    );
+
+    // Verify the HumanReview hold blocks the source with dossier content.
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert!(
+        !blockers.is_empty(),
+        "source must be blocked by HumanReview hold"
+    );
+    let hold_task = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
+    assert_eq!(hold_task.issue_type, "review");
+    assert_eq!(hold_task.status, "open");
+    assert!(
+        hold_task
+            .description
+            .contains("Requires senior engineer review of auth flow"),
+        "hold description must contain the dossier hold_description, got: {}",
+        hold_task.description
+    );
+    assert!(
+        hold_task.description.contains("Three attempts failed"),
+        "hold description must contain the dossier failure_analysis, got: {}",
+        hold_task.description
+    );
+    assert!(
+        hold_task.description.contains("Arbiter park decision"),
+        "hold description must indicate arbiter park, got: {}",
+        hold_task.description
+    );
+}
+
+/// Verify the ArbiterPark transition is only valid from InLeadIntervention.
+#[test]
+fn arbiter_park_transition_rejects_non_lead_intervention_states() {
+    let invalid_from = [
+        TaskStatus::Open,
+        TaskStatus::InProgress,
+        TaskStatus::NeedsTaskReview,
+        TaskStatus::InTaskReview,
+        TaskStatus::Approved,
+        TaskStatus::PrDraft,
+        TaskStatus::PrReview,
+        TaskStatus::NeedsLeadIntervention,
+        TaskStatus::Closed,
+    ];
+    for from in &invalid_from {
+        let result = djinn_core::models::task::compute_transition(
+            &TransitionAction::ArbiterPark,
+            from,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "ArbiterPark must be rejected from {from:?}"
+        );
+    }
+    // Must succeed from InLeadIntervention → Open.
+    let result = djinn_core::models::task::compute_transition(
+        &TransitionAction::ArbiterPark,
+        &TaskStatus::InLeadIntervention,
+        None,
+    );
+    assert!(
+        result.is_ok(),
+        "ArbiterPark must succeed from InLeadIntervention"
+    );
+    assert_eq!(result.unwrap().to_status, Some(TaskStatus::Open));
+}
+
+/// Verify the HumanReview hold description contains the structured dossier
+/// content rather than a generic fallback reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn human_review_hold_description_contains_arbiter_dossier() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = make_task_with_reopen_count(&db, &tx, 2).await;
+
+    // Transition to in_lead_intervention.
+    repo.transition(
+        &task.id,
+        TransitionAction::Escalate,
+        "system",
+        "coordinator",
+        Some("test"),
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        &task.id,
+        TransitionAction::LeadInterventionStart,
+        "system",
+        "coordinator",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Create and consume the arbitration row.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let ci = serde_json::json!([]);
+    let ex = serde_json::json!([]);
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &ci,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &ex,
+        })
+        .await
+        .unwrap();
+
+    let dossier = serde_json::json!({
+        "hold_description": "Authentication bypass vulnerability in OAuth callback",
+        "failure_analysis": "Worker attempted 3 fixes; all failed because the OAuth state machine has a race condition between CSRF token validation and session creation.",
+        "attempted_decisions": ["reopen", "reopen", "reopen"],
+        "recommended_action": "Assign to security team; requires manual audit of OAuth flow"
+    });
+    use djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams;
+    arb_repo
+        .update_dispatch_ledger(UpdateDispatchLedgerParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: None,
+            dossier: Some(&dossier),
+            directive: Some(&serde_json::json!({"decision": "park"})),
+            verification_command: None,
+            excluded_models: None,
+        })
+        .await
+        .unwrap();
+    arb_repo.mark_consumed(&task.id, 0).await.unwrap();
+
+    // Create the HumanReview hold with dossier as description.
+    let hold_reason = format!(
+        "Arbiter park decision \u{2014} human review required.\n\n{}",
+        serde_json::to_string_pretty(&dossier).unwrap()
+    );
+    let review_task = repo
+        .create_in_project(
+            &task.project_id,
+            None,
+            "Test hold",
+            &format!("Escalated from task. Reason: {hold_reason}"),
+            "Requires human review.",
+            "review",
+            0,
+            "system",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    repo.add_blocker(&task.id, &review_task.id).await.unwrap();
+
+    // Park the source.
+    repo.transition(
+        &task.id,
+        TransitionAction::ArbiterPark,
+        "system",
+        "supervisor",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Verify the hold description contains the specific dossier content, not a generic template.
+    let hold = repo.get(&review_task.id).await.unwrap().unwrap();
+    assert!(
+        hold.description
+            .contains("Authentication bypass vulnerability in OAuth callback"),
+        "hold must contain the specific hold_description from the dossier, got: {}",
+        hold.description
+    );
+    assert!(
+        hold.description
+            .contains("OAuth state machine has a race condition"),
+        "hold must contain the specific failure_analysis from the dossier, got: {}",
+        hold.description
+    );
+    assert!(
+        hold.description.contains("Arbiter park decision"),
+        "hold must identify this as an arbiter park, got: {}",
+        hold.description
+    );
+    // Must NOT contain the old static failure template.
+    assert!(
+        !hold
+            .description
+            .contains("Repeated automated remediation already failed"),
+        "hold must NOT contain the old static template, got: {}",
+        hold.description
     );
 }

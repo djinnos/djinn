@@ -81,6 +81,316 @@ impl DirectServices {
             task_runs,
         }
     }
+
+    /// Execute the arbiter park transaction: persist the decision and dossier
+    /// on the current unconsumed arbitration row, mark it consumed, create a
+    /// `HumanReview` remediation hold with the dossier as the hold description,
+    /// and emit `arbiter_decision` / `arbiter_parked` activity events.
+    ///
+    /// Called BEFORE the `ArbiterPark` state transition so the HumanReview
+    /// blocker exists before the source task lands at `open` (the ordering
+    /// contract from 7f8u). On any arbitration-row failure, fails closed by
+    /// creating the HumanReview hold with a fallback dossier rather than
+    /// leaving the task stranded.
+    async fn execute_arbiter_park_transaction(
+        &self,
+        task_id: &str,
+        dossier_json: Option<&str>,
+    ) -> Result<(), String> {
+        use djinn_db::TaskRepository;
+        use djinn_db::repositories::task_arbitration::{
+            TaskArbitrationRepository, UpdateDispatchLedgerParams,
+        };
+
+        let db = self.callbacks.agent_context.db.clone();
+        let event_bus = self.callbacks.agent_context.event_bus.clone();
+        let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+        let arb_repo = TaskArbitrationRepository::new(db.clone());
+
+        // Load the source task for project_id and short_id.
+        let task = task_repo
+            .get(task_id)
+            .await
+            .map_err(|e| format!("arbiter_park: failed to load task: {e}"))?
+            .ok_or_else(|| format!("arbiter_park: task {task_id} not found"))?;
+
+        // Parse the dossier JSON from the reason parameter.
+        let dossier: serde_json::Value = dossier_json
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        // Resolve the current unconsumed arbitration row.
+        let (hold_cycle, unconsumed_record) = arb_repo
+            .resolve_current_hold_cycle(task_id)
+            .await
+            .map_err(|e| format!("arbiter_park: failed to resolve hold cycle: {e}"))?;
+
+        // Dossier summary for activity events.
+        let dossier_summary = dossier
+            .get("hold_description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("arbiter park decision")
+            .chars()
+            .take(200)
+            .collect::<String>();
+
+        // Persist the decision payload and park dossier on the arbitration
+        // row, then mark it consumed. If no unconsumed row exists, create a
+        // new one in consumed state as a fail-closed recovery.
+        if let Some(ref record) = unconsumed_record {
+            // Update the existing unconsumed row with the decision/dossier.
+            let decision_json = serde_json::json!({
+                "decision": "park",
+                "dossier_summary": dossier_summary,
+            });
+            arb_repo
+                .update_dispatch_ledger(UpdateDispatchLedgerParams {
+                    task_id,
+                    hold_cycle: record.hold_cycle,
+                    mirror_head_sha: None,
+                    github_head_sha: None,
+                    pr_url: None,
+                    failing_ci_job_ids: None,
+                    dossier: Some(&dossier),
+                    directive: Some(&decision_json),
+                    verification_command: None,
+                    excluded_models: None,
+                })
+                .await
+                .map_err(|e| format!("arbiter_park: failed to update arbitration row: {e}"))?;
+
+            // Mark consumed exactly once.
+            let consumed = arb_repo
+                .mark_consumed(task_id, record.hold_cycle)
+                .await
+                .map_err(|e| format!("arbiter_park: failed to mark consumed: {e}"))?;
+            if !consumed {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    hold_cycle = record.hold_cycle,
+                    "arbiter_park: arbitration row was already consumed — possible double-park"
+                );
+            }
+        } else {
+            // No unconsumed row exists. Fail closed: create a consumed row
+            // with the dossier so the park transaction is recoverable.
+            tracing::warn!(
+                task_id = %task.short_id,
+                hold_cycle,
+                "arbiter_park: no unconsumed arbitration row; creating a consumed recovery row"
+            );
+            use djinn_db::repositories::task_arbitration::CreateArbitrationParams;
+            let failing_ci_job_ids = serde_json::json!([]);
+            let excluded_models = serde_json::json!([]);
+            let decision_json = serde_json::json!({
+                "decision": "park",
+                "dossier_summary": dossier_summary,
+                "recovery": true,
+            });
+            arb_repo
+                .try_create(CreateArbitrationParams {
+                    task_id,
+                    hold_cycle,
+                    deadline_at: None,
+                    mirror_head_sha: None,
+                    github_head_sha: None,
+                    pr_url: None,
+                    failing_ci_job_ids: &failing_ci_job_ids,
+                    dossier: Some(&dossier),
+                    directive: Some(&decision_json),
+                    verification_command: None,
+                    excluded_models: &excluded_models,
+                })
+                .await
+                .map_err(|e| format!("arbiter_park: failed to create recovery row: {e}"))?;
+            // Mark it consumed.
+            let _ = arb_repo.mark_consumed(task_id, hold_cycle).await;
+        }
+
+        // Create a HumanReview remediation task that blocks the source.
+        // Reuses the same semantics as the coordinator's
+        // `create_remediation_task(RemediationKind::HumanReview)` from 7f8u.
+        self.create_arbiter_human_review_hold(
+            task_id,
+            &task.project_id,
+            &dossier,
+            &dossier_summary,
+        )
+        .await?;
+
+        // Emit arbiter_decision activity.
+        let decision_payload = serde_json::json!({
+            "event": "arbiter_decision",
+            "task_id": task.short_id,
+            "hold_cycle": hold_cycle,
+            "decision": "park",
+            "dossier_summary": dossier_summary,
+        });
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(task_id),
+                "system",
+                "coordinator",
+                "arbiter_decision",
+                &decision_payload.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "arbiter_park: failed to log arbiter_decision activity"
+            );
+        }
+
+        // Emit arbiter_parked activity.
+        let parked_payload = serde_json::json!({
+            "event": "arbiter_parked",
+            "task_id": task.short_id,
+            "hold_cycle": hold_cycle,
+            "decision": "park",
+            "dossier_summary": dossier_summary,
+        });
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(task_id),
+                "system",
+                "coordinator",
+                "arbiter_parked",
+                &parked_payload.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "arbiter_park: failed to log arbiter_parked activity"
+            );
+        }
+
+        // Record park metric.
+        djinn_telemetry::task::increment_parked_labeled(0, 0, 0, task.reopen_count);
+
+        Ok(())
+    }
+
+    /// Create a HumanReview remediation task that blocks the source task.
+    /// The dossier content becomes the hold description so humans see the
+    /// structured arbiter analysis rather than a static failure template.
+    async fn create_arbiter_human_review_hold(
+        &self,
+        source_task_id: &str,
+        project_id: &str,
+        dossier: &serde_json::Value,
+        dossier_summary: &str,
+    ) -> Result<(), String> {
+        use djinn_db::TaskRepository;
+
+        let db = self.callbacks.agent_context.db.clone();
+        let event_bus = self.callbacks.agent_context.event_bus.clone();
+        let task_repo = TaskRepository::new(db.clone(), event_bus);
+
+        // Load the source task for naming the review task.
+        let source_task = task_repo.get(source_task_id).await.ok().flatten();
+        let source_creator = source_task
+            .as_ref()
+            .and_then(|t| t.created_by_user_id.clone());
+
+        // Idempotency: if the source already has an unresolved blocker
+        // (from a prior park), skip creating a duplicate hold.
+        if let Some(ref src) = source_task {
+            match task_repo.list_blockers(&src.id).await {
+                Ok(blockers) if blockers.iter().any(|b| b.status != "closed") => {
+                    tracing::info!(
+                        source_task_id = %src.short_id,
+                        "arbiter_park: human-review hold skipped — source already blocked"
+                    );
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        // Build the HumanReview hold description from the arbiter dossier.
+        let hold_reason = format!(
+            "Arbiter park decision — human review required.\n\n{}",
+            serde_json::to_string_pretty(dossier).unwrap_or_else(|_| dossier.to_string())
+        );
+
+        let title = match source_task.as_ref() {
+            Some(t) => {
+                let name: String = t.title.chars().take(70).collect();
+                format!("Planner remediation [{}]: {}", t.short_id, name)
+            }
+            None => format!(
+                "Arbiter park hold: {}",
+                &dossier_summary[..dossier_summary.len().min(60)]
+            ),
+        };
+        let source_label = source_task
+            .as_ref()
+            .map(|t| format!("{} ({})", t.title, t.short_id))
+            .unwrap_or_else(|| source_task_id.to_string());
+        let description = format!(
+            "Escalated from task {source_label}. Arbiter decided to park — \
+             this requires HUMAN review.\n\nDo NOT auto-resolve: a human must \
+             close THIS task to release the blocked source task.\n\nReason: {}",
+            hold_reason
+        );
+        let instructions = "Arbiter parked this task. Requires human review — do not auto-resolve; \
+             a human must close this task to release the blocked source task.";
+
+        // Create the review task.
+        let review_task = match djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                source_creator,
+                task_repo.create_in_project(
+                    project_id,
+                    None,
+                    &title,
+                    &description,
+                    instructions,
+                    "review",
+                    0,
+                    "system",
+                    Some("open"),
+                    None,
+                ),
+            )
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                return Err(format!("arbiter_park: failed to create review task: {e}"));
+            }
+        };
+
+        // Block the source on the review task.
+        if let Some(ref src) = source_task
+            && let Err(e) = task_repo.add_blocker(&src.id, &review_task.id).await
+        {
+            tracing::warn!(
+                error = %e,
+                source_task_id = %src.short_id,
+                review_task_id = %review_task.short_id,
+                "arbiter_park: failed to block source on review task"
+            );
+        }
+
+        // Label the hold for UI visibility.
+        if let Err(e) = task_repo
+            .update_labels(&review_task.id, r#"["human-review-hold"]"#)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                review_task_id = %review_task.short_id,
+                "arbiter_park: failed to label hold task"
+            );
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -434,6 +744,15 @@ impl SupervisorServices for DirectServices {
         use djinn_core::models::TransitionAction;
         use djinn_db::TaskRepository;
         let parsed = TransitionAction::parse(&action).map_err(|e| e.to_string())?;
+
+        // Arbiter park: execute the full park transaction before the state
+        // transition so the HumanReview blocker exists before the task lands
+        // at `open` (the ordering contract from 7f8u).
+        if matches!(parsed, TransitionAction::ArbiterPark) {
+            self.execute_arbiter_park_transaction(&task_id, reason.as_deref())
+                .await?;
+        }
+
         let repo = TaskRepository::new(
             self.callbacks.agent_context.db.clone(),
             self.callbacks.agent_context.event_bus.clone(),
