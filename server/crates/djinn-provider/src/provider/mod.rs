@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod client;
 pub mod error;
+pub mod first_event;
 pub mod format;
 pub mod telemetry;
 
