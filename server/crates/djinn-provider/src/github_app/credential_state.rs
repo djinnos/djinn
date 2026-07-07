@@ -118,20 +118,30 @@ enum EnvLoadResult {
     Absent,
 }
 
-/// Check whether *any* of the core GitHub App env vars are set.
+/// Check whether *any* of the core GitHub App env vars are *present in the
+/// environment* — even with an empty value.
 ///
 /// "Core" means the vars that are *required* for a valid config:
 /// `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
 /// and `GITHUB_APP_PRIVATE_KEY`/`GITHUB_APP_PRIVATE_KEY_PATH`.
 ///
-/// If none are set, the operator has not attempted env-based configuration
-/// and we should silently check persisted credentials. If *any* are set,
-/// the operator has started configuring via env and we should report errors
-/// rather than silently falling through.
+/// Presence is defined as the env var having been **set** in the process
+/// environment, *regardless of whether the value is empty*. Empty values are
+/// treated as attempted (but invalid) higher-priority Secret/env configuration
+/// and must produce the fatal `InvalidSecret` state — they must NOT silently
+/// fall through to persisted credentials.
+///
+/// Only when the var is *completely unset* (not present at all) is it
+/// considered absent; in that case we may silently consult persisted
+/// credentials.
 fn any_core_env_var_set() -> bool {
     use super::{ENV_APP_ID, ENV_APP_SLUG, ENV_CLIENT_ID, ENV_CLIENT_SECRET};
     use super::{ENV_PRIVATE_KEY, ENV_PRIVATE_KEY_PATH};
 
+    // NOTE: Do NOT filter empty strings out here. An operator setting
+    // `GITHUB_APP_ID=""` has clearly attempted Secret/env configuration —
+    // silently falling through to persisted credentials would hide their
+    // mistake. Empty values are reported as `InvalidSecret` issues downstream.
     for key in [
         ENV_APP_ID,
         ENV_CLIENT_ID,
@@ -139,21 +149,13 @@ fn any_core_env_var_set() -> bool {
         ENV_PRIVATE_KEY,
         ENV_PRIVATE_KEY_PATH,
     ] {
-        if std::env::var(key)
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .is_some()
-        {
+        if std::env::var_os(key).is_some() {
             return true;
         }
     }
     // ENV_APP_SLUG is informational (not required for a valid config)
     // but if it's set alongside nothing else, treat it as an attempted config.
-    if std::env::var(ENV_APP_SLUG)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .is_some()
-    {
+    if std::env::var_os(ENV_APP_SLUG).is_some() {
         return true;
     }
     false
@@ -406,6 +408,7 @@ mod tests {
                 "GITHUB_APP_PRIVATE_KEY_PATH",
                 "GITHUB_APP_WEBHOOK_SECRET",
                 "DJINN_PUBLIC_URL",
+                "DJINN_ENABLE_SELF_SETUP",
             ];
             for k in &all_keys {
                 unsafe { std::env::remove_var(k) };
@@ -476,6 +479,7 @@ mod tests {
                 "GITHUB_APP_PRIVATE_KEY_PATH",
                 "GITHUB_APP_WEBHOOK_SECRET",
                 "DJINN_PUBLIC_URL",
+                "DJINN_ENABLE_SELF_SETUP",
             ] {
                 unsafe { std::env::remove_var(k) };
             }
@@ -571,6 +575,129 @@ mod tests {
         }
     }
 
+    /// Regression for the credential-source precedence gap: when an operator
+    /// sets a required env var to an *empty* value (e.g. `GITHUB_APP_ID=""`)
+    /// while persisted credentials exist, the env source must be treated as
+    /// attempted-but-invalid and produce the fatal `InvalidSecret` state —
+    /// it must NOT silently fall through to persisted credentials.
+    ///
+    /// AC1/AC2 require that the typed state distinguishes absent env from
+    /// present-but-empty env, so this regression is required.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_env_var_is_fatal_over_persisted() {
+        let repo = cred_repo();
+        let persisted = fixture_config();
+        persist_app_config(&repo, &persisted).await.unwrap();
+
+        // Set ONLY GITHUB_APP_ID to an empty string. All other required vars
+        // are unset. Previously this would have been treated as Absent and
+        // silently fallen through to persisted credentials.
+        let _env = EnvGuard::clean();
+        unsafe { std::env::set_var("GITHUB_APP_ID", "") };
+
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(
+            matches!(state, CredentialSourceState::InvalidSecret(_)),
+            "empty GITHUB_APP_ID with persisted creds must be fatal; got: {state:?}"
+        );
+        assert!(!state.is_usable());
+        assert!(state.source().is_none());
+
+        if let CredentialSourceState::InvalidSecret(detail) = &state {
+            assert!(
+                detail.issues.iter().any(|i| i.contains("GITHUB_APP_ID")),
+                "InvalidSecret detail should mention GITHUB_APP_ID; got: {:?}",
+                detail.issues
+            );
+        }
+    }
+
+    /// Variant of the regression: every other required var is set, but one is
+    /// empty. Still must be fatal — and the issue must name the empty var.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_client_id_alongside_other_env_vars_is_fatal() {
+        let repo = cred_repo();
+        let persisted = fixture_config();
+        persist_app_config(&repo, &persisted).await.unwrap();
+
+        let _env = EnvGuard::clean();
+        // Set everything but make GITHUB_APP_CLIENT_ID empty.
+        unsafe { std::env::set_var("GITHUB_APP_ID", "12345") };
+        unsafe { std::env::set_var("GITHUB_APP_CLIENT_ID", "") };
+        unsafe { std::env::set_var("GITHUB_APP_CLIENT_SECRET", "shh") };
+        unsafe {
+            std::env::set_var(
+                "GITHUB_APP_PRIVATE_KEY",
+                "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n",
+            )
+        };
+
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(
+            matches!(state, CredentialSourceState::InvalidSecret(_)),
+            "empty GITHUB_APP_CLIENT_ID with persisted creds must be fatal; got: {state:?}"
+        );
+        assert!(!state.is_usable());
+        if let CredentialSourceState::InvalidSecret(detail) = &state {
+            assert!(
+                detail
+                    .issues
+                    .iter()
+                    .any(|i| i.contains("GITHUB_APP_CLIENT_ID"))
+            );
+        }
+    }
+
+    /// Variant: PEM is set to an empty string. Must be fatal, not persisted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_private_key_is_fatal_over_persisted() {
+        let repo = cred_repo();
+        let persisted = fixture_config();
+        persist_app_config(&repo, &persisted).await.unwrap();
+
+        let _env = EnvGuard::clean();
+        unsafe { std::env::set_var("GITHUB_APP_ID", "12345") };
+        unsafe { std::env::set_var("GITHUB_APP_CLIENT_ID", "Iv1.abc") };
+        unsafe { std::env::set_var("GITHUB_APP_CLIENT_SECRET", "shh") };
+        unsafe { std::env::set_var("GITHUB_APP_PRIVATE_KEY", "") };
+
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(
+            matches!(state, CredentialSourceState::InvalidSecret(_)),
+            "empty GITHUB_APP_PRIVATE_KEY with persisted creds must be fatal; got: {state:?}"
+        );
+        assert!(!state.is_usable());
+    }
+
+    /// Distinguishing case for AC1: a *truly* absent env (unset, not empty)
+    /// with persisted credentials must produce `ValidPersisted`, NOT
+    /// `InvalidSecret`. This documents the absence/empty distinction.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn truly_absent_env_falls_through_to_persisted() {
+        let repo = cred_repo();
+        let persisted = fixture_config();
+        persist_app_config(&repo, &persisted).await.unwrap();
+
+        let _env = EnvGuard::clean();
+        // Sanity: no GitHub App env vars are present.
+        for k in [
+            "GITHUB_APP_ID",
+            "GITHUB_APP_CLIENT_ID",
+            "GITHUB_APP_CLIENT_SECRET",
+            "GITHUB_APP_PRIVATE_KEY",
+            "GITHUB_APP_PRIVATE_KEY_PATH",
+            "GITHUB_APP_SLUG",
+        ] {
+            assert!(std::env::var_os(k).is_none(), "env var {k} should be unset");
+        }
+
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(
+            matches!(state, CredentialSourceState::ValidPersisted(_)),
+            "truly absent env with persisted creds must produce ValidPersisted; got: {state:?}"
+        );
+    }
+
     // ── AC 3: valid persisted credentials ────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -591,23 +718,81 @@ mod tests {
     }
 
     // ── AC 3b: persisted credentials with self_setup both on and off ─────
-    // (The state machine itself doesn't gate on the flag — the flag only
-    // controls whether setup *routes* are advertised. But we verify that
-    // persisted creds resolve regardless.)
+    // The credential resolution itself does not gate on the flag — the flag
+    // only controls whether setup *routes* are advertised. We verify that
+    // persisted credentials resolve to `ValidPersisted` regardless of the
+    // `DJINN_ENABLE_SELF_SETUP` flag's value (so an operator who disables
+    // the flag after a successful setup still has working credentials).
+
+    /// Toggle `DJINN_ENABLE_SELF_SETUP` to a concrete value.
+    struct SelfSetupFlagGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl SelfSetupFlagGuard {
+        fn set(value: &str) -> Self {
+            let key = "DJINN_ENABLE_SELF_SETUP";
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for SelfSetupFlagGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn persisted_credentials_independent_of_self_setup_flag() {
-        let _guard = EnvGuard::clean();
+    async fn persisted_credentials_work_with_self_setup_flag_on() {
+        let _env = EnvGuard::clean();
+        let _flag = SelfSetupFlagGuard::set("true");
         let repo = cred_repo();
-        let config = fixture_config();
-        persist_app_config(&repo, &config).await.unwrap();
+        persist_app_config(&repo, &fixture_config()).await.unwrap();
 
-        // Simulate self_setup on/off — the credential resolution is the same.
-        let state_on = resolve_credential_source(Some(&repo)).await;
-        let state_off = resolve_credential_source(Some(&repo)).await;
-        assert!(state_on.is_usable());
-        assert!(state_off.is_usable());
-        assert_eq!(state_on.app_config(), state_off.app_config());
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(
+            matches!(state, CredentialSourceState::ValidPersisted(_)),
+            "self_setup=on with persisted creds must produce ValidPersisted; got: {state:?}"
+        );
+        assert_eq!(state.app_config().unwrap().app_id, 99999);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persisted_credentials_work_with_self_setup_flag_off() {
+        let _env = EnvGuard::clean();
+        let _flag = SelfSetupFlagGuard::set("false");
+        let repo = cred_repo();
+        persist_app_config(&repo, &fixture_config()).await.unwrap();
+
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(
+            matches!(state, CredentialSourceState::ValidPersisted(_)),
+            "self_setup=off with persisted creds must produce ValidPersisted; got: {state:?}"
+        );
+        assert_eq!(state.app_config().unwrap().app_id, 99999);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persisted_credentials_work_with_self_setup_flag_unset() {
+        // Same as "off" but with the var removed entirely. Operators who never
+        // set the flag should still have working persisted credentials.
+        let _env = EnvGuard::clean();
+        unsafe { std::env::remove_var("DJINN_ENABLE_SELF_SETUP") };
+        let repo = cred_repo();
+        persist_app_config(&repo, &fixture_config()).await.unwrap();
+
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(
+            matches!(state, CredentialSourceState::ValidPersisted(_)),
+            "self_setup=unset with persisted creds must produce ValidPersisted; got: {state:?}"
+        );
+        assert_eq!(state.app_config().unwrap().app_id, 99999);
     }
 
     // ── AC 4: Secret removal reveals persisted credentials ───────────────
