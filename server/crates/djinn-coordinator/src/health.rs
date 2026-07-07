@@ -4,6 +4,7 @@ use super::*;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_provider::github_api::GitHubApiClient;
 use regex::Regex;
 
@@ -1696,6 +1697,35 @@ impl CoordinatorActor {
                         project_id = %project.id,
                         error = %e,
                         "CoordinatorActor: failed to prune note associations"
+                    );
+                }
+            }
+
+            // Refresh and prune embedding-related associations.
+            let refresh_start = SystemClock::new().now_instant();
+            match note_repo.refresh_embedding_associations(&project.id).await {
+                Ok(stats) => {
+                    let pruned = note_repo
+                        .prune_embedding_associations(&project.id)
+                        .await
+                        .unwrap_or(0);
+                    let elapsed_ms = refresh_start.elapsed().as_millis();
+                    tracing::info!(
+                        project_id = %project.id,
+                        notes_scanned = stats.notes_scanned,
+                        notes_missing_embeddings = stats.notes_missing_embeddings,
+                        candidates_evaluated = stats.candidates_evaluated,
+                        edges_upserted = stats.edges_upserted,
+                        edges_pruned = pruned,
+                        elapsed_ms = elapsed_ms,
+                        "CoordinatorActor: refreshed embedding-related note associations"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        project_id = %project.id,
+                        error = %e,
+                        "CoordinatorActor: failed to refresh embedding-related associations"
                     );
                 }
             }
