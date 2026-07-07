@@ -3,5 +3,6 @@ mod evidence_spike_regression_tests;
 mod fuzzy_tests;
 mod helpers_tests;
 mod lsp_schema_tests;
+mod proposal_update_handler_tests;
 mod schema_tests;
 mod truncate_tests;
