@@ -1035,6 +1035,44 @@ impl SupervisorServices for DirectServices {
 
         Ok(())
     }
+
+    /// Mark the monitored-reopen attempt as complete.  Resolves the latest
+    /// arbitration row for the task and, if it is unconsumed with a monitored
+    /// reopen in progress (`monitored_reopen_count >= 1`), transitions it to
+    /// `consumed`.  This is idempotent: a row already consumed/failed is a
+    /// no-op.
+    async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String> {
+        use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
+
+        let db = self.callbacks.agent_context.db.clone();
+        let arb_repo = TaskArbitrationRepository::new(db);
+
+        let latest = arb_repo.get_latest_for_task(&task_id).await.map_err(|e| {
+            format!("complete_monitored_reopen: failed to load latest arbitration: {e}")
+        })?;
+
+        let Some(record) = latest else {
+            return Ok(());
+        };
+
+        // Only complete when a monitored reopen is actually in progress.
+        if record.monitored_reopen_count < 1 {
+            return Ok(());
+        }
+
+        arb_repo
+            .complete_monitored_reopen(&task_id, record.hold_cycle)
+            .await
+            .map_err(|e| format!("complete_monitored_reopen: failed to complete: {e}"))?;
+
+        tracing::info!(
+            task_id = %task_id,
+            hold_cycle = record.hold_cycle,
+            "complete_monitored_reopen: marked monitored reopen attempt complete"
+        );
+
+        Ok(())
+    }
 }
 
 /// Intern the wire form's `(entity_type, action)` back into the static-str

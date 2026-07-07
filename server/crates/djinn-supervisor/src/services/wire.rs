@@ -445,6 +445,10 @@ pub enum ServiceRpcRequest {
         verification_command: String,
         exclude_models: Vec<String>,
     },
+    /// [`crate::SupervisorServices::complete_monitored_reopen`].
+    /// Marks the monitored-reopen attempt complete on a terminal worker
+    /// outcome.  Appended at the enum tail for bincode stability.
+    CompleteMonitoredReopen { task_id: String },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -523,6 +527,9 @@ pub enum ServiceRpcResponse {
     /// Monitored-reopen attempt-start ack.  `Err` carries the host's
     /// error.  Appended at the enum tail for bincode stability.
     StartMonitoredReopen(Result<(), String>),
+    /// Monitored-reopen attempt-completion ack.  `Err` carries the host's
+    /// error.  Appended at the enum tail for bincode stability.
+    CompleteMonitoredReopen(Result<(), String>),
 }
 
 #[cfg(test)]

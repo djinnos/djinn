@@ -595,6 +595,10 @@ impl SupervisorServices for WorkerSupervisorServices {
             .start_monitored_reopen(task_id, directive, verification_command, exclude_models)
             .await
     }
+
+    async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String> {
+        self.rpc.complete_monitored_reopen(task_id).await
+    }
 }
 
 #[cfg(test)]

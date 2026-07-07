@@ -1270,6 +1270,10 @@ async fn dispatch(
                 .await;
             ServiceRpcResponse::StartMonitoredReopen(result)
         }
+        ServiceRpcRequest::CompleteMonitoredReopen { task_id } => {
+            let result = services.complete_monitored_reopen(task_id).await;
+            ServiceRpcResponse::CompleteMonitoredReopen(result)
+        }
     }
 }
 
@@ -1476,6 +1480,10 @@ mod tests {
             _verification_command: String,
             _exclude_models: Vec<String>,
         ) -> Result<(), String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
             unimplemented!("not exercised in server tests")
         }
     }

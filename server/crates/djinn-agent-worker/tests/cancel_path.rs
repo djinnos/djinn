@@ -339,6 +339,9 @@ async fn start_fake_server(
                         ServiceRpcRequest::StartMonitoredReopen { .. } => {
                             ServiceRpcResponse::StartMonitoredReopen(Ok(()))
                         }
+                        ServiceRpcRequest::CompleteMonitoredReopen { .. } => {
+                            ServiceRpcResponse::CompleteMonitoredReopen(Ok(()))
+                        }
                     };
                     let reply = Frame {
                         correlation_id,

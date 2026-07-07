@@ -363,4 +363,12 @@ pub trait SupervisorServices: Send + Sync + 'static {
         verification_command: String,
         exclude_models: Vec<String>,
     ) -> Result<(), String>;
+
+    /// Mark the monitored-reopen attempt as complete.  Called on any terminal
+    /// outcome of the monitored worker attempt — worker submit, reviewer
+    /// rejection, CI/preapproval failure, worker failure, or no-eligible-model.
+    /// Transitions the arbitration row to `consumed` (terminal for this hold
+    /// cycle) so re-entry cannot trigger a second arbiter or worker retry.
+    /// Failures are non-fatal — callers log and continue.
+    async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String>;
 }

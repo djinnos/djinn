@@ -413,6 +413,9 @@ async fn handle_rpc(
         ServiceRpcRequest::StartMonitoredReopen { .. } => {
             ServiceRpcResponse::StartMonitoredReopen(Ok(()))
         }
+        ServiceRpcRequest::CompleteMonitoredReopen { .. } => {
+            ServiceRpcResponse::CompleteMonitoredReopen(Ok(()))
+        }
     }
 }
 

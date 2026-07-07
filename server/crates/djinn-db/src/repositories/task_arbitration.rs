@@ -60,6 +60,9 @@ pub struct TaskArbitrationRecord {
     pub excluded_models: serde_json::Value,
     pub monitored_reopen_at: Option<String>,
     pub monitored_reopen_count: i32,
+    /// True once the directive was injected into exactly one worker prompt.
+    /// Subsequent worker prompts see this and return None.
+    pub directive_injected: bool,
     pub consumed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -342,6 +345,43 @@ impl TaskArbitrationRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Atomically mark that the directive has been injected into exactly one
+    /// worker prompt.  Returns `true` when the flag transitioned from `false`
+    /// to `true` (first call); returns `false` when it was already `true`
+    /// (second worker prompt on re-entry).  This is the one-shot guard: the
+    /// caller calls `load_arbiter_directive`, and only injects when this
+    /// method returns `true`.
+    ///
+    /// The UPDATE's `WHERE directive_injected = false` clause makes it
+    /// idempotent: concurrent calls race but only one wins.
+    pub async fn mark_directive_injected(&self, task_id: &str, hold_cycle: i32) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(ARBITRATION_MARK_DIRECTIVE_INJECTED)
+            .bind(task_id)
+            .bind(hold_cycle)
+            .execute(self.db.pool())
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Mark a monitored-reopen attempt as complete.  Called on any terminal
+    /// outcome of the monitored worker attempt: worker submit, reviewer
+    /// rejection, CI/preapproval failure, worker failure, or no-eligible-model.
+    /// This transitions the arbitration row to `consumed` (terminal for this
+    /// hold cycle) so re-entry cannot trigger a second arbiter or worker retry.
+    ///
+    /// Returns `true` if the row was consumed by this call (first terminal
+    /// outcome), `false` if already consumed/failed.
+    pub async fn complete_monitored_reopen(&self, task_id: &str, hold_cycle: i32) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(ARBITRATION_COMPLETE_MONITORED_REOPEN)
+            .bind(task_id)
+            .bind(hold_cycle)
+            .execute(self.db.pool())
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Force the raw arbitration state for repository-boundary regression tests.
     ///
     /// This intentionally does not validate `state`: callers use it to simulate
@@ -396,6 +436,7 @@ const ARBITRATION_SELECT_BY_TASK_CYCLE: &str = r#"
         excluded_models,
         monitored_reopen_at,
         monitored_reopen_count,
+        directive_injected,
         consumed_at,
         created_at,
         updated_at
@@ -422,6 +463,7 @@ const ARBITRATION_SELECT_LATEST_FOR_TASK: &str = r#"
         excluded_models,
         monitored_reopen_at,
         monitored_reopen_count,
+        directive_injected,
         consumed_at,
         created_at,
         updated_at
@@ -450,6 +492,7 @@ const ARBITRATION_SELECT_LIST_FOR_TASK: &str = r#"
         excluded_models,
         monitored_reopen_at,
         monitored_reopen_count,
+        directive_injected,
         consumed_at,
         created_at,
         updated_at
@@ -507,6 +550,21 @@ const ARBITRATION_RECORD_MONITORED_REOPEN: &str = r#"
         monitored_reopen_count = monitored_reopen_count + 1,
         updated_at             = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     WHERE task_id = $1 AND hold_cycle = $2
+"#;
+
+const ARBITRATION_MARK_DIRECTIVE_INJECTED: &str = r#"
+    UPDATE task_arbitrations
+    SET directive_injected = true,
+        updated_at         = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    WHERE task_id = $1 AND hold_cycle = $2 AND directive_injected = false
+"#;
+
+const ARBITRATION_COMPLETE_MONITORED_REOPEN: &str = r#"
+    UPDATE task_arbitrations
+    SET state       = 'consumed',
+        consumed_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        updated_at  = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    WHERE task_id = $1 AND hold_cycle = $2 AND state = 'unconsumed'
 "#;
 
 const ARBITRATION_FORCE_STATE_FOR_TESTING: &str = r#"
@@ -1044,6 +1102,7 @@ mod tests {
             .unwrap();
         assert!(before.monitored_reopen_at.is_none());
         assert_eq!(before.monitored_reopen_count, 0);
+        assert!(!before.directive_injected);
 
         repo.record_monitored_reopen(&task_id, 1).await.unwrap();
         let after = repo
@@ -1140,5 +1199,153 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(record.state, "failed");
+    }
+
+    // ── zkk9: directive one-shot injection and completion tests ─────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mark_directive_injected_one_shot_guard() {
+        let db = test_db();
+        let (_proj, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskArbitrationRepository::new(db);
+
+        repo.try_create(sample_params(
+            &task_id,
+            1,
+            &serde_json::json!([]),
+            &serde_json::json!([]),
+        ))
+        .await
+        .unwrap();
+
+        // Before mark, directive_injected is false.
+        let before = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!before.directive_injected);
+
+        // First mark succeeds (first worker prompt).
+        let first = repo.mark_directive_injected(&task_id, 1).await.unwrap();
+        assert!(first, "first mark_directive_injected should return true");
+
+        // Second mark returns false (second worker prompt — re-entry).
+        let second = repo.mark_directive_injected(&task_id, 1).await.unwrap();
+        assert!(
+            !second,
+            "second mark_directive_injected should return false (one-shot guard)"
+        );
+
+        // Verify the flag is true and stays true.
+        let after = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after.directive_injected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn complete_monitored_reopen_transitions_to_consumed() {
+        let db = test_db();
+        let (_proj, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskArbitrationRepository::new(db);
+
+        repo.try_create(sample_params(
+            &task_id,
+            1,
+            &serde_json::json!([]),
+            &serde_json::json!([]),
+        ))
+        .await
+        .unwrap();
+        repo.record_monitored_reopen(&task_id, 1).await.unwrap();
+
+        // Complete the monitored reopen.
+        let applied = repo.complete_monitored_reopen(&task_id, 1).await.unwrap();
+        assert!(applied, "complete_monitored_reopen should return true");
+
+        let after = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, "consumed");
+        assert!(after.consumed_at.is_some());
+
+        // Idempotent: a second call is a no-op.
+        let second = repo.complete_monitored_reopen(&task_id, 1).await.unwrap();
+        assert!(
+            !second,
+            "complete_monitored_reopen on consumed row returns false"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn complete_monitored_reopen_no_op_on_failed_row() {
+        let db = test_db();
+        let (_proj, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskArbitrationRepository::new(db);
+
+        repo.try_create(sample_params(
+            &task_id,
+            1,
+            &serde_json::json!([]),
+            &serde_json::json!([]),
+        ))
+        .await
+        .unwrap();
+        repo.record_monitored_reopen(&task_id, 1).await.unwrap();
+        repo.mark_failed(&task_id, 1).await.unwrap();
+
+        let applied = repo.complete_monitored_reopen(&task_id, 1).await.unwrap();
+        assert!(
+            !applied,
+            "complete_monitored_reopen on failed row should return false"
+        );
+
+        let record = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, "failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_current_hold_cycle_returns_directive_injected_flag() {
+        // Verify that the directive_injected field is correctly returned by
+        // resolve_current_hold_cycle. This exercises the full SELECT path.
+        let db = test_db();
+        let (_proj, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskArbitrationRepository::new(db);
+
+        repo.try_create(sample_params(
+            &task_id,
+            1,
+            &serde_json::json!([]),
+            &serde_json::json!(["model-a", "model-b"]),
+        ))
+        .await
+        .unwrap();
+        repo.record_monitored_reopen(&task_id, 1).await.unwrap();
+
+        let (_, Some(record)) = repo.resolve_current_hold_cycle(&task_id).await.unwrap() else {
+            panic!("expected unconsumed record");
+        };
+        assert_eq!(record.monitored_reopen_count, 1);
+        assert!(!record.directive_injected);
+        assert_eq!(
+            record.excluded_models,
+            serde_json::json!(["model-a", "model-b"])
+        );
+
+        // Mark injected — re-resolve should show directive_injected = true.
+        repo.mark_directive_injected(&task_id, 1).await.unwrap();
+        let (_, Some(record2)) = repo.resolve_current_hold_cycle(&task_id).await.unwrap() else {
+            panic!("expected unconsumed record after mark");
+        };
+        assert!(record2.directive_injected);
     }
 }

@@ -2492,6 +2492,32 @@ impl TaskRunSupervisor {
             }
         };
 
+        // zkk9: Close out the monitored-reopen attempt on any terminal worker
+        // outcome.  Worker submit, reviewer rejection, CI/preapproval failure,
+        // worker failure, and no-eligible-model all reach this point with a
+        // terminal outcome.  `complete_monitored_reopen` is idempotent (no-op
+        // if already consumed or no monitored reopen is in progress), so it is
+        // safe to call unconditionally here.  The `LeadReopen` outcome starts
+        // the attempt (it does not reach this post-loop point because it sets
+        // `result` and `break`s before this block), so there is no risk of
+        // immediately completing what was just started.
+        //
+        // Failures are non-fatal — we log and proceed so the terminal outcome
+        // is still reported.
+        if !matches!(outcome, TaskRunOutcome::Interrupted)
+            && let Err(e) = self
+                .services
+                .complete_monitored_reopen(spec.task_id.clone())
+                .await
+        {
+            tracing::warn!(
+                task_run_id = %run_id,
+                task_id = %spec.task_id,
+                error = %e,
+                "supervisor: complete_monitored_reopen failed (non-fatal)"
+            );
+        }
+
         let terminal_status = match &outcome {
             TaskRunOutcome::PrOpened { .. } | TaskRunOutcome::Closed { .. } => {
                 TaskRunStatus::Completed
@@ -2932,6 +2958,10 @@ mod tests {
             _verification_command: String,
             _exclude_models: Vec<String>,
         ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
             Ok(())
         }
     }
@@ -5307,6 +5337,10 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+
+        async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     // ── Arbiter pre-approval gate tests ──────────────────────────────────────
@@ -5326,6 +5360,9 @@ mod tests {
         /// passed to `start_monitored_reopen` so the reopen settlement test
         /// can assert the directive was persisted before the transition.
         start_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<MonitoredReopenCall>>>,
+        /// zkk9: records task_ids passed to `complete_monitored_reopen` so
+        /// terminal-outcome tests can assert the monitored attempt was closed.
+        complete_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     /// Recorded `start_monitored_reopen` call for assertion.
@@ -5533,6 +5570,14 @@ mod tests {
                 });
             Ok(())
         }
+
+        async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String> {
+            self.complete_monitored_reopen_calls
+                .lock()
+                .expect("complete_monitored_reopen_calls mutex poisoned")
+                .push(task_id);
+            Ok(())
+        }
     }
 
     /// Build a minimal mirror + supervisor for arbiter gate tests.
@@ -5549,7 +5594,7 @@ mod tests {
         std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
-        let (root, supervisor, spec, transition_calls, open_pr_called, _reopen) =
+        let (root, supervisor, spec, transition_calls, open_pr_called, _reopen, _complete) =
             build_arbiter_gate_test_env_with_reopen(
                 task_id,
                 project_id,
@@ -5574,6 +5619,7 @@ mod tests {
         std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
         std::sync::Arc<std::sync::Mutex<Vec<MonitoredReopenCall>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
             .expect("temp test root");
@@ -5591,6 +5637,8 @@ mod tests {
         let start_monitored_reopen_calls: std::sync::Arc<
             std::sync::Mutex<Vec<MonitoredReopenCall>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let complete_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let services: std::sync::Arc<dyn SupervisorServices> =
             std::sync::Arc::new(ArbiterGateTestServices {
@@ -5601,6 +5649,7 @@ mod tests {
                 transition_calls: transition_calls.clone(),
                 open_pr_called: open_pr_called.clone(),
                 start_monitored_reopen_calls: start_monitored_reopen_calls.clone(),
+                complete_monitored_reopen_calls: complete_monitored_reopen_calls.clone(),
             });
 
         let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
@@ -5629,6 +5678,7 @@ mod tests {
             transition_calls,
             open_pr_called,
             start_monitored_reopen_calls,
+            complete_monitored_reopen_calls,
         )
     }
 
@@ -5855,7 +5905,7 @@ mod tests {
         //    command / excluded models and mark the attempt start.
         // 2. Fire `lead_intervention_complete` to return the task to `open`.
         // 3. NOT call open_pr (reopen is terminal for this run).
-        let (_root, supervisor, spec, transition_calls, _open_pr, reopen_calls) =
+        let (_root, supervisor, spec, transition_calls, _open_pr, reopen_calls, complete_calls) =
             build_arbiter_gate_test_env_with_reopen(
                 "T-reopen-persist",
                 "proj-reopen",
@@ -5904,13 +5954,23 @@ mod tests {
             "reopen must produce Closed, got: {:?}",
             report.outcome
         );
+
+        // zkk9: complete_monitored_reopen is called on terminal outcomes.
+        // The reopen outcome produces Closed, which triggers the post-loop
+        // completion hook.
+        let complete = complete_calls.lock().unwrap();
+        assert_eq!(
+            complete.len(),
+            1,
+            "complete_monitored_reopen must be called once for terminal outcome, got: {complete:?}"
+        );
     }
 
     #[tokio::test]
     async fn arbiter_reopen_does_not_call_open_pr() {
         // Reopen must NOT fall through to open_pr — it returns the task to
         // `open` for a fresh worker dispatch.
-        let (_root, supervisor, spec, _transition_calls, open_pr_called, _reopen_calls) =
+        let (_root, supervisor, spec, _transition_calls, open_pr_called, _reopen_calls, _complete) =
             build_arbiter_gate_test_env_with_reopen(
                 "T-reopen-no-pr",
                 "proj-reopen",

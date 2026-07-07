@@ -2016,6 +2016,10 @@ mod tests {
             ) -> Result<(), String> {
                 unimplemented!()
             }
+
+            async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

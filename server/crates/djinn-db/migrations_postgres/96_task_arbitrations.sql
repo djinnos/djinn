@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS task_arbitrations (
     -- Monitored-reopen lifecycle
     monitored_reopen_at   VARCHAR(64)  NULL,
     monitored_reopen_count INT         NOT NULL DEFAULT 0,
+    -- True once the directive has been injected into exactly one worker
+    -- prompt.  Subsequent worker prompts read this flag and return None so
+    -- the directive is never injected twice for the same monitored reopen.
+    directive_injected    BOOLEAN      NOT NULL DEFAULT false,
     -- Timestamps
     consumed_at           VARCHAR(64)  NULL,
     created_at            VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),

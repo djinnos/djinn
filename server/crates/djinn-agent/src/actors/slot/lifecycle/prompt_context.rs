@@ -709,12 +709,12 @@ pub(crate) fn role_receives_arbiter_directive(role_name: &str) -> bool {
 /// non-worker roles or when no monitored reopen is in progress.
 ///
 /// The directive is loaded from the latest unconsumed arbitration row only
-/// when `monitored_reopen_count >= 1`. This ensures the directive is injected
-/// into exactly one worker prompt: `start_monitored_reopen` atomically marks
-/// the attempt start (incrementing `monitored_reopen_count` to 1), so the
-/// first worker dispatch sees the directive. The arbitration row is consumed
-/// (marked consumed) on the first terminal outcome, so subsequent dispatches
-/// will not find an unconsumed row with a monitored reopen.
+/// when `monitored_reopen_count >= 1` AND the directive has not yet been
+/// injected (`directive_injected == false`). The one-shot guard is enforced
+/// atomically: `mark_directive_injected` flips `directive_injected` from
+/// `false` to `true` with a conditional `WHERE directive_injected = false`
+/// clause. Only the first worker prompt wins the race; any second worker
+/// prompt (re-entry) will see `directive_injected == true` and return `None`.
 pub(crate) async fn load_arbiter_directive(
     role_name: &str,
     task_id: &str,
@@ -730,6 +730,20 @@ pub(crate) async fn load_arbiter_directive(
     let record = unconsumed_record?;
     // Only inject when a monitored reopen attempt is in progress.
     if record.monitored_reopen_count < 1 {
+        return None;
+    }
+    // One-shot guard: if the directive was already injected for this monitored
+    // reopen, do not inject it again.
+    if record.directive_injected {
+        return None;
+    }
+    // Atomically claim the injection.  If the UPDATE affects zero rows the
+    // directive was already injected by a concurrent prompt; return None.
+    let claimed = arb_repo
+        .mark_directive_injected(task_id, record.hold_cycle)
+        .await
+        .ok()?;
+    if !claimed {
         return None;
     }
     // Extract the directive text from the structured JSON payload.
