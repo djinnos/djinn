@@ -1348,4 +1348,187 @@ mod tests {
         };
         assert!(record2.directive_injected);
     }
+
+    // ── zkk9 round 3: full lifecycle regression tests ──────────────────────
+
+    /// End-to-end monitored reopen lifecycle at the repository level:
+    /// 1. Create row (unconsumed, monitored_reopen_count = 0)
+    /// 2. record_monitored_reopen → count = 1, row still unconsumed
+    /// 3. mark_directive_injected → first call true (one-shot), second false
+    /// 4. Row still unconsumed after injection (directive persists)
+    /// 5. complete_monitored_reopen → consumed
+    /// 6. No second arbiter/worker cycle: resolve_current_hold_cycle returns
+    ///    (next_cycle, None) after consumption — no unconsumed row to re-enter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn monitored_reopen_full_lifecycle_no_double_reentry() {
+        let db = test_db();
+        let (_proj, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskArbitrationRepository::new(db);
+
+        // 1. Create unconsumed row.
+        repo.try_create(sample_params(
+            &task_id,
+            1,
+            &serde_json::json!([]),
+            &serde_json::json!(["bad-model"]),
+        ))
+        .await
+        .unwrap();
+
+        // 2. Start monitored reopen — row stays unconsumed.
+        repo.record_monitored_reopen(&task_id, 1).await.unwrap();
+        let after_start = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_start.monitored_reopen_count, 1);
+        assert_eq!(after_start.state, "unconsumed");
+        assert!(!after_start.directive_injected);
+
+        // resolve_current_hold_cycle still returns the unconsumed row.
+        let (cycle, unconsumed) = repo.resolve_current_hold_cycle(&task_id).await.unwrap();
+        assert_eq!(cycle, 1);
+        assert!(unconsumed.is_some());
+
+        // 3. First directive injection wins (one-shot).
+        let first_inject = repo.mark_directive_injected(&task_id, 1).await.unwrap();
+        assert!(first_inject, "first mark_directive_injected should win");
+
+        // Second directive injection loses (re-entry).
+        let second_inject = repo.mark_directive_injected(&task_id, 1).await.unwrap();
+        assert!(
+            !second_inject,
+            "second mark_directive_injected must lose (one-shot guard)"
+        );
+
+        // 4. Row still unconsumed after injection — directive persists for
+        //    coordinator exclude_models enforcement.
+        let after_inject = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_inject.state, "unconsumed");
+        assert!(after_inject.directive_injected);
+        assert_eq!(after_inject.monitored_reopen_count, 1);
+
+        // 5. Complete the monitored reopen on worker terminal outcome.
+        let completed = repo.complete_monitored_reopen(&task_id, 1).await.unwrap();
+        assert!(completed, "complete_monitored_reopen should succeed");
+
+        let after_complete = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_complete.state, "consumed");
+
+        // 6. No second arbiter/worker cycle: resolve_current_hold_cycle
+        //    returns (next_cycle, None) — no unconsumed row to re-enter.
+        let (cycle2, unconsumed2) = repo.resolve_current_hold_cycle(&task_id).await.unwrap();
+        assert_eq!(
+            cycle2, 2,
+            "after consumption, next hold cycle is incremented"
+        );
+        assert!(
+            unconsumed2.is_none(),
+            "no unconsumed row remains — no second arbiter/worker retry"
+        );
+    }
+
+    /// No-eligible-model scenario: when exclude_models eliminates all worker
+    /// models, the coordinator calls complete_monitored_reopen and the row
+    /// transitions to consumed.  No second arbiter dispatch is possible.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_eligible_model_completes_monitored_reopen() {
+        let db = test_db();
+        let (_proj, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskArbitrationRepository::new(db);
+
+        // Create row with excluded models that would eliminate all workers.
+        repo.try_create(sample_params(
+            &task_id,
+            1,
+            &serde_json::json!([]),
+            &serde_json::json!(["model-a", "model-b", "model-c"]),
+        ))
+        .await
+        .unwrap();
+        repo.record_monitored_reopen(&task_id, 1).await.unwrap();
+
+        // Coordinator detects no eligible model and completes the monitored
+        // reopen.  The row transitions to consumed — no second arbiter cycle.
+        let completed = repo.complete_monitored_reopen(&task_id, 1).await.unwrap();
+        assert!(completed);
+
+        let record = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, "consumed");
+
+        // resolve_current_hold_cycle returns (next_cycle, None).
+        let (cycle, unconsumed) = repo.resolve_current_hold_cycle(&task_id).await.unwrap();
+        assert_eq!(cycle, 2);
+        assert!(unconsumed.is_none());
+    }
+
+    /// Directive injection is one-shot: after mark_directive_injected, a
+    /// second resolve_current_hold_cycle returns the row with
+    /// directive_injected == true.  The prompt_context layer checks this flag
+    /// and returns None for the second worker prompt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn directive_injection_consumed_after_first_worker_prompt() {
+        let db = test_db();
+        let (_proj, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskArbitrationRepository::new(db);
+
+        let directive = serde_json::json!({"decision": "reopen", "directive": "Fix the bug"});
+        let empty_arr = serde_json::json!([]);
+
+        repo.try_create(CreateArbitrationParams {
+            task_id: &task_id,
+            hold_cycle: 1,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &empty_arr,
+            dossier: None,
+            directive: Some(&directive),
+            verification_command: Some("cargo test"),
+            excluded_models: &empty_arr,
+        })
+        .await
+        .unwrap();
+
+        repo.record_monitored_reopen(&task_id, 1).await.unwrap();
+
+        // First worker prompt: directive_injected is false → inject.
+        let (_, Some(rec1)) = repo.resolve_current_hold_cycle(&task_id).await.unwrap() else {
+            panic!("expected unconsumed record");
+        };
+        assert!(!rec1.directive_injected);
+        assert!(rec1.monitored_reopen_count >= 1);
+
+        // Atomically claim the injection.
+        let claimed = repo.mark_directive_injected(&task_id, 1).await.unwrap();
+        assert!(claimed);
+
+        // Second worker prompt (re-entry): directive_injected is true →
+        // load_arbiter_directive returns None (no duplicate injection).
+        let (_, Some(rec2)) = repo.resolve_current_hold_cycle(&task_id).await.unwrap() else {
+            panic!("expected unconsumed record");
+        };
+        assert!(
+            rec2.directive_injected,
+            "second worker prompt must see directive_injected == true"
+        );
+        assert_eq!(
+            rec2.state, "unconsumed",
+            "row still unconsumed until terminal"
+        );
+    }
 }
