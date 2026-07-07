@@ -876,6 +876,15 @@ impl CoordinatorActor {
         let mut any_at_capacity = false;
         let total_candidates = model_ids.len();
         let mut skipped_count: usize = 0;
+        // Chain-scoped failure observations: only this dispatch attempt's
+        // observed failures can later trigger breaker side effects. The list
+        // is collected here (not on `HealthTracker`) precisely so a successful
+        // fallback never causes breaker checks for an earlier candidate, and
+        // so two unrelated failover chains cannot leak breaker observations
+        // into each other. Returned to the caller via
+        // `DispatchOutcome::Failed { exhausted_observations }`; discarded on
+        // every other branch.
+        let mut exhausted_observations: Vec<djinn_provider::catalog::HealthKey> = Vec::new();
 
         for (candidate_index, model_id) in model_ids.iter().enumerate() {
             tracing::Span::current().record("model_id", tracing::field::display(model_id));
@@ -912,6 +921,12 @@ impl CoordinatorActor {
                         total_candidates,
                         skipped_count,
                     );
+                    // Successful fallback: discard chain-scoped observations.
+                    // The earlier candidate's failure counts stay recorded in
+                    // `HealthTracker` (for diagnostics) but no breaker trip
+                    // is evaluated, so the fallback-rescued session does not
+                    // demote or cooldown a model whose chain was not
+                    // exhausted.
                     return DispatchOutcome::Dispatched;
                 }
                 Err(PoolError::AtCapacity { .. }) => {
@@ -940,11 +955,20 @@ impl CoordinatorActor {
                     return DispatchOutcome::PoolDead;
                 }
                 Err(e) => {
-                    // Failover-chain traversal: log the per-candidate failure
-                    // and continue to the next eligible candidate instead of
-                    // returning Failed immediately.  Terminal side effects are
-                    // intentionally deferred until all candidates are exhausted
-                    // (the dependent task owns further deferral policy).
+                    // Failover-chain traversal: record the per-candidate
+                    // health *observation* immediately (failure counts are
+                    // incremented for diagnostics and candidate health state),
+                    // but do NOT trip the circuit breaker yet — breaker
+                    // demotion/cooldown is deferred until the chain is
+                    // exhausted (AC2).  Track the key on the *chain-local*
+                    // list so a successful fallback never evaluates a breaker
+                    // check for an earlier candidate, and so two unrelated
+                    // failover chains cannot leak observations into each
+                    // other.  Log the failure and continue to the next
+                    // eligible candidate.
+                    self.health.record_failure_observation(scope, model_id);
+                    exhausted_observations
+                        .push(djinn_provider::catalog::HealthKey::new(scope, model_id));
                     tracing::Span::current().record("outcome", "error");
                     tracing::debug!(outcome = "error", model_id = %model_id, label);
                     tracing::warn!(
@@ -975,7 +999,108 @@ impl CoordinatorActor {
             DispatchOutcome::AtCapacity
         } else {
             tracing::Span::current().record("outcome", "error");
-            DispatchOutcome::Failed
+            DispatchOutcome::Failed {
+                exhausted_observations,
+            }
+        }
+    }
+
+    /// Apply terminal side effects after failover-chain exhaustion.
+    ///
+    /// Called when [`try_dispatch_to_pool`] returns
+    /// [`DispatchOutcome::Failed { .. }`] — all candidates were tried and none
+    /// accepted the dispatch. Advances the per-task failure streak and applies
+    /// an escalating cooldown so the task is not silently retried every tick.
+    /// After [`MAX_DISPATCH_FAILURES`] consecutive exhaustions the task is
+    /// terminally failed.
+    ///
+    /// Extracted from `dispatch_ready_tasks` so the chain-exhaustion terminal
+    /// side-effect contract is unit-testable without the full dispatch loop.
+    ///
+    /// **AC2 breaker deferral**: This method also applies the circuit-breaker
+    /// trip for each candidate that was observed to fail during *this chain's*
+    /// traversal. Breaker demotion/cooldown is deferred from per-candidate
+    /// failure time to this point — after all candidates are exhausted — so
+    /// a successful fallback never triggers a breaker trip for an earlier
+    /// candidate, and two unrelated failover chains cannot leak breaker
+    /// observations into each other (AC2).
+    ///
+    /// `exhausted_observations` is the chain-scoped list of `(scope, model)`
+    /// keys carried through from [`DispatchOutcome::Failed`]. It MUST come
+    /// from the *same* dispatch attempt whose outcome triggered this call;
+    /// observations from a fallback-rescued chain were discarded by
+    /// `try_dispatch_to_pool` on the success path and cannot leak here, and
+    /// observations from an unrelated exhaustion cannot leak in via any
+    /// shared buffer (the previous `HealthTracker::pending_breaker_observations`
+    /// global buffer was removed specifically to prevent that).
+    pub(crate) async fn apply_chain_exhaustion_side_effects(
+        &mut self,
+        task: &djinn_core::models::Task,
+        role: &str,
+        exhausted_observations: &[djinn_provider::catalog::HealthKey],
+    ) {
+        // Apply deferred breaker checks for THIS chain's observed failures
+        // only.  Observations from a fallback-rescued chain (which were
+        // discarded by `try_dispatch_to_pool` on the success path) cannot
+        // leak here, and observations from an unrelated exhaustion cannot
+        // leak in via a global buffer. The breaker trip happens at most
+        // once per chain-exhausted failover attempt.
+        for key in exhausted_observations {
+            self.health
+                .apply_breaker_check_for(key.scope.as_deref(), &key.model_id);
+        }
+
+        let streak = {
+            let s = self
+                .dispatch_failure_streak
+                .entry(task.id.clone())
+                .or_insert(0);
+            *s = s.saturating_add(1);
+            *s
+        };
+
+        if streak >= MAX_DISPATCH_FAILURES {
+            self.terminally_fail_task(
+                task,
+                role,
+                "all failover candidates exhausted after multiple attempts. \
+                 The task could not be dispatched to any configured model. \
+                 Resolve the underlying issue and reopen.",
+            )
+            .await;
+            self.dispatch_failure_streak.remove(&task.id);
+            self.dispatch_cooldowns.remove(&task.id);
+            self.inflight_dispatches.remove(&task.id);
+            self.clear_durable_dispatch_backoff_state(
+                &task.id,
+                Some(&task.short_id),
+                "chain_exhaustion_terminal_close_clear",
+            )
+            .await;
+        } else {
+            let cooldown = escalating_dispatch_cooldown(streak);
+            tracing::warn!(
+                task_id = %task.short_id,
+                role,
+                streak,
+                cooldown_secs = cooldown.as_secs(),
+                observed_candidates = exhausted_observations.len(),
+                "CoordinatorActor: all failover candidates exhausted — backing off dispatch (escalating cooldown)"
+            );
+            self.dispatch_cooldowns
+                .insert(task.id.clone(), SystemClock::new().now_instant() + cooldown);
+            self.persist_durable_dispatch_state_update(
+                &task.id,
+                Some(&task.short_id),
+                "chain_exhaustion_backoff",
+                DurableDispatchStateUpdate {
+                    failure_streak: Some(streak),
+                    cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
+                    last_dispatched: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await;
         }
     }
 
@@ -1390,6 +1515,10 @@ impl CoordinatorActor {
             // fresh spawn/admission side-effects.  Guard ordering:
             // 1. Open-PR adoption: when the task has an existing open PR
             //    (task.pr_url), adopt it and record an adopted_pr audit row.
+            //    Adoption is bypassed when the task's required-CI gate is
+            //    failing (task.ci_status == "failing"): the PrCiFailed
+            //    remediation flow reopened the task so a worker can fix the
+            //    failing PR, and adopting would starve that remediation.
             // 2. Non-terminal attempt: if a pending or submitted attempt
             //    already exists for this task+role, defer dispatch and record
             //    a guard-only audit row.  No dispatch / provider / reopen
@@ -1399,6 +1528,7 @@ impl CoordinatorActor {
                 &task.id,
                 role,
                 task.pr_url.as_deref(),
+                Some(task.ci_status.as_str()),
             )
             .await
             {
@@ -2165,7 +2295,9 @@ impl CoordinatorActor {
                     record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_ERROR);
                     return;
                 }
-                DispatchOutcome::Failed => {
+                DispatchOutcome::Failed {
+                    exhausted_observations,
+                } => {
                     let breaker_open_for_all_candidates = model_ids
                         .iter()
                         .all(|model_id| !self.health.is_available(creator.as_deref(), model_id));
@@ -2185,6 +2317,16 @@ impl CoordinatorActor {
                         candidate_models = model_ids.len(),
                         "CoordinatorActor: no model could accept dispatch"
                     );
+
+                    // Chain-exhaustion terminal side effects: advance the
+                    // failure streak and apply escalating cooldown so the
+                    // task is not silently retried every tick without
+                    // backoff. Pass this chain's exhausted observations so
+                    // breaker side effects apply ONLY to failures from THIS
+                    // dispatch attempt — not from a fallback-rescued or
+                    // unrelated earlier chain (AC2).
+                    self.apply_chain_exhaustion_side_effects(&task, role, &exhausted_observations)
+                        .await;
                 }
             }
         }
@@ -3827,7 +3969,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Failed),
+            matches!(outcome, DispatchOutcome::Failed { .. }),
             "dispatch should return Failed when all candidates have open breakers"
         );
 
@@ -4441,6 +4583,1156 @@ mod failover_chain_tests {
             logs_contain("skipped_count=1"),
             "failover_candidate_accepted must report skipped_count=1 \
              (model-a was skipped before model-b was accepted)"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC3: First-candidate pool error followed by a successful fallback does
+    /// NOT advance the failure streak, apply a dispatch cooldown, trip the
+    /// circuit breaker for the failed candidate, or increment park/intervention
+    /// counters.
+    ///
+    /// Scenario: 2 candidates — model-a fails with a pool error (SlotBusy),
+    /// model-b dispatches successfully. The test asserts:
+    /// 1. The outcome is `Dispatched` (fallback succeeded).
+    /// 2. No failure streak was recorded for the task.
+    /// 3. No dispatch cooldown was applied.
+    /// 4. Per-candidate health failure was recorded for model-a (the failing
+    ///    candidate) — failure counts are still incremented for diagnostics
+    ///    and candidate health state.
+    /// 5. The circuit breaker was NOT tripped because the chain was not
+    ///    exhausted (AC2 deferral).
+    /// 6. The chain-scoped observation list is NOT returned to the caller (the
+    ///    fallback path discards it), so no breaker checks are applied for
+    ///    earlier candidates. There is no global observation buffer that a
+    ///    later exhaustion could later consume to trigger a breaker trip for
+    ///    this fallback-rescued chain (AC2 chain-scoping fix).
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn failover_chain_first_candidate_failure_fallback_succeeds_no_terminal_effects() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        // Track which models the dispatch_fn was called with
+        let attempted_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let attempted_models_clone = attempted_models.clone();
+
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "fallback-task",
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "fallback-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    let tracker = attempted_models_clone.clone();
+                    async move {
+                        tracker.lock().unwrap().push(mid.clone());
+                        if mid == "provider/model-a" {
+                            // Simulate a pool error for model-a
+                            Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                        } else {
+                            pool.dispatch(&tid, &pp, &mid).await
+                        }
+                    }
+                },
+            )
+            .await;
+
+        // ── AC3a: dispatch should succeed on model-b ─────────────────────
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-b after model-a pool error"
+        );
+
+        // ── AC3b: both models were attempted ─────────────────────────────
+        let attempted = attempted_models.lock().unwrap().clone();
+        assert!(
+            attempted.contains(&"provider/model-a".to_string()),
+            "dispatch_fn should have been called with model-a"
+        );
+        assert!(
+            attempted.contains(&"provider/model-b".to_string()),
+            "dispatch_fn should have been called with model-b (fallback)"
+        );
+
+        // ── AC3c: per-candidate health failure was recorded for model-a ──
+        // After one pool error, model-a should have 1 consecutive failure.
+        // The breaker threshold is 3, so it should still be available.
+        assert!(
+            actor.health.is_available(None, "provider/model-a"),
+            "model-a should still be available after a single pool error (below breaker threshold)"
+        );
+
+        // ── AC3c2: circuit breaker was NOT tripped (AC2 deferral) ────────
+        // The breaker must NOT be tripped for model-a even though it failed,
+        // because the chain was not exhausted — a later candidate succeeded.
+        // Breaker demotion is deferred to `apply_chain_exhaustion_side_effects`.
+        let model_a_health = actor.health.model_health(None, "provider/model-a");
+        assert!(
+            !model_a_health.auto_disabled,
+            "model-a breaker must NOT be tripped when chain was not exhausted \
+             (breaker demotion deferred until chain exhaustion — AC2)"
+        );
+
+        // ── AC3d: no failure streak was recorded for the task ────────────
+        assert!(
+            !actor.dispatch_failure_streak.contains_key("fallback-task"),
+            "no failure streak should be recorded when the chain was not exhausted"
+        );
+
+        // ── AC3e: no dispatch cooldown was applied ───────────────────────
+        assert!(
+            !actor.dispatch_cooldowns.contains_key("fallback-task"),
+            "no dispatch cooldown should be applied when the chain was not exhausted"
+        );
+
+        // ── AC3f: terminal side effects were NOT applied ─────────────────
+        // `apply_chain_exhaustion_side_effects` is called ONLY when
+        // `try_dispatch_to_pool` returns `DispatchOutcome::Failed`.  Since
+        // the outcome was `Dispatched`, the method was never invoked, so:
+        //   - Session was NOT suspended (terminally_fail_task not called)
+        //   - Task was NOT reopened / quality-struck
+        //   - Park/intervention counters were NOT incremented
+        //   - Dispatch failure streak was NOT advanced
+        // These are verified above (AC3d, AC3e).  The negative log assertions
+        // below confirm the terminal path was not entered:
+        assert!(
+            !logs_contain("all failover candidates exhausted"),
+            "must NOT log chain-exhaustion message when fallback succeeded"
+        );
+        assert!(
+            !logs_contain("circuit-breaker tripped after failover-chain exhaustion"),
+            "must NOT log breaker trip when chain was not exhausted"
+        );
+
+        // Per-candidate observation and acceptance logs ARE emitted:
+        assert!(
+            logs_contain("failover_candidate_attempt"),
+            "must log per-candidate attempt for the failed model-a"
+        );
+        assert!(
+            logs_contain("failover_candidate_accepted"),
+            "must log acceptance for the successful fallback model-b"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC4: Chain exhaustion applies the appropriate terminal side effects
+    /// and diagnostics once no eligible fallback candidate remains.
+    ///
+    /// Scenario: 2 candidates — both fail with pool errors (SlotBusy).
+    /// After `try_dispatch_to_pool` returns `Failed`, the caller invokes
+    /// `apply_chain_exhaustion_side_effects` (the same call
+    /// `dispatch_ready_tasks` makes on chain exhaustion). The test asserts:
+    /// 1. The outcome is `Failed` (chain exhausted).
+    /// 2. `apply_chain_exhaustion_side_effects` records a failure streak.
+    /// 3. A dispatch cooldown is applied.
+    /// 4. Per-candidate health failures were recorded for both candidates.
+    /// 5. Repeated exhaustion escalates the streak.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn failover_chain_exhaustion_applies_terminal_side_effects() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (mut actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        // Build a minimal Task for the side-effect method (only `id` and
+        // `short_id` are read by `apply_chain_exhaustion_side_effects`).
+        let task = djinn_core::models::Task {
+            id: "exhausted-task-uuid".to_owned(),
+            project_id: String::new(),
+            short_id: "exhausted-task".to_owned(),
+            epic_id: None,
+            title: String::new(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_owned(),
+            status: "open".to_owned(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".to_owned(),
+            acceptance_criteria: "[]".to_owned(),
+            reopen_count: 0,
+            continuation_count: 0,
+            total_reopen_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-06-12T00:00:00Z".to_owned(),
+            updated_at: "2026-06-12T00:00:00Z".to_owned(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_owned(),
+            agent_type: None,
+            created_by_user_id: None,
+            ci_status: "unknown".to_owned(),
+            ci_head_sha: None,
+            ci_pr_number: None,
+            ci_blocking_required_check_names: "[]".to_owned(),
+            ci_failure_fingerprint: None,
+            ci_first_seen_at: None,
+            ci_last_seen_at: None,
+            ci_same_signature_count: 0,
+            ci_last_remediation_base_sha: None,
+            unresolved_blocker_count: 0,
+        };
+
+        let attempted_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let attempted_models_clone = attempted_models.clone();
+
+        let outcome = actor
+            .try_dispatch_to_pool(
+                &task.short_id,
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |_pool, model_id| {
+                    let mid = model_id.to_owned();
+                    let tracker = attempted_models_clone.clone();
+                    async move {
+                        tracker.lock().unwrap().push(mid.clone());
+                        // All candidates fail
+                        Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                    }
+                },
+            )
+            .await;
+
+        // ── AC4a: dispatch should fail after chain exhaustion ────────────
+        assert!(
+            matches!(outcome, DispatchOutcome::Failed { .. }),
+            "dispatch should return Failed when all candidates fail"
+        );
+
+        // ── AC4b: both models were attempted ─────────────────────────────
+        let attempted = attempted_models.lock().unwrap().clone();
+        assert_eq!(
+            attempted.len(),
+            2,
+            "dispatch_fn should have been called for both candidates"
+        );
+        assert!(attempted.contains(&"provider/model-a".to_string()));
+        assert!(attempted.contains(&"provider/model-b".to_string()));
+
+        // ── AC4c: per-candidate health failures were recorded ────────────
+        // After one pool error each, both models should have 1 consecutive
+        // failure. Breaker threshold is 3, so both should still be available.
+        assert!(
+            actor.health.is_available(None, "provider/model-a"),
+            "model-a should still be available after a single pool error"
+        );
+        assert!(
+            actor.health.is_available(None, "provider/model-b"),
+            "model-b should still be available after a single pool error"
+        );
+
+        // ── AC4d: apply terminal side effects (as dispatch_ready_tasks does) ─
+        let exhausted_observations = match &outcome {
+            DispatchOutcome::Failed {
+                exhausted_observations,
+            } => exhausted_observations.clone(),
+            _ => panic!("expected DispatchOutcome::Failed"),
+        };
+        actor
+            .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations)
+            .await;
+
+        // failure streak should be 1
+        assert_eq!(
+            actor.dispatch_failure_streak.get("exhausted-task-uuid"),
+            Some(&1),
+            "failure streak should be 1 after first chain exhaustion"
+        );
+
+        // dispatch cooldown should be applied
+        assert!(
+            actor.dispatch_cooldowns.contains_key("exhausted-task-uuid"),
+            "dispatch cooldown should be applied after chain exhaustion"
+        );
+
+        // ── AC4e: chain-exhaustion diagnostic was logged ─────────────────
+        assert!(
+            logs_contain("all failover candidates exhausted"),
+            "must log chain-exhaustion message"
+        );
+        assert!(
+            logs_contain("failover_candidate_attempt"),
+            "must log per-candidate attempt for each failed candidate"
+        );
+
+        // ── AC4f: repeated exhaustion escalates streak and cooldown ──────
+        // Simulate a second exhaustion: re-dispatch (all fail) then apply
+        // side effects.  The streak should advance to 2.
+        let outcome2 = actor
+            .try_dispatch_to_pool(
+                &task.short_id,
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |_pool, _model_id| async {
+                    Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                },
+            )
+            .await;
+
+        assert!(matches!(outcome2, DispatchOutcome::Failed { .. }));
+        let exhausted_observations2 = match outcome2 {
+            DispatchOutcome::Failed {
+                exhausted_observations,
+            } => exhausted_observations,
+            _ => Vec::new(),
+        };
+        actor
+            .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations2)
+            .await;
+
+        assert_eq!(
+            actor.dispatch_failure_streak.get("exhausted-task-uuid"),
+            Some(&2),
+            "failure streak should be 2 after second chain exhaustion"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC2 regression: circuit breaker IS tripped after chain exhaustion when
+    /// consecutive failure threshold is reached, and breaker demotion/cooldown
+    /// was deferred until this point (not applied during per-candidate traversal).
+    ///
+    /// Scenario: 2 candidates fail, 3 chain exhaustions in a row.
+    /// After the 3rd exhaustion (consecutive_failures reaches
+    /// CIRCUIT_BREAKER_THRESHOLD = 3), `apply_chain_exhaustion_side_effects`
+    /// trips the breaker for both candidates.  Before the 3rd exhaustion,
+    /// the breaker should NOT be tripped even though failures were observed.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn breaker_tripped_after_chain_exhaustion_reaches_threshold() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (mut actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        let task = djinn_core::models::Task {
+            id: "breaker-task-uuid".to_owned(),
+            project_id: String::new(),
+            short_id: "breaker-task".to_owned(),
+            epic_id: None,
+            title: String::new(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_owned(),
+            status: "open".to_owned(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".to_owned(),
+            acceptance_criteria: "[]".to_owned(),
+            reopen_count: 0,
+            continuation_count: 0,
+            total_reopen_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-06-12T00:00:00Z".to_owned(),
+            updated_at: "2026-06-12T00:00:00Z".to_owned(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_owned(),
+            agent_type: None,
+            created_by_user_id: None,
+            ci_status: "unknown".to_owned(),
+            ci_head_sha: None,
+            ci_pr_number: None,
+            ci_blocking_required_check_names: "[]".to_owned(),
+            ci_failure_fingerprint: None,
+            ci_first_seen_at: None,
+            ci_last_seen_at: None,
+            ci_same_signature_count: 0,
+            ci_last_remediation_base_sha: None,
+            unresolved_blocker_count: 0,
+        };
+
+        // Run 2 chain exhaustions — breaker threshold is 3, so breaker should
+        // NOT be tripped yet even though failures are observed.
+        for round in 1..=2 {
+            let outcome = actor
+                .try_dispatch_to_pool(
+                    &task.short_id,
+                    "worker",
+                    0,
+                    None,
+                    &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                    |_pool, _model_id| async {
+                        Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                    },
+                )
+                .await;
+            assert!(matches!(outcome, DispatchOutcome::Failed { .. }));
+
+            // Breaker should still be available before side-effects are applied
+            assert!(
+                actor.health.is_available(None, "provider/model-a"),
+                "model-a should be available before side-effects (round {round})"
+            );
+
+            let exhausted_observations = match outcome {
+                DispatchOutcome::Failed {
+                    exhausted_observations,
+                } => exhausted_observations,
+                _ => Vec::new(),
+            };
+            actor
+                .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations)
+                .await;
+
+            // After round 2: consecutive_failures = 2 for each candidate.
+            // Breaker threshold is 3, so NOT tripped yet.
+            let model_a_health = actor.health.model_health(None, "provider/model-a");
+            assert!(
+                !model_a_health.auto_disabled,
+                "model-a breaker must NOT be tripped after {round} exhaustions (threshold is 3)"
+            );
+            let model_b_health = actor.health.model_health(None, "provider/model-b");
+            assert!(
+                !model_b_health.auto_disabled,
+                "model-b breaker must NOT be tripped after {round} exhaustions (threshold is 3)"
+            );
+        }
+
+        // 3rd chain exhaustion: consecutive_failures reaches 3 → breaker trips.
+        let outcome = actor
+            .try_dispatch_to_pool(
+                &task.short_id,
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |_pool, _model_id| async {
+                    Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                },
+            )
+            .await;
+        assert!(matches!(outcome, DispatchOutcome::Failed { .. }));
+
+        // Before side-effects: breaker should still be available
+        // (observation-only recording does not trip the breaker).
+        assert!(
+            actor.health.is_available(None, "provider/model-a"),
+            "model-a must still be available before side-effects are applied (AC2 deferral)"
+        );
+
+        // Apply chain-exhaustion side effects → breaker trips for both.
+        let exhausted_observations = match outcome {
+            DispatchOutcome::Failed {
+                exhausted_observations,
+            } => exhausted_observations,
+            _ => Vec::new(),
+        };
+        actor
+            .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations)
+            .await;
+
+        // Breaker IS tripped for model-a after chain exhaustion.
+        let model_a_health = actor.health.model_health(None, "provider/model-a");
+        assert!(
+            model_a_health.auto_disabled,
+            "model-a breaker MUST be tripped after 3 chain exhaustions reach threshold"
+        );
+
+        // Breaker IS tripped for model-b after chain exhaustion.
+        let model_b_health = actor.health.model_health(None, "provider/model-b");
+        assert!(
+            model_b_health.auto_disabled,
+            "model-b breaker MUST be tripped after 3 chain exhaustions reach threshold"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC3 DB-backed regression: a first-candidate pool failure for a real
+    /// task followed by a successful fallback must NOT suspend the session,
+    /// reopen or quality-strike the task, or increment park / intervention
+    /// counters persisted in the database.
+    ///
+    /// This locks the full end-to-end behavior of the failover-chain contract
+    /// at the persisted-row level — not just in-memory dispatch state.  The
+    /// earlier in-memory test (`failover_chain_first_candidate_failure_fallback_succeeds_no_terminal_effects`)
+    /// verifies the dispatch-surface invariants; this one proves they hold
+    /// when there's a real task row, a real running session row, and real
+    /// counters to mis-increment.
+    ///
+    /// Scenario:
+    /// - A task is created in the database with status=`open`, reopen_count=0,
+    ///   intervention_count=0, total_reopen_count=0.
+    /// - A "running" session is created against model-a (the failing candidate)
+    ///   so we can prove it is preserved (not interrupted/suspended).
+    /// - `try_dispatch_to_pool` traverses the failover chain with `[model-a,
+    ///   model-b]`; model-a returns `Slot::SlotBusy`, model-b dispatches
+    ///   successfully against the real pool.
+    /// - We then verify:
+    ///   1. The session row is still `running` (status unchanged — the
+    ///      fallback was rescued without suspending the session).
+    ///   2. The task's persisted status is still `open` (no terminal close).
+    ///   3. `reopen_count`, `total_reopen_count`, `intervention_count` are
+    ///      unchanged (no quality strike, no intervention, no reopen).
+    ///   4. No `dispatch_state` row was written for the task (no
+    ///      chain-exhaustion backoff was persisted).
+    ///   5. No new session rows were created for the failing model-a (only
+    ///      the test's pre-existing session is present).
+    ///   6. `apply_chain_exhaustion_side_effects` was NOT entered (logs only).
+    ///   7. The model-a breaker was NOT tripped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tracing_test::traced_test]
+    async fn ac3_dbbacked_fallback_rescues_session_without_terminal_effects() {
+        use djinn_core::events::EventBus;
+        use djinn_db::{
+            CreateSessionParams, DispatchStateRepository, EpicRepository, SessionRepository,
+            TaskRepository,
+        };
+
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        // Create a real epic + task + running session for the failing candidate.
+        let event_bus = EventBus::noop();
+        let epic_repo = EpicRepository::new(db.clone(), event_bus.clone());
+        let epic = epic_repo
+            .create("ac3-epic", "", "", "", "", None)
+            .await
+            .expect("create epic");
+        let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+        let task = task_repo
+            .create(&epic.id, "ac3-fallback-task", "", "", "task", 0, "", None)
+            .await
+            .expect("create task");
+        let db = db; // shadow to keep worktree-readable
+
+        // Verify initial task invariants before any dispatch happens.
+        assert_eq!(task.status, "open", "task must start at `open` status");
+        assert_eq!(task.reopen_count, 0, "task starts with reopen_count=0");
+        assert_eq!(
+            task.total_reopen_count, 0,
+            "task starts with total_reopen_count=0"
+        );
+        assert_eq!(
+            task.intervention_count, 0,
+            "task starts with intervention_count=0"
+        );
+
+        // Create a running session against model-a (the failing candidate) so
+        // we can verify it is preserved when fallback rescues the dispatch.
+        let session_repo = SessionRepository::new(db.clone(), event_bus.clone());
+        let session_a = session_repo
+            .create(CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: "provider/model-a",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create session for model-a");
+        assert_eq!(
+            session_a.status, "running",
+            "seeded session must be in `running` status"
+        );
+
+        // Capture pre-dispatch snapshot of session list to verify no new
+        // session for model-a is created when dispatch fails on it.
+        let pre_session_ids: std::collections::HashSet<String> = session_repo
+            .list_for_task(&task.id)
+            .await
+            .expect("list sessions for task")
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            pre_session_ids.len(),
+            1,
+            "test starts with exactly one session for the task"
+        );
+
+        // Capture pre-dispatch counters for post-dispatch comparison.
+        let pre_task = task_repo
+            .get(&task.id)
+            .await
+            .expect("get task")
+            .expect("task should still exist");
+        let pre_reopen_count = pre_task.reopen_count;
+        let pre_total_reopen_count = pre_task.total_reopen_count;
+        let pre_intervention_count = pre_task.intervention_count;
+        let pre_status = pre_task.status.clone();
+
+        // Track which models `dispatch_fn` was called with.
+        let attempted_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let attempted_models_clone = attempted_models.clone();
+
+        let (mut actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        // Persist a tiny image + workspace fixture (some dispatch paths probe
+        // readiness; we don't want to depend on global env vars).
+        let _ = crate::test_helpers::create_test_project(&db).await;
+
+        let outcome = actor
+            .try_dispatch_to_pool(
+                &task.short_id,
+                "worker",
+                0,
+                Some(task.created_by_user_id.as_deref().unwrap_or("user-x")),
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "ac3-fallback-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    let tracker = attempted_models_clone.clone();
+                    async move {
+                        tracker.lock().unwrap().push(mid.clone());
+                        if mid == "provider/model-a" {
+                            Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                        } else {
+                            pool.dispatch(&tid, &pp, &mid).await
+                        }
+                    }
+                },
+            )
+            .await;
+
+        // ── Outcome: dispatch succeeded via fallback. ────────────────────────
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-b after model-a pool error; got {outcome:?}"
+        );
+        let attempted = attempted_models.lock().unwrap().clone();
+        assert!(
+            attempted.contains(&"provider/model-a".to_string()),
+            "dispatch_fn should have been called with model-a (the failing candidate)"
+        );
+        assert!(
+            attempted.contains(&"provider/model-b".to_string()),
+            "dispatch_fn should have been called with model-b (the fallback)"
+        );
+
+        // ── AC3.1: session_a is NOT suspended/interrupted ───────────────────
+        // The fallback-rescued session must stay `running`. If the terminal
+        // side-effect path had leaked (breach of AC2/AC3), the session would
+        // have been interrupted via `session_repo.interrupt_running_for_task`.
+        let post_sessions = session_repo
+            .list_for_task(&task.id)
+            .await
+            .expect("list sessions after dispatch");
+        assert_eq!(
+            post_sessions.len(),
+            1,
+            "no new session should be created on the failing model-a; \
+             only the seeded session should remain (got {} sessions)",
+            post_sessions.len()
+        );
+        let session_a_post = &post_sessions[0];
+        assert_eq!(
+            session_a_post.id, session_a.id,
+            "the surviving session must be the one we pre-created"
+        );
+        assert_eq!(
+            session_a_post.status, "running",
+            "fallback-rescued session must NOT be suspended; \
+             terminal side effects must only flow through \
+             apply_chain_exhaustion_side_effects, which is called only on \
+             chain exhaustion"
+        );
+
+        // ── AC3.2: task status is unchanged (still `open`, not closed) ──────
+        let post_task = task_repo
+            .get(&task.id)
+            .await
+            .expect("get task after dispatch")
+            .expect("task should still exist after fallback");
+        assert_eq!(
+            post_task.status, pre_status,
+            "task status must be unchanged after fallback-rescued dispatch; \
+             was {pre_status:?}, became {:?}",
+            post_task.status
+        );
+        assert_eq!(
+            post_task.status, "open",
+            "task must remain `open` (no terminal close) — terminal close is a \
+             chain-exhaustion-only effect"
+        );
+
+        // ── AC3.3: counters unchanged (no quality strike, no reopen/...) ─────
+        assert_eq!(
+            post_task.reopen_count, pre_reopen_count,
+            "task.reopen_count must not be bumped for a fallback-rescued \
+             dispatch; was {pre_reopen_count}, became {}",
+            post_task.reopen_count
+        );
+        assert_eq!(
+            post_task.total_reopen_count, pre_total_reopen_count,
+            "task.total_reopen_count must not be bumped for a fallback-rescued \
+             dispatch; was {pre_total_reopen_count}, became {}",
+            post_task.total_reopen_count
+        );
+        assert_eq!(
+            post_task.intervention_count, pre_intervention_count,
+            "task.intervention_count must NOT be bumped — fallback rescue must \
+             not trigger a Planner intervention; was {pre_intervention_count}, \
+             became {}",
+            post_task.intervention_count
+        );
+
+        // ── AC3.4: no persisted dispatch_state for the task ─────────────────
+        // `apply_chain_exhaustion_side_effects` writes `failure_streak` and
+        // `cooldown_until` to `dispatch_state` on every chain exhaustion; a
+        // successful fallback must NOT produce such a row (it stays NULL,
+        // which is itself a meaningful state: no backoff was applied).
+        let dispatch_repo = DispatchStateRepository::new(db.clone());
+        let dispatch_state = dispatch_repo
+            .get(&task.id)
+            .await
+            .expect("get dispatch_state");
+        match dispatch_state {
+            None => {
+                // No row at all is the cleanest signal: chain-exhaustion
+                // side effects never ran.
+            }
+            Some(state) => {
+                assert_eq!(
+                    state.failure_streak, 0,
+                    "no failure streak should be persisted on a fallback-rescued \
+                     dispatch; got failure_streak={}",
+                    state.failure_streak
+                );
+                assert!(
+                    state.cooldown_until.is_none(),
+                    "no cooldown_until should be persisted on a fallback-rescued \
+                     dispatch; got cooldown_until={:?}",
+                    state.cooldown_until
+                );
+            }
+        }
+
+        // ── AC3.5: breaker was NOT tripped for the failing model-a ──────────
+        // Pre-fix (R1) the breaker tripped inside `try_dispatch_to_pool`;
+        // post-fix the breaker check is deferred to
+        // `apply_chain_exhaustion_side_effects` and that path was never
+        // invoked because the chain was rescued.
+        let scope = Some(task.created_by_user_id.as_deref().unwrap_or("user-x"));
+        let model_a_health = actor.health.model_health(scope, "provider/model-a");
+        assert!(
+            !model_a_health.auto_disabled,
+            "model-a breaker must NOT be tripped when fallback rescued the \
+             chain (AC2 deferral: breaker checks only on chain exhaustion)"
+        );
+        // The failure counter IS recorded for diagnostics — but the breaker
+        // is still below the trip threshold.
+        assert!(
+            model_a_health.consecutive_failures >= 1,
+            "model-a's failure counter must be incremented for diagnostics \
+             (per-candidate observation), but the breaker must not trip \
+             below the threshold (got {} consecutive failures)",
+            model_a_health.consecutive_failures
+        );
+
+        // ── AC3.6: chain-exhaustion path was NOT entered ────────────────────
+        assert!(
+            !logs_contain("all failover candidates exhausted"),
+            "must NOT log chain-exhaustion message when fallback succeeded"
+        );
+        assert!(
+            !logs_contain("backing off dispatch"),
+            "must NOT log dispatch-backoff when fallback succeeded"
+        );
+
+        // ── AC3.7: per-candidate observation WAS recorded ────────────────────
+        assert!(
+            logs_contain("failover_candidate_attempt"),
+            "must log per-candidate attempt for the failed model-a"
+        );
+        assert!(
+            logs_contain("failover_candidate_accepted"),
+            "must log acceptance for the successful fallback model-b"
+        );
+
+        // ── AC3.8 (chain-scoping fix): a later, unrelated chain exhaustion
+        // must NOT trigger a breaker trip for model-a.
+        //
+        // Pre-fix (R2), the pending observations were buffered globally on
+        // `HealthTracker` and a later `apply_chain_exhaustion_side_effects`
+        // would have consumed them — meaning model-a would be breaker-tripped
+        // even though this dispatch's chain was rescued by fallback.  Post-fix,
+        // the chain-scoped observations are returned only via
+        // `DispatchOutcome::Failed { exhausted_observations }`; the successful
+        // fallback path discards them; and there is no global buffer for a
+        // later unrelated exhaustion to consume.
+        let unrelated_outcome = actor
+            .try_dispatch_to_pool(
+                "unrelated-task",
+                "worker",
+                0,
+                None,
+                &["provider/model-z".to_owned()],
+                |_pool, _model_id| async {
+                    Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                },
+            )
+            .await;
+        let exhausted_unrelated = match unrelated_outcome {
+            DispatchOutcome::Failed {
+                exhausted_observations,
+            } => exhausted_observations,
+            _ => panic!(
+                "expected unrelated chain to exhaust; got {:?}",
+                unrelated_outcome
+            ),
+        };
+        actor
+            .apply_chain_exhaustion_side_effects(
+                &task, // reuse the task fixture (only its id is read for streak)
+                "worker",
+                &exhausted_unrelated,
+            )
+            .await;
+
+        // Model-a's state must still reflect ONLY the per-candidate
+        // observation from the fallback-rescued chain (no breaker trip,
+        // exactly 1 consecutive failure). A cross-chain leakage would
+        // have reset model-a's consecutive_failures via this observation's
+        // breaker check, or worse, tripped the breaker.
+        let model_a_post = actor.health.model_health(scope, "provider/model-a");
+        assert!(
+            !model_a_post.auto_disabled,
+            "model-a breaker must STILL not be tripped after an unrelated \
+             exhaustion is processed (cross-chain observations must not \
+             leak into this chain's breaker state)"
+        );
+        assert_eq!(
+            model_a_post.consecutive_failures, 1,
+            "model-a's consecutive_failures must remain at 1 (the \
+             fallback-rescued chain's observation only); a cross-chain \
+             leakage from an unrelated exhaustion would have incremented \
+             this counter"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC2 reviewer-repro regression: a candidate model that is observed
+    /// (recorded for diagnostics) during a *fallback-rescued* chain must NOT
+    /// later contribute to the circuit-breaker trip. Only candidate failures
+    /// from chains that actually exhaust are breaker-eligible.
+    ///
+    /// Scenario (the reviewer's repro):
+    ///   * Model-a fails twice, each time rescued by a successful fallback
+    ///     candidate. After these two non-terminal chains, model-a's
+    ///     `consecutive_failures` is 2 but its breaker-eligible counter is 0.
+    ///   * A third chain containing model-a *exhausts*. That exhaustion
+    ///     advances the breaker-eligible counter by 1. Despite model-a's
+    ///     overall diagnostic `consecutive_failures` now being 3, the breaker
+    ///     MUST NOT trip — only one breaker-eligible exhausted-chain failure
+    ///     has occurred (below the threshold of 3).
+    ///   * Only repeated exhausted-chain failures reaching the configured
+    ///     threshold trip the breaker (verifying the breaker still trips
+    ///     when it should).
+    ///
+    /// This guards against a regression where the breaker eligibility counter
+    /// is identical to (or accumulated into) the diagnostic `consecutive_failures`
+    /// counter, which would let fallback-rescued observations leak into later
+    /// breaker decisions.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn ac4_fallback_rescued_observations_do_not_advance_breaker_eligibility() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (mut actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            // Single model per chain (model-a failing, plus a model-b fallback);
+            // every exhaust chain in step 3 contains both candidates.
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        // Build a minimal Task for `apply_chain_exhaustion_side_effects` (only
+        // `id` and `short_id` are read for streak/persist paths).
+        let task = djinn_core::models::Task {
+            id: "breaker-elig-task-uuid".to_owned(),
+            project_id: String::new(),
+            short_id: "breaker-elig-task".to_owned(),
+            epic_id: None,
+            title: String::new(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_owned(),
+            status: "open".to_owned(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".to_owned(),
+            acceptance_criteria: "[]".to_owned(),
+            reopen_count: 0,
+            continuation_count: 0,
+            total_reopen_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-06-12T00:00:00Z".to_owned(),
+            updated_at: "2026-06-12T00:00:00Z".to_owned(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_owned(),
+            agent_type: None,
+            created_by_user_id: None,
+            ci_status: "unknown".to_owned(),
+            ci_head_sha: None,
+            ci_pr_number: None,
+            ci_blocking_required_check_names: "[]".to_owned(),
+            ci_failure_fingerprint: None,
+            ci_first_seen_at: None,
+            ci_last_seen_at: None,
+            ci_same_signature_count: 0,
+            ci_last_remediation_base_sha: None,
+            unresolved_blocker_count: 0,
+        };
+
+        // ── Step 1: Two model-a failures, each rescued by model-b ─────────
+        // After two of these chains, model-a's `consecutive_failures` will be
+        // 2, but breaker-eligible failures are STILL zero — the two
+        // diagnostic observations must not contribute to breaker eligibility.
+        for chain in 1..=2 {
+            let outcome = actor
+                .try_dispatch_to_pool(
+                    &task.short_id,
+                    "worker",
+                    0,
+                    None,
+                    &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                    |pool, model_id| {
+                        let pool = pool.clone();
+                        let tid = format!("{}-{}", task.short_id, chain);
+                        let pp = "/tmp/proj".to_owned();
+                        let mid = model_id.to_owned();
+                        async move {
+                            if mid == "provider/model-a" {
+                                // Failure observation: rescued by next candidate.
+                                Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                            } else {
+                                pool.dispatch(&tid, &pp, &mid).await
+                            }
+                        }
+                    },
+                )
+                .await;
+
+            assert!(
+                matches!(outcome, DispatchOutcome::Dispatched),
+                "step 1 chain {chain}: fallback should rescue the dispatch; got {outcome:?}"
+            );
+
+            // Sanity check the diagnostic observation was recorded.
+            let after_chain = actor.health.model_health(None, "provider/model-a");
+            assert_eq!(
+                after_chain.consecutive_failures, chain as u32,
+                "step 1 chain {chain}: model-a's diagnostic counter should be {chain} \
+                 (got {})",
+                after_chain.consecutive_failures
+            );
+            assert_eq!(
+                after_chain.breaker_eligible_consecutive_failures, 0,
+                "step 1 chain {chain}: breaker-eligible counter MUST stay 0 — these \
+                 observations are fallback-rescued and never advance breaker \
+                 eligibility (AC2 reviewer repro). Got {}.",
+                after_chain.breaker_eligible_consecutive_failures
+            );
+            assert!(
+                actor.health.is_available(None, "provider/model-a"),
+                "step 1 chain {chain}: model-a must remain available — failed was \
+                 rescued by successful fallback, breaker should not have tripped"
+            );
+        }
+
+        // ── Step 2: A third chain CONTAINING model-a exhausts ──────────────
+        // This single exhaustion records one diagnostic observation AND
+        // applies exactly one breaker-eligible failure check. After this
+        // round, model-a's diagnostic `consecutive_failures` is 3 (from the
+        // 2 fallback-rescued + 1 exhausted), but only one breaker-eligible
+        // failure has occurred. The breaker MUST NOT trip — that requires
+        // the configured threshold of breaker-eligible failures.
+        let outcome = actor
+            .try_dispatch_to_pool(
+                &task.short_id,
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |_pool, _model_id| async {
+                    // Both candidates fail → chain exhausts.
+                    Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, DispatchOutcome::Failed { .. }),
+            "step 2: chain must exhaust when both candidates fail"
+        );
+
+        // Importantly: the breaker must NOT yet be tripped before side effects
+        // are applied. Observations alone don't trip the breaker — that is
+        // exclusively the job of `apply_chain_exhaustion_side_effects`.
+        let pre_side_effects = actor.health.model_health(None, "provider/model-a");
+        assert_eq!(
+            pre_side_effects.consecutive_failures, 3,
+            "step 2 pre-side-effects: diagnostic counter should be 3 \
+             (2 fallback-rescued + 1 exhausted-chain)"
+        );
+        assert!(
+            actor.health.is_available(None, "provider/model-a"),
+            "step 2 pre-side-effects: model-a must still be available — observation alone \
+             does NOT trip the breaker (that requires apply_breaker_check_for via chain \
+             exhaustion)"
+        );
+
+        // Apply the chain-exhaustion side effects for this single exhaustion.
+        let exhausted_observations = match outcome {
+            DispatchOutcome::Failed {
+                exhausted_observations,
+            } => exhausted_observations,
+            _ => unreachable!("asserted Failed above"),
+        };
+        actor
+            .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations)
+            .await;
+
+        // ── Step 3: After ONE exhausted-chain failure, breaker MUST NOT trip
+        let after_one_exhaustion = actor.health.model_health(None, "provider/model-a");
+        assert_eq!(
+            after_one_exhaustion.consecutive_failures, 3,
+            "after one exhausted chain: diagnostic counter must equal 3 \
+             (two fallback-rescued + one exhausted-chain observation)"
+        );
+        assert_eq!(
+            after_one_exhaustion.breaker_eligible_consecutive_failures, 1,
+            "after one exhausted chain: breaker-eligible counter must equal 1 — \
+             only the single exhausted-chain failure advanced it, not the two \
+             fallback-rescued observations"
+        );
+        assert!(
+            actor.health.is_available(None, "provider/model-a"),
+            "after one exhausted chain: model-a must STILL be available — the configured \
+             breaker threshold requires multiple exhausted-chain failures, and only one \
+             breaker-eligible failure has occurred (reviewer repro: the prior \
+             2 fallback-rescued observations must NOT count). If this trips, the AC2 \
+             breaker-eligibility separation regressed."
+        );
+
+        // ── Step 4: Repeated exhausted-chain failures reaching threshold trip
+        // The breaker-eligible counter is now 1 (from step 2's single
+        // exhausted chain). Drive the remaining `THRESHOLD - 1` exhausted
+        // chains to reach the configured threshold, which trips the breaker
+        // at the end of the next exhaustion. We hardcode the threshold to 3
+        // (matching `CIRCUIT_BREAKER_THRESHOLD` in
+        // `djinn-provider/src/catalog/health.rs`) to avoid leaking the
+        // constant via `pub`; if the constant ever changes, this test
+        // must be re-tuned, with the inline comment refreshed.
+        const THRESHOLD: u32 = 3;
+        let additional_needed = THRESHOLD - 1;
+        for exhaustion_round in 1..=additional_needed {
+            let outcome = actor
+                .try_dispatch_to_pool(
+                    &task.short_id,
+                    "worker",
+                    0,
+                    None,
+                    &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                    |_pool, _model_id| async {
+                        Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                    },
+                )
+                .await;
+
+            assert!(
+                matches!(outcome, DispatchOutcome::Failed { .. }),
+                "exhausted-chain round {exhaustion_round}: must report exhaustion"
+            );
+
+            let exhausted_observations = match outcome {
+                DispatchOutcome::Failed {
+                    exhausted_observations,
+                } => exhausted_observations,
+                _ => unreachable!(),
+            };
+            actor
+                .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations)
+                .await;
+
+            let running_total = 1 + exhaustion_round;
+            let health = actor.health.model_health(None, "provider/model-a");
+            assert_eq!(
+                health.breaker_eligible_consecutive_failures, running_total,
+                "after {running_total} total exhausted chains, breaker-eligible counter \
+                 must equal {running_total} (got {})",
+                health.breaker_eligible_consecutive_failures
+            );
+            // The breaker should NOT trip until we hit the threshold.
+            if running_total < THRESHOLD {
+                assert!(
+                    actor.health.is_available(None, "provider/model-a"),
+                    "after {running_total} exhausted chains (below threshold): \
+                     model-a must still be available"
+                );
+            }
+        }
+
+        // We have now exhausted exactly THRESHOLD chains. The breaker must be
+        // tripped from the LAST exhaustion's side effects (i.e. on the
+        // exhaustion that pushes the counter to the threshold).
+        let final_health = actor.health.model_health(None, "provider/model-a");
+        assert!(
+            final_health.auto_disabled,
+            "model-a breaker MUST trip after THRESHOLD exhausted chains reach the \
+             configured breaker threshold (verifying the breaker still trips when \
+             it should — only exhausted-chain failures count toward eligibility)"
+        );
+        assert_eq!(
+            final_health.breaker_eligible_consecutive_failures, THRESHOLD,
+            "breaker-eligible counter must equal THRESHOLD ({THRESHOLD}) after exactly \
+             THRESHOLD exhausted chains (got {})",
+            final_health.breaker_eligible_consecutive_failures
         );
 
         cancel.cancel();

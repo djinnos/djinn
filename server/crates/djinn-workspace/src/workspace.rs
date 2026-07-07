@@ -20,8 +20,14 @@ use crate::git_helpers;
 /// from a junk-only tree without re-running `git status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitOutcome {
-    /// A legitimate diff was staged and committed.
-    Committed,
+    /// A legitimate diff was staged and committed.  The `excluded` field lists
+    /// any repo-relative paths that were rejected by the commit-safety filter
+    /// but did not prevent the commit (there were also legitimate changes).
+    Committed {
+        /// Repo-relative paths of scratch/junk files excluded alongside the
+        /// legitimate commit (may be empty).
+        excluded: Vec<String>,
+    },
     /// The tree was clean — nothing to commit.
     NoChanges,
     /// Only files excluded by the commit-safety filter changed; no commit was
@@ -36,7 +42,16 @@ pub enum CommitOutcome {
 impl CommitOutcome {
     /// Returns `true` if a commit was created.
     pub fn committed(&self) -> bool {
-        matches!(self, CommitOutcome::Committed)
+        matches!(self, CommitOutcome::Committed { .. })
+    }
+
+    /// Returns the list of excluded paths, regardless of outcome variant.
+    pub fn excluded(&self) -> &[String] {
+        match self {
+            CommitOutcome::Committed { excluded } => excluded,
+            CommitOutcome::NoLegitimateChanges { excluded } => excluded,
+            CommitOutcome::NoChanges => &[],
+        }
     }
 }
 
@@ -303,7 +318,7 @@ impl Workspace {
             ],
         )
         .await?;
-        Ok(CommitOutcome::Committed)
+        Ok(CommitOutcome::Committed { excluded })
     }
 
     /// Refuse to commit any staged file larger than GitHub's 100 MiB hard limit.
@@ -1639,6 +1654,21 @@ mod tests {
         assert!(
             !committed_files.contains("test3.txt"),
             "scratch test3.txt must not be committed, got: {committed_files}"
+        );
+
+        // The committed outcome must surface the excluded scratch paths.
+        let excluded = outcome.excluded();
+        assert!(
+            excluded.contains(&"patch.txt".to_string()),
+            "patch.txt must appear in excluded list, got: {excluded:?}"
+        );
+        assert!(
+            excluded.contains(&"test2.txt".to_string()),
+            "test2.txt must appear in excluded list, got: {excluded:?}"
+        );
+        assert!(
+            excluded.contains(&"test3.txt".to_string()),
+            "test3.txt must appear in excluded list, got: {excluded:?}"
         );
     }
 

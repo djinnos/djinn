@@ -14,7 +14,10 @@ mod association;
 pub(crate) mod consolidation;
 mod context;
 mod crud;
+mod embedding_associations;
 mod embeddings;
+
+pub use embedding_associations::EmbeddingAssociationRefreshStats;
 mod entity_association;
 mod file_helpers;
 mod graph;
@@ -48,11 +51,11 @@ pub use djinn_memory::{
     DbNoteGroup, NoteDedupCandidate, NoteQualityAssessment,
 };
 pub use embeddings::{
-    EmbeddedNote, EmbeddingQueryContext, NoopNoteVectorStore, NoteEmbeddingMatch,
-    NoteEmbeddingProvider, NoteEmbeddingRecord, NoteRepairEmbeddingRow, NoteVectorBackend,
-    NoteVectorStore, QdrantConfig, QdrantNoteVectorStore, UpsertNoteEmbedding,
-    embedding_content_hash, embedding_document_text, infer_embedding_branch_from_worktree,
-    legacy_embedding_document_text, task_branch_name,
+    EligibleEmbeddingNote, EmbeddedNote, EmbeddingCandidate, EmbeddingQueryContext,
+    NoopNoteVectorStore, NoteEmbeddingMatch, NoteEmbeddingProvider, NoteEmbeddingRecord,
+    NoteRepairEmbeddingRow, NoteVectorBackend, NoteVectorStore, QdrantConfig,
+    QdrantNoteVectorStore, UpsertNoteEmbedding, embedding_content_hash, embedding_document_text,
+    infer_embedding_branch_from_worktree, legacy_embedding_document_text, task_branch_name,
 };
 pub use entity_association::{
     MemoryEntityAssociation, MemoryEntityKind, MemoryEntityRef, MemoryEntityType,

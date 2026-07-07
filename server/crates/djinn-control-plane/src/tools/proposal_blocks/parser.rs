@@ -458,9 +458,7 @@ fn empty_block_error(block: &ParsedProposalBlock, content_attrs: &[&str]) -> Str
             .join(" or ");
         msg.push_str(&format!(" (or supplied via the {attrs} attribute)"));
     }
-    msg.push_str(
-        ", but it arrived self-closing or with blank children and would render empty. ",
-    );
+    msg.push_str(", but it arrived self-closing or with blank children and would render empty. ");
     if let Some(def) = proposal_block_definition_for_tag(&block.tag)
         && let Some(desc) = def.description
     {

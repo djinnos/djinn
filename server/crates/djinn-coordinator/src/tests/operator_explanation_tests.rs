@@ -792,7 +792,7 @@ async fn zps8_pending_head_in_ledger_is_inflight_not_strike() {
     assert!(ledger[0].terminal_at.is_none());
 
     // Guard defers for this task+role.
-    let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+    let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(
         decision,
         RespawnGuardDecision::Defer(GuardReason::RespawnGuard),

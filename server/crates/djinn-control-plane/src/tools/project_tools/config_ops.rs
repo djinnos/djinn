@@ -409,3 +409,553 @@ impl DjinnMcpServer {
         })
     }
 }
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use djinn_core::events::EventBus;
+    use djinn_db::{Database, ProjectRepository};
+    use serde_json::json;
+
+    use crate::bridge::RuntimeOps;
+    use crate::server::DjinnMcpServer;
+    use crate::state::McpState;
+    use crate::state::stubs::{
+        StubCoordinatorOps, StubGitOps, StubLspOps, StubRepoGraphOps, StubSlotPoolOps,
+    };
+
+    /// RuntimeOps stub that persists the `EnvironmentConfig` passed to
+    /// `apply_environment_config` to the underlying test DB. Production
+    /// runtimes upsert a Kubernetes ConfigMap and may mirror the JSON into
+    /// Dolt; in-process tests just need the JSON write so a subsequent
+    /// `project_environment_config_get` round-trip can read it back. The
+    /// tool's parse + validate + source-tagging logic is exercised
+    /// end-to-end through `dispatch_tool` — the test double captures
+    /// exactly what the tool persisted, so any field dropped or mutated
+    /// before this call would surface as a failed round-trip assertion.
+    struct TestRuntimeOps {
+        db: Database,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeOps for TestRuntimeOps {
+        async fn apply_settings(
+            &self,
+            _: &djinn_core::models::DjinnSettings,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn embed_memory_query(
+            &self,
+            _: &str,
+        ) -> Result<Option<crate::bridge::SemanticQueryEmbedding>, String> {
+            Ok(None)
+        }
+        async fn reset_runtime_settings(&self) {}
+        async fn persist_model_health_state(&self) {}
+        async fn apply_environment_config(
+            &self,
+            project_id: &str,
+            config: &djinn_stack::environment::EnvironmentConfig,
+        ) -> Result<(), String> {
+            // Serialize the exact `EnvironmentConfig` (including the
+            // `UserEdited` source tag applied by the set path) and write
+            // it to the DB. This is the production-equivalent
+            // persistence side-effect: the next `get` reads this row.
+            let json = serde_json::to_string(config).map_err(|e| format!("serialize: {e}"))?;
+            let repo = ProjectRepository::new(self.db.clone(), EventBus::noop());
+            repo.set_environment_config(project_id, &json)
+                .await
+                .map_err(|e| format!("set_environment_config: {e}"))?;
+            Ok(())
+        }
+        async fn trigger_mirror_refresh(&self, _: &str) {}
+        async fn enqueue_image_build(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn trigger_graph_warm(&self, _: &str) {}
+        async fn apply_user_model_change(&self) {}
+        async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn list_taskrun_jobs(&self) -> Result<Vec<crate::bridge::TaskrunJobRef>, String> {
+            Ok(Vec::new())
+        }
+        async fn cleanup_task_branches(&self, _: &str) {}
+    }
+
+    async fn test_server(db: Database) -> DjinnMcpServer {
+        let state = McpState::new(
+            db.clone(),
+            EventBus::noop(),
+            djinn_provider::catalog::CatalogService::new(),
+            djinn_provider::catalog::HealthTracker::new(),
+            Some(Arc::new(StubCoordinatorOps)),
+            Some(Arc::new(StubSlotPoolOps)),
+            None,
+            None,
+            Arc::new(StubLspOps),
+            Arc::new(TestRuntimeOps { db }),
+            Arc::new(StubGitOps),
+            Arc::new(StubRepoGraphOps),
+        );
+        DjinnMcpServer::new(state)
+    }
+
+    /// Seed a project in the DB and return its UUID.
+    async fn seed_project(db: &Database) -> String {
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        repo.create("test-env-cfg", "test", "test-env-cfg")
+            .await
+            .expect("create project")
+            .id
+    }
+
+    /// Persist raw environment_config JSON directly to the DB.
+    async fn seed_environment_config(db: &Database, project_id: &str, json: &str) {
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        repo.set_environment_config(project_id, json)
+            .await
+            .expect("seed env config");
+    }
+
+    /// Persist a stack JSON so `project_environment_config_reset` has
+    /// something to reset from.
+    async fn seed_stack(db: &Database, project_id: &str, stack_json: &str) {
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        repo.set_stack(project_id, stack_json)
+            .await
+            .expect("seed stack");
+    }
+
+    // ── AC1: valid set then get round-trip ───────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_accepts_valid_pretask_and_get_returns_it_unchanged() {
+        let db = Database::open_in_memory().expect("open db");
+        db.ensure_initialized().await.unwrap();
+        let project_id = seed_project(&db).await;
+        let server = test_server(db.clone()).await;
+
+        let cfg = json!({
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_task": [
+                    {
+                        "name": "install-deps",
+                        "command": "pip install -e .",
+                        "timeout_seconds": 120,
+                        "failure_policy": "blocking"
+                    },
+                    {
+                        "name": "seed-db",
+                        "command": "python manage.py migrate",
+                        "timeout_seconds": 600,
+                        "failure_policy": "best_effort"
+                    },
+                    {
+                        "command": "echo unnamed",
+                        "timeout_seconds": 30
+                    }
+                ]
+            }
+        });
+
+        // ── set: validates + tags source UserEdited ──
+        let set_result = server
+            .dispatch_tool(
+                "project_environment_config_set",
+                json!({ "project": project_id, "config": cfg }),
+            )
+            .await
+            .expect("set dispatch");
+        assert_eq!(
+            set_result.get("status").and_then(|v| v.as_str()),
+            Some("ok"),
+            "set failed: {}",
+            set_result
+        );
+
+        // The TestRuntimeOps stub persists the exact
+        // `EnvironmentConfig` (including the `UserEdited` source tag
+        // applied by the set path) to the test DB, mirroring what the
+        // production runtime bridge writes. No manual seeding after the
+        // set call — that would mask any field dropped or mutated
+        // before `apply_environment_config`.
+
+        // ── get: verifies fields survive ──
+        let get_result = server
+            .dispatch_tool(
+                "project_environment_config_get",
+                json!({ "project": project_id }),
+            )
+            .await
+            .expect("get dispatch");
+        assert_eq!(
+            get_result.get("status").and_then(|v| v.as_str()),
+            Some("ok"),
+            "get failed: {}",
+            get_result
+        );
+
+        let returned_cfg = get_result.get("config").expect("config field");
+        let pre_task = returned_cfg
+            .pointer("/lifecycle/pre_task")
+            .expect("lifecycle.pre_task missing")
+            .as_array()
+            .expect("pre_task not array");
+
+        assert_eq!(pre_task.len(), 3);
+
+        // First entry: all fields explicit.
+        assert_eq!(pre_task[0]["name"], "install-deps");
+        assert_eq!(pre_task[0]["command"], "pip install -e .");
+        assert_eq!(pre_task[0]["timeout_seconds"], 120);
+        assert_eq!(pre_task[0]["failure_policy"], "blocking");
+
+        // Second entry: best_effort.
+        assert_eq!(pre_task[1]["name"], "seed-db");
+        assert_eq!(pre_task[1]["command"], "python manage.py migrate");
+        assert_eq!(pre_task[1]["timeout_seconds"], 600);
+        assert_eq!(pre_task[1]["failure_policy"], "best_effort");
+
+        // Third entry: unnamed. The raw JSON round-trip through the DB
+        // preserves exactly what was submitted; serde defaults only fill
+        // on deserialization into EnvironmentConfig, not in raw Value
+        // form. So fields omitted by the user remain absent.
+        assert!(pre_task[2].get("name").is_none() || pre_task[2]["name"].is_null());
+        assert_eq!(pre_task[2]["command"], "echo unnamed");
+        assert_eq!(pre_task[2]["timeout_seconds"], 30);
+    }
+
+    // ── AC1: invalid pre-task rejected via EnvironmentConfig::validate ───
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_rejects_empty_command() {
+        let db = Database::open_in_memory().expect("open db");
+        db.ensure_initialized().await.unwrap();
+        let project_id = seed_project(&db).await;
+        let server = test_server(db.clone()).await;
+
+        let cfg = json!({
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_task": [{ "name": "bad", "command": "", "timeout_seconds": 300 }]
+            }
+        });
+        let result = server
+            .dispatch_tool(
+                "project_environment_config_set",
+                json!({ "project": project_id, "config": cfg }),
+            )
+            .await
+            .expect("dispatch");
+
+        assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("error"));
+        let error = result.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            error.contains("validate"),
+            "expected validate error, got: {error}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_rejects_timeout_below_minimum() {
+        let db = Database::open_in_memory().expect("open db");
+        db.ensure_initialized().await.unwrap();
+        let project_id = seed_project(&db).await;
+        let server = test_server(db.clone()).await;
+
+        let cfg = json!({
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_task": [{ "name": "bad", "command": "echo oops", "timeout_seconds": 0 }]
+            }
+        });
+        let result = server
+            .dispatch_tool(
+                "project_environment_config_set",
+                json!({ "project": project_id, "config": cfg }),
+            )
+            .await
+            .expect("dispatch");
+
+        assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("error"));
+        let error = result.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            error.contains("validate"),
+            "expected validate error, got: {error}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_rejects_duplicate_names() {
+        let db = Database::open_in_memory().expect("open db");
+        db.ensure_initialized().await.unwrap();
+        let project_id = seed_project(&db).await;
+        let server = test_server(db.clone()).await;
+
+        let cfg = json!({
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_task": [
+                    { "name": "dup", "command": "echo a", "timeout_seconds": 60 },
+                    { "name": "dup", "command": "echo b", "timeout_seconds": 60 }
+                ]
+            }
+        });
+        let result = server
+            .dispatch_tool(
+                "project_environment_config_set",
+                json!({ "project": project_id, "config": cfg }),
+            )
+            .await
+            .expect("dispatch");
+
+        assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("error"));
+        let error = result.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            error.contains("validate"),
+            "expected validate error, got: {error}"
+        );
+    }
+
+    // ── AC3: reset produces empty pre_task defaults ──────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reset_returns_empty_pretask_and_auto_detected_source() {
+        let db = Database::open_in_memory().expect("open db");
+        db.ensure_initialized().await.unwrap();
+        let project_id = seed_project(&db).await;
+
+        // Seed a minimal stack so reset can build a config from it.
+        // Stack requires detected_at + all top-level fields.
+        seed_stack(
+            &db,
+            &project_id,
+            &json!({
+                "detected_at": "2025-01-01T00:00:00Z",
+                "languages": [],
+                "primary_language": null,
+                "package_managers": [],
+                "monorepo_tools": [],
+                "is_monorepo": false,
+                "test_runners": [],
+                "frameworks": [],
+                "runtimes": { "rust": "stable" },
+                "manifest_signals": {
+                    "has_package_json": false,
+                    "has_cargo_toml": true,
+                    "has_pyproject_toml": false,
+                    "has_go_mod": false,
+                    "has_pnpm_workspace": false,
+                    "has_turbo_json": false
+                },
+                "workspaces": []
+            })
+            .to_string(),
+        )
+        .await;
+
+        // Seed a user-edited config with non-empty pre_task entries,
+        // so we can verify the reset overwrites them to empty.
+        seed_environment_config(
+            &db,
+            &project_id,
+            &json!({
+                "schema_version": 1,
+                "source": "user_edited",
+                "lifecycle": {
+                    "pre_task": [
+                        { "name": "user-cmd", "command": "echo user", "timeout_seconds": 120 }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .await;
+
+        let server = test_server(db.clone()).await;
+        let result = server
+            .dispatch_tool(
+                "project_environment_config_reset",
+                json!({ "project": project_id }),
+            )
+            .await
+            .expect("dispatch");
+
+        assert_eq!(
+            result.get("status").and_then(|v| v.as_str()),
+            Some("ok"),
+            "reset failed: {}",
+            result
+        );
+
+        let returned_cfg = result.get("config").expect("config");
+        let pre_task = returned_cfg
+            .pointer("/lifecycle/pre_task")
+            .expect("pre_task missing in reset config")
+            .as_array()
+            .expect("pre_task not array");
+        assert!(pre_task.is_empty(), "reset should produce empty pre_task");
+
+        assert_eq!(
+            returned_cfg.get("source").and_then(|v| v.as_str()),
+            Some("auto-detected"),
+        );
+    }
+
+    // ── AC3: unseeded project returns empty defaults ─────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_returns_empty_defaults_for_unseeded_project() {
+        let db = Database::open_in_memory().expect("open db");
+        db.ensure_initialized().await.unwrap();
+        let project_id = seed_project(&db).await;
+        let server = test_server(db.clone()).await;
+
+        let result = server
+            .dispatch_tool(
+                "project_environment_config_get",
+                json!({ "project": project_id }),
+            )
+            .await
+            .expect("dispatch");
+
+        assert_eq!(
+            result.get("status").and_then(|v| v.as_str()),
+            Some("ok"),
+            "get failed: {}",
+            result
+        );
+
+        let returned_cfg = result.get("config").expect("config");
+        assert!(returned_cfg.is_object());
+
+        // lifecycle.pre_task absent or empty — backward-compatible.
+        let pre_task = returned_cfg
+            .pointer("/lifecycle/pre_task")
+            .and_then(|v| v.as_array());
+        if let Some(arr) = pre_task {
+            assert!(arr.is_empty(), "unseeded pre_task should be empty");
+        }
+    }
+
+    // ── Source tagging: set marks config as UserEdited ────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_persists_source_as_user_edited() {
+        let db = Database::open_in_memory().expect("open db");
+        db.ensure_initialized().await.unwrap();
+        let project_id = seed_project(&db).await;
+        let server = test_server(db.clone()).await;
+
+        let cfg = json!({
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_task": [
+                    { "name": "setup", "command": "make setup", "timeout_seconds": 300 }
+                ]
+            }
+        });
+
+        let _ = server
+            .dispatch_tool(
+                "project_environment_config_set",
+                json!({ "project": project_id, "config": cfg }),
+            )
+            .await
+            .expect("dispatch");
+
+        // The TestRuntimeOps stub persists the source-tagged
+        // `EnvironmentConfig` (with `UserEdited` → `"user-edited"` via
+        // `rename_all = "kebab-case"`) to the test DB. No manual
+        // seeding after the set call.
+        let get = server
+            .dispatch_tool(
+                "project_environment_config_get",
+                json!({ "project": project_id }),
+            )
+            .await
+            .expect("dispatch");
+
+        let returned_cfg = get.get("config").expect("config");
+        assert_eq!(
+            returned_cfg.get("source").and_then(|v| v.as_str()),
+            Some("user-edited"),
+        );
+        // Verify the pre_task entry survived.
+        let pre_task = returned_cfg
+            .pointer("/lifecycle/pre_task")
+            .expect("pre_task missing")
+            .as_array()
+            .expect("not array");
+        assert_eq!(pre_task.len(), 1);
+        assert_eq!(pre_task[0]["name"], "setup");
+        assert_eq!(pre_task[0]["command"], "make setup");
+    }
+
+    // ── Round-trip with all failure_policy variants ──────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_get_round_trip_preserves_failure_policy_variants() {
+        let db = Database::open_in_memory().expect("open db");
+        db.ensure_initialized().await.unwrap();
+        let project_id = seed_project(&db).await;
+        let server = test_server(db.clone()).await;
+
+        let cfg = json!({
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_task": [
+                    {
+                        "name": "blocker",
+                        "command": "cargo build",
+                        "timeout_seconds": 900,
+                        "failure_policy": "blocking"
+                    },
+                    {
+                        "name": "optional",
+                        "command": "cargo clippy",
+                        "timeout_seconds": 300,
+                        "failure_policy": "best_effort"
+                    }
+                ]
+            }
+        });
+
+        let set_result = server
+            .dispatch_tool(
+                "project_environment_config_set",
+                json!({ "project": project_id, "config": cfg }),
+            )
+            .await
+            .expect("dispatch");
+        assert_eq!(set_result["status"], "ok", "set failed: {set_result}");
+
+        // The TestRuntimeOps stub persists the exact
+        // `EnvironmentConfig` (with the `UserEdited` source tag applied
+        // by the set path) to the test DB. No manual seeding after the
+        // set call — that would mask any field dropped or mutated
+        // before `apply_environment_config`.
+        let get = server
+            .dispatch_tool(
+                "project_environment_config_get",
+                json!({ "project": project_id }),
+            )
+            .await
+            .expect("dispatch");
+
+        let pre_task = get["config"]["lifecycle"]["pre_task"]
+            .as_array()
+            .expect("array");
+        assert_eq!(pre_task.len(), 2);
+        assert_eq!(pre_task[0]["failure_policy"], "blocking");
+        assert_eq!(pre_task[1]["failure_policy"], "best_effort");
+        assert_eq!(pre_task[0]["timeout_seconds"], 900);
+        assert_eq!(pre_task[1]["timeout_seconds"], 300);
+    }
+}
