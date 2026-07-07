@@ -12,7 +12,8 @@ mod template_bootstrap;
 pub mod test_support {
     pub use crate::repositories::test_support::{
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
-        UsageTestSessionSeed, UsageTestTaskSeed, add_blocker_edge, backdate_task_updated_at,
+        UsageTestSessionSeed, UsageTestTaskSeed, add_blocker_edge,
+        backdate_task_attempt_created_at, backdate_task_updated_at,
         build_multi_project_housekeeping_fixture, close_task_at,
         corrupt_credential_encrypted_value, drop_table_for_test, ensure_doctor_findings_schema,
         event_bus_for, make_project, override_debate_trail_body_metadata, seed_chat_session_row,
@@ -134,8 +135,8 @@ pub use repositories::{
     },
     task_attempt::{
         CompletedParentSummary, CreateTaskAttemptParams, FillTaskAttemptParams,
-        GuardAdoptedPrTaskAttemptParams, GuardDeferTaskAttemptParams, SubmitTaskAttemptParams,
-        TaskAttemptRepository, TerminalTaskAttemptParams,
+        GuardAdoptedPrTaskAttemptParams, GuardDeferTaskAttemptParams, OrphanedPendingAttempt,
+        SubmitTaskAttemptParams, TaskAttemptRepository, TerminalTaskAttemptParams,
     },
     task_run::{CreateTaskRunParams, TaskRunRepository},
     usage_analytics::{
