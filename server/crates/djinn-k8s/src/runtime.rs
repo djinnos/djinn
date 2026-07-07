@@ -60,7 +60,7 @@ use uuid::Uuid;
 
 use crate::config::KubernetesConfig;
 use crate::job::{build_task_run_job, taskrun_job_ref_from_job};
-use crate::secret::{build_task_run_secret, job_owner_reference, task_run_resource_name};
+use crate::secret::{TaskRunSecretBuilder, job_owner_reference, task_run_resource_name};
 use crate::sidecar::ImageServiceResolution;
 
 /// Bound on the [`ConnectionRegistry::register_pending`] buffer used by
@@ -334,6 +334,51 @@ impl SessionRuntime for KubernetesRuntime {
             None => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
         };
 
+        // Load the project's effective EnvironmentConfig once for the
+        // entire prepare flow.  Fail-open: absent DB config, lookup
+        // errors, or parse failures yield `EnvironmentConfig::empty()`
+        // so dispatch continues with no pre-task config and no cargo
+        // cache policy — preserving rolling compatibility with old/no
+        // environment_config rows.
+        let (effective_env_config, cargo_cache_policy): (
+            djinn_stack::environment::EnvironmentConfig,
+            Option<djinn_stack::environment::CargoCachePolicy>,
+        ) = {
+            let env_repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+            match env_repo.get_environment_config(&spec.project_id).await {
+                Ok(Some(raw)) => {
+                    match serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(&raw)
+                    {
+                        Ok(cfg) => {
+                            let policy = cfg.cargo_cache_policy.clone();
+                            (cfg, policy)
+                        }
+                        Err(e) => {
+                            warn!(
+                                task_run_id = %task_run_id_str,
+                                project_id = %spec.project_id,
+                                error = %e,
+                                "kubernetes_runtime: environment config parse failed; \
+                                 using empty config (fail-open)"
+                            );
+                            (djinn_stack::environment::EnvironmentConfig::empty(), None)
+                        }
+                    }
+                }
+                Ok(None) => (djinn_stack::environment::EnvironmentConfig::empty(), None),
+                Err(e) => {
+                    warn!(
+                        task_run_id = %task_run_id_str,
+                        project_id = %spec.project_id,
+                        error = %e,
+                        "kubernetes_runtime: environment config DB lookup failed; \
+                         using empty config (fail-open)"
+                    );
+                    (djinn_stack::environment::EnvironmentConfig::empty(), None)
+                }
+            }
+        };
+
         // 0. Reserve the registry slot BEFORE creating the Job.  This closes
         //    the race where the Pod starts up and completes the AuthHello
         //    handshake faster than `prepare` returns — without a reservation
@@ -350,13 +395,34 @@ impl SessionRuntime for KubernetesRuntime {
             .await
             .insert(task_run_id_str.clone(), pending);
 
-        // 1. Build + create the per-task-run Secret. Carries both `spec.bin`
-        //    and `credentials.bin` (Phase 7a).
-        let secret = match build_task_run_secret(ns, &task_run_id, spec, credentials) {
-            Ok(s) => s,
-            Err(e) => {
-                self.drop_pending(&task_run_id_str).await;
-                return Err(RuntimeError::Prepare(format!("build secret: {e}")));
+        // 1. Resolve backing services and build the per-task-run Secret.
+        //    Service resolution is computed before the Secret so the worker
+        //    receives enough metadata to wait after sidecar readiness.
+        //    The existing `task_run_services_resolved` activity event is
+        //    logged after Secret creation (see step 1b below).
+        let service_resolution =
+            crate::sidecar::resolve_image_services_with_metadata(db, &spec.project_id).await;
+
+        // Build + create the per-task-run Secret.  Carries `spec.bin`,
+        // `credentials.bin`, the effective `EnvironmentConfig` JSON,
+        // and the resolved service metadata JSON (hgd0 Wave 1).
+        let secret = {
+            let builder = TaskRunSecretBuilder::new(ns, &task_run_id, spec, credentials)
+                .environment_config(&effective_env_config);
+            match builder.service_metadata(&service_resolution) {
+                Ok(b) => match b.build() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.drop_pending(&task_run_id_str).await;
+                        return Err(RuntimeError::Prepare(format!("build secret: {e}")));
+                    }
+                },
+                Err(e) => {
+                    self.drop_pending(&task_run_id_str).await;
+                    return Err(RuntimeError::Prepare(format!(
+                        "serialize service metadata: {e}"
+                    )));
+                }
             }
         };
 
@@ -368,13 +434,11 @@ impl SessionRuntime for KubernetesRuntime {
             )));
         }
 
-        // 2. Build + create the Job manifest. Resolve the backing services
-        //    declared on the project's image so they're injected as native
-        //    sidecars. Dispatch remains fail-open, but the resolution is now
-        //    observable on the task activity log: configured-but-not-injected
-        //    presets must not disappear silently.
-        let service_resolution =
-            crate::sidecar::resolve_image_services_with_metadata(db, &spec.project_id).await;
+        // 1b. Log the `task_run_services_resolved` activity event.
+        //     Service resolution was computed earlier (step 1) so both the
+        //     Secret payload and this event carry identical metadata.
+        //     Existing consumers of this event name and
+        //     requested/injected/skipped semantics remain unchanged.
         let services = &service_resolution.services;
         let service_payload = service_resolution_activity_payload(
             &task_run_id_str,
@@ -443,22 +507,9 @@ impl SessionRuntime for KubernetesRuntime {
             ),
         }
 
-        // Load the project's EnvironmentConfig to extract the
-        // cargo_cache_policy for the task-run Job's env vars. Fail-open:
-        // if the DB lookup or JSON parse fails, proceed with no policy
-        // (backward-compatible default behavior).
-        let cargo_cache_policy: Option<djinn_stack::environment::CargoCachePolicy> = {
-            let env_repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-            match env_repo.get_environment_config(&spec.project_id).await {
-                Ok(Some(raw)) => {
-                    serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(&raw)
-                        .ok()
-                        .and_then(|cfg| cfg.cargo_cache_policy)
-                }
-                _ => None,
-            }
-        };
-
+        // 2. Build + create the Job manifest.  The `cargo_cache_policy`
+        //    was extracted from the effective EnvironmentConfig earlier
+        //    (step 1) and is passed through as before.
         let job = build_task_run_job(
             &self.config,
             &task_run_id,
