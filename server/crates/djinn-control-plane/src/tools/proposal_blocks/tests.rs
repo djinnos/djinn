@@ -757,3 +757,109 @@ fn registry_tags_match_catalog_tags() {
         "catalog tags must exactly match proposal_block_registry() tag values"
     );
 }
+
+// ── Empty children-based block rejection (validate_block_content) ────────────
+//
+// A known block whose catalog grammar is CHILDREN-based (decisions, file-tree,
+// checklist, diff, json-explorer, wireframe, callout) that arrives self-closing
+// or with blank children validates as a "known tag" yet renders empty. These
+// tests pin the write-time rejection and the actionable error text, plus the
+// content-attribute escape hatch for the attribute-form blocks.
+
+/// The exact production failure: `<Decisions ... decisions={[…]} />` written in
+/// the unsupported self-closing attribute form is rejected, and the error tells
+/// the author to write children markdown with `###` headings.
+#[test]
+fn block_content_rejects_self_closing_decisions_attr_form() {
+    let body = r#"<Decisions id="auth" title="Auth" decisions={[{"decision":"JWT"}]} />"#;
+    let blocks = parse_mdx_blocks(body).unwrap();
+    let err = validate_block_content(&blocks).unwrap_err();
+    assert!(err.contains("Decisions block"), "error was: {err}");
+    assert!(err.contains("`auth`"), "error must name the block id: {err}");
+    assert!(
+        err.contains("###"),
+        "decisions error must direct the author to `###` heading children: {err}"
+    );
+}
+
+/// A self-closing FileTree (children-only block) is rejected with an
+/// id-naming, grammar-quoting error.
+#[test]
+fn block_content_rejects_self_closing_file_tree() {
+    let body = r#"<FileTree id="layout" root="src" />"#;
+    let blocks = parse_mdx_blocks(body).unwrap();
+    let err = validate_block_content(&blocks).unwrap_err();
+    assert!(err.contains("FileTree block"), "error was: {err}");
+    assert!(err.contains("`layout`"), "error was: {err}");
+    assert!(err.contains("children"), "error was: {err}");
+}
+
+/// A self-closing Checklist (children-only, no attribute alternative) is
+/// rejected.
+#[test]
+fn block_content_rejects_self_closing_checklist() {
+    let body = r#"<Checklist id="acceptance" />"#;
+    let blocks = parse_mdx_blocks(body).unwrap();
+    let err = validate_block_content(&blocks).unwrap_err();
+    assert!(err.contains("Checklist block"), "error was: {err}");
+    assert!(err.contains("`acceptance`"), "error was: {err}");
+}
+
+/// Blank (whitespace-only) children are treated the same as self-closing.
+#[test]
+fn block_content_rejects_blank_children() {
+    let body = "<Callout id=\"c\" tone=\"warning\">\n   \n</Callout>";
+    let blocks = parse_mdx_blocks(body).unwrap();
+    let err = validate_block_content(&blocks).unwrap_err();
+    assert!(err.contains("Callout block"), "error was: {err}");
+}
+
+/// A valid children-form Decisions block is accepted.
+#[test]
+fn block_content_accepts_children_form_decisions() {
+    let body = "<Decisions id=\"auth\">\n### Use JWT for stateless auth\nStatus: accepted\n\nWe scale horizontally.\n</Decisions>";
+    let blocks = parse_mdx_blocks(body).unwrap();
+    assert!(validate_block_content(&blocks).is_ok());
+}
+
+/// The attribute-form blocks are accepted when their content attribute is
+/// present: annotated-code `code=`, rich-text `content=`, tabs `tabs=`,
+/// columns `columns=`.
+#[test]
+fn block_content_accepts_content_attribute_forms() {
+    let ac = r#"<AnnotatedCode id="ex" language="rust" code={`fn main() {}`} />"#;
+    assert!(validate_block_content(&parse_mdx_blocks(ac).unwrap()).is_ok());
+
+    let rt = r#"<RichText id="intro" content="Hello" />"#;
+    assert!(validate_block_content(&parse_mdx_blocks(rt).unwrap()).is_ok());
+
+    let tabs = r#"<Tabs id="t" tabs={[{ "label": "A", "body": "hi" }]} />"#;
+    assert!(validate_block_content(&parse_mdx_blocks(tabs).unwrap()).is_ok());
+
+    let cols = r#"<Columns id="c" columns={[{ "body": "left" }, { "body": "right" }]} />"#;
+    assert!(validate_block_content(&parse_mdx_blocks(cols).unwrap()).is_ok());
+}
+
+/// An attribute-form block with the content attribute MISSING is still rejected
+/// (an empty RichText renders nothing).
+#[test]
+fn block_content_rejects_attribute_form_without_content() {
+    let body = r#"<RichText id="intro" />"#;
+    let blocks = parse_mdx_blocks(body).unwrap();
+    let err = validate_block_content(&blocks).unwrap_err();
+    assert!(err.contains("RichText block"), "error was: {err}");
+    assert!(
+        err.contains("`content`"),
+        "error must mention the content attribute alternative: {err}"
+    );
+}
+
+/// Blocks that are not content-required (e.g. api-endpoint, diagram) are not
+/// subject to the empty-children guard here (diagram emptiness is guarded by
+/// `validate_mdx_blocks`).
+#[test]
+fn block_content_ignores_non_content_required_blocks() {
+    let body = r#"<ApiEndpoint id="get" method="GET" path="/x" />"#;
+    let blocks = parse_mdx_blocks(body).unwrap();
+    assert!(validate_block_content(&blocks).is_ok());
+}

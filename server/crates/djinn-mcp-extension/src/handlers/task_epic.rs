@@ -16,8 +16,10 @@ use djinn_control_plane::tools::task_tools::{
     UpdateTaskRequest as SharedUpdateTaskRequest, add_task_comment as shared_add_task_comment,
     create_task as shared_create_task, update_task as shared_update_task,
 };
+use djinn_control_plane::tools::proposal_blocks::validate_question_form_placement;
 use djinn_control_plane::tools::validation::{
-    validate_ac_count, validate_design, validate_mdx_body, validate_proposal_status, validate_title,
+    resolve_body_format_and_validate, validate_ac_count, validate_design,
+    validate_proposal_status, validate_title,
 };
 use djinn_db::repositories::proposal::ProposalAcceptanceCriteriaAmendment;
 use djinn_db::{
@@ -754,6 +756,13 @@ pub(crate) async fn call_proposal_ac_set(
 /// authoring-attribution `event_metadata` is left `None` — the coordinator's
 /// refinement dispatch tags the resulting revision(s) with
 /// `source = "refinement_loop"` after the session.
+///
+/// Body validation IS identical to the server-side tool: the shared
+/// `resolve_body_format_and_validate` cutover auto-upgrades a markdown body
+/// carrying MDX block tags to `mdx`, runs the full block-validation stack
+/// (unknown tags, empty children-based blocks, wireframe safety, empty
+/// diagrams), and the question-form placement gate applies when a new mdx
+/// body is written.
 pub(crate) async fn call_proposal_update(
     ctx: &dyn ExtensionContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -770,11 +779,23 @@ pub(crate) async fn call_proposal_update(
     };
     let body = p.body.as_deref().unwrap_or(&existing.body);
     validate_design(body)?;
-    let body_format = p
+    // Effective declared format: explicitly passed, else the proposal's
+    // current format (matches the server-side tool's fallback on update).
+    let declared_format = p
         .body_format
         .as_deref()
         .unwrap_or(existing.body_format.as_str());
-    validate_mdx_body(body, Some(body_format))?;
+    // Resolve the persisted format (auto-upgrading a markdown body that
+    // carries block tags to mdx) and run the full MDX block-validation stack —
+    // the same shared cutover the server-side `proposal_update` uses, so both
+    // write paths validate and persist identically. Previously this handler
+    // only ran `validate_mdx_body` against the DECLARED format, so a markdown
+    // body full of block tags skipped all validation and was stored as
+    // markdown (rendered as raw text in the UI).
+    let body_format = resolve_body_format_and_validate(body, Some(declared_format))?;
+    if p.body.is_some() && body_format == "mdx" {
+        validate_question_form_placement(body)?;
+    }
 
     let ac_json = if let Some(ac) = &p.acceptance_criteria {
         validate_ac_count(ac.len())?;
@@ -804,7 +825,7 @@ pub(crate) async fn call_proposal_update(
                 acceptance_criteria: &ac_json,
                 status,
                 superseded_by: superseded_by.as_deref(),
-                body_format: p.body_format.as_deref(),
+                body_format: Some(body_format),
                 event_metadata: None,
             },
         )
