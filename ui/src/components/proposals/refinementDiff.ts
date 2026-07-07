@@ -31,7 +31,7 @@ export function refinementDiffBodies(
 
   return {
     before: base?.body ?? "",
-    after: head.body,
+    after: head.body ?? "",
     fromSeq: base?.seq ?? null,
     headSeq: head.seq,
   };
