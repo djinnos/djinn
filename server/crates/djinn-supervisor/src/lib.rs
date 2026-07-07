@@ -1094,7 +1094,7 @@ impl TaskRunSupervisor {
                         let message =
                             format!("Merge {} into {}", spec.base_branch, spec.task_branch);
                         match workspace.commit(&message, identity).await {
-                            Ok(true) => {
+                            Ok(outcome) if outcome.committed() => {
                                 info!(
                                     task_run_id = %run_id,
                                     task_id = %spec.task_id,
@@ -1122,7 +1122,7 @@ impl TaskRunSupervisor {
                                     );
                                 }
                             }
-                            Ok(false) => {
+                            Ok(_outcome) => {
                                 // try_merge staged a non-empty diff (we were
                                 // behind), so this should not happen; if it
                                 // does the merge produced no tree change and
@@ -1253,6 +1253,14 @@ impl TaskRunSupervisor {
 
         let sequence = spec.flow.role_sequence();
         let mut completed: Vec<RoleKind> = Vec::new();
+        // zkk9: Track whether this run *started* a monitored reopen (the
+        // arbiter's LeadReopen decision).  If so, the post-loop
+        // `complete_monitored_reopen` hook must be skipped — the
+        // arbitration row must remain unconsumed so the next worker
+        // dispatch can see the directive/exclusions.  Completion happens
+        // only when the monitored *worker* attempt reaches a terminal
+        // outcome (a later, separate task-run).
+        let mut started_monitored_reopen = false;
         let outcome = {
             let mut last_stage_role: Option<RoleKind> = None;
             let mut result: Option<TaskRunOutcome> = None;
@@ -1437,7 +1445,7 @@ impl TaskRunSupervisor {
                         };
                         let message = format!("{}: {}", task.short_id, task.title);
                         match workspace.commit(&message, identity).await {
-                            Ok(true) => {
+                            Ok(outcome) if outcome.committed() => {
                                 tracing::info!(
                                     task_id = %task.short_id,
                                     task_run_id = %run_id,
@@ -1452,7 +1460,18 @@ impl TaskRunSupervisor {
                                 // clean and this arm un-taken, yet their work
                                 // still needs pushing. One push site covers both.
                             }
-                            Ok(false) => {
+                            Ok(djinn_workspace::CommitOutcome::NoLegitimateChanges {
+                                ref excluded,
+                            }) => {
+                                tracing::info!(
+                                    task_id = %task.short_id,
+                                    task_run_id = %run_id,
+                                    role = %role_kind.as_str(),
+                                    excluded_paths = ?excluded,
+                                    "supervisor: no legitimate changes after stage; junk-only files excluded"
+                                );
+                            }
+                            Ok(_) => {
                                 tracing::debug!(
                                     task_id = %task.short_id,
                                     task_run_id = %run_id,
@@ -2060,10 +2079,41 @@ impl TaskRunSupervisor {
                     }
                     StageOutcome::LeadReopen {
                         reason,
-                        directive: _,
-                        verification_command: _,
-                        exclude_models: _,
+                        directive,
+                        verification_command,
+                        exclude_models,
                     } => {
+                        // Persist the directive / verification command /
+                        // excluded models on the current arbitration row
+                        // and atomically mark the monitored-reopen attempt
+                        // start so re-entry cannot inject the directive twice.
+                        // The directive is injected into exactly one next
+                        // worker prompt (see prompt_context::load_arbiter_directive).
+                        if !self.services.cancel().is_cancelled()
+                            && let Err(e) = self
+                                .services
+                                .start_monitored_reopen(
+                                    spec.task_id.clone(),
+                                    directive.clone(),
+                                    verification_command.clone(),
+                                    exclude_models.clone(),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: start_monitored_reopen failed — proceeding with lead_intervention_complete transition"
+                            );
+                        } else {
+                            // Mark that this run started a monitored reopen so
+                            // the post-loop completion hook is skipped.  The
+                            // arbitration row must remain unconsumed until the
+                            // monitored worker attempt reaches a terminal
+                            // outcome in a separate task-run.
+                            started_monitored_reopen = true;
+                        }
                         if !self.services.cancel().is_cancelled()
                             && let Err(e) = self
                                 .services
@@ -2467,6 +2517,39 @@ impl TaskRunSupervisor {
                 }
             }
         };
+
+        // zkk9: Close out the monitored-reopen attempt on any terminal worker
+        // outcome.  Worker submit, reviewer rejection, CI/preapproval failure,
+        // worker failure, and no-eligible-model all reach this point with a
+        // terminal outcome.  `complete_monitored_reopen` is idempotent (no-op
+        // if already consumed or no monitored reopen is in progress), so it is
+        // safe to call unconditionally here.
+        //
+        // CRITICAL: This hook is skipped when this run *started* the monitored
+        // reopen (the arbiter's LeadReopen decision).  The arbiter run persists
+        // the directive and marks the attempt start; the arbitration row must
+        // remain unconsumed so the next worker dispatch can see the
+        // directive/exclusions.  Completing here would consume the row before
+        // the worker ever runs, defeating the entire monitored-reopen
+        // lifecycle.  Completion happens only when the monitored *worker*
+        // attempt reaches a terminal outcome (a later, separate task-run).
+        //
+        // Failures are non-fatal — we log and proceed so the terminal outcome
+        // is still reported.
+        if !started_monitored_reopen
+            && !matches!(outcome, TaskRunOutcome::Interrupted)
+            && let Err(e) = self
+                .services
+                .complete_monitored_reopen(spec.task_id.clone())
+                .await
+        {
+            tracing::warn!(
+                task_run_id = %run_id,
+                task_id = %spec.task_id,
+                error = %e,
+                "supervisor: complete_monitored_reopen failed (non-fatal)"
+            );
+        }
 
         let terminal_status = match &outcome {
             TaskRunOutcome::PrOpened { .. } | TaskRunOutcome::Closed { .. } => {
@@ -2898,6 +2981,20 @@ mod tests {
             _decision: String,
             _evidence_json: String,
         ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn start_monitored_reopen(
+            &self,
+            _task_id: String,
+            _directive: String,
+            _verification_command: String,
+            _exclude_models: Vec<String>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
             Ok(())
         }
     }
@@ -5263,6 +5360,20 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+
+        async fn start_monitored_reopen(
+            &self,
+            _task_id: String,
+            _directive: String,
+            _verification_command: String,
+            _exclude_models: Vec<String>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     // ── Arbiter pre-approval gate tests ──────────────────────────────────────
@@ -5278,6 +5389,27 @@ mod tests {
         gate_result: Result<ArbiterGateResult, String>,
         transition_calls: std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
         open_pr_called: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        /// zkk9: records (directive, verification_command, exclude_models)
+        /// passed to `start_monitored_reopen` so the reopen settlement test
+        /// can assert the directive was persisted before the transition.
+        start_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<MonitoredReopenCall>>>,
+        /// zkk9: records task_ids passed to `complete_monitored_reopen` so
+        /// terminal-outcome tests can assert the monitored attempt was closed.
+        complete_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        /// zkk9: expected role for `execute_stage`.  Defaults to `Lead` for
+        /// arbiter gate tests; set to `Worker` for monitored-reopen completion
+        /// tests that simulate a worker task-run.
+        expected_role: RoleKind,
+    }
+
+    /// Recorded `start_monitored_reopen` call for assertion.
+    #[derive(Clone, Debug)]
+    #[allow(dead_code)]
+    struct MonitoredReopenCall {
+        task_id: String,
+        directive: String,
+        verification_command: String,
+        exclude_models: Vec<String>,
     }
 
     #[async_trait]
@@ -5299,7 +5431,10 @@ mod tests {
             _task_run_id: &str,
             _spec: &TaskRunSpec,
         ) -> Result<StageOutcome, StageError> {
-            assert_eq!(role_kind, RoleKind::Lead);
+            assert_eq!(
+                role_kind, self.expected_role,
+                "execute_stage called with unexpected role"
+            );
             Ok(self.stage_outcome.clone())
         }
 
@@ -5456,6 +5591,33 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+
+        async fn start_monitored_reopen(
+            &self,
+            task_id: String,
+            directive: String,
+            verification_command: String,
+            exclude_models: Vec<String>,
+        ) -> Result<(), String> {
+            self.start_monitored_reopen_calls
+                .lock()
+                .expect("start_monitored_reopen_calls mutex poisoned")
+                .push(MonitoredReopenCall {
+                    task_id,
+                    directive,
+                    verification_command,
+                    exclude_models,
+                });
+            Ok(())
+        }
+
+        async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String> {
+            self.complete_monitored_reopen_calls
+                .lock()
+                .expect("complete_monitored_reopen_calls mutex poisoned")
+                .push(task_id);
+            Ok(())
+        }
     }
 
     /// Build a minimal mirror + supervisor for arbiter gate tests.
@@ -5472,6 +5634,33 @@ mod tests {
         std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
+        let (root, supervisor, spec, transition_calls, open_pr_called, _reopen, _complete) =
+            build_arbiter_gate_test_env_with_reopen(
+                task_id,
+                project_id,
+                stage_outcome,
+                gate_result,
+            )
+            .await;
+        (root, supervisor, spec, transition_calls, open_pr_called)
+    }
+
+    /// Variant of [`build_arbiter_gate_test_env`] that also returns the
+    /// `start_monitored_reopen` call tracker for reopen settlement tests.
+    async fn build_arbiter_gate_test_env_with_reopen(
+        task_id: &str,
+        project_id: &str,
+        stage_outcome: StageOutcome,
+        gate_result: Result<ArbiterGateResult, String>,
+    ) -> (
+        tempfile::TempDir,
+        TaskRunSupervisor,
+        TaskRunSpec,
+        std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::Arc<std::sync::Mutex<Vec<MonitoredReopenCall>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
         let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
             .expect("temp test root");
         let source_dir = root.path().join("source");
@@ -5485,6 +5674,11 @@ mod tests {
 
         let transition_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let open_pr_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let start_monitored_reopen_calls: std::sync::Arc<
+            std::sync::Mutex<Vec<MonitoredReopenCall>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let complete_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let services: std::sync::Arc<dyn SupervisorServices> =
             std::sync::Arc::new(ArbiterGateTestServices {
@@ -5494,6 +5688,9 @@ mod tests {
                 gate_result,
                 transition_calls: transition_calls.clone(),
                 open_pr_called: open_pr_called.clone(),
+                start_monitored_reopen_calls: start_monitored_reopen_calls.clone(),
+                complete_monitored_reopen_calls: complete_monitored_reopen_calls.clone(),
+                expected_role: RoleKind::Lead,
             });
 
         let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
@@ -5515,7 +5712,95 @@ mod tests {
             is_evidence_spike: false,
         };
 
-        (root, supervisor, spec, transition_calls, open_pr_called)
+        (
+            root,
+            supervisor,
+            spec,
+            transition_calls,
+            open_pr_called,
+            start_monitored_reopen_calls,
+            complete_monitored_reopen_calls,
+        )
+    }
+
+    /// zkk9: Build a worker-flow test environment for monitored-reopen
+    /// completion tests.  Returns the same trackers as
+    /// [`build_arbiter_gate_test_env_with_reopen`] but configures the spec
+    /// for `SupervisorFlow::NewTask` (worker-only) and sets `expected_role`
+    /// to `Worker`.
+    async fn build_worker_flow_test_env(
+        task_id: &str,
+        project_id: &str,
+        stage_outcome: StageOutcome,
+    ) -> (
+        tempfile::TempDir,
+        TaskRunSupervisor,
+        TaskRunSpec,
+        std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::Arc<std::sync::Mutex<Vec<MonitoredReopenCall>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let mirror = std::sync::Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let transition_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let open_pr_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let start_monitored_reopen_calls: std::sync::Arc<
+            std::sync::Mutex<Vec<MonitoredReopenCall>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let complete_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let services: std::sync::Arc<dyn SupervisorServices> =
+            std::sync::Arc::new(ArbiterGateTestServices {
+                cancel: CancellationToken::new(),
+                task: fixture_task(task_id, project_id),
+                stage_outcome,
+                gate_result: Ok(ArbiterGateResult::Pass),
+                transition_calls: transition_calls.clone(),
+                open_pr_called: open_pr_called.clone(),
+                start_monitored_reopen_calls: start_monitored_reopen_calls.clone(),
+                complete_monitored_reopen_calls: complete_monitored_reopen_calls.clone(),
+                expected_role: RoleKind::Worker,
+            });
+
+        let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
+        let spec = TaskRunSpec {
+            task_run_id: format!("run-worker-{task_id}"),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: format!("djinn/{task_id}"),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        };
+
+        (
+            root,
+            supervisor,
+            spec,
+            transition_calls,
+            open_pr_called,
+            start_monitored_reopen_calls,
+            complete_monitored_reopen_calls,
+        )
     }
 
     #[tokio::test]
@@ -5729,6 +6014,208 @@ mod tests {
         assert!(
             open_pr_called.load(std::sync::atomic::Ordering::SeqCst),
             "infra error must fall through to open_pr"
+        );
+    }
+
+    // ── Monitored reopen settlement tests (zkk9) ─────────────────────────────
+
+    #[tokio::test]
+    async fn arbiter_reopen_persists_directive_and_fires_transition() {
+        // A valid arbiter `reopen` must:
+        // 1. Call `start_monitored_reopen` to persist the directive / verification
+        //    command / excluded models and mark the attempt start.
+        // 2. Fire `lead_intervention_complete` to return the task to `open`.
+        // 3. NOT call open_pr (reopen is terminal for this run).
+        let (_root, supervisor, spec, transition_calls, _open_pr, reopen_calls, complete_calls) =
+            build_arbiter_gate_test_env_with_reopen(
+                "T-reopen-persist",
+                "proj-reopen",
+                StageOutcome::LeadReopen {
+                    reason: "needs different approach".into(),
+                    directive: "Fix the retry loop in dispatch.rs by adding a circuit breaker"
+                        .into(),
+                    verification_command: "cargo test -p djinn-coordinator".into(),
+                    exclude_models: vec!["gpt-4o-mini".into()],
+                },
+                Ok(ArbiterGateResult::Pass),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // start_monitored_reopen was called with the directive payload.
+        let reopen = reopen_calls.lock().unwrap();
+        assert_eq!(
+            reopen.len(),
+            1,
+            "start_monitored_reopen must be called exactly once"
+        );
+        assert_eq!(
+            reopen[0].directive,
+            "Fix the retry loop in dispatch.rs by adding a circuit breaker"
+        );
+        assert_eq!(
+            reopen[0].verification_command,
+            "cargo test -p djinn-coordinator"
+        );
+        assert_eq!(reopen[0].exclude_models, vec!["gpt-4o-mini".to_string()]);
+
+        // lead_intervention_complete transition fired.
+        let calls = transition_calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.action == "lead_intervention_complete"),
+            "reopen must fire lead_intervention_complete transition, got: {calls:?}"
+        );
+
+        // Reopen is terminal for this run — produces Closed.
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Closed { .. }),
+            "reopen must produce Closed, got: {:?}",
+            report.outcome
+        );
+
+        // zkk9: complete_monitored_reopen must NOT be called on the arbiter
+        // reopen run itself.  The arbiter run starts the monitored reopen
+        // (persisting the directive/exclusions and marking the attempt start);
+        // the arbitration row must remain unconsumed so the next worker
+        // dispatch can see the directive.  Completion happens only when the
+        // monitored *worker* attempt reaches a terminal outcome in a separate
+        // task-run.
+        let complete = complete_calls.lock().unwrap();
+        assert_eq!(
+            complete.len(),
+            0,
+            "complete_monitored_reopen must NOT be called on the arbiter reopen run \
+             (the row must stay unconsumed for the next worker dispatch), got: {complete:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn arbiter_reopen_does_not_call_open_pr() {
+        // Reopen must NOT fall through to open_pr — it returns the task to
+        // `open` for a fresh worker dispatch.
+        let (_root, supervisor, spec, _transition_calls, open_pr_called, _reopen_calls, _complete) =
+            build_arbiter_gate_test_env_with_reopen(
+                "T-reopen-no-pr",
+                "proj-reopen",
+                StageOutcome::LeadReopen {
+                    reason: "blocked on deps".into(),
+                    directive: "Update the API client to use the new endpoint".into(),
+                    verification_command: "cargo test".into(),
+                    exclude_models: vec![],
+                },
+                Ok(ArbiterGateResult::Pass),
+            )
+            .await;
+
+        let _report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            !open_pr_called.load(std::sync::atomic::Ordering::SeqCst),
+            "reopen must NOT fall through to open_pr"
+        );
+    }
+
+    // ── zkk9 round 3: monitored reopen lifecycle regression tests ───────────
+
+    /// A worker task-run with a `WorkerDone` outcome (terminal submit) must
+    /// call `complete_monitored_reopen` — this is the monitored worker
+    /// terminal outcome that closes out the reopen attempt.
+    #[tokio::test]
+    async fn worker_submit_completes_monitored_reopen() {
+        let (_root, supervisor, spec, _transition_calls, _open_pr, _reopen, complete_calls) =
+            build_worker_flow_test_env(
+                "T-worker-submit-complete",
+                "proj-ws",
+                StageOutcome::WorkerDone,
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // WorkerDone produces WorkerSubmitted (terminal for this run).
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::WorkerSubmitted),
+            "worker done must produce WorkerSubmitted, got: {:?}",
+            report.outcome
+        );
+
+        // The post-loop completion hook must fire for this worker terminal
+        // outcome (it was NOT started by this run — started_monitored_reopen
+        // is false for a worker run).
+        let complete = complete_calls.lock().unwrap();
+        assert_eq!(
+            complete.len(),
+            1,
+            "complete_monitored_reopen must be called once for worker submit terminal outcome, got: {complete:?}"
+        );
+    }
+
+    /// A worker task-run that fails (worker failure) must call
+    /// `complete_monitored_reopen` — worker failure is a terminal outcome.
+    #[tokio::test]
+    async fn worker_failure_completes_monitored_reopen() {
+        let (_root, supervisor, spec, _transition_calls, _open_pr, _reopen, complete_calls) =
+            build_worker_flow_test_env(
+                "T-worker-fail-complete",
+                "proj-wf",
+                StageOutcome::Failed {
+                    reason: "worker crashed".into(),
+                    provider_failure: None,
+                },
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Failed { .. }),
+            "worker failure must produce Failed, got: {:?}",
+            report.outcome
+        );
+
+        let complete = complete_calls.lock().unwrap();
+        assert_eq!(
+            complete.len(),
+            1,
+            "complete_monitored_reopen must be called once for worker failure, got: {complete:?}"
+        );
+    }
+
+    /// A worker task-run with a loop-guard trip must call
+    /// `complete_monitored_reopen` — loop-guard is a terminal failure outcome.
+    #[tokio::test]
+    async fn worker_loop_guard_completes_monitored_reopen() {
+        let (_root, supervisor, spec, _transition_calls, _open_pr, _reopen, complete_calls) =
+            build_worker_flow_test_env(
+                "T-worker-loop-complete",
+                "proj-wl",
+                StageOutcome::LoopGuardTripped {
+                    kind: djinn_runtime::LoopGuardKind::IdenticalToolFailure,
+                    offending_signature: "shell".into(),
+                    threshold: 3,
+                    observed: 5,
+                    turn_span: (1, 10),
+                    session_id: "sess-1".into(),
+                },
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::LoopGuardTripped { .. }),
+            "loop guard must produce LoopGuardTripped, got: {:?}",
+            report.outcome
+        );
+
+        let complete = complete_calls.lock().unwrap();
+        assert_eq!(
+            complete.len(),
+            1,
+            "complete_monitored_reopen must be called once for loop-guard trip, got: {complete:?}"
         );
     }
 }

@@ -738,6 +738,16 @@ async fn warm_cargo_target_base(
         project_id,
         workspace_dir.to_string_lossy().as_ref(),
     );
+
+    // Stamp the warm base BEFORE compiling. The compile refreshes the mtime of
+    // every artifact it actually uses, so a post-compile `cargo sweep --file`
+    // can safely delete everything older than this stamp — stale crate versions
+    // cargo accumulates in `deps/` (it never GCs a target dir) plus orphaned
+    // `incremental/` sessions. Best-effort: on images without cargo-sweep the
+    // stamp fails, `sweep_stamped` stays false, and the whole prune no-ops.
+    let sweep_stamped =
+        run_cargo_sweep_step(project_id, &workspace_dir, &["--stamp"], "sweep-stamp").await;
+
     let started = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
 
     let commands = &policy.warm_commands;
@@ -767,6 +777,11 @@ async fn warm_cargo_target_base(
         commands[0].label,
     )
     .await;
+    // Track whether ANY warm step compiled successfully. The post-compile
+    // `--file` sweep only runs when at least one step succeeded, so a fully-red
+    // branch (nothing compiles → nothing refreshed) never prunes a still-good
+    // base down to a cold rebuild.
+    let mut any_step_ok = clippy_ok;
 
     // Run remaining warm commands (all-features clippy, default-features
     // clippy, build fallback, test --no-run, etc.), skipping the first
@@ -790,7 +805,7 @@ async fn warm_cargo_target_base(
             .cloned()
             .chain(cmd.feature_args.iter().cloned())
             .collect();
-        run_cargo_warm_step(
+        any_step_ok |= run_cargo_warm_step(
             project_id,
             &workspace_dir,
             &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
@@ -801,6 +816,22 @@ async fn warm_cargo_target_base(
 
     let elapsed = started.elapsed();
     cargo_metrics::record_warm_base_freshness(project_id, elapsed.as_millis() as u64);
+
+    // Prune the warm base of everything the compile above did not touch. Safe by
+    // construction: cargo-sweep only removes whole artifact files older than the
+    // stamp, and cargo transparently rebuilds anything genuinely needed on the
+    // next warm — it can never leave a corrupt/half cache. Gated on a successful
+    // stamp AND at least one green step so a broken branch keeps its warm base.
+    if sweep_stamped && any_step_ok {
+        run_cargo_sweep_step(project_id, &workspace_dir, &["--file"], "sweep-file").await;
+    } else {
+        info!(
+            project_id,
+            sweep_stamped,
+            any_step_ok,
+            "cargo warm: skipping warm-base sweep (no stamp or no successful compile step)"
+        );
+    }
 
     info!(
         project_id,
@@ -827,6 +858,77 @@ async fn run_cargo_warm_step(
     label: &str,
 ) -> bool {
     run_cargo_warm_step_with_cargo("cargo", project_id, workspace_dir, args, label).await
+}
+
+/// Run `cargo sweep <args>` inside `workspace_dir` to prune the warm target
+/// base. Returns `true` on success. Best-effort and non-fatal like the warm
+/// steps: a non-zero exit (e.g. cargo-sweep not installed on an older image →
+/// "no such subcommand: sweep") or a spawn error logs and returns `false`, so
+/// the warm proceeds and simply skips pruning. cargo-sweep resolves the target
+/// dir via `cargo metadata`, which honors the inherited `CARGO_TARGET_DIR`, so
+/// it operates on the same warm base the compile wrote to.
+async fn run_cargo_sweep_step(
+    project_id: &str,
+    workspace_dir: &Path,
+    args: &[&str],
+    label: &str,
+) -> bool {
+    run_cargo_sweep_step_with_cargo("cargo", project_id, workspace_dir, args, label).await
+}
+
+async fn run_cargo_sweep_step_with_cargo(
+    cargo_bin: impl AsRef<OsStr>,
+    project_id: &str,
+    workspace_dir: &Path,
+    args: &[&str],
+    label: &str,
+) -> bool {
+    let sweep_command = format!("cargo sweep {}", args.join(" "));
+    let workspace_dir_display = workspace_dir.display().to_string();
+    match tokio::process::Command::new(cargo_bin.as_ref())
+        .arg("sweep")
+        .args(args)
+        .current_dir(workspace_dir)
+        .status()
+        .await
+    {
+        Ok(status) if status.success() => {
+            info!(
+                project_id,
+                workspace_dir = %workspace_dir_display,
+                sweep_command = %sweep_command,
+                step_label = label,
+                sweep_outcome = "ok",
+                "cargo warm: sweep step succeeded"
+            );
+            true
+        }
+        Ok(status) => {
+            warn!(
+                project_id,
+                workspace_dir = %workspace_dir_display,
+                sweep_command = %sweep_command,
+                step_label = label,
+                sweep_outcome = "failed",
+                code = ?status.code(),
+                "cargo warm: sweep step failed (non-fatal; warm base left unpruned)"
+            );
+            false
+        }
+        Err(e) => {
+            warn!(
+                project_id,
+                workspace_dir = %workspace_dir_display,
+                sweep_command = %sweep_command,
+                step_label = label,
+                sweep_outcome = "spawn_error",
+                error = %e,
+                "cargo warm: could not spawn cargo-sweep (absent on this image?); \
+                 warm base left unpruned"
+            );
+            false
+        }
+    }
 }
 
 async fn run_cargo_warm_step_with_cargo(
@@ -2972,6 +3074,65 @@ warning: something
         assert!(
             logs.contains("step=\"check\""),
             "missing step label: {logs}"
+        );
+    }
+
+    /// Write an executable stub `cargo` that ignores its args and exits `code`.
+    #[cfg(unix)]
+    fn write_stub_cargo(dir: &Path, code: i32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("cargo-stub.sh");
+        std::fs::write(&bin, format!("#!/bin/sh\nexit {code}\n")).expect("write stub cargo");
+        let mut perms = std::fs::metadata(&bin).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).expect("chmod stub cargo");
+        bin
+    }
+
+    #[cfg(unix)]
+    fn block_on_sweep(cargo_bin: &Path, workspace: &Path, args: &[&str]) -> bool {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("runtime")
+            .block_on(run_cargo_sweep_step_with_cargo(
+                cargo_bin, "project-sweep", workspace, args, "sweep-file",
+            ))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_sweep_step_returns_true_when_cargo_exits_zero() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cargo_bin = write_stub_cargo(tmp.path(), 0);
+        assert!(
+            block_on_sweep(&cargo_bin, tmp.path(), &["--file"]),
+            "a zero-exit cargo sweep must report success"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_sweep_step_returns_false_when_cargo_fails() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Exit 101 mimics `cargo`'s "no such subcommand: sweep" on an image that
+        // predates cargo-sweep — the warm must treat it as a non-fatal no-op.
+        let cargo_bin = write_stub_cargo(tmp.path(), 101);
+        assert!(
+            !block_on_sweep(&cargo_bin, tmp.path(), &["--file"]),
+            "a non-zero cargo sweep must report failure, not panic"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_sweep_step_returns_false_when_cargo_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("definitely-not-a-real-cargo");
+        assert!(
+            !block_on_sweep(&missing, tmp.path(), &["--stamp"]),
+            "a spawn error (cargo-sweep absent) must degrade to false, not panic"
         );
     }
 

@@ -47,6 +47,8 @@ pub(crate) struct PromptContext {
     pub completed_dependency_parents: Option<Vec<djinn_db::CompletedParentSummary>>,
     /// y8pv / 48ru: one-line resume note for worker dispatch.
     pub worker_resume_note: Option<String>,
+    /// zkk9: arbiter directive for monitored reopen (worker-only).
+    pub arbiter_directive: Option<String>,
     /// Base system prompt rendered from the role template + `TaskContext`.
     pub base_system_prompt: String,
     /// Base prompt with role-level extensions + `learned_prompt` appended.
@@ -107,6 +109,9 @@ pub(crate) struct PromptContextInputs<'a> {
     pub read_sources: &'a [ReadSourceInfo],
     /// Worker resume note (y8pv/48ru). `None` for non-worker roles.
     pub worker_resume_note: Option<&'a str>,
+    /// Arbiter directive for monitored reopen (zkk9). `None` for non-worker
+    /// roles or when no monitored reopen is in progress.
+    pub arbiter_directive: Option<&'a str>,
     /// Per-server MCP instructions from connected servers, in deterministic
     /// server-name order. Failed or no-instruction servers are omitted.
     pub mcp_server_instructions: &'a std::collections::BTreeMap<String, String>,
@@ -431,6 +436,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         app_state,
         read_sources,
         worker_resume_note,
+        arbiter_directive,
         mcp_server_instructions,
     } = inputs;
 
@@ -599,6 +605,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             reviewer_diff_context: reviewer_diff_context.clone(),
             ci_blocking_directive: ci_blocking_directive.clone(),
             worker_resume_note: worker_resume_note.map(str::to_string),
+            arbiter_directive: arbiter_directive.map(str::to_string),
         },
     );
     let system_prompt_with_extensions = apply_role_extensions(
@@ -625,6 +632,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         reviewer_diff_context,
         ci_blocking_directive,
         worker_resume_note: worker_resume_note.map(str::to_string),
+        arbiter_directive: arbiter_directive.map(str::to_string),
         prior_attempts,
         completed_dependency_parents,
         base_system_prompt,
@@ -690,6 +698,61 @@ async fn resolve_reviewer_diff_shas(
 /// Only the worker role receives resume context.
 pub(crate) fn role_receives_worker_resume(role_name: &str) -> bool {
     role_name == "worker"
+}
+
+/// Only the worker role receives the arbiter directive.
+pub(crate) fn role_receives_arbiter_directive(role_name: &str) -> bool {
+    role_name == "worker"
+}
+
+/// Load the arbiter directive for a monitored reopen. Returns `None` for
+/// non-worker roles or when no monitored reopen is in progress.
+///
+/// The directive is loaded from the latest unconsumed arbitration row only
+/// when `monitored_reopen_count >= 1` AND the directive has not yet been
+/// injected (`directive_injected == false`). The one-shot guard is enforced
+/// atomically: `mark_directive_injected` flips `directive_injected` from
+/// `false` to `true` with a conditional `WHERE directive_injected = false`
+/// clause. Only the first worker prompt wins the race; any second worker
+/// prompt (re-entry) will see `directive_injected == true` and return `None`.
+pub(crate) async fn load_arbiter_directive(
+    role_name: &str,
+    task_id: &str,
+    app_state: &AgentContext,
+) -> Option<String> {
+    if !role_receives_arbiter_directive(role_name) {
+        return None;
+    }
+    use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
+    let arb_repo = TaskArbitrationRepository::new(app_state.db.clone());
+    let (_hold_cycle, unconsumed_record) =
+        arb_repo.resolve_current_hold_cycle(task_id).await.ok()?;
+    let record = unconsumed_record?;
+    // Only inject when a monitored reopen attempt is in progress.
+    if record.monitored_reopen_count < 1 {
+        return None;
+    }
+    // One-shot guard: if the directive was already injected for this monitored
+    // reopen, do not inject it again.
+    if record.directive_injected {
+        return None;
+    }
+    // Atomically claim the injection.  If the UPDATE affects zero rows the
+    // directive was already injected by a concurrent prompt; return None.
+    let claimed = arb_repo
+        .mark_directive_injected(task_id, record.hold_cycle)
+        .await
+        .ok()?;
+    if !claimed {
+        return None;
+    }
+    // Extract the directive text from the structured JSON payload.
+    record
+        .directive
+        .as_ref()
+        .and_then(|d| d.get("directive"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Build one-line worker resume note. Returns None when not applicable.

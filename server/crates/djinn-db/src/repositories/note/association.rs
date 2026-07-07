@@ -580,22 +580,34 @@ impl NoteRepository {
         Ok(map)
     }
 
-    /// Get all associations for a given note.
+    /// Get all co-access associations for a given note.
     ///
-    /// Returns associations where the note is either note_a_id or note_b_id,
-    /// ordered by weight descending.
+    /// Returns only `kind = 'co_access'` / `source = 'session_co_access'`
+    /// rows where the note is either `note_a_id` or `note_b_id`, ordered by
+    /// weight descending.  This is the legacy Hebbian retrieval path — it
+    /// intentionally excludes typed edges (`derived_from`, `builds_on`,
+    /// `embedding_related`, etc.) so callers that reason about co-access
+    /// strength see only the implicit co-access signal and never confuse an
+    /// embedding-minted or authored edge for a co-access count.
+    ///
+    /// For a full-association view across all kinds and sources, use
+    /// [`Self::list_associations_for_note`] or
+    /// [`Self::list_provenance_associations_for_note`].
     pub async fn get_associations_for_note(&self, note_id: &str) -> Result<Vec<NoteAssociation>> {
         self.db.ensure_initialized().await?;
 
-        let associations: Vec<NoteAssociation> = sqlx::query_as!(
-            NoteAssociation,
+        // Runtime (non-macro) query: the `kind` and `source` filter columns
+        // are added by migration 97, which is not in the offline `.sqlx/`
+        // cache, so `query_as!` would fail under `SQLX_OFFLINE=true`.
+        let associations: Vec<NoteAssociation> = sqlx::query_as(
             "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access
              FROM note_associations
-             WHERE note_a_id = $1 OR note_b_id = $2
+             WHERE (note_a_id = $1 OR note_b_id = $2)
+               AND kind = 'co_access' AND source = 'session_co_access'
              ORDER BY weight DESC",
-            note_id,
-            note_id
         )
+        .bind(note_id)
+        .bind(note_id)
         .fetch_all(self.db.pool())
         .await?;
 
@@ -604,6 +616,12 @@ impl NoteRepository {
 
     /// List associations for a note, joining the opposite note to return resolved
     /// permalink and title. Covers both directions (note_a_id = id OR note_b_id = id).
+    ///
+    /// **Returns all association kinds and sources** — co-access, authored,
+    /// embedding, derived_from, etc. — filtered only by `weight >= min_weight`.
+    /// Each entry carries its `kind` string so callers can distinguish
+    /// co-access edges from typed provenance edges.  For co-access-only
+    /// retrieval, use [`Self::get_associations_for_note`].
     ///
     /// * `note_id`    – the note whose associations to fetch.
     /// * `min_weight` – include only associations with weight >= this value.
@@ -646,48 +664,68 @@ impl NoteRepository {
         Ok(entries)
     }
 
-    /// List all associations with weight above a threshold.
+    /// List co-access associations with weight above a threshold.
     ///
-    /// Returns associations ordered by weight descending.
+    /// Returns only `kind = 'co_access'` / `source = 'session_co_access'`
+    /// rows ordered by weight descending.  Typed provenance edges
+    /// (embedding, authored, derived_from, etc.) are excluded so callers
+    /// that use this for co-access graph scoring see only the implicit
+    /// Hebbian signal.
     pub async fn list_associations_above_weight(
         &self,
         threshold: f64,
     ) -> Result<Vec<NoteAssociation>> {
         self.db.ensure_initialized().await?;
 
-        let associations: Vec<NoteAssociation> = sqlx::query_as!(
-            NoteAssociation,
+        // Runtime (non-macro) query: the `kind` and `source` filter columns
+        // are added by migration 97, which is not in the offline `.sqlx/`
+        // cache.
+        let associations: Vec<NoteAssociation> = sqlx::query_as(
             "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access
              FROM note_associations
              WHERE weight >= $1
+               AND kind = 'co_access' AND source = 'session_co_access'
              ORDER BY weight DESC",
-            threshold
         )
+        .bind(threshold)
         .fetch_all(self.db.pool())
         .await?;
 
         Ok(associations)
     }
 
-    /// Delete associations with weight below a threshold.
+    /// Delete co-access associations with weight below a threshold.
     ///
-    /// Useful for periodic pruning of low-weight associations.
+    /// Only removes rows where `kind = 'co_access'` and
+    /// `source = 'session_co_access'`.  Typed provenance edges
+    /// (embedding, authored, derived_from, etc.) are never touched by this
+    /// helper, even if their weight falls below the threshold.
+    ///
     /// Returns the number of associations deleted.
     pub async fn prune_associations_below_weight(&self, threshold: f64) -> Result<u64> {
         self.db.ensure_initialized().await?;
 
-        let result = sqlx::query!(
+        // Runtime (non-macro) query: the `kind` and `source` filter columns
+        // are added by migration 97, which is not in the offline `.sqlx/`
+        // cache.
+        let result = sqlx::query(
             "DELETE FROM note_associations
-             WHERE weight < $1",
-            threshold
+             WHERE weight < $1
+               AND kind = 'co_access' AND source = 'session_co_access'",
         )
+        .bind(threshold)
         .execute(self.db.pool())
         .await?;
 
         Ok(result.rows_affected())
     }
 
-    /// Delete associations older than a given timestamp with weight below threshold.
+    /// Delete stale co-access associations older than a given timestamp.
+    ///
+    /// Only removes rows where `kind = 'co_access'` and
+    /// `source = 'session_co_access'`.  Typed provenance edges are excluded
+    /// so fresh embedding/authored rows sharing the same note pair or low
+    /// weight are never deleted by this helper.
     ///
     /// Returns the number of associations deleted.
     pub async fn prune_old_associations(
@@ -697,36 +735,50 @@ impl NoteRepository {
     ) -> Result<u64> {
         self.db.ensure_initialized().await?;
 
-        let result = sqlx::query!(
+        // Runtime (non-macro) query: the `kind` and `source` filter columns
+        // are added by migration 97, which is not in the offline `.sqlx/`
+        // cache.
+        let result = sqlx::query(
             "DELETE FROM note_associations
-             WHERE last_co_access < $1 AND weight <= $2",
-            before_timestamp,
-            max_weight
+             WHERE last_co_access < $1 AND weight <= $2
+               AND kind = 'co_access' AND source = 'session_co_access'",
         )
+        .bind(before_timestamp)
+        .bind(max_weight)
         .execute(self.db.pool())
         .await?;
 
         Ok(result.rows_affected())
     }
 
-    /// Prune low-weight, stale associations for a specific project.
+    /// Prune low-weight, stale co-access associations for a specific project.
     ///
-    /// Deletes associations where:
+    /// Deletes only `kind = 'co_access'` / `source = 'session_co_access'`
+    /// rows where:
     /// - weight < 0.05 (low weight threshold)
-    /// - last_co_access is older than 90 days
-    /// - note_a_id belongs to a note in the specified project
+    /// - `last_co_access` is older than 90 days
+    /// - `note_a_id` belongs to a note in the specified project
+    ///
+    /// Typed provenance edges (embedding, authored, derived_from, etc.) are
+    /// never deleted by this helper — even if they share a note pair or low
+    /// weight with a stale co-access row.  This ensures housekeeping does not
+    /// accidentally remove fresh embedding or authored rows.
     ///
     /// Returns the number of associations deleted.
     pub async fn prune_associations(&self, project_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
 
-        let result = sqlx::query!(
+        // Runtime (non-macro) query: the `kind` and `source` filter columns
+        // are added by migration 97, which is not in the offline `.sqlx/`
+        // cache.
+        let result = sqlx::query(
             r#"DELETE FROM note_associations
              WHERE weight < 0.05
                AND last_co_access < to_char((now() at time zone 'utc') - interval '90 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-               AND note_a_id IN (SELECT id FROM notes WHERE project_id = $1)"#,
-            project_id
+               AND note_a_id IN (SELECT id FROM notes WHERE project_id = $1)
+               AND kind = 'co_access' AND source = 'session_co_access'"#,
         )
+        .bind(project_id)
         .execute(self.db.pool())
         .await?;
 

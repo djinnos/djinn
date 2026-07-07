@@ -12,6 +12,7 @@ use super::post_intervention_lane;
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
 use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
 
 fn record_dispatch_attempt(outcome: &'static str) {
@@ -1868,6 +1869,48 @@ impl CoordinatorActor {
                 }
             }
 
+            // zkk9: Enforce arbiter-monitored-reopen `exclude_models` for the
+            // one monitored worker dispatch.  When an arbiter issued a `reopen`
+            // decision, the directive/excluded models were persisted on the
+            // current unconsumed arbitration row.  If this worker dispatch is
+            // the monitored attempt, apply those exclusions.  Unlike the
+            // rotation exclusions above, these do NOT degrade to the unfiltered
+            // list — if no eligible model remains, the task is parked with an
+            // updated dossier rather than cycling another worker.
+            if role == "worker" {
+                let arb_repo = TaskArbitrationRepository::new(self.db.clone());
+                if let Ok((_cycle, Some(arb_record))) =
+                    arb_repo.resolve_current_hold_cycle(&task.id).await
+                    && arb_record.monitored_reopen_count >= 1
+                    && !arb_record.directive_injected
+                {
+                    // This is the monitored reopen worker dispatch.
+                    let reopen_excluded: Vec<String> = arb_record
+                        .excluded_models
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !reopen_excluded.is_empty() {
+                        let filtered: Vec<String> = model_ids
+                            .iter()
+                            .filter(|m| !reopen_excluded.contains(m))
+                            .cloned()
+                            .collect();
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            excluded = ?reopen_excluded,
+                            remaining = filtered.len(),
+                            "zkk9: enforcing arbiter reopen exclude_models for monitored worker dispatch"
+                        );
+                        model_ids = filtered;
+                    }
+                }
+            }
+
             // Cross-model ("Thorough") review: when this is a reviewer dispatch
             // and the creator has `diverse_review` on, steer the fallback list so
             // the first viable model id differs from the one that implemented the
@@ -1887,6 +1930,54 @@ impl CoordinatorActor {
                 creator.as_deref().unwrap_or(""),
                 &model_ids,
             );
+
+            // zkk9: No-eligible-model parking for monitored reopen.  If the
+            // arbiter's `exclude_models` eliminated all worker models for the
+            // monitored reopen dispatch, park with an updated dossier instead
+            // of cycling another worker or arbiter.  Also mark the monitored
+            // attempt complete so re-entry cannot trigger a second cycle.
+            if model_ids.is_empty() && role == "worker" {
+                let arb_repo = TaskArbitrationRepository::new(self.db.clone());
+                let should_park_reopen = match arb_repo.resolve_current_hold_cycle(&task.id).await {
+                    Ok((cycle, Some(rec))) => (rec.monitored_reopen_count >= 1
+                        && !rec.directive_injected)
+                        .then_some((cycle, rec)),
+                    _ => None,
+                };
+                if let Some((hold_cycle, rec)) = should_park_reopen {
+                    let park_reason = "arbiter reopen exclude_models eliminated all worker models";
+                    let dossier = serde_json::json!({
+                        "reason": park_reason,
+                        "task_id": task.short_id,
+                        "kind": "monitored_reopen_no_eligible_model",
+                        "excluded_models": rec.excluded_models,
+                        "directive": rec.directive,
+                        "verification_command": rec.verification_command,
+                    });
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        "zkk9: monitored reopen exclude_models left no eligible worker model — parking with dossier"
+                    );
+                    // Complete the monitored attempt so re-entry cannot retry.
+                    let _ = arb_repo
+                        .complete_monitored_reopen(&task.id, hold_cycle)
+                        .await;
+                    let quality_strikes = self
+                        .task_repo()
+                        .quality_reopen_count(&task.id)
+                        .await
+                        .unwrap_or(0);
+                    self.park_source_human_review_with_dossier(
+                        &task,
+                        park_reason,
+                        quality_strikes,
+                        Some(dossier),
+                        &serde_json::json!({}),
+                    )
+                    .await;
+                    continue;
+                }
+            }
 
             // No model whose provider this task's owner has connected → the task
             // is structurally undispatchable (the canary). Don't loop it forever

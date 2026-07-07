@@ -345,4 +345,30 @@ pub trait SupervisorServices: Send + Sync + 'static {
         decision: String,
         evidence_json: String,
     ) -> Result<(), String>;
+
+    /// Start a monitored-reopen worker attempt for an arbiter `reopen`
+    /// decision.  Persists the directive, verification command, and
+    /// excluded models on the current arbitration row, then atomically
+    /// marks the attempt start via `record_monitored_reopen` so re-entry
+    /// cannot inject the directive twice.
+    ///
+    /// Emits an `arbiter_decision` activity event with the reopen
+    /// decision.  Failures are non-fatal — callers log and proceed with
+    /// the `lead_intervention_complete` transition that returns the task
+    /// to `open` for a fresh worker dispatch.
+    async fn start_monitored_reopen(
+        &self,
+        task_id: String,
+        directive: String,
+        verification_command: String,
+        exclude_models: Vec<String>,
+    ) -> Result<(), String>;
+
+    /// Mark the monitored-reopen attempt as complete.  Called on any terminal
+    /// outcome of the monitored worker attempt — worker submit, reviewer
+    /// rejection, CI/preapproval failure, worker failure, or no-eligible-model.
+    /// Transitions the arbitration row to `consumed` (terminal for this hold
+    /// cycle) so re-entry cannot trigger a second arbiter or worker retry.
+    /// Failures are non-fatal — callers log and continue.
+    async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String>;
 }
