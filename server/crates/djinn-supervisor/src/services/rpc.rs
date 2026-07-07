@@ -55,7 +55,9 @@ use super::wire::{
     AuthHelloMsg, AuthResultMsg, Frame, FramePayload, SerializableCreateTaskRunParams,
     ServiceRpcRequest, ServiceRpcResponse,
 };
-use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
+use crate::{
+    BranchPublicationResult, RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec,
+};
 
 /// Failure mode for [`RpcServices::connect_tcp`].
 ///
@@ -878,6 +880,47 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn publish_branch_to_github(
+        &self,
+        spec: &TaskRunSpec,
+        task: &Task,
+    ) -> BranchPublicationResult {
+        let req = ServiceRpcRequest::PublishBranchToGithub {
+            spec: spec.clone(),
+            task: task.clone(),
+        };
+        match self.roundtrip(req).await {
+            Ok(ServiceRpcResponse::PublishBranchToGithub(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => BranchPublicationResult {
+                success: false,
+                pushed_sha: None,
+                mirror_head: String::new(),
+                attempted_github_head: String::new(),
+                pr_branch_existed: false,
+                error_class: Some("rpc_transport".into()),
+                error_message: Some(format!("rpc transport: {e}")),
+            },
+            Ok(other) => BranchPublicationResult {
+                success: false,
+                pushed_sha: None,
+                mirror_head: String::new(),
+                attempted_github_head: String::new(),
+                pr_branch_existed: false,
+                error_class: Some("rpc_protocol".into()),
+                error_message: Some(format!("rpc protocol: unexpected reply {other:?}")),
+            },
+            Err(e) => BranchPublicationResult {
+                success: false,
+                pushed_sha: None,
+                mirror_head: String::new(),
+                attempted_github_head: String::new(),
+                pr_branch_existed: false,
+                error_class: Some("rpc_transport".into()),
+                error_message: Some(e),
+            },
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -1251,6 +1294,16 @@ impl SupervisorServices for UnimplementedRpcServices {
     async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
         unimplemented!(
             "UnimplementedRpcServices::complete_monitored_reopen — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn publish_branch_to_github(
+        &self,
+        _spec: &TaskRunSpec,
+        _task: &Task,
+    ) -> BranchPublicationResult {
+        unimplemented!(
+            "UnimplementedRpcServices::publish_branch_to_github — construct RpcServices for real RPC"
         )
     }
 }

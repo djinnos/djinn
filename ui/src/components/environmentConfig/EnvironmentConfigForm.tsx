@@ -39,6 +39,7 @@ import {
   setCargoFeaturesCsv,
 } from "@/api/environmentConfig";
 import { HookCommandList } from "@/components/environmentConfig/HookCommandList";
+import { PreTaskCommandList } from "@/components/environmentConfig/PreTaskCommandList";
 
 interface Props {
   config: EnvironmentConfig;
@@ -463,8 +464,8 @@ function LifecycleSection({ config, onChange }: Props) {
           />
         </TabsContent>
         <TabsContent value="pre_task" className="mt-3">
-          <HookCommandList
-            hooks={config.lifecycle.pre_task}
+          <PreTaskCommandList
+            commands={config.lifecycle.pre_task}
             onChange={(next) =>
               onChange({ ...config, lifecycle: { ...config.lifecycle, pre_task: next } })
             }

@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use djinn_control_plane::tools::epic_ops::{
     EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest,
 };
+use djinn_control_plane::tools::proposal_blocks::validate_question_form_placement;
 use djinn_control_plane::tools::proposal_tools::{
     ProposalBlockPatchParams, ProposalUpdateParams, apply_block_patch,
 };
@@ -16,10 +17,9 @@ use djinn_control_plane::tools::task_tools::{
     UpdateTaskRequest as SharedUpdateTaskRequest, add_task_comment as shared_add_task_comment,
     create_task as shared_create_task, update_task as shared_update_task,
 };
-use djinn_control_plane::tools::proposal_blocks::validate_question_form_placement;
 use djinn_control_plane::tools::validation::{
-    resolve_body_format_and_validate, validate_ac_count, validate_design,
-    validate_proposal_status, validate_title,
+    resolve_body_format_and_validate, validate_ac_count, validate_design, validate_proposal_status,
+    validate_title,
 };
 use djinn_db::repositories::proposal::ProposalAcceptanceCriteriaAmendment;
 use djinn_db::{

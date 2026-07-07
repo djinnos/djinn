@@ -43,7 +43,6 @@ use tracing::{debug, info, warn};
 
 pub mod services;
 
-pub use services::SupervisorServices;
 pub use services::rpc::{
     ConnectTcpError, RpcBackgroundTasks, RpcServices, StubRpcServices, UnimplementedRpcServices,
 };
@@ -56,6 +55,7 @@ pub use services::wire::{
     AuthHelloMsg, AuthResultMsg, Frame, FramePayload, SerializableCreateTaskRunParams,
     ServiceRpcRequest, ServiceRpcResponse,
 };
+pub use services::{BranchPublicationResult, SupervisorServices};
 
 // Re-export runtime spec types at the crate root so the thin
 // `djinn_agent::supervisor` shim preserves every existing import path.
@@ -1677,6 +1677,52 @@ impl TaskRunSupervisor {
                                  worker progress NOT durable in mirror; refusing \
                                  submit_task_review to prevent phantom submission"
                             );
+                        }
+                        // ── GitHub publication for existing open PRs ─────────
+                        //
+                        // If the mirror push succeeded and this task already has
+                        // an open PR (`task.pr_url` is set), push the same task
+                        // branch/head to GitHub so Actions evaluates the latest
+                        // commit instead of a stale PR head. This is a freshness
+                        // optimization only — it does NOT gate submit_task_review.
+                        // On failure, the stale-head remediation loop will catch
+                        // the divergence. Gated on Worker role (matching the
+                        // submit_task_review gate below); ArchitectDone tasks
+                        // typically don't have open PRs.
+                        if push_succeeded && role_kind == RoleKind::Worker && task.pr_url.is_some()
+                        {
+                            match self.services.publish_branch_to_github(&spec, &task).await {
+                                result if result.success => {
+                                    tracing::info!(
+                                        task_id = %task.short_id,
+                                        task_run_id = %run_id,
+                                        branch = %spec.task_branch,
+                                        github_head = ?result.pushed_sha,
+                                        "supervisor: published WorkerDone mirror commit to GitHub open-PR branch"
+                                    );
+                                }
+                                pub_failure => {
+                                    // Record structured publication-failure
+                                    // evidence. The task still proceeds to
+                                    // review — mirror push already succeeded and
+                                    // the internal review gates approval/merge.
+                                    // The GitHub stale-head remediation loop
+                                    // will catch the divergence.
+                                    tracing::warn!(
+                                        target: "djinn_supervisor::github_publication_failure",
+                                        task_id = %task.short_id,
+                                        task_run_id = %run_id,
+                                        branch = %spec.task_branch,
+                                        mirror_head = %pub_failure.mirror_head,
+                                        github_head = %pub_failure.attempted_github_head,
+                                        pr_branch_existed = pub_failure.pr_branch_existed,
+                                        error_class = ?pub_failure.error_class,
+                                        error = ?pub_failure.error_message,
+                                        "supervisor: GitHub publication failed after mirror push succeeded — \
+                                         GitHub Actions may evaluate a stale PR head"
+                                    );
+                                }
+                            }
                         }
                         // Worker finished cleanly → submit_task_review
                         // (in_progress → needs_task_review). The run ends after

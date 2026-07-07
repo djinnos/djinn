@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use djinn_core::models::{SessionRecord, Task, TaskRunStatus};
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_workspace::Workspace;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
@@ -24,6 +25,27 @@ pub use wire::{
     BillingSource, CostBasisHint, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
     SerializableDjinnEvent,
 };
+
+/// Outcome of pushing a task branch to GitHub for a task with an existing
+/// open PR.  Carries the pushed SHA on success; structured failure details
+/// (mirror head, attempted GitHub head, PR-branch existence, error class)
+/// on failure so callers can record structured publication-failure activity.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BranchPublicationResult {
+    pub success: bool,
+    /// The GitHub head SHA after a successful push.
+    pub pushed_sha: Option<String>,
+    /// The mirror head SHA at the time of the attempt (always populated).
+    pub mirror_head: String,
+    /// The SHA we attempted to push to GitHub (always populated).
+    pub attempted_github_head: String,
+    /// Whether the PR branch already existed on GitHub before our push.
+    pub pr_branch_existed: bool,
+    /// Machine-readable error class on failure (e.g. "push_rejected", "auth").
+    pub error_class: Option<String>,
+    /// Human-readable error string on failure.
+    pub error_message: Option<String>,
+}
 
 /// Dependencies shared across every stage in a task-run.
 ///
@@ -371,4 +393,31 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// cycle) so re-entry cannot trigger a second arbiter or worker retry.
     /// Failures are non-fatal — callers log and continue.
     async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String>;
+
+    /// Push the task branch to GitHub for a task with an existing open PR,
+    /// so GitHub Actions evaluates the worker's latest mirror commit.
+    ///
+    /// Called after a successful WorkerDone mirror push.  The host-side
+    /// `DirectServices` impl resolves GitHub coords, mints an installation
+    /// token, and delegates to the existing `push_task_branch_to_github`
+    /// helper (reusing its concurrent-push race guard).  The worker-side
+    /// RPC stub forwards over the wire.
+    ///
+    /// Default is a no-op success so test doubles stay untouched; real
+    /// impls (`DirectServices`, `RpcServices`) MUST override.
+    async fn publish_branch_to_github(
+        &self,
+        _spec: &TaskRunSpec,
+        _task: &Task,
+    ) -> BranchPublicationResult {
+        BranchPublicationResult {
+            success: true,
+            pushed_sha: None,
+            mirror_head: String::new(),
+            attempted_github_head: String::new(),
+            pr_branch_existed: false,
+            error_class: None,
+            error_message: None,
+        }
+    }
 }
