@@ -4,7 +4,8 @@
 // message suitable for returning as a JSON `{ "error": ... }` response.
 
 use crate::tools::proposal_blocks::{
-    extract_custom_block_tags, parse_mdx_blocks, proposal_block_tags,
+    extract_custom_block_tags, parse_mdx_blocks, proposal_block_tags, validate_block_content,
+    validate_mdx_blocks,
 };
 
 /// Decode the handful of HTML entities that LLM-authored plain text routinely
@@ -189,6 +190,51 @@ pub fn validate_mdx_body(body: &str, body_format: Option<&str>) -> Result<(), St
     }
     validate_html_block_safety(body)?;
     Ok(())
+}
+
+/// Resolve the effective `body_format` for a full-body proposal write and run
+/// the full MDX block-validation stack on it.
+///
+/// This is the shared cutover that closes the "markdown body full of block tags"
+/// hole: a `markdown` body that carries any custom (PascalCase) block tag is
+/// upgraded to `mdx` and validated, exactly like [`apply_block_patch`] already
+/// does for targeted patches. A body that is already `mdx`, or has no block
+/// tags, keeps its declared format. When the effective format is `mdx` the body
+/// must pass the whole stack: unknown-tag rejection + wireframe HTML-safety
+/// ([`validate_mdx_body`]), the empty-diagram guard and unknown-tag walk
+/// ([`validate_mdx_blocks`]), a structural parse ([`parse_mdx_blocks`]), and the
+/// empty-children guard ([`validate_block_content`]).
+///
+/// All four full-body write paths — `proposal_create`, `proposal_update`,
+/// `proposal_import`, and `apply_block_patch` (block-patch) — call this so they
+/// resolve the persisted format and validate identically. It deliberately does
+/// NOT enforce question-form placement: that is an authoring-gate concern layered
+/// on top by `proposal_create` / `proposal_update` (and intentionally skipped by
+/// the block-patch and import restore paths).
+///
+/// Returns the `&'static str` format to persist (`"markdown"` or `"mdx"`).
+pub fn resolve_body_format_and_validate(
+    body: &str,
+    declared_format: Option<&str>,
+) -> Result<&'static str, String> {
+    let has_block_tags = !extract_custom_block_tags(body).is_empty();
+    let effective = if declared_format == Some("mdx") || has_block_tags {
+        "mdx"
+    } else {
+        "markdown"
+    };
+
+    if effective == "mdx" {
+        // Unknown-tag rejection + wireframe active-markup backstop.
+        validate_mdx_body(body, Some("mdx"))?;
+        // Unknown-tag walk (descends nested blocks) + empty-diagram guard.
+        validate_mdx_blocks(body).map_err(|e| e.to_string())?;
+        // Structural parse, then reject empty children-based blocks.
+        let blocks = parse_mdx_blocks(body).map_err(|e| e.to_string())?;
+        validate_block_content(&blocks)?;
+    }
+
+    Ok(effective)
 }
 
 /// Server-side backstop for the sandboxed `html` and `wireframe` blocks (defense
@@ -802,5 +848,58 @@ Bind it with `el.onclick = fn` in the handler.
         assert!(validate_epic_create_status(Some("drafting")).is_err());
         assert!(validate_epic_create_status(Some("proposed")).is_err());
         assert!(validate_epic_create_status(Some("closed")).is_err());
+    }
+
+    // ── resolve_body_format_and_validate ─────────────────────────────────────
+
+    #[test]
+    fn resolve_plain_markdown_stays_markdown() {
+        // No block tags → stays markdown, no validation applied.
+        assert_eq!(
+            resolve_body_format_and_validate("# Title\n\nPlain prose.", Some("markdown")).unwrap(),
+            "markdown"
+        );
+        assert_eq!(
+            resolve_body_format_and_validate("just text", None).unwrap(),
+            "markdown"
+        );
+    }
+
+    #[test]
+    fn resolve_markdown_with_block_tags_upgrades_to_mdx() {
+        // A markdown-declared body carrying a known block tag is upgraded and
+        // validated — this is the core cutover that closes the storage hole.
+        let body = "<Callout id=\"c\" tone=\"info\">\nNote.\n</Callout>";
+        assert_eq!(
+            resolve_body_format_and_validate(body, Some("markdown")).unwrap(),
+            "mdx"
+        );
+        // Omitted format upgrades the same way.
+        assert_eq!(resolve_body_format_and_validate(body, None).unwrap(), "mdx");
+    }
+
+    #[test]
+    fn resolve_markdown_with_unknown_block_tag_is_rejected() {
+        // Previously passed silently (markdown skipped all validation).
+        let body = "<FooBar id=\"x\" />";
+        let err = resolve_body_format_and_validate(body, Some("markdown")).unwrap_err();
+        assert!(err.contains("FooBar"), "error was: {err}");
+    }
+
+    #[test]
+    fn resolve_rejects_empty_children_based_block() {
+        // The production failure: a self-closing children-based block.
+        let body = r#"<Decisions id="d" decisions={[{"decision":"x"}]} />"#;
+        let err = resolve_body_format_and_validate(body, Some("markdown")).unwrap_err();
+        assert!(err.contains("Decisions block"), "error was: {err}");
+        assert!(err.contains("###"), "error was: {err}");
+    }
+
+    #[test]
+    fn resolve_mdx_declared_empty_body_ok() {
+        assert_eq!(
+            resolve_body_format_and_validate("", Some("mdx")).unwrap(),
+            "mdx"
+        );
     }
 }

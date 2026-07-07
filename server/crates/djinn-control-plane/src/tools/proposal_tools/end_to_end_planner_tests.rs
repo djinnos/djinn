@@ -198,7 +198,7 @@ The open-questions section collects uncertainties for the team.
             ),
             (
                 "The approach section describes the high-level plan in prose.",
-                "<FileTree id=\"repo-layout\" name=\"repo\" />",
+                "<FileTree id=\"repo-layout\" name=\"repo\">\nsrc/\n</FileTree>",
                 "second patch: approach -> FileTree",
             ),
             (
@@ -303,7 +303,7 @@ The open-questions section collects uncertainties for the team.
             ),
             (
                 "The approach section describes the high-level plan in prose.",
-                "<FileTree id=\"repo\" name=\"repo\" />",
+                "<FileTree id=\"repo\" name=\"repo\">\nsrc/\n</FileTree>",
             ),
         ] {
             let response = server
@@ -422,7 +422,7 @@ The open-questions section collects uncertainties for the team.
             ),
             (
                 "The approach section describes the high-level plan in prose.",
-                "<FileTree id=\"repo-layout\" name=\"repo\" />",
+                "<FileTree id=\"repo-layout\" name=\"repo\">\nsrc/\n</FileTree>",
             ),
             (
                 "The tradeoffs section enumerates the costs of the chosen approach.",
@@ -638,7 +638,7 @@ The open-questions section collects uncertainties for the team.
             ),
             (
                 "The approach section describes the high-level plan in prose.",
-                "<FileTree id=\"repo-layout\" name=\"repo\" />",
+                "<FileTree id=\"repo-layout\" name=\"repo\">\nsrc/\n</FileTree>",
             ),
             (
                 "The tradeoffs section enumerates the costs of the chosen approach.",

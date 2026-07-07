@@ -78,6 +78,41 @@ async fn run_with_provider(
     i64,
     i64,
 ) {
+    run_with_provider_and_model(
+        provider,
+        tools,
+        conversation,
+        slot_ctx,
+        project_path,
+        task_id,
+        session_id,
+        cancel,
+        "synthetic/test-model",
+    )
+    .await
+}
+
+/// Like [`run_with_provider`] but accepts an explicit `model_id`, allowing
+/// tests to exercise Codex-specific (or non-Codex) retry behaviour.
+#[allow(clippy::too_many_arguments)]
+async fn run_with_provider_and_model(
+    provider: &dyn djinn_provider::provider::LlmProvider,
+    tools: &[serde_json::Value],
+    conversation: &mut Conversation,
+    slot_ctx: &crate::host::SlotContext,
+    project_path: &str,
+    task_id: &str,
+    session_id: &str,
+    cancel: &CancellationToken,
+    model_id: &str,
+) -> (
+    anyhow::Result<()>,
+    crate::output_parser::ParsedAgentOutput,
+    i64,
+    i64,
+    i64,
+    i64,
+) {
     let worktree = test_path("djinn-reply-loop-");
     let worktree_path = worktree.as_path();
     run_reply_loop(
@@ -93,7 +128,7 @@ async fn run_with_provider(
             role_name: "worker",
             finalize_tool_names: &["submit_work", "request_lead"],
             context_window: 10_000,
-            model_id: "synthetic/test-model",
+            model_id,
             cancel,
             global_cancel: cancel,
             ctx: slot_ctx,
@@ -265,7 +300,9 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
-    let (result, output, _, _, _, _) = run_with_provider(
+    // Use a Codex-family model so that empty-stream retries are allowed
+    // (non-Codex models now fail immediately on terminal empty turns).
+    let (result, output, _, _, _, _) = run_with_provider_and_model(
         &provider,
         &tools,
         &mut conversation,
@@ -274,6 +311,7 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
         &task_id,
         &session_id,
         &cancel,
+        "openai/test-model",
     )
     .await;
     assert!(
@@ -288,6 +326,94 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
                 matches!(block, ContentBlock::Text { text } if text.contains("You have not completed your session."))
             })
     }));
+}
+
+/// AC3 regression: a stream that emits partial assistant text but ends without
+/// `StreamEvent::Done` must NOT be persisted as a complete assistant turn.
+///
+/// The in-flight flush still preserves observed content for resume, but the
+/// reply loop must return a typed provider failure error so the truncated turn
+/// is not finalized as a successful assistant message.
+#[tokio::test]
+async fn truncated_stream_with_partial_text_is_not_persisted_as_complete() {
+    let tools = vec![dummy_tool_schema("submit_work")];
+    // Provider returns partial text with no StreamEvent::Done — simulates a
+    // truncated/early-ended provider stream.
+    let provider = FakeProvider::script(vec![vec![
+        StreamEvent::Delta(ContentBlock::Text {
+            text: "partial assistant output that was cut short".into(),
+        }),
+        // No StreamEvent::Done — stream ends early.
+    ]]);
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    let mut conversation = base_conversation();
+    let (result, _output, _, _, _, _) = run_with_provider(
+        &provider,
+        &tools,
+        &mut conversation,
+        &slot_ctx,
+        &project_path,
+        &task_id,
+        &session_id,
+        &cancel,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "truncated stream should produce an error, not succeed: {result:?}"
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("ended early") || err_msg.contains("truncated"),
+        "error should mention truncated/early stream: {err_msg}"
+    );
+    // The conversation must NOT contain a finalized assistant message with the
+    // partial text.  Only the original system + user messages should remain.
+    let has_assistant_msg = conversation
+        .messages
+        .iter()
+        .any(|m| m.role == Role::Assistant);
+    assert!(
+        !has_assistant_msg,
+        "truncated assistant output must not be finalized as a complete assistant message; \
+         conversation messages: {:?}",
+        conversation.messages.len()
+    );
+}
+
+/// Regression: a non-Codex provider that returns an empty stream (no events)
+/// must produce a typed provider failure on the very first occurrence — no
+/// retries, no nudge path.
+#[tokio::test]
+async fn non_codex_empty_stream_fails_immediately_on_first_occurrence() {
+    use djinn_provider::provider::ProviderError;
+
+    let provider = FakeProvider::script(vec![vec![]]);
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    let mut conversation = base_conversation();
+    // Non-Codex model → immediate terminal failure.
+    let (result, _output, _, _, _, _) = run_with_provider_and_model(
+        &provider,
+        &[],
+        &mut conversation,
+        &slot_ctx,
+        &project_path,
+        &task_id,
+        &session_id,
+        &cancel,
+        "synthetic/kimi-k2.5",
+    )
+    .await;
+    let err = result.expect_err("non-Codex empty stream must produce a terminal error");
+    // Non-Codex providers get a transient ProviderInternal(500).
+    assert!(
+        err.downcast_ref::<ProviderError>().is_some(),
+        "error must carry a typed ProviderError for failover classification: {err}"
+    );
+    assert!(
+        err.to_string().contains("empty"),
+        "error must mention empty for diagnostics: {err}"
+    );
 }
 
 #[tokio::test]
