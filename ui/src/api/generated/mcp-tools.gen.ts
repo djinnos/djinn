@@ -2372,6 +2372,14 @@ export namespace ImageCreateInputSchema {
   export type HookCommand = (string | string[] | {
   [k: string]: HookCommand
   })
+  export type PreTaskFailurePolicy = ("blocking" | "best_effort")
+  export interface PreTaskCommand {
+  command: string
+  failure_policy?: PreTaskFailurePolicy
+  name?: string
+  timeout_seconds?: number
+  [k: string]: any
+  }
 
   export interface ImageCreateInput {
   config: EnvironmentConfig
@@ -2550,7 +2558,7 @@ export namespace ImageCreateInputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
@@ -2643,6 +2651,14 @@ export namespace ImageListOutputSchema {
   export type HookCommand = (string | string[] | {
   [k: string]: HookCommand
   })
+  export type PreTaskFailurePolicy = ("blocking" | "best_effort")
+  export interface PreTaskCommand {
+  command: string
+  failure_policy?: PreTaskFailurePolicy
+  name?: string
+  timeout_seconds?: number
+  [k: string]: any
+  }
 
   export interface ImageListOutput {
   error?: string
@@ -2833,7 +2849,7 @@ export namespace ImageListOutputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
@@ -2917,6 +2933,14 @@ export namespace ImageUpdateInputSchema {
   export type HookCommand = (string | string[] | {
   [k: string]: HookCommand
   })
+  export type PreTaskFailurePolicy = ("blocking" | "best_effort")
+  export interface PreTaskCommand {
+  command: string
+  failure_policy?: PreTaskFailurePolicy
+  name?: string
+  timeout_seconds?: number
+  [k: string]: any
+  }
 
   export interface ImageUpdateInput {
   config: EnvironmentConfig
@@ -3092,7 +3116,7 @@ export namespace ImageUpdateInputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
@@ -4864,6 +4888,14 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   export type HookCommand = (string | string[] | {
   [k: string]: HookCommand
   })
+  export type PreTaskFailurePolicy = ("blocking" | "best_effort")
+  export interface PreTaskCommand {
+  command: string
+  failure_policy?: PreTaskFailurePolicy
+  name?: string
+  timeout_seconds?: number
+  [k: string]: any
+  }
 
   export interface ProjectEnvironmentConfigGetOutput {
   /**
@@ -5044,7 +5076,7 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
@@ -5113,6 +5145,14 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   export type HookCommand = (string | string[] | {
   [k: string]: HookCommand
   })
+  export type PreTaskFailurePolicy = ("blocking" | "best_effort")
+  export interface PreTaskCommand {
+  command: string
+  failure_policy?: PreTaskFailurePolicy
+  name?: string
+  timeout_seconds?: number
+  [k: string]: any
+  }
 
   export interface ProjectEnvironmentConfigResetOutput {
   /**
@@ -5287,7 +5327,7 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
@@ -5345,6 +5385,14 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   export type HookCommand = (string | string[] | {
   [k: string]: HookCommand
   })
+  export type PreTaskFailurePolicy = ("blocking" | "best_effort")
+  export interface PreTaskCommand {
+  command: string
+  failure_policy?: PreTaskFailurePolicy
+  name?: string
+  timeout_seconds?: number
+  [k: string]: any
+  }
 
   export interface ProjectEnvironmentConfigSetInput {
   config: EnvironmentConfig
@@ -5523,7 +5571,7 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
