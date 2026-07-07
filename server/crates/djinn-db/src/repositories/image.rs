@@ -416,4 +416,142 @@ mod tests {
         repo.set_project_image("p1", None).await.unwrap();
         assert!(repo.delete("i1").await.is_ok());
     }
+
+    /// Prove that `lifecycle.pre_task` JSONB is preserved through the full
+    /// create → get → list → update → get round-trip without dropping or
+    /// reshaping fields.  This is the repository-level proof required by the
+    /// "round-trip lifecycle.pre_task through image repository" task.
+    #[tokio::test]
+    async fn pre_task_jsonb_round_trip() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let repo = ImageRepository::new(db.clone());
+
+        // Config with a single pre-task command (all fields populated).
+        let config_json = r#"{
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_task": [
+                    {
+                        "name": "install-deps",
+                        "command": "pip install -e .",
+                        "timeout_seconds": 120,
+                        "failure_policy": "blocking"
+                    }
+                ]
+            }
+        }"#;
+
+        // ── create ──────────────────────────────────────────────────────────
+        repo.create("pt1", "Python-pre-task", Some("pre-task test"), config_json)
+            .await
+            .unwrap();
+
+        // ── get ─────────────────────────────────────────────────────────────
+        let img = repo.get("pt1").await.unwrap().expect("row after create");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&img.config).expect("config must be valid JSON after get");
+        let pre_task = &parsed["lifecycle"]["pre_task"];
+        let cmds = pre_task.as_array().expect("pre_task is array");
+        assert_eq!(cmds.len(), 1, "expected one pre-task command");
+        assert_eq!(cmds[0]["name"], "install-deps");
+        assert_eq!(cmds[0]["command"], "pip install -e .");
+        assert_eq!(cmds[0]["timeout_seconds"], 120);
+        assert_eq!(cmds[0]["failure_policy"], "blocking");
+
+        // ── list ────────────────────────────────────────────────────────────
+        let all = repo.list().await.unwrap();
+        assert_eq!(all.len(), 1);
+        let listed_parsed: serde_json::Value =
+            serde_json::from_str(&all[0].config).expect("list config JSON");
+        let listed_cmds = listed_parsed["lifecycle"]["pre_task"].as_array().unwrap();
+        assert_eq!(listed_cmds.len(), 1);
+        assert_eq!(listed_cmds[0]["name"], "install-deps");
+        assert_eq!(listed_cmds[0]["command"], "pip install -e .");
+        assert_eq!(listed_cmds[0]["timeout_seconds"], 120);
+        assert_eq!(listed_cmds[0]["failure_policy"], "blocking");
+
+        // ── update with a different pre-task set ────────────────────────────
+        let updated_config = r#"{
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_task": [
+                    {
+                        "name": "migrate",
+                        "command": "python manage.py migrate",
+                        "timeout_seconds": 180,
+                        "failure_policy": "best_effort"
+                    },
+                    {
+                        "command": "npm ci",
+                        "timeout_seconds": 300
+                    }
+                ]
+            }
+        }"#;
+        repo.update("pt1", "Python-pre-task", None, updated_config)
+            .await
+            .unwrap();
+
+        // Build state reset on update.
+        let after = repo.get("pt1").await.unwrap().expect("row after update");
+        assert_eq!(after.status, "none", "update resets status");
+        assert!(after.config_hash.is_none());
+
+        // Verify updated pre-task JSONB.
+        let after_parsed: serde_json::Value =
+            serde_json::from_str(&after.config).expect("updated config JSON");
+        let after_cmds = after_parsed["lifecycle"]["pre_task"]
+            .as_array()
+            .expect("pre_task is array after update");
+        assert_eq!(
+            after_cmds.len(),
+            2,
+            "expected two pre-task commands after update"
+        );
+        assert_eq!(after_cmds[0]["name"], "migrate");
+        assert_eq!(after_cmds[0]["command"], "python manage.py migrate");
+        assert_eq!(after_cmds[0]["timeout_seconds"], 180);
+        assert_eq!(after_cmds[0]["failure_policy"], "best_effort");
+        assert_eq!(after_cmds[1]["command"], "npm ci");
+        assert_eq!(after_cmds[1]["timeout_seconds"], 300);
+
+        // ── list after update ───────────────────────────────────────────────
+        let all_after = repo.list().await.unwrap();
+        assert_eq!(all_after.len(), 1);
+        let list_after_parsed: serde_json::Value =
+            serde_json::from_str(&all_after[0].config).expect("list config JSON after update");
+        let list_after_cmds = list_after_parsed["lifecycle"]["pre_task"]
+            .as_array()
+            .unwrap();
+        assert_eq!(list_after_cmds.len(), 2);
+        assert_eq!(list_after_cmds[0]["name"], "migrate");
+        assert_eq!(list_after_cmds[1]["command"], "npm ci");
+    }
+
+    /// Config without a `lifecycle` key must store and return a config where
+    /// `lifecycle.pre_task` is absent (serde default), not corrupted.
+    #[tokio::test]
+    async fn absent_lifecycle_survives_jsonb_round_trip() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let repo = ImageRepository::new(db.clone());
+
+        repo.create("abs1", "No-lifecycle", None, r#"{"schema_version":1}"#)
+            .await
+            .unwrap();
+
+        let img = repo.get("abs1").await.unwrap().expect("row");
+        let parsed: serde_json::Value = serde_json::from_str(&img.config).expect("config JSON");
+        // lifecycle should default to empty if absent.
+        let lifecycle = &parsed["lifecycle"];
+        if !lifecycle.is_null() {
+            // If serde re-emits the default lifecycle, pre_task must be empty.
+            let pre_task = &lifecycle["pre_task"];
+            assert!(
+                pre_task.is_null() || pre_task.as_array().is_none_or(|a| a.is_empty()),
+                "absent lifecycle should not have spurious pre_task entries, got: {pre_task}"
+            );
+        }
+    }
 }
