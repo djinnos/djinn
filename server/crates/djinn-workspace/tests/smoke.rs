@@ -77,7 +77,7 @@ async fn mirror_clone_commit_cycle() {
         .unwrap();
     let made = ws.commit("wip", id).await.unwrap();
     assert!(
-        matches!(made, CommitOutcome::Committed),
+        matches!(made, CommitOutcome::Committed { .. }),
         "expected a commit since hello.txt was added; got {made:?}"
     );
 
@@ -122,7 +122,7 @@ async fn push_to_origin_lands_worker_commit_in_mirror() {
     };
     let made = ws.commit("worker stage", id).await.unwrap();
     assert!(
-        matches!(made, CommitOutcome::Committed),
+        matches!(made, CommitOutcome::Committed { .. }),
         "expected a commit since from-worker.txt was added; got {made:?}"
     );
 

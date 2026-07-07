@@ -1446,12 +1446,24 @@ impl TaskRunSupervisor {
                         let message = format!("{}: {}", task.short_id, task.title);
                         match workspace.commit(&message, identity).await {
                             Ok(outcome) if outcome.committed() => {
-                                tracing::info!(
-                                    task_id = %task.short_id,
-                                    task_run_id = %run_id,
-                                    role = %role_kind.as_str(),
-                                    "supervisor: committed worker/architect changes"
-                                );
+                                let excluded = outcome.excluded();
+                                if excluded.is_empty() {
+                                    tracing::info!(
+                                        task_id = %task.short_id,
+                                        task_run_id = %run_id,
+                                        role = %role_kind.as_str(),
+                                        "supervisor: committed worker/architect changes"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        task_id = %task.short_id,
+                                        task_run_id = %run_id,
+                                        role = %role_kind.as_str(),
+                                        excluded_count = excluded.len(),
+                                        excluded_paths = ?excluded,
+                                        "supervisor: committed worker/architect changes (some scratch files excluded)"
+                                    );
+                                }
                                 // The push that makes this commit durable in the
                                 // mirror happens UNCONDITIONALLY just below the
                                 // match — see the comment there. We no longer
@@ -1467,17 +1479,22 @@ impl TaskRunSupervisor {
                                     task_id = %task.short_id,
                                     task_run_id = %run_id,
                                     role = %role_kind.as_str(),
+                                    excluded_count = excluded.len(),
                                     excluded_paths = ?excluded,
                                     "supervisor: no legitimate changes after stage; junk-only files excluded"
                                 );
                             }
-                            Ok(_) => {
+                            Ok(djinn_workspace::CommitOutcome::NoChanges) => {
                                 tracing::debug!(
                                     task_id = %task.short_id,
                                     task_run_id = %run_id,
                                     role = %role_kind.as_str(),
                                     "supervisor: no changes to commit after stage"
                                 );
+                            }
+                            Ok(djinn_workspace::CommitOutcome::Committed { .. }) => {
+                                // Unreachable: committed() guard already matched.
+                                unreachable!("Committed already matched by guard");
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -6216,6 +6233,447 @@ mod tests {
             complete.len(),
             1,
             "complete_monitored_reopen must be called once for loop-guard trip, got: {complete:?}"
+        );
+    }
+
+    // ── CommitOutcome excluded-path propagation tests ─────────────────────
+    //
+    // These tests verify that the WorkerDone/ArchitectDone auto-commit path
+    // in the supervisor correctly surfaces excluded-path data from the typed
+    // `CommitOutcome` at the reporting/logging boundary.
+
+    /// A services mock whose `execute_stage` writes files into the workspace
+    /// (simulating what a real worker does) and then returns `WorkerDone` so
+    /// the supervisor's auto-commit path exercises the full
+    /// `CommitOutcome` handling.
+    struct CommitPathServices {
+        cancel: CancellationToken,
+        task: Task,
+        updated_statuses: std::sync::Arc<std::sync::Mutex<Vec<TaskRunStatus>>>,
+        /// Closure called inside `execute_stage` with the workspace path.
+        /// Use this to write scratch/legitimate files before the supervisor
+        /// auto-commits.
+        write_fn: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync>,
+    }
+
+    #[async_trait]
+    impl SupervisorServices for CommitPathServices {
+        fn cancel(&self) -> &CancellationToken {
+            &self.cancel
+        }
+
+        async fn load_task(&self, task_id: String) -> Result<Task, String> {
+            assert_eq!(task_id, self.task.id);
+            Ok(self.task.clone())
+        }
+
+        async fn execute_stage(
+            &self,
+            _task: &Task,
+            workspace: &Workspace,
+            _role_kind: RoleKind,
+            _task_run_id: &str,
+            _spec: &TaskRunSpec,
+        ) -> Result<StageOutcome, StageError> {
+            (self.write_fn)(workspace.path());
+            Ok(StageOutcome::WorkerDone)
+        }
+
+        async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
+            TaskRunOutcome::WorkerSubmitted
+        }
+
+        async fn create_task_run(
+            &self,
+            _params: services::SerializableCreateTaskRunParams,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn update_task_run_status(
+            &self,
+            _run_id: String,
+            status: TaskRunStatus,
+        ) -> Result<(), String> {
+            self.updated_statuses
+                .lock()
+                .expect("updated statuses mutex poisoned")
+                .push(status);
+            Ok(())
+        }
+
+        async fn get_model_context_window(&self, _model_id: String) -> Result<i64, String> {
+            Ok(128_000)
+        }
+
+        async fn get_provider_base_url(
+            &self,
+            _catalog_provider_id: String,
+        ) -> Result<String, String> {
+            Ok("http://localhost".into())
+        }
+
+        async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+
+        async fn create_session(
+            &self,
+            _params: services::SerializableCreateSessionParams,
+        ) -> Result<djinn_core::models::SessionRecord, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn publish_session_message(
+            &self,
+            _session_id: String,
+            _task_id: String,
+            _agent_type: String,
+            _message: serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn get_environment_config(
+            &self,
+            _project_id: String,
+        ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn invoke_llm(
+            &self,
+            _model_id: String,
+            _conversation: djinn_provider::message::Conversation,
+            _tools: Vec<serde_json::Value>,
+            _tool_choice: Option<djinn_provider::provider::ToolChoice>,
+        ) -> Result<djinn_provider::provider::LlmResponse, String> {
+            unimplemented!("not exercised")
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn update_session_status(
+            &self,
+            _session_id: String,
+            _status: djinn_core::models::SessionStatus,
+            _tokens_in: i64,
+            _tokens_out: i64,
+            _cache_read: i64,
+            _cache_write: i64,
+            _parked_reason: Option<String>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn tool_github_search(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_github_fetch_file(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_ci_job_log(
+            &self,
+            _session_task_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn emit_djinn_event(
+            &self,
+            _event: services::SerializableDjinnEvent,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn transition_task(
+            &self,
+            _task_id: String,
+            _action: String,
+            _reason: Option<String>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn run_arbiter_preapproval_gate(
+            &self,
+            _task: &Task,
+        ) -> Result<ArbiterGateResult, String> {
+            Ok(ArbiterGateResult::Pass)
+        }
+
+        async fn record_arbiter_decision(
+            &self,
+            _task_id: String,
+            _decision: String,
+            _evidence_json: String,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn start_monitored_reopen(
+            &self,
+            _task_id: String,
+            _directive: String,
+            _verification_command: String,
+            _exclude_models: Vec<String>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn commit_path_spec(task_id: &str, project_id: &str, run_id: &str) -> TaskRunSpec {
+        TaskRunSpec {
+            task_run_id: run_id.into(),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/commit-path".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        }
+    }
+
+    /// Junk-only WorkerDone: supervisor must emit a distinct log line with
+    /// `excluded_count` and `excluded_paths` structured fields rather than
+    /// pretending the tree was clean.
+    #[tokio::test]
+    async fn worker_done_junk_only_emits_excluded_paths_in_logs() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "proj-junk-only";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let write_fn: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync> =
+            std::sync::Arc::new(|ws_path: &std::path::Path| {
+                std::fs::write(ws_path.join("patch.txt"), "scratch\n").expect("write patch.txt");
+                std::fs::write(ws_path.join("test.txt"), "scratch\n").expect("write test.txt");
+            });
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(CommitPathServices {
+            cancel: CancellationToken::new(),
+            task: fixture_task("task-junk", project_id),
+            updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            write_fn,
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = commit_path_spec("task-junk", project_id, "run-junk");
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(true)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // Run should complete normally (junk-only is not an error).
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::WorkerSubmitted),
+            "junk-only run must produce WorkerSubmitted, got {:?}",
+            report.outcome
+        );
+
+        let captured = logs.take();
+        // Must contain the junk-only message with structured fields.
+        assert!(
+            captured.contains("no legitimate changes after stage; junk-only files excluded"),
+            "expected junk-only log message, got:\n{captured}"
+        );
+        assert!(
+            captured.contains("excluded_count="),
+            "expected excluded_count structured field, got:\n{captured}"
+        );
+        assert!(
+            captured.contains("excluded_paths="),
+            "expected excluded_paths structured field, got:\n{captured}"
+        );
+        // Must NOT contain a generic "committed" message for this case.
+        assert!(
+            !captured.contains("committed worker/architect changes"),
+            "junk-only must NOT log as a normal commit, got:\n{captured}"
+        );
+    }
+
+    /// Legitimate + scratch WorkerDone: supervisor must commit the legitimate
+    /// file AND log the excluded scratch files alongside the committed message.
+    #[tokio::test]
+    async fn worker_done_legitimate_plus_scratch_logs_excluded_paths() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "proj-mixed";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let write_fn: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync> =
+            std::sync::Arc::new(|ws_path: &std::path::Path| {
+                // Legitimate source file
+                std::fs::write(ws_path.join("real.rs"), "fn main() {}\n").expect("write real.rs");
+                // Scratch files
+                std::fs::write(ws_path.join("patch.txt"), "scratch\n").expect("write patch.txt");
+                std::fs::write(ws_path.join("test2.txt"), "scratch\n").expect("write test2.txt");
+            });
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(CommitPathServices {
+            cancel: CancellationToken::new(),
+            task: fixture_task("task-mixed", project_id),
+            updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            write_fn,
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = commit_path_spec("task-mixed", project_id, "run-mixed");
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(true)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::WorkerSubmitted),
+            "mixed legit+scratch run must produce WorkerSubmitted, got {:?}",
+            report.outcome
+        );
+
+        let captured = logs.take();
+        // Must contain the committed message WITH scratch exclusion details.
+        assert!(
+            captured.contains("committed worker/architect changes (some scratch files excluded)"),
+            "expected committed-with-exclusions log message, got:\n{captured}"
+        );
+        assert!(
+            captured.contains("excluded_count="),
+            "expected excluded_count structured field, got:\n{captured}"
+        );
+        assert!(
+            captured.contains("excluded_paths="),
+            "expected excluded_paths structured field, got:\n{captured}"
+        );
+        // Must NOT contain the junk-only message (legitimate changes exist).
+        assert!(
+            !captured.contains("no legitimate changes after stage"),
+            "mixed commit must NOT log as junk-only, got:\n{captured}"
+        );
+    }
+
+    /// Clean WorkerDone (no files written): supervisor logs a debug no-op
+    /// message and does NOT emit excluded-path fields.
+    #[tokio::test]
+    async fn worker_done_clean_tree_logs_no_changes() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "proj-clean";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        // No-op write_fn: the workspace is untouched.
+        let write_fn: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync> =
+            std::sync::Arc::new(|_ws_path: &std::path::Path| {
+                // Intentionally empty — clean tree.
+            });
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(CommitPathServices {
+            cancel: CancellationToken::new(),
+            task: fixture_task("task-clean", project_id),
+            updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            write_fn,
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = commit_path_spec("task-clean", project_id, "run-clean");
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(true)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::WorkerSubmitted),
+            "clean tree run must produce WorkerSubmitted, got {:?}",
+            report.outcome
+        );
+
+        let captured = logs.take();
+        // Must contain the no-changes message (at debug level).
+        assert!(
+            captured.contains("no changes to commit after stage"),
+            "expected no-changes log message, got:\n{captured}"
+        );
+        // Must NOT contain excluded-path fields for a clean tree.
+        assert!(
+            !captured.contains("excluded_count="),
+            "clean tree must NOT log excluded_count, got:\n{captured}"
+        );
+        assert!(
+            !captured.contains("no legitimate changes"),
+            "clean tree must NOT log as junk-only, got:\n{captured}"
         );
     }
 }
