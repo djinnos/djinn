@@ -3327,7 +3327,7 @@ async fn protocol_violation_clean_exit_classified_as_failed_attempt() {
 
     let actor = coordinator_actor_for_tests(&db, &tx);
     let result = actor
-        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed")
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
         .await;
 
     let result = result.expect("classification must succeed");
@@ -3419,7 +3419,7 @@ async fn nonzero_exit_is_crash_outcome_distinct_from_clean_violation() {
 
     let actor = coordinator_actor_for_tests(&db, &tx);
     let result = actor
-        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "failed")
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "failed", "worker")
         .await;
 
     let result = result.expect("classification must succeed");
@@ -3503,7 +3503,7 @@ async fn already_terminal_task_exit_preserves_kill_noop() {
 
     let actor = coordinator_actor_for_tests(&db, &tx);
     let result = actor
-        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed")
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
         .await;
 
     let result = result.expect("classification must succeed");
@@ -3688,7 +3688,7 @@ async fn interrupted_session_nonterminal_is_crash_protocol_violation() {
 
     let actor = coordinator_actor_for_tests(&db, &tx);
     let result = actor
-        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "interrupted")
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "interrupted", "worker")
         .await;
 
     let result = result.expect("classification must succeed");
@@ -5363,7 +5363,7 @@ async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_id
 
     // ── Path A: clean exit on nonterminal task → ProtocolViolation ──
     let r1 = actor
-        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed")
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
         .await
         .expect("first classification must succeed");
     assert_eq!(
@@ -5379,7 +5379,7 @@ async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_id
 
     // ── Idempotency on the nonterminal path: second call sees same task state ──
     let r1_again = actor
-        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed")
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
         .await
         .expect("repeat classification must succeed");
     assert_eq!(
@@ -5413,7 +5413,7 @@ async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_id
         .unwrap();
 
     let r2 = actor
-        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed")
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
         .await
         .expect("terminal classification must succeed");
     assert_eq!(
@@ -5455,7 +5455,7 @@ async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_id
     //  idempotency here means the verdict/outcome are stable, not that the
     //  evidence row count is fixed. The append-only chain is the audit trail.)
     let r3 = actor
-        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed")
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
         .await
         .expect("repeat terminal classification must succeed");
     assert_eq!(
@@ -5658,4 +5658,258 @@ async fn repeated_recovery_ticks_do_not_duplicate_terminalization_or_release() {
         dead_after_tick3, dead_after_tick1,
         "tick 2 and tick 3 must NOT append additional dead_reclaimed rows"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Orphaned pending task_attempt terminalization (event path + reaper backstop).
+//
+// Regression: dispatch-start creates a `pending` task_attempts row, but a
+// cleanly-failed run (e.g. provider error → TaskRunOutcome::Failed) finalizes
+// its own session, so no recovery/zombie terminalizer ever fires and the row
+// stayed `pending` forever — `run_respawn_guard` then deferred every future
+// dispatch of that (task, role) pair (permanent wedge; 5 production tasks).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Event path: a session "failed" event for a nonterminal task must
+/// terminalize the dispatch-start `pending` attempt to `crashed` and unblock
+/// the respawn guard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_session_exit_terminalizes_pending_attempt_and_unblocks_respawn_guard() {
+    use crate::dispatch::respawn_guard::{RespawnGuardDecision, run_respawn_guard};
+    use djinn_core::models::SessionStatus;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "failed-exit-terminalize").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    // ── Dispatch-start: pending attempt row (as task_dispatch records it) ──
+    let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
+    let attempt_id =
+        crate::dispatch::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .expect("dispatch-start must create a pending attempt");
+
+    // ── A run + session that self-finalizes as failed (provider error) ──
+    let run_id = "run-failed-exit-terminalize";
+    let run_repo = TaskRunRepository::new(db.clone());
+    run_repo
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    let session = session_repo
+        .update(&session.id, SessionStatus::Failed, 0, 0, 0, 0, None)
+        .await
+        .unwrap();
+    run_repo
+        .update_status(run_id, djinn_core::models::TaskRunStatus::Failed)
+        .await
+        .unwrap();
+
+    // ── Deliver the session "failed" event through the real handler ──
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor
+        .handle_event(DjinnEventEnvelope {
+            entity_type: "session",
+            action: "failed",
+            payload: serde_json::to_value(&session).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        })
+        .await;
+
+    // ── The pending attempt is terminal (crashed) ──
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let in_flight = attempt_repo
+        .latest_pending_or_submitted(&task.id, Some("worker"))
+        .await
+        .unwrap();
+    assert!(
+        in_flight.is_none(),
+        "no pending/submitted attempt may survive a failed session exit"
+    );
+    let attempt = attempt_repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(attempt.outcome, "crashed");
+    assert!(
+        attempt.terminal_at.is_some(),
+        "terminal_at must be stamped on the crashed attempt"
+    );
+
+    // ── The respawn guard no longer wedges the (task, role) pair ──
+    let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+    assert_eq!(
+        decision,
+        RespawnGuardDecision::Allow,
+        "respawn guard must allow dispatch after the attempt is terminalized"
+    );
+
+    // ── Idempotency: a duplicate failed event is a no-op ──
+    actor
+        .handle_event(DjinnEventEnvelope {
+            entity_type: "session",
+            action: "failed",
+            payload: serde_json::to_value(&session).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        })
+        .await;
+    let all = attempt_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(all.len(), 1, "duplicate exit events must not create rows");
+    assert_eq!(all[0].outcome, "crashed");
+}
+
+/// Backdate a task_attempt's `created_at` so the orphan reaper's threshold
+/// comparison sees it as old (well past the 15-minute threshold).
+async fn backdate_attempt(db: &Database, attempt_id: &str) {
+    djinn_db::test_support::backdate_task_attempt_created_at(db, attempt_id, "1 hour").await;
+}
+
+/// Reaper backstop: a stale `pending` attempt whose task has a terminal (or
+/// absent) task_run is finalized to `crashed`; a fresh pending row and one
+/// backed by a live task_run are left untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orphaned_pending_attempt_reaper_finalizes_stale_rows_only() {
+    use crate::dispatch::respawn_guard::{RespawnGuardDecision, run_respawn_guard};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+
+    let run_repo = TaskRunRepository::new(db.clone());
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+
+    let seed_attempt = |task_id: String| {
+        let db = db.clone();
+        async move {
+            let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task_id, "worker");
+            crate::dispatch::attempt_lifecycle::record_dispatch_start(
+                &db, &task_id, "worker", None, &dk,
+            )
+            .await
+            .expect("pending attempt must insert")
+        }
+    };
+
+    // A: stale attempt + terminal task_run → reaped.
+    let (task_a, _n) = create_task_with_note(&db, &tx, "reaper-terminal-run").await;
+    let attempt_a = seed_attempt(task_a.id.clone()).await;
+    backdate_attempt(&db, &attempt_a).await;
+    run_repo
+        .create(CreateTaskRunParams {
+            id: "run-reaper-a",
+            project_id: &task_a.project_id,
+            task_id: &task_a.id,
+            trigger_type: "manual",
+            status: Some("failed"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    // B: stale attempt + NO task_run at all → reaped.
+    let (task_b, _n) = create_task_with_note(&db, &tx, "reaper-absent-run").await;
+    let attempt_b = seed_attempt(task_b.id.clone()).await;
+    backdate_attempt(&db, &attempt_b).await;
+
+    // C: FRESH attempt (younger than threshold) + terminal task_run → kept.
+    let (task_c, _n) = create_task_with_note(&db, &tx, "reaper-fresh-attempt").await;
+    let attempt_c = seed_attempt(task_c.id.clone()).await;
+    run_repo
+        .create(CreateTaskRunParams {
+            id: "run-reaper-c",
+            project_id: &task_c.project_id,
+            task_id: &task_c.id,
+            trigger_type: "manual",
+            status: Some("failed"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    // D: stale attempt + LIVE (running) task_run → kept.
+    let (task_d, _n) = create_task_with_note(&db, &tx, "reaper-live-run").await;
+    let attempt_d = seed_attempt(task_d.id.clone()).await;
+    backdate_attempt(&db, &attempt_d).await;
+    run_repo
+        .create(CreateTaskRunParams {
+            id: "run-reaper-d",
+            project_id: &task_d.project_id,
+            task_id: &task_d.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "test").await;
+
+    // A and B reaped to crashed with terminal_at stamped.
+    for (attempt_id, label) in [(&attempt_a, "terminal-run"), (&attempt_b, "absent-run")] {
+        let attempt = attempt_repo.get(attempt_id).await.unwrap().unwrap();
+        assert_eq!(attempt.outcome, "crashed", "{label}: must be reaped");
+        assert!(
+            attempt.terminal_at.is_some(),
+            "{label}: terminal_at must be stamped"
+        );
+    }
+
+    // C (fresh) and D (live run) untouched.
+    for (attempt_id, label) in [(&attempt_c, "fresh-attempt"), (&attempt_d, "live-run")] {
+        let attempt = attempt_repo.get(attempt_id).await.unwrap().unwrap();
+        assert_eq!(attempt.outcome, "pending", "{label}: must NOT be reaped");
+        assert!(attempt.terminal_at.is_none(), "{label}: must stay live");
+    }
+
+    // The reaped tasks' respawn guards unblock; the live one still defers.
+    assert_eq!(
+        run_respawn_guard(&db, &task_a.id, "worker", None).await,
+        RespawnGuardDecision::Allow,
+        "guard must allow dispatch for a reaped task"
+    );
+    assert!(
+        matches!(
+            run_respawn_guard(&db, &task_d.id, "worker", None).await,
+            RespawnGuardDecision::Defer(_)
+        ),
+        "guard must still defer while a live run backs the pending attempt"
+    );
+
+    // Idempotency: a second sweep changes nothing and creates no rows.
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "test").await;
+    for task in [&task_a, &task_b, &task_c, &task_d] {
+        let all = attempt_repo.list_for_task(&task.id).await.unwrap();
+        assert_eq!(all.len(), 1, "sweep must never create attempt rows");
+    }
 }
