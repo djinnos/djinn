@@ -1016,6 +1016,142 @@ impl NoteRepository {
         .fetch_all(self.db.pool())
         .await?)
     }
+
+    /// List active, non-archived notes in the given project that have a
+    /// current row in `note_embedding_meta`.
+    ///
+    /// Returns enough metadata for the embedding association refresh
+    /// algorithm to detect stale or changed embeddings without a second
+    /// query.
+    ///
+    /// Uses a runtime (non-`query!`) SQL query consistent with the existing
+    /// migration-97 pattern in `association.rs`, since the `.sqlx/` offline
+    /// cache does not include migration 97 columns.
+    pub async fn list_eligible_embedding_association_notes(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<EligibleEmbeddingNote>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, EligibleEmbeddingNote>(
+            r#"SELECT n.id AS note_id, m.model_version, m.embedding_dim, m.content_hash
+               FROM notes n
+               JOIN note_embedding_meta m ON m.note_id = n.id
+               WHERE n.project_id = $1 AND n.status = 'active'"#,
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// List note IDs of active, non-archived notes in the project that do
+    /// NOT have a row in `note_embedding_meta`.
+    ///
+    /// Used by housekeeping to report embedding coverage gaps.
+    pub async fn list_notes_missing_embeddings(&self, project_id: &str) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar::<_, String>(
+            r#"SELECT n.id
+               FROM notes n
+               LEFT JOIN note_embedding_meta m ON m.note_id = n.id
+               WHERE n.project_id = $1
+                 AND n.status = 'active'
+                 AND m.note_id IS NULL"#,
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Fetch bounded nearest-neighbor embedding candidates for a note.
+    ///
+    /// Fetches the note's embedding vector via
+    /// [`get_note_embedding_vector`](Self::get_note_embedding_vector),
+    /// queries the vector store for nearest neighbors via
+    /// [`query_similar_embeddings`](Self::query_similar_embeddings),
+    /// excludes the query note itself, and converts the vector store's
+    /// distance metric to cosine similarity.
+    ///
+    /// **Distance-to-similarity conversion:**
+    /// - Qdrant: `distance = -(cosine_similarity)` → `similarity = -distance`
+    /// - SQLite-vec: cosine distance `d` → `similarity = 1.0 - d`
+    /// - Noop: returns empty vec (no vectors are stored)
+    ///
+    /// Returns an empty vec if the embedding is missing or the vector store
+    /// returns no results.
+    pub async fn query_embedding_candidates(
+        &self,
+        note_id: &str,
+        _project_id: &str,
+        candidate_pool: usize,
+    ) -> Result<Vec<EmbeddingCandidate>> {
+        self.db.ensure_initialized().await?;
+
+        let vector = match self.get_note_embedding_vector(note_id).await? {
+            Some(v) => v,
+            None => return Ok(vec![]),
+        };
+
+        // Request one extra to account for the query note potentially
+        // appearing in the nearest-neighbor results.
+        let matches = self
+            .query_similar_embeddings(
+                &vector,
+                EmbeddingQueryContext::default(),
+                candidate_pool + 1,
+            )
+            .await?;
+
+        let backend = self.vector_store().backend();
+        let candidates: Vec<EmbeddingCandidate> = matches
+            .into_iter()
+            .filter(|m| m.note_id != note_id)
+            .map(|m| {
+                let cosine_similarity = match backend {
+                    // Qdrant stores `distance = -(cosine_similarity)`.
+                    NoteVectorBackend::Qdrant => -m.distance,
+                    // SQLite-vec returns cosine distance (0 = identical).
+                    NoteVectorBackend::SqliteVec => 1.0 - m.distance,
+                    // Noop returns empty vec; this arm is unreachable but
+                    // defensively preserves the raw value.
+                    NoteVectorBackend::Noop => m.distance,
+                };
+                EmbeddingCandidate {
+                    note_id: m.note_id,
+                    cosine_similarity,
+                }
+            })
+            .take(candidate_pool)
+            .collect();
+
+        Ok(candidates)
+    }
+}
+
+/// A note eligible for embedding association refresh: active, non-archived,
+/// with a current row in `note_embedding_meta`.
+///
+/// Returned by [`NoteRepository::list_eligible_embedding_association_notes`].
+/// Carries enough metadata for the refresh algorithm to detect stale or
+/// changed embeddings without a second query.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct EligibleEmbeddingNote {
+    pub note_id: String,
+    pub model_version: String,
+    pub embedding_dim: i32,
+    pub content_hash: String,
+}
+
+/// A candidate note from the embedding vector store for association minting.
+///
+/// Returned by [`NoteRepository::query_embedding_candidates`].
+#[derive(Clone, Debug)]
+pub struct EmbeddingCandidate {
+    pub note_id: String,
+    /// Cosine similarity in `[-1.0, 1.0]`. Derived from the vector store's
+    /// distance metric:
+    /// - Qdrant: `distance = -(cosine_similarity)` → `similarity = -distance`
+    /// - SQLite-vec: cosine distance `d` → `similarity = 1.0 - d`
+    pub cosine_similarity: f64,
 }
 
 /// Per-note state surfaced by [`NoteRepository::list_repair_embedding_rows`].
