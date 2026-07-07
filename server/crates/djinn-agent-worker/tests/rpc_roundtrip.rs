@@ -287,6 +287,14 @@ impl SupervisorServices for FakeServices {
     async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
         unimplemented!("not exercised on the auth-rejection path")
     }
+
+    async fn record_arbiter_session_termination(
+        &self,
+        _task_id: String,
+        _is_infra_failure: bool,
+    ) -> Result<bool, String> {
+        unimplemented!("not exercised on the auth-rejection path")
+    }
 }
 
 /// Bind `serve_on_tcp` to `127.0.0.1:0`, return the resolved `(SocketAddr,

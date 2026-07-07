@@ -2283,6 +2283,30 @@ impl TaskRunSupervisor {
                                 "supervisor: planner-Failed close transition skipped"
                             );
                         }
+                        // Arbiter session termination accounting: distinguish
+                        // provider/infra failures from sessions that ran and
+                        // ended without a valid decision.  Infra failures
+                        // before a decision increment infra observability
+                        // only; no-decision failures increment
+                        // decision_failure_count (capped at 2).  At the cap,
+                        // the arbitration is parked with a generated failure
+                        // dossier.
+                        if role_kind == RoleKind::Lead {
+                            let is_infra = provider_failure.is_some();
+                            if let Err(e) = self
+                                .services
+                                .record_arbiter_session_termination(spec.task_id.clone(), is_infra)
+                                .await
+                            {
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    error = %e,
+                                    "supervisor: record_arbiter_session_termination failed — \
+                                     accounting skipped"
+                                );
+                            }
+                        }
                         if let Some(class) = provider_failure {
                             tracing::warn!(
                                 target: "djinn_supervisor::provider_failure",
@@ -2996,6 +3020,14 @@ mod tests {
 
         async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
             Ok(())
+        }
+
+        async fn record_arbiter_session_termination(
+            &self,
+            _task_id: String,
+            _is_infra_failure: bool,
+        ) -> Result<bool, String> {
+            Ok(false)
         }
     }
 
@@ -5374,6 +5406,14 @@ mod tests {
         async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
             Ok(())
         }
+
+        async fn record_arbiter_session_termination(
+            &self,
+            _task_id: String,
+            _is_infra_failure: bool,
+        ) -> Result<bool, String> {
+            Ok(false)
+        }
     }
 
     // ── Arbiter pre-approval gate tests ──────────────────────────────────────
@@ -5617,6 +5657,14 @@ mod tests {
                 .expect("complete_monitored_reopen_calls mutex poisoned")
                 .push(task_id);
             Ok(())
+        }
+
+        async fn record_arbiter_session_termination(
+            &self,
+            _task_id: String,
+            _is_infra_failure: bool,
+        ) -> Result<bool, String> {
+            Ok(false)
         }
     }
 

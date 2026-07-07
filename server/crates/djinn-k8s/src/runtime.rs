@@ -2020,6 +2020,14 @@ mod tests {
             async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
                 unimplemented!()
             }
+
+            async fn record_arbiter_session_termination(
+                &self,
+                _task_id: String,
+                _is_infra_failure: bool,
+            ) -> Result<bool, String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

@@ -449,6 +449,13 @@ pub enum ServiceRpcRequest {
     /// Marks the monitored-reopen attempt complete on a terminal worker
     /// outcome.  Appended at the enum tail for bincode stability.
     CompleteMonitoredReopen { task_id: String },
+    /// [`crate::SupervisorServices::record_arbiter_session_termination`].
+    /// Records bounded session termination accounting.  Appended at the
+    /// enum tail for bincode stability.
+    RecordArbiterSessionTermination {
+        task_id: String,
+        is_infra_failure: bool,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -530,6 +537,10 @@ pub enum ServiceRpcResponse {
     /// Monitored-reopen attempt-completion ack.  `Err` carries the host's
     /// error.  Appended at the enum tail for bincode stability.
     CompleteMonitoredReopen(Result<(), String>),
+    /// Arbiter session termination accounting ack.  `Ok(true)` when the
+    /// decision-failure cap was reached and the arbitration was parked.
+    /// Appended at the enum tail for bincode stability.
+    RecordArbiterSessionTermination(Result<bool, String>),
 }
 
 #[cfg(test)]

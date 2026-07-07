@@ -3097,7 +3097,11 @@ warning: something
             .build()
             .expect("runtime")
             .block_on(run_cargo_sweep_step_with_cargo(
-                cargo_bin, "project-sweep", workspace, args, "sweep-file",
+                cargo_bin,
+                "project-sweep",
+                workspace,
+                args,
+                "sweep-file",
             ))
     }
 

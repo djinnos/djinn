@@ -599,6 +599,16 @@ impl SupervisorServices for WorkerSupervisorServices {
     async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String> {
         self.rpc.complete_monitored_reopen(task_id).await
     }
+
+    async fn record_arbiter_session_termination(
+        &self,
+        task_id: String,
+        is_infra_failure: bool,
+    ) -> Result<bool, String> {
+        self.rpc
+            .record_arbiter_session_termination(task_id, is_infra_failure)
+            .await
+    }
 }
 
 #[cfg(test)]

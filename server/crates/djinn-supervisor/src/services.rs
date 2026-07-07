@@ -371,4 +371,23 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// cycle) so re-entry cannot trigger a second arbiter or worker retry.
     /// Failures are non-fatal — callers log and continue.
     async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String>;
+
+    /// Record the termination of an arbiter session for bounded accounting.
+    ///
+    /// `is_infra_failure` is `true` when the failure was a provider/infra
+    /// error (before any decision was made), `false` when the session ran
+    /// but ended without a valid decision.
+    ///
+    /// Returns `Ok(true)` when the decision-failure cap was reached and the
+    /// arbitration was parked with a generated failure dossier (no further
+    /// arbiter dispatch for this hold cycle), `Ok(false)` when the
+    /// termination was recorded but the arbiter may be re-dispatched.
+    ///
+    /// Infra failures after a decision has been accepted (consumed
+    /// arbitration) are no-ops — they do not mutate accounting.
+    async fn record_arbiter_session_termination(
+        &self,
+        task_id: String,
+        is_infra_failure: bool,
+    ) -> Result<bool, String>;
 }
