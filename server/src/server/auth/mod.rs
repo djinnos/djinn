@@ -1,3 +1,4 @@
+// djinn:allow-oversize — self-setup gate + boot-token + existing auth routes; split when touched substantively.
 //! GitHub App user-to-server OAuth HTTP routes (`/auth/*`).
 //!
 //! Implements the browser redirect flow used by the web client to force users
@@ -172,7 +173,6 @@ async fn config(State(state): State<AppState>) -> Json<ConfigResponse> {
     })
 }
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI8, Ordering};
 
 // ─── Self-setup gate helpers ──────────────────────────────────────────────────
@@ -181,18 +181,17 @@ use std::sync::atomic::{AtomicI8, Ordering};
 /// -1 = no override (use env var), 0 = forced false, 1 = forced true.
 static SELF_SETUP_OVERRIDE: AtomicI8 = AtomicI8::new(-1);
 
-/// Mutex that serializes access to the self-setup override during tests.
-/// Prevents parallel tests from interfering with each other's override state.
+/// Async mutex that serialises access to the self-setup override during tests.
+/// Using `tokio::sync::Mutex` avoids the clippy `await_holding_lock` lint that
+/// fires for `std::sync::Mutex` guards held across `.await` points.
 #[cfg(test)]
-static SELF_SETUP_TEST_LOCK: Mutex<()> = Mutex::new(());
+static SELF_SETUP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Acquire the test lock, set the override, and return a guard that clears
-/// the override and releases the lock on drop.
+/// Acquire the async test lock, set the override, and return the guard.
+/// The override stays set until the guard is dropped (end of test).
 #[cfg(test)]
-fn with_self_setup_override(value: Option<bool>) -> std::sync::MutexGuard<'static, ()> {
-    let guard = SELF_SETUP_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+async fn with_self_setup_override(value: Option<bool>) -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = SELF_SETUP_TEST_LOCK.lock().await;
     let v = match value {
         None => -1,
         Some(true) => 1,
@@ -200,20 +199,6 @@ fn with_self_setup_override(value: Option<bool>) -> std::sync::MutexGuard<'stati
     };
     SELF_SETUP_OVERRIDE.store(v, Ordering::SeqCst);
     guard
-}
-
-/// Set a test-only override for `self_setup_enabled()`. Pass `None` to
-/// clear the override and restore env-var behavior.
-/// NOTE: for parallel-safe tests, prefer `with_self_setup_override` which
-/// holds a serialization lock.
-#[cfg(test)]
-fn set_self_setup_override(value: Option<bool>) {
-    let v = match value {
-        None => -1,
-        Some(true) => 1,
-        Some(false) => 0,
-    };
-    SELF_SETUP_OVERRIDE.store(v, Ordering::SeqCst);
 }
 
 /// Whether the `DJINN_ENABLE_SELF_SETUP` environment variable is set to true.
@@ -1480,9 +1465,9 @@ mod tests {
     // ─── Self-setup gate tests ───────────────────────────────────────────────
 
     /// When the override is disabled, `self_setup_enabled()` returns false.
-    #[test]
-    fn self_setup_disabled_by_default() {
-        let _lock = with_self_setup_override(Some(false));
+    #[tokio::test]
+    async fn self_setup_disabled_by_default() {
+        let _lock = with_self_setup_override(Some(false)).await;
         assert!(!self_setup_enabled());
     }
 
@@ -1514,7 +1499,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_reports_no_self_setup_when_gate_disabled() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(false));
+        let _lock = with_self_setup_override(Some(false)).await;
         let state = test_helpers::test_app_state_in_memory().await;
         let resp = config(State(state)).await;
         let body = resp.0;
@@ -1526,7 +1511,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_reports_self_setup_when_enabled_and_unconfigured() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
         let resp = config(State(state)).await;
         let body = resp.0;
@@ -1538,7 +1523,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_reports_no_self_setup_when_credentials_present() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
         let cfg = djinn_provider::github_app::AppConfig {
             app_id: 1,
@@ -1562,7 +1547,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_app_returns_404_when_gate_disabled() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(false));
+        let _lock = with_self_setup_override(Some(false)).await;
         let state = test_helpers::test_app_state_in_memory().await;
         let headers = HeaderMap::new();
         let resp = create_app(
@@ -1578,7 +1563,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_app_returns_404_when_credentials_present() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
         let cfg = djinn_provider::github_app::AppConfig {
             app_id: 1,
@@ -1605,7 +1590,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn manifest_callback_returns_404_when_gate_disabled() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(false));
+        let _lock = with_self_setup_override(Some(false)).await;
         let state = test_helpers::test_app_state_in_memory().await;
         let headers = HeaderMap::new();
         let resp = app_manifest_callback(State(state), headers).await;
@@ -1619,7 +1604,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn valid_boot_token_exchange_sets_session_and_redirects() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
 
         let (raw_token, bt) = boot_token::BootToken::generate();
@@ -1676,7 +1661,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn invalid_boot_token_is_rejected() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
 
         let (_raw, bt) = boot_token::BootToken::generate();
@@ -1699,7 +1684,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn used_boot_token_is_rejected() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
 
         let (raw_token, bt) = boot_token::BootToken::generate();
@@ -1734,7 +1719,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn no_boot_token_returns_410() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
 
         let headers = HeaderMap::new();
@@ -1754,7 +1739,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn empty_boot_token_returns_400() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
 
         let headers = HeaderMap::new();
@@ -1774,7 +1759,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_app_without_token_or_session_returns_401() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
         let headers = HeaderMap::new();
         let resp = create_app(
@@ -1791,7 +1776,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_app_with_valid_session_returns_200() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
 
         let mut headers = HeaderMap::new();
@@ -1815,7 +1800,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn manifest_callback_with_valid_session_returns_200() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
 
         let mut headers = HeaderMap::new();
@@ -1833,7 +1818,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn manifest_callback_without_session_returns_401() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
         let headers = HeaderMap::new();
         let resp = app_manifest_callback(State(state), headers).await;
@@ -1844,7 +1829,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn token_exchange_clean_redirect_no_leak() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(true));
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
         let (raw_token, bt) = boot_token::BootToken::generate();
         state.set_boot_token_for_tests(Some(bt)).await;
@@ -1877,7 +1862,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn no_loopback_bypass_on_setup_routes() {
         use crate::test_helpers;
-        let _lock = with_self_setup_override(Some(false));
+        let _lock = with_self_setup_override(Some(false)).await;
         let state = test_helpers::test_app_state_in_memory().await;
 
         let mut headers = HeaderMap::new();
