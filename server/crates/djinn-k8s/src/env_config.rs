@@ -259,4 +259,86 @@ mod tests {
         // the same string (intentional naming alignment).
         assert_eq!(ENV_CONFIG_KEY, ENV_CONFIG_SECRET_DATA_KEY);
     }
+
+    // ---- hgd0 Wave 1 transport compatibility tests -------------------------
+
+    /// AC1: A minimal JSON blob that predates the `lifecycle` field (an "old
+    /// config") deserializes into `EnvironmentConfig` with an empty
+    /// `lifecycle.pre_task` list thanks to `#[serde(default)]`.  This proves
+    /// rolling compatibility: new runtime + old/no config → empty pre_task.
+    #[test]
+    fn old_json_without_lifecycle_field_defaults_to_empty_pretask() {
+        let old_json = r#"{"schema_version":1}"#;
+        let cfg: djinn_stack::environment::EnvironmentConfig =
+            serde_json::from_str(old_json).expect("old config must deserialize");
+        assert_eq!(cfg.schema_version, 1);
+        assert!(
+            cfg.lifecycle.pre_task.is_empty(),
+            "old config without lifecycle field must default to empty pre_task"
+        );
+    }
+
+    /// AC1: An empty JSON object (the Dolt column default `'{}'`) deserializes
+    /// with empty `lifecycle.pre_task`.  This is the most basic backward-compat
+    /// case: a project that never had any environment config written.
+    #[test]
+    fn empty_json_object_defaults_to_empty_pretask() {
+        let empty_json = r#"{}"#;
+        let cfg: djinn_stack::environment::EnvironmentConfig =
+            serde_json::from_str(empty_json).expect("empty config must deserialize");
+        assert!(
+            cfg.lifecycle.pre_task.is_empty(),
+            "empty JSON object must default to empty pre_task"
+        );
+    }
+
+    /// AC2: Non-empty `PreTaskCommand`s serialize to JSON bytes that round-trip
+    /// back through `serde_json` preserving the exact command, name, and timeout.
+    /// This is the payload shape the Secret transport carries to the worker.
+    #[test]
+    fn nonempty_pretask_commands_serialize_as_json_bytes() {
+        use djinn_stack::environment::{LifecycleHooks, PreTaskCommand, PreTaskFailurePolicy};
+
+        let cfg = djinn_stack::environment::EnvironmentConfig {
+            schema_version: 1,
+            lifecycle: LifecycleHooks {
+                pre_task: vec![
+                    PreTaskCommand {
+                        name: Some("setup-db".into()),
+                        command: "python manage.py migrate".into(),
+                        timeout_seconds: 120,
+                        failure_policy: PreTaskFailurePolicy::default(),
+                    },
+                    PreTaskCommand {
+                        name: None,
+                        command: "npm ci".into(),
+                        timeout_seconds: 300,
+                        failure_policy: PreTaskFailurePolicy::default(),
+                    },
+                ],
+                ..LifecycleHooks::default()
+            },
+            ..djinn_stack::environment::EnvironmentConfig::empty()
+        };
+
+        let json_bytes = serde_json::to_vec(&cfg).expect("serialize");
+        let json_str = std::str::from_utf8(&json_bytes).expect("valid UTF-8");
+        let round_tripped: djinn_stack::environment::EnvironmentConfig =
+            serde_json::from_str(json_str).expect("deserialize");
+
+        assert_eq!(round_tripped.lifecycle.pre_task.len(), 2);
+        assert_eq!(
+            round_tripped.lifecycle.pre_task[0].command,
+            "python manage.py migrate"
+        );
+        assert_eq!(
+            round_tripped.lifecycle.pre_task[0].name.as_deref(),
+            Some("setup-db")
+        );
+        assert_eq!(round_tripped.lifecycle.pre_task[0].timeout_seconds, 120);
+        assert_eq!(round_tripped.lifecycle.pre_task[1].command, "npm ci");
+        assert_eq!(round_tripped.lifecycle.pre_task[1].name, None);
+        assert_eq!(round_tripped.lifecycle.pre_task[1].timeout_seconds, 300);
+        assert!(round_tripped.validate().is_ok());
+    }
 }
