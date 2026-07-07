@@ -1094,7 +1094,7 @@ impl TaskRunSupervisor {
                         let message =
                             format!("Merge {} into {}", spec.base_branch, spec.task_branch);
                         match workspace.commit(&message, identity).await {
-                            Ok(true) => {
+                            Ok(outcome) if outcome.committed() => {
                                 info!(
                                     task_run_id = %run_id,
                                     task_id = %spec.task_id,
@@ -1122,7 +1122,7 @@ impl TaskRunSupervisor {
                                     );
                                 }
                             }
-                            Ok(false) => {
+                            Ok(_outcome) => {
                                 // try_merge staged a non-empty diff (we were
                                 // behind), so this should not happen; if it
                                 // does the merge produced no tree change and
@@ -1437,7 +1437,7 @@ impl TaskRunSupervisor {
                         };
                         let message = format!("{}: {}", task.short_id, task.title);
                         match workspace.commit(&message, identity).await {
-                            Ok(true) => {
+                            Ok(outcome) if outcome.committed() => {
                                 tracing::info!(
                                     task_id = %task.short_id,
                                     task_run_id = %run_id,
@@ -1452,7 +1452,18 @@ impl TaskRunSupervisor {
                                 // clean and this arm un-taken, yet their work
                                 // still needs pushing. One push site covers both.
                             }
-                            Ok(false) => {
+                            Ok(djinn_workspace::CommitOutcome::NoLegitimateChanges {
+                                ref excluded,
+                            }) => {
+                                tracing::info!(
+                                    task_id = %task.short_id,
+                                    task_run_id = %run_id,
+                                    role = %role_kind.as_str(),
+                                    excluded_paths = ?excluded,
+                                    "supervisor: no legitimate changes after stage; junk-only files excluded"
+                                );
+                            }
+                            Ok(_) => {
                                 tracing::debug!(
                                     task_id = %task.short_id,
                                     task_run_id = %run_id,

@@ -26,7 +26,7 @@ pub use mirror::{
     mirror_path_for, mirrors_root,
 };
 pub use workspace::{
-    EphemeralWorkspaceError, GitIdentity, MergeOutcome, MergeParentOutcome, Workspace,
-    normalize_mtimes_at,
+    CommitOutcome, EphemeralWorkspaceError, GitIdentity, MergeOutcome, MergeParentOutcome,
+    Workspace, normalize_mtimes_at,
 };
 pub use workspace_store::{WorkspaceError, WorkspaceStore, workspace_path_for, workspaces_root};
