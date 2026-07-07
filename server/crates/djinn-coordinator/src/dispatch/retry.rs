@@ -2142,7 +2142,7 @@ impl CoordinatorActor {
             DispatchOutcome::PoolDead => {
                 tracing::error!("CoordinatorActor: planner escalation — slot pool actor dead");
             }
-            DispatchOutcome::Failed => {
+            DispatchOutcome::Failed { .. } => {
                 tracing::debug!(outcome = "error", task_id = %review_task.short_id, role = "planner");
                 tracing::debug!(
                     "CoordinatorActor: planner escalation — no model could accept Planner dispatch"

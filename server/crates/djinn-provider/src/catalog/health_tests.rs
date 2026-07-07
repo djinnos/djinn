@@ -822,29 +822,42 @@ fn apply_breaker_check_for_does_not_trip_below_threshold() {
 }
 
 #[test]
-fn take_pending_observations_returns_and_clears_buffer() {
+fn record_failure_observation_increments_counters_without_buffering() {
     let ht = HealthTracker::new();
     ht.record_failure_observation(Some("user-a"), "model-a");
     ht.record_failure_observation(Some("user-b"), "model-b");
-    let pending = ht.take_pending_observations();
-    assert_eq!(pending.len(), 2);
-    assert!(pending.iter().any(|k| k.model_id == "model-a"));
-    assert!(pending.iter().any(|k| k.model_id == "model-b"));
-
-    // Second call returns empty.
-    let pending2 = ht.take_pending_observations();
-    assert!(pending2.is_empty());
+    // Successive calls increment counters idempotently; the tracker no
+    // longer exposes a global observation buffer (chain-scoped observations
+    // are owned by the dispatch caller, see `try_dispatch_to_pool`).
+    let health_a = ht.model_health(Some("user-a"), "model-a");
+    let health_b = ht.model_health(Some("user-b"), "model-b");
+    assert_eq!(health_a.consecutive_failures, 1);
+    assert_eq!(health_a.total_failures, 1);
+    assert_eq!(health_b.consecutive_failures, 1);
+    assert_eq!(health_b.total_failures, 1);
+    // Neither bucket should have tripped — recording an observation never
+    // trips the breaker; that only happens via `apply_breaker_check_for`.
+    assert!(ht.is_available(Some("user-a"), "model-a"));
+    assert!(ht.is_available(Some("user-b"), "model-b"));
 }
 
 #[test]
 fn breaker_trips_on_chain_exhaustion_after_deferred_observations() {
     let ht = HealthTracker::new();
-    // Simulate 3 chain exhaustions, each recording 1 observation per model.
+    // Simulate 3 chain exhaustions, each recording 1 observation per model
+    // and then evaluating the breaker check.  Because `record_failure_observation`
+    // is now chain-agnostic, the caller (i.e. `CoordinatorActor::apply_chain_exhaustion_side_effects`)
+    // tracks chain-scoped observations itself and passes them explicitly
+    // to `apply_breaker_check_for`.
     for _ in 0..3 {
         ht.record_failure_observation(S, "model-a");
         ht.record_failure_observation(S, "model-b");
-        // Simulate chain exhaustion: apply breaker for all pending observations.
-        for key in ht.take_pending_observations() {
+        let observed: Vec<_> = [HealthKey::new(S, "model-a"), HealthKey::new(S, "model-b")]
+            .into_iter()
+            .collect();
+        // Simulate chain exhaustion: apply breaker for the chain's
+        // observations explicitly.
+        for key in &observed {
             ht.apply_breaker_check_for(key.scope.as_deref(), &key.model_id);
         }
     }
@@ -859,21 +872,28 @@ fn breaker_trips_on_chain_exhaustion_after_deferred_observations() {
 }
 
 #[test]
-fn successful_fallback_discards_pending_observations() {
+fn successful_fallback_does_not_apply_breaker_check() {
     let ht = HealthTracker::new();
     // Record 2 observations (below threshold) for model-a.
     ht.record_failure_observation(S, "model-a");
     ht.record_failure_observation(S, "model-a");
-    // Simulate successful fallback: observations are NOT consumed
-    // (apply_breaker_check_for is only called on chain exhaustion).
-    // model-a stays available because breaker threshold (3) is not reached.
+    // Simulate a successful fallback: `apply_chain_exhaustion_side_effects`
+    // is NOT called on the success path, so the breaker check is never
+    // evaluated and the observations are discarded.  model-a stays
+    // available because (a) breaker threshold (3) is not reached and
+    // (b) the dispatcher never invoked `apply_breaker_check_for`.
     assert!(
         ht.is_available(S, "model-a"),
         "model-a should be available — 2 failures below threshold, no breaker check applied"
     );
-    // Pending observations still exist (would be consumed on next chain exhaustion).
-    let pending = ht.take_pending_observations();
-    assert_eq!(pending.len(), 2);
+    // `apply_breaker_check_for` is also a no-op as long as the threshold is
+    // not reached, mirroring the chain-exhaustion path's "no premature trip"
+    // contract.
+    ht.apply_breaker_check_for(S, "model-a");
+    assert!(
+        ht.is_available(S, "model-a"),
+        "model-a must remain available: breaker check below threshold is a no-op"
+    );
 }
 
 #[test]

@@ -300,11 +300,6 @@ pub struct HealthTracker {
     /// by the coordinator at its redispatch streak/cooldown site. Independent of
     /// the `(scope, model)` breaker buckets above.
     task_failures: Arc<Mutex<HashMap<String, TaskFailureSignal>>>,
-    /// Deferred breaker observations: keys recorded by
-    /// [`record_failure_observation`] during failover-chain traversal.
-    /// Flushed by [`take_pending_observations`] and evaluated by
-    /// [`apply_breaker_check_for`] after chain exhaustion.
-    pending_breaker_observations: Arc<Mutex<Vec<HealthKey>>>,
 }
 
 impl HealthTracker {
@@ -312,7 +307,6 @@ impl HealthTracker {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             task_failures: Arc::new(Mutex::new(HashMap::new())),
-            pending_breaker_observations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -337,31 +331,24 @@ impl HealthTracker {
         self.task_failures.lock().unwrap().remove(task_id)
     }
 
-    /// Record a failure **observation** — increments consecutive/total failure
-    /// counters and buffers the key for a later breaker check, but does NOT
-    /// trip the circuit breaker.
+    /// Record a failure **observation** — increments the consecutive/total
+    /// failure counters for the `(scope, model)` bucket so the candidate's
+    /// failure is reflected in health-state diagnostics immediately, but does
+    /// NOT trip the circuit breaker.
     ///
     /// Use this during failover-chain traversal so each candidate's failure is
     /// observed immediately (for diagnostics and per-candidate health state),
     /// while breaker demotion/cooldown is deferred until the chain is exhausted.
-    /// Call [`apply_breaker_check_for`] after chain exhaustion to evaluate
-    /// whether the breaker should trip for each observed failure.
+    /// The caller is responsible for tracking the chain-scoped list of observed
+    /// failures and passing them to [`apply_breaker_check_for`] after chain
+    /// exhaustion; this method itself is intentionally chain-agnostic so a
+    /// successful fallback cannot leak breaker side effects into later,
+    /// unrelated chains.
     pub fn record_failure_observation(&self, scope: Option<&str>, model_id: &str) {
         let mut map = self.inner.lock().unwrap();
-        let key = HealthKey::new(scope, model_id);
-        let state = map.entry(key.clone()).or_default();
+        let state = map.entry(HealthKey::new(scope, model_id)).or_default();
         state.consecutive_failures += 1;
         state.total_failures += 1;
-        drop(map);
-        self.pending_breaker_observations.lock().unwrap().push(key);
-    }
-
-    /// Take all pending breaker observations recorded by
-    /// [`record_failure_observation`] since the last call.
-    /// The returned keys should be passed to [`apply_breaker_check_for`] after
-    /// chain exhaustion to evaluate whether the breaker should trip.
-    pub fn take_pending_observations(&self) -> Vec<HealthKey> {
-        std::mem::take(&mut *self.pending_breaker_observations.lock().unwrap())
     }
 
     /// Evaluate and apply the circuit-breaker trip for a single `(scope, model)`
