@@ -329,9 +329,9 @@ async fn start_fake_server(
                             ServiceRpcResponse::TransitionTask(Ok(()))
                         }
                         ServiceRpcRequest::RunArbiterPreapprovalGate { .. } => {
-                            ServiceRpcResponse::RunArbiterPreapprovalGate(
-                                Ok(djinn_supervisor::ArbiterGateResult::Pass),
-                            )
+                            ServiceRpcResponse::RunArbiterPreapprovalGate(Ok(
+                                djinn_supervisor::ArbiterGateResult::Pass,
+                            ))
                         }
                         ServiceRpcRequest::RecordArbiterDecision { .. } => {
                             ServiceRpcResponse::RecordArbiterDecision(Ok(()))

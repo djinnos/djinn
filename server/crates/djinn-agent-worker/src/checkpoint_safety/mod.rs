@@ -25,6 +25,11 @@
 //! real git repository. The async [`scan_worktree`] entry point wires those pure
 //! functions to live git output.
 //!
+//! Path-level exclusion predicates (generated paths, root-level scratch files,
+//! fixture/testdata allowlists) are shared with the workspace commit path via
+//! [`djinn_workspace::commit_safety`], preventing semantic drift between the
+//! checkpoint path and the WorkerDone auto-commit path.
+//!
 //! Design ref: [[design/8yjx-roadmap]].
 //!
 //! This module is a foundation for later tasks in epic 8yjx (WIP commit push
@@ -38,6 +43,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use djinn_workspace::commit_safety::{self, CommitSafetyConfig};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
@@ -101,9 +107,9 @@ pub struct CheckpointSafetyConfig {
 impl Default for CheckpointSafetyConfig {
     fn default() -> Self {
         Self {
-            excluded_path_patterns: DEFAULT_EXCLUDED_PATH_PATTERNS.to_vec(),
-            excluded_extensions: DEFAULT_EXCLUDED_EXTENSIONS.to_vec(),
-            excluded_dir_components: DEFAULT_EXCLUDED_DIR_COMPONENTS.to_vec(),
+            excluded_path_patterns: commit_safety::DEFAULT_EXCLUDED_PATH_PATTERNS.to_vec(),
+            excluded_extensions: commit_safety::DEFAULT_EXCLUDED_EXTENSIONS.to_vec(),
+            excluded_dir_components: commit_safety::DEFAULT_EXCLUDED_DIR_COMPONENTS.to_vec(),
             secret_content_patterns: DEFAULT_SECRET_CONTENT_PATTERNS.to_vec(),
             blocked_path_substrings: DEFAULT_BLOCKED_PATH_SUBSTRINGS.to_vec(),
             large_binary_threshold: LARGE_BINARY_THRESHOLD_BYTES,
@@ -111,114 +117,21 @@ impl Default for CheckpointSafetyConfig {
     }
 }
 
-/// Default excluded path patterns — generated caches, build outputs, logs,
-/// coverage reports, dependency directories, and LFS/submodule payloads.
-const DEFAULT_EXCLUDED_PATH_PATTERNS: &[&str] = &[
-    "target/",
-    "node_modules/",
-    ".next/",
-    ".nuxt/",
-    ".svelte-kit/",
-    "dist/",
-    "build/",
-    ".build/",
-    "out/",
-    ".output/",
-    ".turbo/",
-    ".parcel-cache/",
-    "coverage/",
-    ".nyc_output/",
-    "__pycache__/",
-    ".pytest_cache/",
-    ".mypy_cache/",
-    ".ruff_cache/",
-    ".tox/",
-    ".venv/",
-    "venv/",
-    ".cache/",
-    ".gradle/",
-    ".mvn/",
-    "vendor/",
-    ".cargo/registry/",
-    ".local/share/pnpm/",
-    ".pnpm-store/",
-    ".yarn/cache/",
-    ".turbo/cache/",
-    "logs/",
-    "log/",
-    "*.log",
-    "*.tmp",
-    "*.swp",
-    "*.bak",
-    "*.lock.json",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "Cargo.lock",
-    "*.lcov",
-    "*.profdata",
-    "*.profraw",
-    "*.gcno",
-    "*.gcda",
-    "*.o",
-    "*.a",
-    "*.so",
-    "*.dylib",
-    "*.dll",
-    "*.exe",
-    "*.wasm",
-    "*.pdb",
-    "*.class",
-    "*.jar",
-    "*.war",
-    "*.pyc",
-    "*.pyo",
-    "*.DS_Store",
-    "*.thumbs.db",
-];
-
-/// Default excluded file extensions (binaries and compiled artifacts).
-const DEFAULT_EXCLUDED_EXTENSIONS: &[&str] = &[
-    "pyc", "pyo", "class", "o", "a", "so", "dylib", "dll", "exe", "wasm", "pdb", "jar", "war",
-    "log", "lcov", "profdata", "profraw", "gcno", "gcda", "tmp", "swp", "bak", "DS_Store",
-];
-
-/// Default directory components that cause entire subtrees to be excluded.
-const DEFAULT_EXCLUDED_DIR_COMPONENTS: &[&str] = &[
-    "target",
-    "node_modules",
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".tox",
-    ".venv",
-    "venv",
-    "env",
-    ".cache",
-    ".gradle",
-    ".mvn",
-    "dist",
-    "build",
-    ".build",
-    "out",
-    ".output",
-    ".turbo",
-    ".parcel-cache",
-    "coverage",
-    ".nyc_output",
-    ".next",
-    ".nuxt",
-    ".svelte-kit",
-    "vendor",
-    ".cargo",
-    ".pnpm-store",
-    ".yarn",
-    "logs",
-    "log",
-    ".idea",
-    ".vscode",
-];
+impl CheckpointSafetyConfig {
+    /// Build a [`CommitSafetyConfig`] from this config's path-related fields.
+    ///
+    /// Used to delegate path-level classification to the shared
+    /// [`djinn_workspace::commit_safety`] module without duplicating the
+    /// pattern lists and matching logic.
+    fn to_commit_safety_config(&self) -> CommitSafetyConfig {
+        CommitSafetyConfig {
+            excluded_path_patterns: self.excluded_path_patterns.clone(),
+            excluded_extensions: self.excluded_extensions.clone(),
+            excluded_dir_components: self.excluded_dir_components.clone(),
+            ..Default::default()
+        }
+    }
+}
 
 /// Default secret-like content patterns. Each is matched case-insensitively
 /// against file content. These intentionally err on the side of caution — a
@@ -320,6 +233,8 @@ pub enum ExclusionReason {
     Submodule,
     /// Path appears to be an LFS pointer or payload.
     LfsPayload,
+    /// A root-level worker scratch file (e.g. `patch.txt`, `test.txt`).
+    RootScratch,
 }
 
 // ─── Safety findings ────────────────────────────────────────────────────
@@ -438,6 +353,10 @@ pub enum CheckpointSafetyError {
 /// should be excluded from staging. This is the pure core of the classification
 /// pipeline — it does not touch the filesystem or run git.
 ///
+/// Path-level checks (generated paths, root-level scratch files,
+/// fixture/testdata allowlists) delegate to [`djinn_workspace::commit_safety`]
+/// to prevent semantic drift with the WorkerDone auto-commit path.
+///
 /// Parameters:
 /// - `path`: repo-relative POSIX path (forward slashes, no leading `./`).
 /// - `git_status`: the git porcelain status character(s) for this path
@@ -490,34 +409,33 @@ pub fn classify_path(
         };
     }
 
-    // Generated path patterns.
-    if is_generated_path(path, config) {
-        return ClassifiedFile {
-            path: path.to_string(),
-            classification: FileClassification::Generated,
-            exclusion_reason: Some(ExclusionReason::GeneratedPath),
-        };
+    // Delegate generated-path, generated-dir, and generated-extension checks
+    // to the shared commit_safety module to prevent semantic drift.
+    let shared_config = config.to_commit_safety_config();
+    let shared_result = commit_safety::classify_path(path, &shared_config);
+    match shared_result {
+        commit_safety::PathClassification::Excluded(reason) => {
+            let exclusion = match reason {
+                commit_safety::PathExclusionReason::GeneratedPath => ExclusionReason::GeneratedPath,
+                commit_safety::PathExclusionReason::GeneratedExtension => {
+                    ExclusionReason::GeneratedExtension
+                }
+                commit_safety::PathExclusionReason::GeneratedDir => ExclusionReason::GeneratedDir,
+                commit_safety::PathExclusionReason::RootScratch => ExclusionReason::RootScratch,
+                commit_safety::PathExclusionReason::RootEditorDrop => {
+                    ExclusionReason::GeneratedPath
+                }
+            };
+            return ClassifiedFile {
+                path: path.to_string(),
+                classification: FileClassification::Generated,
+                exclusion_reason: Some(exclusion),
+            };
+        }
+        commit_safety::PathClassification::Allowed => {}
     }
 
-    // Generated directory component.
-    if has_generated_dir_component(path, config) {
-        return ClassifiedFile {
-            path: path.to_string(),
-            classification: FileClassification::Generated,
-            exclusion_reason: Some(ExclusionReason::GeneratedDir),
-        };
-    }
-
-    // Generated file extension.
-    if has_generated_extension(path, config) {
-        return ClassifiedFile {
-            path: path.to_string(),
-            classification: FileClassification::Generated,
-            exclusion_reason: Some(ExclusionReason::GeneratedExtension),
-        };
-    }
-
-    // Large binary.
+    // Large binary (checkpoint-specific: not in the shared module).
     if let Some(size) = size_bytes
         && size >= config.large_binary_threshold
     {
@@ -537,60 +455,27 @@ pub fn classify_path(
 
 /// Check whether a path matches any of the configured generated-path patterns.
 ///
-/// A pattern matches if:
-/// - It ends with `/` and the path starts with it (directory prefix), or
-/// - It starts with `*` and the path ends with the pattern's suffix (glob), or
-/// - The path *contains* the pattern as a path segment.
+/// Delegates to [`djinn_workspace::commit_safety::is_generated_path`] using
+/// this config's path patterns.
 pub fn is_generated_path(path: &str, config: &CheckpointSafetyConfig) -> bool {
-    for pat in &config.excluded_path_patterns {
-        if pat.ends_with('/') {
-            // Directory prefix: `target/` matches `target/foo` and `foo/target/bar`.
-            let dir = pat.trim_end_matches('/');
-            if path == dir
-                || path.starts_with(&format!("{dir}/"))
-                || path.contains(&format!("/{dir}/"))
-            {
-                return true;
-            }
-        } else if let Some(suffix) = pat.strip_prefix('*') {
-            // Glob suffix: `*.log` matches `app.log` and `logs/app.log`.
-            if path.ends_with(suffix) {
-                return true;
-            }
-        } else {
-            // Bare segment match.
-            if path == *pat
-                || path.contains(&format!("/{pat}/"))
-                || path.starts_with(&format!("{pat}/"))
-            {
-                return true;
-            }
-        }
-    }
-    false
+    let shared_config = config.to_commit_safety_config();
+    commit_safety::is_generated_path(path, &shared_config)
 }
 
 /// Check whether any path *component* is a generated directory name.
+///
+/// Delegates to [`djinn_workspace::commit_safety::has_generated_dir_component`].
 pub fn has_generated_dir_component(path: &str, config: &CheckpointSafetyConfig) -> bool {
-    for component in path.split('/') {
-        if config.excluded_dir_components.contains(&component) {
-            return true;
-        }
-    }
-    false
+    let shared_config = config.to_commit_safety_config();
+    commit_safety::has_generated_dir_component(path, &shared_config)
 }
 
 /// Check whether the file extension is in the generated-extensions list.
+///
+/// Delegates to [`djinn_workspace::commit_safety::has_generated_extension`].
 pub fn has_generated_extension(path: &str, config: &CheckpointSafetyConfig) -> bool {
-    if let Some(ext) = path.rsplit('.').next()
-        && path.contains('.')
-        && ext.len() <= 10
-        && ext != path
-        && config.excluded_extensions.contains(&ext)
-    {
-        return true;
-    }
-    false
+    let shared_config = config.to_commit_safety_config();
+    commit_safety::has_generated_extension(path, &shared_config)
 }
 
 /// Heuristic: detect submodule worktree paths.
