@@ -3688,7 +3688,13 @@ async fn interrupted_session_nonterminal_is_crash_protocol_violation() {
 
     let actor = coordinator_actor_for_tests(&db, &tx);
     let result = actor
-        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "interrupted", "worker")
+        .classify_session_exit_liveness(
+            &session.id,
+            &task.id,
+            Some(run_id),
+            "interrupted",
+            "worker",
+        )
         .await;
 
     let result = result.expect("classification must succeed");
@@ -5689,10 +5695,11 @@ async fn failed_session_exit_terminalizes_pending_attempt_and_unblocks_respawn_g
 
     // ── Dispatch-start: pending attempt row (as task_dispatch records it) ──
     let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    let attempt_id =
-        crate::dispatch::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
-            .await
-            .expect("dispatch-start must create a pending attempt");
+    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
+        &db, &task.id, "worker", None, &dk,
+    )
+    .await
+    .expect("dispatch-start must create a pending attempt");
 
     // ── A run + session that self-finalizes as failed (provider error) ──
     let run_id = "run-failed-exit-terminalize";
