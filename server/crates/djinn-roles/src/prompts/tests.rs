@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use super::*;
 use crate::AgentType;
 use djinn_core::models::Task;
@@ -78,6 +79,7 @@ fn make_ctx() -> TaskContext {
         reviewer_diff_context: None,
         ci_blocking_directive: None,
         worker_resume_note: None,
+        arbiter_directive: None,
     }
 }
 
@@ -1131,6 +1133,89 @@ fn worker_resume_section_omitted_when_note_is_whitespace() {
     assert!(
         !prompt.contains("## Resume Context"),
         "prompt should not include Resume Context for whitespace-only note"
+    );
+}
+
+// ── Arbiter directive rendering (zkk9 / monitored reopen) ──────────────────
+
+#[test]
+fn arbiter_directive_injected_into_worker_prompt() {
+    let task = make_task();
+    let ctx = TaskContext {
+        arbiter_directive: Some("Fix the retry loop in dispatch.rs".into()),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        prompt.contains("Arbiter Directive"),
+        "worker prompt should include Arbiter Directive section when directive is present"
+    );
+    assert!(
+        prompt.contains("Fix the retry loop in dispatch.rs"),
+        "worker prompt should contain the directive text verbatim"
+    );
+    assert!(
+        !prompt.contains("{{arbiter_directive_section}}"),
+        "placeholder should be replaced"
+    );
+}
+
+#[test]
+fn arbiter_directive_omitted_when_none() {
+    let task = make_task();
+    let ctx = make_ctx(); // arbiter_directive: None
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        !prompt.contains("Arbiter Directive"),
+        "prompt should not include Arbiter Directive section when directive is None"
+    );
+    assert!(
+        !prompt.contains("{{arbiter_directive_section}}"),
+        "placeholder should be replaced with empty string"
+    );
+}
+
+#[test]
+fn arbiter_directive_omitted_when_whitespace() {
+    let task = make_task();
+    let ctx = TaskContext {
+        arbiter_directive: Some("   ".into()),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        !prompt.contains("Arbiter Directive"),
+        "prompt should not include Arbiter Directive for whitespace-only text"
+    );
+}
+
+#[test]
+fn arbiter_directive_not_injected_into_planner_prompt() {
+    // The directive is gated to worker-only at the prompt-context layer
+    // (load_arbiter_directive returns None for non-worker roles), so a
+    // planner prompt with arbiter_directive=None should never contain it.
+    let task = make_task();
+    let ctx = make_ctx(); // arbiter_directive: None (non-worker)
+    let prompt = render_prompt(AgentType::Planner, &task, &ctx);
+
+    assert!(
+        !prompt.contains("Arbiter Directive"),
+        "planner prompt must not include Arbiter Directive section"
+    );
+}
+
+#[test]
+fn arbiter_directive_not_injected_into_reviewer_prompt() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
+
+    assert!(
+        !prompt.contains("Arbiter Directive"),
+        "reviewer prompt must not include Arbiter Directive section"
     );
 }
 
