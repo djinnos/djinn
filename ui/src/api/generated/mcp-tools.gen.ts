@@ -2550,13 +2550,40 @@ export namespace ImageCreateInputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
    * — commands that prepare the workspace for the agent session.
    */
   pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  /**
+   * A named pre-task command declared in the project environment config.
+   * 
+   * Pre-task commands run in the task-run Pod before the supervisor starts.
+   * Each command carries an optional name (auto-generated as `pre_task_N`
+   * when omitted), a shell command string, a timeout, and a failure policy.
+   */
+  export interface PreTaskCommand {
+  /**
+   * Shell command passed to `/bin/sh -c`.
+   */
+  command: string
+  /**
+   * What to do when the command exits non-zero.
+   */
+  failure_policy?: ("blocking" | "best_effort")
+  /**
+   * Optional display/identity name. When `None`, resolved to
+   * `pre_task_1`, `pre_task_2`, etc. at validation time.
+   */
+  name?: string
+  /**
+   * Maximum wall-clock seconds the command may run. Default 300 (5 min).
+   */
+  timeout_seconds?: number
   [k: string]: any
   }
   export interface Workspace {
@@ -2833,13 +2860,40 @@ export namespace ImageListOutputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
    * — commands that prepare the workspace for the agent session.
    */
   pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  /**
+   * A named pre-task command declared in the project environment config.
+   * 
+   * Pre-task commands run in the task-run Pod before the supervisor starts.
+   * Each command carries an optional name (auto-generated as `pre_task_N`
+   * when omitted), a shell command string, a timeout, and a failure policy.
+   */
+  export interface PreTaskCommand {
+  /**
+   * Shell command passed to `/bin/sh -c`.
+   */
+  command: string
+  /**
+   * What to do when the command exits non-zero.
+   */
+  failure_policy?: ("blocking" | "best_effort")
+  /**
+   * Optional display/identity name. When `None`, resolved to
+   * `pre_task_1`, `pre_task_2`, etc. at validation time.
+   */
+  name?: string
+  /**
+   * Maximum wall-clock seconds the command may run. Default 300 (5 min).
+   */
+  timeout_seconds?: number
   [k: string]: any
   }
   export interface Workspace {
@@ -3092,13 +3146,40 @@ export namespace ImageUpdateInputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
    * — commands that prepare the workspace for the agent session.
    */
   pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  /**
+   * A named pre-task command declared in the project environment config.
+   * 
+   * Pre-task commands run in the task-run Pod before the supervisor starts.
+   * Each command carries an optional name (auto-generated as `pre_task_N`
+   * when omitted), a shell command string, a timeout, and a failure policy.
+   */
+  export interface PreTaskCommand {
+  /**
+   * Shell command passed to `/bin/sh -c`.
+   */
+  command: string
+  /**
+   * What to do when the command exits non-zero.
+   */
+  failure_policy?: ("blocking" | "best_effort")
+  /**
+   * Optional display/identity name. When `None`, resolved to
+   * `pre_task_1`, `pre_task_2`, etc. at validation time.
+   */
+  name?: string
+  /**
+   * Maximum wall-clock seconds the command may run. Default 300 (5 min).
+   */
+  timeout_seconds?: number
   [k: string]: any
   }
   export interface Workspace {
@@ -5044,13 +5125,40 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
    * — commands that prepare the workspace for the agent session.
    */
   pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  /**
+   * A named pre-task command declared in the project environment config.
+   * 
+   * Pre-task commands run in the task-run Pod before the supervisor starts.
+   * Each command carries an optional name (auto-generated as `pre_task_N`
+   * when omitted), a shell command string, a timeout, and a failure policy.
+   */
+  export interface PreTaskCommand {
+  /**
+   * Shell command passed to `/bin/sh -c`.
+   */
+  command: string
+  /**
+   * What to do when the command exits non-zero.
+   */
+  failure_policy?: ("blocking" | "best_effort")
+  /**
+   * Optional display/identity name. When `None`, resolved to
+   * `pre_task_1`, `pre_task_2`, etc. at validation time.
+   */
+  name?: string
+  /**
+   * Maximum wall-clock seconds the command may run. Default 300 (5 min).
+   */
+  timeout_seconds?: number
   [k: string]: any
   }
   export interface Workspace {
@@ -5287,13 +5395,40 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
    * — commands that prepare the workspace for the agent session.
    */
   pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  /**
+   * A named pre-task command declared in the project environment config.
+   * 
+   * Pre-task commands run in the task-run Pod before the supervisor starts.
+   * Each command carries an optional name (auto-generated as `pre_task_N`
+   * when omitted), a shell command string, a timeout, and a failure policy.
+   */
+  export interface PreTaskCommand {
+  /**
+   * Shell command passed to `/bin/sh -c`.
+   */
+  command: string
+  /**
+   * What to do when the command exits non-zero.
+   */
+  failure_policy?: ("blocking" | "best_effort")
+  /**
+   * Optional display/identity name. When `None`, resolved to
+   * `pre_task_1`, `pre_task_2`, etc. at validation time.
+   */
+  name?: string
+  /**
+   * Maximum wall-clock seconds the command may run. Default 300 (5 min).
+   */
+  timeout_seconds?: number
   [k: string]: any
   }
   export interface Workspace {
@@ -5523,13 +5658,40 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   /**
    * Runs in the task-run Pod before the supervisor starts.
    */
-  pre_task?: HookCommand[]
+  pre_task?: PreTaskCommand[]
   /**
    * Workspace setup hook that runs once in the task-run Pod before the
    * supervisor starts. Typically `pnpm install` / `cargo build` / similar
    * — commands that prepare the workspace for the agent session.
    */
   pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  /**
+   * A named pre-task command declared in the project environment config.
+   * 
+   * Pre-task commands run in the task-run Pod before the supervisor starts.
+   * Each command carries an optional name (auto-generated as `pre_task_N`
+   * when omitted), a shell command string, a timeout, and a failure policy.
+   */
+  export interface PreTaskCommand {
+  /**
+   * Shell command passed to `/bin/sh -c`.
+   */
+  command: string
+  /**
+   * What to do when the command exits non-zero.
+   */
+  failure_policy?: ("blocking" | "best_effort")
+  /**
+   * Optional display/identity name. When `None`, resolved to
+   * `pre_task_1`, `pre_task_2`, etc. at validation time.
+   */
+  name?: string
+  /**
+   * Maximum wall-clock seconds the command may run. Default 300 (5 min).
+   */
+  timeout_seconds?: number
   [k: string]: any
   }
   export interface Workspace {
@@ -7936,9 +8098,22 @@ export type ProposalRemoveTargetOutput = ProposalRemoveTargetOutputSchema.Propos
 export namespace ProposalShowInputSchema {
   export interface ProposalShowInput {
   /**
+   * Select which top-level sections to include in the response.
+   * Accepted values: `proposal`, `targets`, `feedback`, `signoffs`,
+   * `revisions`, `debate`, `epics`, `gate_status`.
+   * Default: all fields selected. Invalid values return a validation error.
+   */
+  fields?: string[]
+  /**
    * Proposal UUID or short_id.
    */
   id: string
+  /**
+   * Controls revision body verbosity when `revisions` is selected.
+   * Accepted values: `excerpt` (default), `full`, `omit`.
+   * Ignored when `fields` omits `revisions`.
+   */
+  revision_bodies?: string
   [k: string]: any
   }
 
@@ -8414,11 +8589,24 @@ export namespace ProposalShowOutputSchema {
   }
   export interface ProposalRevisionModel {
   acceptance_criteria: AcceptanceCriterionItem[]
-  body: string
+  /**
+   * Full revision body — present only when `revision_bodies = "full"`.
+   */
+  body?: string
+  /**
+   * First 512 Unicode scalar values of the revision body.
+   * Present when `revision_bodies` is `excerpt` or `full`.
+   */
+  body_excerpt?: string
   /**
    * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
    */
   body_format: string
+  /**
+   * `true` when the original revision body exceeded the 512-scalar cap.
+   * Present when `revision_bodies` is `excerpt` or `full`.
+   */
+  body_truncated?: boolean
   created_at: string
   edited_by_user_id?: string
   /**
