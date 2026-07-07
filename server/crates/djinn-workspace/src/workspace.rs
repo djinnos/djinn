@@ -183,13 +183,18 @@ impl Workspace {
     ///
     /// Unlike the old implementation that ran unconditional `git add -A`, this
     /// method enumerates dirty/untracked paths via `git status --porcelain=v1`,
-    /// classifies each path through the shared [`crate::commit_safety`] filter,
-    /// and stages **only** eligible paths.  Root-level scratch files
-    /// (`patch.txt`, `test2.txt`, etc.) are excluded while intentional
-    /// fixture/testdata paths are preserved.
+    /// classifies **every** changed path through the shared
+    /// [`crate::commit_safety`] filter, and stages/strips paths accordingly:
     ///
-    /// Already-staged entries (e.g. from a prior `try_merge`) are left
-    /// untouched — the filter applies only to new working-tree changes.
+    /// - **Working-tree / untracked entries** that are allowed get staged;
+    ///   excluded ones are skipped.
+    /// - **Pre-staged (index-only) entries** that are allowed are left in the
+    ///   index (preserving merge staging from a prior `try_merge`); excluded
+    ///   ones are **unstaged** via `git reset HEAD` so scratch files a worker
+    ///   may have pre-staged cannot sneak into the commit.
+    ///
+    /// Root-level scratch files (`patch.txt`, `test2.txt`, etc.) are excluded
+    /// while intentional fixture/testdata paths are preserved.
     ///
     /// Returns a [`CommitOutcome`] distinguishing a real commit, a clean tree,
     /// and a junk-only tree with excluded-path details.
@@ -211,14 +216,9 @@ impl Workspace {
         let config = crate::commit_safety::CommitSafetyConfig::default();
         let mut eligible: Vec<String> = Vec::new();
         let mut excluded: Vec<String> = Vec::new();
+        let mut paths_to_unstage: Vec<String> = Vec::new();
 
         for entry in &entries {
-            // Only consider entries with working-tree changes or untracked
-            // files.  Already-staged entries (index-only, Y == ' ') are left
-            // alone — they came from merge staging and should be preserved.
-            if entry.worktree == ' ' {
-                continue;
-            }
             // Ignored files (rarely seen without --ignored) — skip.
             if entry.index == '!' && entry.worktree == '!' {
                 continue;
@@ -226,7 +226,13 @@ impl Workspace {
 
             match crate::commit_safety::classify_path(&entry.path, &config) {
                 crate::commit_safety::PathClassification::Allowed => {
-                    eligible.push(entry.path.clone());
+                    // Only add to staging list if there are working-tree
+                    // changes or the file is untracked.  Index-only allowed
+                    // entries (e.g. merge staging from `try_merge`) are
+                    // already in the index — leave them alone.
+                    if entry.worktree != ' ' {
+                        eligible.push(entry.path.clone());
+                    }
                 }
                 crate::commit_safety::PathClassification::Excluded(reason) => {
                     tracing::debug!(
@@ -235,11 +241,31 @@ impl Workspace {
                         "commit: excluding path from staging"
                     );
                     excluded.push(entry.path.clone());
+                    // If this excluded path is already staged (index-only
+                    // or both index+worktree), queue it for unstaging so
+                    // pre-staged scratch files don't end up in the commit.
+                    if entry.index != ' ' && entry.index != '?' {
+                        paths_to_unstage.push(entry.path.clone());
+                    }
                 }
             }
         }
 
-        // ── Step 3: Stage eligible paths ─────────────────────────────────
+        // ── Step 3: Unstage excluded pre-staged paths ────────────────────
+        if !paths_to_unstage.is_empty() {
+            // `git reset HEAD -- <paths>` reverts index entries to HEAD.
+            // For new files (not in HEAD) this removes them from the index;
+            // for modified files it reverts the index entry.  Files remain
+            // on disk in both cases.  Errors are non-fatal — the subsequent
+            // `git diff --cached` check catches any residual issues.
+            let mut reset_args: Vec<&str> = vec!["reset", "HEAD", "--"];
+            for path in &paths_to_unstage {
+                reset_args.push(path.as_str());
+            }
+            let _ = self.run_git(&reset_args, &[]).await;
+        }
+
+        // ── Step 4: Stage eligible paths ─────────────────────────────────
         if !eligible.is_empty() {
             let mut add_args: Vec<&str> = vec!["add", "--"];
             for path in &eligible {
@@ -248,7 +274,7 @@ impl Workspace {
             self.run_git(&add_args, &[]).await?;
         }
 
-        // ── Step 4: Check staged content ─────────────────────────────────
+        // ── Step 5: Check staged content ─────────────────────────────────
         let staged = self
             .run_git(&["diff", "--cached", "--name-only"], &[])
             .await?;
@@ -263,10 +289,10 @@ impl Workspace {
             return Ok(CommitOutcome::NoLegitimateChanges { excluded });
         }
 
-        // ── Step 5: Defense-in-depth oversized file check ────────────────
+        // ── Step 6: Defense-in-depth oversized file check ────────────────
         self.reject_oversized_staged_files(&staged).await?;
 
-        // ── Step 6: Commit ───────────────────────────────────────────────
+        // ── Step 7: Commit ───────────────────────────────────────────────
         self.run_git(
             &["commit", "-m", message],
             &[
@@ -1768,6 +1794,174 @@ mod tests {
         assert!(
             committed_files.contains("src/patch.txt"),
             "nested scratch-like file must be committed, got: {committed_files}"
+        );
+    }
+
+    // ---- Pre-staged scratch file regressions (reviewer feedback) -----------
+
+    /// Pre-staged scratch-only (worker ran `git add patch.txt`): must produce
+    /// `NoLegitimateChanges`, NOT `Committed`.
+    #[tokio::test]
+    async fn commit_prestaged_scratch_only_returns_no_legitimate_changes() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+        let head_before = git(cp, &["rev-parse", "HEAD"]).trim().to_string();
+
+        // Worker writes and pre-stages a scratch file before supervisor calls commit.
+        write(cp, "patch.txt", "scratch content\n");
+        git(cp, &["add", "patch.txt"]);
+
+        // Verify precondition: patch.txt is staged.
+        let cached = git(cp, &["diff", "--cached", "--name-only"]);
+        assert!(
+            cached.contains("patch.txt"),
+            "precondition: patch.txt must be staged before commit, got: {cached}"
+        );
+
+        let outcome = ws
+            .commit("work", TEST_IDENT)
+            .await
+            .expect("commit must not error for pre-staged scratch");
+        match &outcome {
+            CommitOutcome::NoLegitimateChanges { excluded } => {
+                assert!(
+                    excluded.contains(&"patch.txt".to_string()),
+                    "patch.txt must be in excluded list, got: {excluded:?}"
+                );
+            }
+            other => {
+                panic!("expected NoLegitimateChanges for pre-staged scratch-only, got {other:?}")
+            }
+        }
+
+        // No commit may be created.
+        assert_eq!(
+            git(cp, &["rev-parse", "HEAD"]).trim(),
+            head_before,
+            "no commit may be created for pre-staged scratch-only"
+        );
+
+        // patch.txt must have been unstaged.
+        let cached_after = git(cp, &["diff", "--cached", "--name-only"]);
+        assert!(
+            !cached_after.contains("patch.txt"),
+            "pre-staged scratch must be unstaged, cached still has: {cached_after}"
+        );
+    }
+
+    /// Pre-staged scratch + working-tree legitimate edit: must commit only the
+    /// legitimate file and unstage the scratch.
+    #[tokio::test]
+    async fn commit_prestaged_scratch_with_legitimate_edit_commits_only_legitimate() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        // Worker pre-stages scratch files.
+        write(cp, "patch.txt", "scratch\n");
+        write(cp, "test2.txt", "scratch\n");
+        git(cp, &["add", "patch.txt", "test2.txt"]);
+
+        // Supervisor then writes a legitimate change (working-tree dirty).
+        write(cp, "real.rs", "fn main() {}\n");
+
+        let outcome = ws
+            .commit("work", TEST_IDENT)
+            .await
+            .expect("commit must succeed");
+        assert!(
+            outcome.committed(),
+            "legitimate change must produce Committed"
+        );
+
+        let committed_files = git(cp, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            committed_files.contains("real.rs"),
+            "legitimate file must be committed, got: {committed_files}"
+        );
+        assert!(
+            !committed_files.contains("patch.txt"),
+            "pre-staged scratch patch.txt must not be committed, got: {committed_files}"
+        );
+        assert!(
+            !committed_files.contains("test2.txt"),
+            "pre-staged scratch test2.txt must not be committed, got: {committed_files}"
+        );
+    }
+
+    /// Pre-staged fixture file (`tests/fixtures/patch.txt`): must be allowed
+    /// through and committed, since fixture paths bypass scratch checks.
+    #[tokio::test]
+    async fn commit_prestaged_fixture_file_is_allowed() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        // Worker creates and pre-stages a fixture file.
+        std::fs::create_dir_all(cp.join("tests/fixtures")).expect("mkdir");
+        write(cp, "tests/fixtures/patch.txt", "fixture data\n");
+        git(cp, &["add", "tests/fixtures/patch.txt"]);
+
+        let outcome = ws
+            .commit("work", TEST_IDENT)
+            .await
+            .expect("commit must succeed");
+        assert!(
+            outcome.committed(),
+            "pre-staged fixture file must be committed"
+        );
+
+        let committed_files = git(cp, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            committed_files.contains("tests/fixtures/patch.txt"),
+            "fixture file must be in commit even when pre-staged, got: {committed_files}"
+        );
+    }
+
+    /// Pre-staged scratch alongside clean merge staging: the merge files must
+    /// survive while scratch files are stripped.
+    #[tokio::test]
+    async fn commit_prestaged_scratch_with_clean_merge_preserves_merge_files() {
+        let (origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        // Task-side commit on a different file (no conflict).
+        write(cp, "task.txt", "task work\n");
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "task work"]);
+
+        // Main advances on a non-overlapping file.
+        advance_main(origin.path(), "newfile.txt", "from-main\n", "main v2");
+
+        // Clean merge into task.
+        match ws.try_merge("main").await.expect("merge") {
+            MergeOutcome::Clean => {}
+            other => panic!("expected clean merge, got {other:?}"),
+        }
+
+        // The merge staged `newfile.txt` (index-only).
+        // Now simulate a worker that also pre-staged a scratch file.
+        write(cp, "patch.txt", "scratch\n");
+        git(cp, &["add", "patch.txt"]);
+
+        let outcome = ws
+            .commit("Merge main into task", TEST_IDENT)
+            .await
+            .expect("commit must succeed");
+        assert!(
+            outcome.committed(),
+            "merge + scratch must still produce a committed outcome"
+        );
+
+        // Use `git ls-tree -r HEAD` to inspect the committed tree —
+        // `git show --name-only` uses combined-diff for merge commits which
+        // omits cleanly-merged paths.
+        let tree_files = git(cp, &["ls-tree", "--name-only", "-r", "HEAD"]);
+        assert!(
+            tree_files.contains("newfile.txt"),
+            "merge file must be in the committed tree, got: {tree_files}"
+        );
+        assert!(
+            !tree_files.contains("patch.txt"),
+            "scratch file must not sneak in via pre-staging, got: {tree_files}"
         );
     }
 }
