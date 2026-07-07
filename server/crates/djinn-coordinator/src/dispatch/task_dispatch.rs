@@ -939,11 +939,13 @@ impl CoordinatorActor {
                     return DispatchOutcome::PoolDead;
                 }
                 Err(e) => {
-                    // Failover-chain traversal: log the per-candidate failure
-                    // and continue to the next eligible candidate instead of
-                    // returning Failed immediately.  Terminal side effects are
-                    // intentionally deferred until all candidates are exhausted
-                    // (the dependent task owns further deferral policy).
+                    // Failover-chain traversal: record the per-candidate
+                    // health observation immediately (so the circuit breaker
+                    // tracks consecutive failures for this (scope, model)
+                    // pair), log the failure, and continue to the next
+                    // eligible candidate.  Terminal task/session side effects
+                    // are deferred until all candidates are exhausted.
+                    self.health.record_failure(scope, model_id);
                     tracing::Span::current().record("outcome", "error");
                     tracing::debug!(outcome = "error", model_id = %model_id, label);
                     tracing::warn!(
@@ -975,6 +977,74 @@ impl CoordinatorActor {
         } else {
             tracing::Span::current().record("outcome", "error");
             DispatchOutcome::Failed
+        }
+    }
+
+    /// Apply terminal side effects after failover-chain exhaustion.
+    ///
+    /// Called when [`try_dispatch_to_pool`] returns [`DispatchOutcome::Failed`]
+    /// — all candidates were tried and none accepted the dispatch. Advances the
+    /// per-task failure streak and applies an escalating cooldown so the task is
+    /// not silently retried every tick. After [`MAX_DISPATCH_FAILURES`] consecutive
+    /// exhaustions the task is terminally failed.
+    ///
+    /// Extracted from `dispatch_ready_tasks` so the chain-exhaustion terminal
+    /// side-effect contract is unit-testable without the full dispatch loop.
+    pub(crate) async fn apply_chain_exhaustion_side_effects(
+        &mut self,
+        task: &djinn_core::models::Task,
+        role: &str,
+    ) {
+        let streak = {
+            let s = self
+                .dispatch_failure_streak
+                .entry(task.id.clone())
+                .or_insert(0);
+            *s = s.saturating_add(1);
+            *s
+        };
+
+        if streak >= MAX_DISPATCH_FAILURES {
+            self.terminally_fail_task(
+                task,
+                role,
+                "all failover candidates exhausted after multiple attempts. \
+                 The task could not be dispatched to any configured model. \
+                 Resolve the underlying issue and reopen.",
+            )
+            .await;
+            self.dispatch_failure_streak.remove(&task.id);
+            self.dispatch_cooldowns.remove(&task.id);
+            self.inflight_dispatches.remove(&task.id);
+            self.clear_durable_dispatch_backoff_state(
+                &task.id,
+                Some(&task.short_id),
+                "chain_exhaustion_terminal_close_clear",
+            )
+            .await;
+        } else {
+            let cooldown = escalating_dispatch_cooldown(streak);
+            tracing::warn!(
+                task_id = %task.short_id,
+                role,
+                streak,
+                cooldown_secs = cooldown.as_secs(),
+                "CoordinatorActor: all failover candidates exhausted — backing off dispatch (escalating cooldown)"
+            );
+            self.dispatch_cooldowns
+                .insert(task.id.clone(), SystemClock::new().now_instant() + cooldown);
+            self.persist_durable_dispatch_state_update(
+                &task.id,
+                Some(&task.short_id),
+                "chain_exhaustion_backoff",
+                DurableDispatchStateUpdate {
+                    failure_streak: Some(streak),
+                    cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
+                    last_dispatched: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await;
         }
     }
 
@@ -2094,6 +2164,12 @@ impl CoordinatorActor {
                         candidate_models = model_ids.len(),
                         "CoordinatorActor: no model could accept dispatch"
                     );
+
+                    // Chain-exhaustion terminal side effects: advance the
+                    // failure streak and apply escalating cooldown so the
+                    // task is not silently retried every tick without
+                    // backoff.
+                    self.apply_chain_exhaustion_side_effects(&task, role).await;
                 }
             }
         }
@@ -4350,6 +4426,289 @@ mod failover_chain_tests {
             logs_contain("skipped_count=1"),
             "failover_candidate_accepted must report skipped_count=1 \
              (model-a was skipped before model-b was accepted)"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC3: First-candidate pool error followed by a successful fallback does
+    /// NOT advance the failure streak, apply a dispatch cooldown, or
+    /// increment park/intervention counters.
+    ///
+    /// Scenario: 2 candidates — model-a fails with a pool error (SlotBusy),
+    /// model-b dispatches successfully. The test asserts:
+    /// 1. The outcome is `Dispatched` (fallback succeeded).
+    /// 2. No failure streak was recorded for the task.
+    /// 3. No dispatch cooldown was applied.
+    /// 4. Per-candidate health failure was recorded for model-a (the failing
+    ///    candidate), but the task-level terminal side effects are NOT applied
+    ///    because the chain was not exhausted.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn failover_chain_first_candidate_failure_fallback_succeeds_no_terminal_effects() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        // Track which models the dispatch_fn was called with
+        let attempted_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let attempted_models_clone = attempted_models.clone();
+
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "fallback-task",
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "fallback-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    let tracker = attempted_models_clone.clone();
+                    async move {
+                        tracker.lock().unwrap().push(mid.clone());
+                        if mid == "provider/model-a" {
+                            // Simulate a pool error for model-a
+                            Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                        } else {
+                            pool.dispatch(&tid, &pp, &mid).await
+                        }
+                    }
+                },
+            )
+            .await;
+
+        // ── AC3a: dispatch should succeed on model-b ─────────────────────
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-b after model-a pool error"
+        );
+
+        // ── AC3b: both models were attempted ─────────────────────────────
+        let attempted = attempted_models.lock().unwrap().clone();
+        assert!(
+            attempted.contains(&"provider/model-a".to_string()),
+            "dispatch_fn should have been called with model-a"
+        );
+        assert!(
+            attempted.contains(&"provider/model-b".to_string()),
+            "dispatch_fn should have been called with model-b (fallback)"
+        );
+
+        // ── AC3c: per-candidate health failure was recorded for model-a ──
+        // After one pool error, model-a should have 1 consecutive failure.
+        // The breaker threshold is 3, so it should still be available.
+        assert!(
+            actor.health.is_available(None, "provider/model-a"),
+            "model-a should still be available after a single pool error (below breaker threshold)"
+        );
+
+        // ── AC3d: no failure streak was recorded for the task ────────────
+        assert!(
+            !actor.dispatch_failure_streak.contains_key("fallback-task"),
+            "no failure streak should be recorded when the chain was not exhausted"
+        );
+
+        // ── AC3e: no dispatch cooldown was applied ───────────────────────
+        assert!(
+            !actor.dispatch_cooldowns.contains_key("fallback-task"),
+            "no dispatch cooldown should be applied when the chain was not exhausted"
+        );
+
+        // ── AC3f: terminal side-effect diagnostics are NOT logged ────────
+        assert!(
+            !logs_contain("all failover candidates exhausted"),
+            "must NOT log chain-exhaustion message when fallback succeeded"
+        );
+        assert!(
+            logs_contain("failover_candidate_attempt"),
+            "must log per-candidate attempt for the failed model-a"
+        );
+        assert!(
+            logs_contain("failover_candidate_accepted"),
+            "must log acceptance for the successful fallback model-b"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC4: Chain exhaustion applies the appropriate terminal side effects
+    /// and diagnostics once no eligible fallback candidate remains.
+    ///
+    /// Scenario: 2 candidates — both fail with pool errors (SlotBusy).
+    /// After `try_dispatch_to_pool` returns `Failed`, the caller invokes
+    /// `apply_chain_exhaustion_side_effects` (the same call
+    /// `dispatch_ready_tasks` makes on chain exhaustion). The test asserts:
+    /// 1. The outcome is `Failed` (chain exhausted).
+    /// 2. `apply_chain_exhaustion_side_effects` records a failure streak.
+    /// 3. A dispatch cooldown is applied.
+    /// 4. Per-candidate health failures were recorded for both candidates.
+    /// 5. Repeated exhaustion escalates the streak.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn failover_chain_exhaustion_applies_terminal_side_effects() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (mut actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        // Build a minimal Task for the side-effect method (only `id` and
+        // `short_id` are read by `apply_chain_exhaustion_side_effects`).
+        let task = djinn_core::models::Task {
+            id: "exhausted-task-uuid".to_owned(),
+            project_id: String::new(),
+            short_id: "exhausted-task".to_owned(),
+            epic_id: None,
+            title: String::new(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_owned(),
+            status: "open".to_owned(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".to_owned(),
+            acceptance_criteria: "[]".to_owned(),
+            reopen_count: 0,
+            continuation_count: 0,
+            total_reopen_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-06-12T00:00:00Z".to_owned(),
+            updated_at: "2026-06-12T00:00:00Z".to_owned(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_owned(),
+            agent_type: None,
+            created_by_user_id: None,
+            ci_status: "unknown".to_owned(),
+            ci_head_sha: None,
+            ci_pr_number: None,
+            ci_blocking_required_check_names: "[]".to_owned(),
+            ci_failure_fingerprint: None,
+            ci_first_seen_at: None,
+            ci_last_seen_at: None,
+            ci_same_signature_count: 0,
+            ci_last_remediation_base_sha: None,
+            unresolved_blocker_count: 0,
+        };
+
+        let attempted_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let attempted_models_clone = attempted_models.clone();
+
+        let outcome = actor
+            .try_dispatch_to_pool(
+                &task.short_id,
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |_pool, model_id| {
+                    let mid = model_id.to_owned();
+                    let tracker = attempted_models_clone.clone();
+                    async move {
+                        tracker.lock().unwrap().push(mid.clone());
+                        // All candidates fail
+                        Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                    }
+                },
+            )
+            .await;
+
+        // ── AC4a: dispatch should fail after chain exhaustion ────────────
+        assert!(
+            matches!(outcome, DispatchOutcome::Failed),
+            "dispatch should return Failed when all candidates fail"
+        );
+
+        // ── AC4b: both models were attempted ─────────────────────────────
+        let attempted = attempted_models.lock().unwrap().clone();
+        assert_eq!(
+            attempted.len(),
+            2,
+            "dispatch_fn should have been called for both candidates"
+        );
+        assert!(attempted.contains(&"provider/model-a".to_string()));
+        assert!(attempted.contains(&"provider/model-b".to_string()));
+
+        // ── AC4c: per-candidate health failures were recorded ────────────
+        // After one pool error each, both models should have 1 consecutive
+        // failure. Breaker threshold is 3, so both should still be available.
+        assert!(
+            actor.health.is_available(None, "provider/model-a"),
+            "model-a should still be available after a single pool error"
+        );
+        assert!(
+            actor.health.is_available(None, "provider/model-b"),
+            "model-b should still be available after a single pool error"
+        );
+
+        // ── AC4d: apply terminal side effects (as dispatch_ready_tasks does) ─
+        actor
+            .apply_chain_exhaustion_side_effects(&task, "worker")
+            .await;
+
+        // failure streak should be 1
+        assert_eq!(
+            actor.dispatch_failure_streak.get("exhausted-task-uuid"),
+            Some(&1),
+            "failure streak should be 1 after first chain exhaustion"
+        );
+
+        // dispatch cooldown should be applied
+        assert!(
+            actor.dispatch_cooldowns.contains_key("exhausted-task-uuid"),
+            "dispatch cooldown should be applied after chain exhaustion"
+        );
+
+        // ── AC4e: chain-exhaustion diagnostic was logged ─────────────────
+        assert!(
+            logs_contain("all failover candidates exhausted"),
+            "must log chain-exhaustion message"
+        );
+        assert!(
+            logs_contain("failover_candidate_attempt"),
+            "must log per-candidate attempt for each failed candidate"
+        );
+
+        // ── AC4f: repeated exhaustion escalates streak and cooldown ──────
+        // Simulate a second exhaustion: re-dispatch (all fail) then apply
+        // side effects.  The streak should advance to 2.
+        let outcome2 = actor
+            .try_dispatch_to_pool(
+                &task.short_id,
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |_pool, _model_id| async {
+                    Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                },
+            )
+            .await;
+
+        assert!(matches!(outcome2, DispatchOutcome::Failed));
+        actor
+            .apply_chain_exhaustion_side_effects(&task, "worker")
+            .await;
+
+        assert_eq!(
+            actor.dispatch_failure_streak.get("exhausted-task-uuid"),
+            Some(&2),
+            "failure streak should be 2 after second chain exhaustion"
         );
 
         cancel.cancel();
