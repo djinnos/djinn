@@ -699,6 +699,10 @@ impl CoordinatorActor {
         // same sweep the 15-min tick uses so the dev UI / queries don't show
         // weeks-old stale rows after every restart.
         health::reap_stale_task_runs_for_startup(&self.db).await;
+        // Reap pending task_attempts orphaned while this coordinator was down
+        // (or wedged from before the reaper existed) so the respawn guard
+        // unblocks those (task, role) pairs immediately after a deploy.
+        health::reap_orphaned_pending_attempts_for_startup(&self.db).await;
         let startup_context = self.maintenance_context();
         health::reap_orphaned_taskrun_jobs_for_startup(&self.db, &startup_context).await;
         self.rehydrate_durable_dispatch_state().await;
@@ -1217,6 +1221,10 @@ impl CoordinatorActor {
                 // ensures protocol violations are recorded and count as
                 // failed attempts. Slow extensions never reach this path
                 // (they extend the claim without ending the session).
+                // For failed/interrupted exits on a nonterminal task this
+                // also terminalizes the live task_attempts row (crashed) so
+                // the respawn guard does not defer the (task, role) pair
+                // forever on an orphaned pending attempt.
                 if let Some(task_id) = session.task_id.as_deref() {
                     let _ = self
                         .classify_session_exit_liveness(
@@ -1224,6 +1232,7 @@ impl CoordinatorActor {
                             task_id,
                             session.task_run_id.as_deref(),
                             &session.status,
+                            &session.agent_type,
                         )
                         .await;
                 }

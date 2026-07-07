@@ -198,6 +198,26 @@ pub async fn backdate_task_updated_at(db: &Database, task_id: &str, interval: &s
     .unwrap();
 }
 
+/// Backdate a `task_attempts` row's `created_at` by a PostgreSQL `interval`
+/// string (e.g. `'1 hour'`).
+///
+/// Test-fixture helper for the coordinator's orphaned-pending-attempt reaper,
+/// whose age threshold compares against `created_at`.
+pub async fn backdate_task_attempt_created_at(db: &Database, attempt_id: &str, interval: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE task_attempts SET created_at = to_char(
+             now() AT TIME ZONE 'utc' - $1::interval,
+             'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+         WHERE id = $2",
+    )
+    .bind(interval)
+    .bind(attempt_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
 /// Close a task at an explicit timestamp. Test-fixture helper: production
 /// `closed_at` is stamped automatically by terminal status transitions.
 pub async fn close_task_at(db: &Database, task_id: &str, closed_at: &str) {
