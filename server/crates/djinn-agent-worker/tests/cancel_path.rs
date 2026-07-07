@@ -34,7 +34,7 @@ use djinn_supervisor::{
 };
 use tempfile::TempDir;
 use tokio::process::Command;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -341,6 +341,9 @@ async fn start_fake_server(
                         }
                         ServiceRpcRequest::CompleteMonitoredReopen { .. } => {
                             ServiceRpcResponse::CompleteMonitoredReopen(Ok(()))
+                        }
+                        ServiceRpcRequest::RecordArbiterSessionTermination { .. } => {
+                            ServiceRpcResponse::RecordArbiterSessionTermination(Ok(false))
                         }
                     };
                     let reply = Frame {

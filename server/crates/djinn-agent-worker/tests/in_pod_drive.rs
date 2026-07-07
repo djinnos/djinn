@@ -416,6 +416,9 @@ async fn handle_rpc(
         ServiceRpcRequest::CompleteMonitoredReopen { .. } => {
             ServiceRpcResponse::CompleteMonitoredReopen(Ok(()))
         }
+        ServiceRpcRequest::RecordArbiterSessionTermination { .. } => {
+            ServiceRpcResponse::RecordArbiterSessionTermination(Ok(false))
+        }
     }
 }
 
