@@ -735,9 +735,16 @@ async fn legacy_co_access_row_carries_post_migration_defaults() {
     // upsert_association path carry kind='co_access' and
     // source='session_co_access' (the post-migration defaults), and the
     // provenance columns are NULL (populated only by the provenance-rich
-    // path).  This verifies the expected post-migration state without
-    // replaying the migration itself — the migration is exercised by
-    // the db schema setup in the test harness.
+    // path).  This verifies the expected post-migration state at the
+    // repository layer.
+    //
+    // The migration's own backfill behavior (pre-existing rows receiving the
+    // `source` DEFAULT, PK widening to the four-column key, CHECK constraint
+    // widening) is covered by the dedicated migration harness in
+    // `tests/migrations_note_association_provenance.rs`, which replays
+    // migration 97 on top of the prior schema with seeded legacy rows — the
+    // repository-layer tests here exercise the post-migration *defaults* an
+    // application write produces, not the migration replay itself.
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
     let (tx, _rx) = broadcast::channel(256);
@@ -1199,5 +1206,118 @@ async fn prune_old_associations_spares_typed_rows() {
     assert!(
         embedding.is_some(),
         "embedding row must survive co-access-only prune_old_associations"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_typed_helper_preserves_provenance_rows_for_same_pair() {
+    // Bridge regression: the legacy `upsert_typed_association` helper removes
+    // only the implicit `co_access / session_co_access` row before writing its
+    // own typed edge (so existing single-row-per-pair readers keep working).
+    // It must NOT delete provenance-rich rows (`embedding_related`,
+    // `authored`, etc.) that share the same canonical pair — those are owned
+    // by the provenance substrate and coexist with the typed helper's edge.
+    //
+    // This ties the existing `association.rs` typed-helper behavior to the new
+    // multi-row semantics: the legacy helper's co-access removal is scoped to
+    // `kind='co_access' AND source='session_co_access'`, never touching other
+    // (kind, source) slots.
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    let note_a = make_note(&repo, &project, &tmp, "Bridge A").await;
+    let note_b = make_note(&repo, &project, &tmp, "Bridge B").await;
+
+    // 1) Seed a co_access row (the legacy Hebbian edge).
+    repo.upsert_association(&note_a, &note_b, 1).await.unwrap();
+
+    // 2) Seed a provenance-rich embedding_related row for the same pair.
+    repo.upsert_provenance_association(
+        &note_a,
+        &note_b,
+        &NoteAssociationProvenanceUpsert {
+            kind: NoteAssociationKind::EmbeddingRelated,
+            source: NoteAssociationSource::EmbeddingSimilarity,
+            weight: 0.8,
+            confidence: Some(0.9),
+            algorithm_version: Some("v1".to_string()),
+            embedding_model: Some("test-model".to_string()),
+            embedding_dim: Some(512),
+        },
+    )
+    .await
+    .unwrap();
+
+    // 3) Write a typed edge via the LEGACY helper. This deletes the co_access
+    //    row and writes a `supersedes` row in its place.
+    repo.upsert_typed_association(&note_a, &note_b, NoteAssociationKind::Supersedes, 0.6)
+        .await
+        .unwrap();
+
+    // The co_access row must be gone (promoted/replaced by the typed edge).
+    let co_access = repo
+        .get_provenance_association(
+            &note_a,
+            &note_b,
+            NoteAssociationKind::CoAccess,
+            &NoteAssociationSource::SessionCoAccess,
+        )
+        .await
+        .unwrap();
+    assert!(
+        co_access.is_none(),
+        "legacy typed helper must remove the implicit co_access row"
+    );
+
+    // The typed supersedes row exists at the session_co_access source slot.
+    let typed = repo
+        .get_provenance_association(
+            &note_a,
+            &note_b,
+            NoteAssociationKind::Supersedes,
+            &NoteAssociationSource::SessionCoAccess,
+        )
+        .await
+        .unwrap()
+        .expect("typed supersedes row must exist");
+    assert!(
+        (typed.weight - 0.6).abs() < 1e-12,
+        "typed weight, got {}",
+        typed.weight
+    );
+
+    // The provenance-rich embedding_related row must SURVIVE the legacy
+    // typed helper's co-access removal — it occupies a different
+    // (kind, source) slot.
+    let embedding = repo
+        .get_provenance_association(
+            &note_a,
+            &note_b,
+            NoteAssociationKind::EmbeddingRelated,
+            &NoteAssociationSource::EmbeddingSimilarity,
+        )
+        .await
+        .unwrap()
+        .expect("embedding row must survive the legacy typed helper");
+    assert!(
+        (embedding.weight - 0.8).abs() < 1e-12,
+        "embedding weight must be unchanged, got {}",
+        embedding.weight
+    );
+    assert_eq!(embedding.embedding_dim, Some(512));
+
+    // Two rows now coexist: the typed supersedes edge and the embedding edge.
+    let all = repo
+        .list_provenance_associations_for_pair(&note_a, &note_b)
+        .await
+        .unwrap();
+    assert_eq!(
+        all.len(),
+        2,
+        "expected typed + embedding rows to coexist, got {}",
+        all.len()
     );
 }
