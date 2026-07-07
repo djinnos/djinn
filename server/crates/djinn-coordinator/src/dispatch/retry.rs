@@ -1699,7 +1699,7 @@ impl CoordinatorActor {
     /// dossier when available, otherwise uses a generated dossier from actual
     /// post-intervention history. Never falls back to the old static repeated-AC
     /// template.
-    async fn park_source_human_review_with_dossier(
+    pub(crate) async fn park_source_human_review_with_dossier(
         &mut self,
         task: &djinn_core::models::Task,
         reason: &str,

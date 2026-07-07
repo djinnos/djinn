@@ -133,6 +133,15 @@ pub struct TaskContext {
     /// resume dispatch or the role does not receive worker-resume
     /// instructions.
     pub worker_resume_note: Option<String>,
+
+    // ── Arbiter directive (zkk9 / monitored reopen) ───────────────────────────
+    /// Arbiter directive injected verbatim at the top of exactly one next
+    /// worker prompt after a monitored-reopen decision. Populated only for
+    /// worker-role prompts when the latest unconsumed arbitration row has a
+    /// monitored reopen in progress (`monitored_reopen_count >= 1`).  Never
+    /// injected into planner/reviewer/lead/architect prompts.  `None` when
+    /// there is no active monitored reopen or the role does not receive it.
+    pub arbiter_directive: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -243,6 +252,18 @@ pub fn render_prompt_for_role(
         _ => String::new(),
     };
     out = out.replace("{{worker_resume_section}}", &worker_resume_section);
+
+    // zkk9: arbiter directive for monitored reopen. Injected verbatim at the
+    // top of exactly one next worker prompt. The prompt-context layer gates
+    // this to worker-role only and only when monitored_reopen_count >= 1, so
+    // non-worker roles always see an empty section here.
+    let arbiter_directive_section = match &ctx.arbiter_directive {
+        Some(text) if !text.trim().is_empty() => {
+            format!("## \u{2691} Arbiter Directive (monitored reopen)\n\n{text}\n")
+        }
+        _ => String::new(),
+    };
+    out = out.replace("{{arbiter_directive_section}}", &arbiter_directive_section);
 
     let epic_context_section = match &ctx.epic_context {
         Some(text) if !text.trim().is_empty() => format!("## Epic Context\n\n{text}\n"),

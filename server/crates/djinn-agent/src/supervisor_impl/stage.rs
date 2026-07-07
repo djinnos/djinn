@@ -868,6 +868,24 @@ pub(crate) async fn execute_stage(
             "Supervisor stage: injected worker resume note"
         );
     }
+    // zkk9: load the arbiter directive for a monitored reopen. Only injected
+    // for worker-role prompts when the latest unconsumed arbitration row has a
+    // monitored reopen in progress (monitored_reopen_count >= 1). Non-worker
+    // roles (planner/reviewer/lead/architect) never receive the directive.
+    let arbiter_directive = crate::actors::slot::lifecycle::prompt_context::load_arbiter_directive(
+        runtime_role_name,
+        &task.id,
+        agent_context,
+    )
+    .await;
+    if arbiter_directive.is_some() {
+        tracing::info!(
+            task_id = %task.short_id,
+            task_run_id = %task_run_id,
+            role = %runtime_role_name,
+            "Supervisor stage: injected arbiter directive for monitored reopen"
+        );
+    }
     // Coarse pre-session progress marker for the host-side liveness deadline:
     // model/credential/MCP/skill resolution and prompt assembly happen here,
     // before any session row exists.
@@ -889,6 +907,7 @@ pub(crate) async fn execute_stage(
         app_state: agent_context,
         read_sources: &read_sources,
         worker_resume_note: worker_resume_note.as_deref(),
+        arbiter_directive: arbiter_directive.as_deref(),
         mcp_server_instructions: &mcp_server_instructions,
     })
     .await;
