@@ -80,6 +80,17 @@ curl --proto '=https' --tlsv1.2 -LsSf "https://get.nexte.st/latest/${NEXTEST_PLA
     | tar zxf - -C "${CARGO_HOME}/bin" \
     || echo "[install-rust] cargo-nextest install failed; skipping (CI uses nextest, task-runs can fall back to 'cargo test')" >&2
 
+# cargo-sweep: prunes the warm per-project cargo target base of artifacts the
+# current warm compile did NOT touch — stale crate versions cargo accumulates in
+# `deps/` (it never GCs a target dir) plus orphaned `incremental/` sessions. The
+# warm path brackets its compile with `cargo sweep --stamp` / `--file` so the
+# base self-prunes each warm instead of growing unbounded (an un-swept base grew
+# to 325G and tripped node DiskPressure). Compiled from source (small crate);
+# best-effort so a build/network failure never fails the image build — the warm
+# degrades to a no-op prune when the binary is absent.
+"${CARGO_HOME}/bin/cargo" install --locked cargo-sweep \
+    || echo "[install-rust] cargo-sweep install failed; warm-base pruning will no-op until present" >&2
+
 # Use `:-` defaults, NOT unconditional exports: the worker runs the agent's
 # shell tool as a LOGIN shell (`bash -lc`), so this fragment is sourced on
 # every command. The K8s pod sets CARGO_HOME=/cache/cargo at runtime (job.rs)
