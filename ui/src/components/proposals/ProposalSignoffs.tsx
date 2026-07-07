@@ -118,7 +118,7 @@ export function ProposalSignoffs({
           <Label className="text-xs uppercase text-amber-500">
             Changes since your sign-off (rev {myStaleAnchor.from.seq} → {myStaleAnchor.head.seq})
           </Label>
-          <DiffView before={myStaleAnchor.from.body} after={myStaleAnchor.head.body} />
+          <DiffView before={myStaleAnchor.from.body ?? ""} after={myStaleAnchor.head.body ?? ""} />
         </div>
       )}
     </div>

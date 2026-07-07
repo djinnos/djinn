@@ -60,7 +60,7 @@ export function proposalRevisionMarkdown(revision: ProposalRevision): string {
     `# ${revision.title}`,
     "",
     `## Body (${bodyFormat})`,
-    revision.body.trimEnd() || "_No body._",
+    (revision.body ?? "").trimEnd() || "_No body._",
     "",
     "## Acceptance criteria",
     criteria,
