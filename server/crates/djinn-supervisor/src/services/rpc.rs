@@ -843,6 +843,41 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn start_monitored_reopen(
+        &self,
+        task_id: String,
+        directive: String,
+        verification_command: String,
+        exclude_models: Vec<String>,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::StartMonitoredReopen {
+                task_id,
+                directive,
+                verification_command,
+                exclude_models,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::StartMonitoredReopen(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::CompleteMonitoredReopen { task_id })
+            .await
+        {
+            Ok(ServiceRpcResponse::CompleteMonitoredReopen(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -1198,6 +1233,24 @@ impl SupervisorServices for UnimplementedRpcServices {
     ) -> Result<(), String> {
         unimplemented!(
             "UnimplementedRpcServices::record_arbiter_decision — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn start_monitored_reopen(
+        &self,
+        _task_id: String,
+        _directive: String,
+        _verification_command: String,
+        _exclude_models: Vec<String>,
+    ) -> Result<(), String> {
+        unimplemented!(
+            "UnimplementedRpcServices::start_monitored_reopen — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
+        unimplemented!(
+            "UnimplementedRpcServices::complete_monitored_reopen — construct RpcServices for real RPC"
         )
     }
 }

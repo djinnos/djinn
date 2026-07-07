@@ -410,6 +410,12 @@ async fn handle_rpc(
         ServiceRpcRequest::RecordArbiterDecision { .. } => {
             ServiceRpcResponse::RecordArbiterDecision(Ok(()))
         }
+        ServiceRpcRequest::StartMonitoredReopen { .. } => {
+            ServiceRpcResponse::StartMonitoredReopen(Ok(()))
+        }
+        ServiceRpcRequest::CompleteMonitoredReopen { .. } => {
+            ServiceRpcResponse::CompleteMonitoredReopen(Ok(()))
+        }
     }
 }
 

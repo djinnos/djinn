@@ -921,6 +921,158 @@ impl SupervisorServices for DirectServices {
 
         Ok(())
     }
+
+    /// Start a monitored-reopen worker attempt.  Persists the directive,
+    /// verification command, and excluded models on the current unconsumed
+    /// arbitration row, then atomically marks the attempt start via
+    /// `record_monitored_reopen` so re-entry cannot inject the directive
+    /// twice.  Emits an `arbiter_decision` activity event.
+    async fn start_monitored_reopen(
+        &self,
+        task_id: String,
+        directive: String,
+        verification_command: String,
+        exclude_models: Vec<String>,
+    ) -> Result<(), String> {
+        use djinn_db::TaskRepository;
+        use djinn_db::repositories::task_arbitration::{
+            TaskArbitrationRepository, UpdateDispatchLedgerParams,
+        };
+
+        let db = self.callbacks.agent_context.db.clone();
+        let event_bus = self.callbacks.agent_context.event_bus.clone();
+        let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+        let arb_repo = TaskArbitrationRepository::new(db.clone());
+
+        // Load the source task for short_id (activity logging).
+        let task = task_repo
+            .get(&task_id)
+            .await
+            .map_err(|e| format!("start_monitored_reopen: failed to load task: {e}"))?
+            .ok_or_else(|| format!("start_monitored_reopen: task {task_id} not found"))?;
+
+        // Resolve the current unconsumed arbitration row.
+        let (_hold_cycle, unconsumed_record) = arb_repo
+            .resolve_current_hold_cycle(&task_id)
+            .await
+            .map_err(|e| format!("start_monitored_reopen: failed to resolve hold cycle: {e}"))?;
+
+        // Build the structured payloads for the dispatch ledger update.
+        let directive_json = serde_json::json!({
+            "decision": "reopen",
+            "directive": directive,
+        });
+        let excluded_json = serde_json::Value::Array(
+            exclude_models
+                .iter()
+                .map(|m| serde_json::Value::String(m.clone()))
+                .collect(),
+        );
+
+        if let Some(ref record) = unconsumed_record {
+            // Persist directive / verification command / excluded models.
+            arb_repo
+                .update_dispatch_ledger(UpdateDispatchLedgerParams {
+                    task_id: &task_id,
+                    hold_cycle: record.hold_cycle,
+                    mirror_head_sha: None,
+                    github_head_sha: None,
+                    pr_url: None,
+                    failing_ci_job_ids: None,
+                    dossier: None,
+                    directive: Some(&directive_json),
+                    verification_command: Some(&verification_command),
+                    excluded_models: Some(&excluded_json),
+                })
+                .await
+                .map_err(|e| {
+                    format!("start_monitored_reopen: failed to update arbitration row: {e}")
+                })?;
+
+            // Atomically mark the attempt start.  This increments
+            // `monitored_reopen_count` and sets `monitored_reopen_at`.
+            // Re-entry (a second worker dispatch for the same reopen)
+            // will see `monitored_reopen_count >= 1` and NOT inject the
+            // directive again.
+            arb_repo
+                .record_monitored_reopen(&task_id, record.hold_cycle)
+                .await
+                .map_err(|e| {
+                    format!("start_monitored_reopen: failed to mark attempt start: {e}")
+                })?;
+        } else {
+            // No unconsumed row — log and continue.  The directive will
+            // not be injected since no arbitration row carries it.
+            tracing::warn!(
+                task_id = %task.short_id,
+                "start_monitored_reopen: no unconsumed arbitration row found — directive not persisted"
+            );
+        }
+
+        // Emit arbiter_decision activity event.
+        let activity_payload = serde_json::json!({
+            "event": "arbiter_decision",
+            "task_id": task.short_id,
+            "decision": "reopen",
+            "directive": directive,
+        });
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(&task_id),
+                "system",
+                "coordinator",
+                "arbiter_decision",
+                &activity_payload.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "start_monitored_reopen: failed to log arbiter_decision activity"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Mark the monitored-reopen attempt as complete.  Resolves the latest
+    /// arbitration row for the task and, if it is unconsumed with a monitored
+    /// reopen in progress (`monitored_reopen_count >= 1`), transitions it to
+    /// `consumed`.  This is idempotent: a row already consumed/failed is a
+    /// no-op.
+    async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String> {
+        use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
+
+        let db = self.callbacks.agent_context.db.clone();
+        let arb_repo = TaskArbitrationRepository::new(db);
+
+        let latest = arb_repo.get_latest_for_task(&task_id).await.map_err(|e| {
+            format!("complete_monitored_reopen: failed to load latest arbitration: {e}")
+        })?;
+
+        let Some(record) = latest else {
+            return Ok(());
+        };
+
+        // Only complete when a monitored reopen is actually in progress.
+        if record.monitored_reopen_count < 1 {
+            return Ok(());
+        }
+
+        arb_repo
+            .complete_monitored_reopen(&task_id, record.hold_cycle)
+            .await
+            .map_err(|e| format!("complete_monitored_reopen: failed to complete: {e}"))?;
+
+        tracing::info!(
+            task_id = %task_id,
+            hold_cycle = record.hold_cycle,
+            "complete_monitored_reopen: marked monitored reopen attempt complete"
+        );
+
+        Ok(())
+    }
 }
 
 /// Intern the wire form's `(entity_type, action)` back into the static-str
