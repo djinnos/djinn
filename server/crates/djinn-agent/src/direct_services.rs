@@ -771,7 +771,7 @@ impl SupervisorServices for DirectServices {
         );
         repo.transition(
             &task_id,
-            parsed,
+            parsed.clone(),
             "supervisor",
             "system",
             reason.as_deref(),
@@ -779,7 +779,25 @@ impl SupervisorServices for DirectServices {
         )
         .await
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+        // Supervisor-driven rework reopens (task_review_reject* /
+        // lead_approve_conflict) must terminalize the worker's in-flight
+        // attempt to `reopened` and record a durable rework marker — otherwise
+        // the reviewer's rejection leaves an orphaned `submitted` attempt that
+        // wedges the respawn guard's step-2 dedup forever (the ylme bug). The
+        // PR poller's apply_pr_transition already owns the PrCiFailed /
+        // PrChangesRequested / PrConflict reopens; this covers the transitions
+        // it does not. A no-op for every non-rework action.
+        djinn_coordinator::record_supervisor_rework_reopen(
+            &self.callbacks.agent_context.db,
+            &task_id,
+            &parsed,
+            reason.as_deref(),
+        )
+        .await;
+
+        Ok(())
     }
 
     async fn emit_djinn_event(&self, event: SerializableDjinnEvent) -> Result<(), String> {

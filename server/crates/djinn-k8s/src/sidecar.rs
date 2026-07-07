@@ -539,4 +539,118 @@ mod tests {
         assert_eq!(resolution.skipped[0].preset_id, "preset-does-not-exist");
         assert!(resolution.skipped[0].reason.contains("unknown"));
     }
+
+    // ---- hgd0 Wave 1 transport regression tests ----------------------------
+
+    /// AC4: `sidecar_conn_env` for a preset with `conn_env_var` containing
+    /// `TEST_POSTGRES_URL` emits that env var with the rendered loopback
+    /// connection string.  These are static connection env vars — the preset
+    /// mechanism does not attach or execute any pre-task commands.
+    #[test]
+    fn conn_env_test_postgres_url_from_multi_name_preset() {
+        let s = spec(); // conn_env_var: "DATABASE_URL,TEST_POSTGRES_URL"
+        let envs = sidecar_conn_env(&s);
+        assert_eq!(envs.len(), 2);
+
+        let expected = "postgres://postgres:postgres@127.0.0.1:5432/app_test";
+        assert_eq!(envs[0].name, "DATABASE_URL");
+        assert_eq!(envs[0].value.as_deref(), Some(expected));
+        assert_eq!(envs[1].name, "TEST_POSTGRES_URL");
+        assert_eq!(envs[1].value.as_deref(), Some(expected));
+
+        // Both values are connection URLs, not commands.
+        for env in &envs {
+            let value = env.value.as_deref().unwrap_or("");
+            assert!(
+                value.starts_with("postgres://"),
+                "conn env must be a URL, not a command: {}={}",
+                env.name,
+                value
+            );
+        }
+    }
+
+    /// AC4: `BackingServiceSpec` is a connection-injection primitive — it has
+    /// no fields for pre-task commands, lifecycle hooks, or any command
+    /// execution metadata.  This type-level regression guard ensures that
+    /// service presets remain purely about connection string injection and
+    /// don't accidentally acquire lifecycle coupling.
+    #[test]
+    fn backing_service_spec_has_no_pretask_command_fields() {
+        let s = spec();
+        // The only env vars produced by sidecar_conn_env are from
+        // conn_env_var + conn_template — no lifecycle commands.
+        let envs = sidecar_conn_env(&s);
+        for env in &envs {
+            // Connection env vars are rendered URL strings.
+            let value = env.value.as_deref().unwrap_or("");
+            assert!(
+                value.starts_with("postgres://"),
+                "service preset env must be a connection URL: {}={}",
+                env.name,
+                value
+            );
+        }
+
+        // The sidecar container uses the image's default entrypoint,
+        // not an injected command.
+        let cfg = crate::config::KubernetesConfig::for_testing();
+        let container = sidecar_container(&cfg, &s);
+        assert!(
+            container.command.is_none(),
+            "sidecar container must not override entrypoint with commands"
+        );
+        // The sidecar's env is the service's own env (e.g. POSTGRES_PASSWORD),
+        // not lifecycle pre-task commands.
+        let sidecar_env = container.env.as_ref().unwrap();
+        for env in sidecar_env {
+            assert_ne!(
+                env.name, "DJINN_PRE_TASK",
+                "sidecar env must not contain pre-task command variables"
+            );
+        }
+    }
+
+    /// AC4: When a service preset resolves to an injected sidecar, the
+    /// `InjectedServiceMetadata` carries exactly `preset_id`, `service_type`,
+    /// `port`, and `conn_env_var` — no lifecycle/pre-task metadata leaks
+    /// into the metadata the runtime logs as `task_run_services_resolved`.
+    #[test]
+    fn injected_service_metadata_has_no_pretask_fields() {
+        let requested = vec!["preset-postgres-18".to_string()];
+        let mut services = Vec::new();
+        let mut injected = Vec::new();
+        let mut skipped = Vec::new();
+        append_preset_resolution(
+            "project-metadata-test",
+            &requested[0],
+            Ok(Some(preset())),
+            &mut services,
+            &mut injected,
+            &mut skipped,
+        );
+
+        assert_eq!(injected.len(), 1);
+        let meta = &injected[0];
+        // The metadata carries exactly these four fields.
+        assert_eq!(meta.preset_id, "preset-postgres-18");
+        assert_eq!(meta.service_type, "postgres");
+        assert_eq!(meta.port, 5432);
+        assert_eq!(meta.conn_env_var, "DATABASE_URL,TEST_POSTGRES_URL");
+
+        // No pre-task command field exists on InjectedServiceMetadata.
+        // (This is a compile-time guarantee from the struct definition,
+        // but we also verify the serialized JSON has no unexpected keys.)
+        let json = serde_json::to_value(meta).unwrap();
+        let obj = json.as_object().expect("serialized as object");
+        assert_eq!(
+            obj.len(),
+            4,
+            "exactly 4 fields: preset_id, service_type, port, conn_env_var"
+        );
+        assert!(obj.contains_key("preset_id"));
+        assert!(obj.contains_key("service_type"));
+        assert!(obj.contains_key("port"));
+        assert!(obj.contains_key("conn_env_var"));
+    }
 }
