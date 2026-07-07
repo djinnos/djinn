@@ -5004,7 +5004,7 @@
               "description": "Runs in the task-run Pod before the supervisor starts.",
               "type": "array",
               "items": {
-                "$ref": "#/$defs/HookCommand"
+                "$ref": "#/$defs/PreTaskCommand"
               },
               "default": []
             },
@@ -5036,6 +5036,45 @@
                 "$ref": "#/$defs/HookCommand"
               }
             }
+          ]
+        },
+        "PreTaskCommand": {
+          "description": "A named pre-task command declared in the project environment config.\n\nPre-task commands run in the task-run Pod before the supervisor starts.\nEach command carries an optional name (auto-generated as `pre_task_N`\nwhen omitted), a shell command string, a timeout, and a failure policy.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Optional display/identity name. When `None`, resolved to\n`pre_task_1`, `pre_task_2`, etc. at validation time.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "command": {
+              "description": "Shell command passed to `/bin/sh -c`.",
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "description": "Maximum wall-clock seconds the command may run. Default 300 (5 min).",
+              "type": "integer",
+              "format": "int64",
+              "default": 300
+            },
+            "failure_policy": {
+              "description": "What to do when the command exits non-zero.",
+              "$ref": "#/$defs/PreTaskFailurePolicy",
+              "default": "blocking"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        },
+        "PreTaskFailurePolicy": {
+          "description": "Failure policy for a pre-task command.\n\n* `blocking` (default) — the task run fails if the command fails.\n* `best_effort` — failures are logged but do not abort the task run.",
+          "type": "string",
+          "enum": [
+            "blocking",
+            "best_effort"
           ]
         },
         "CargoCachePolicy": {
@@ -5645,7 +5684,7 @@
               "description": "Runs in the task-run Pod before the supervisor starts.",
               "type": "array",
               "items": {
-                "$ref": "#/$defs/HookCommand"
+                "$ref": "#/$defs/PreTaskCommand"
               },
               "default": []
             },
@@ -5677,6 +5716,45 @@
                 "$ref": "#/$defs/HookCommand"
               }
             }
+          ]
+        },
+        "PreTaskCommand": {
+          "description": "A named pre-task command declared in the project environment config.\n\nPre-task commands run in the task-run Pod before the supervisor starts.\nEach command carries an optional name (auto-generated as `pre_task_N`\nwhen omitted), a shell command string, a timeout, and a failure policy.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Optional display/identity name. When `None`, resolved to\n`pre_task_1`, `pre_task_2`, etc. at validation time.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "command": {
+              "description": "Shell command passed to `/bin/sh -c`.",
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "description": "Maximum wall-clock seconds the command may run. Default 300 (5 min).",
+              "type": "integer",
+              "format": "int64",
+              "default": 300
+            },
+            "failure_policy": {
+              "description": "What to do when the command exits non-zero.",
+              "$ref": "#/$defs/PreTaskFailurePolicy",
+              "default": "blocking"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        },
+        "PreTaskFailurePolicy": {
+          "description": "Failure policy for a pre-task command.\n\n* `blocking` (default) — the task run fails if the command fails.\n* `best_effort` — failures are logged but do not abort the task run.",
+          "type": "string",
+          "enum": [
+            "blocking",
+            "best_effort"
           ]
         },
         "CargoCachePolicy": {
@@ -6228,7 +6306,7 @@
               "description": "Runs in the task-run Pod before the supervisor starts.",
               "type": "array",
               "items": {
-                "$ref": "#/$defs/HookCommand"
+                "$ref": "#/$defs/PreTaskCommand"
               },
               "default": []
             },
@@ -6260,6 +6338,45 @@
                 "$ref": "#/$defs/HookCommand"
               }
             }
+          ]
+        },
+        "PreTaskCommand": {
+          "description": "A named pre-task command declared in the project environment config.\n\nPre-task commands run in the task-run Pod before the supervisor starts.\nEach command carries an optional name (auto-generated as `pre_task_N`\nwhen omitted), a shell command string, a timeout, and a failure policy.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Optional display/identity name. When `None`, resolved to\n`pre_task_1`, `pre_task_2`, etc. at validation time.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "command": {
+              "description": "Shell command passed to `/bin/sh -c`.",
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "description": "Maximum wall-clock seconds the command may run. Default 300 (5 min).",
+              "type": "integer",
+              "format": "int64",
+              "default": 300
+            },
+            "failure_policy": {
+              "description": "What to do when the command exits non-zero.",
+              "$ref": "#/$defs/PreTaskFailurePolicy",
+              "default": "blocking"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        },
+        "PreTaskFailurePolicy": {
+          "description": "Failure policy for a pre-task command.\n\n* `blocking` (default) — the task run fails if the command fails.\n* `best_effort` — failures are logged but do not abort the task run.",
+          "type": "string",
+          "enum": [
+            "blocking",
+            "best_effort"
           ]
         },
         "CargoCachePolicy": {
@@ -10788,7 +10905,7 @@
               "description": "Runs in the task-run Pod before the supervisor starts.",
               "type": "array",
               "items": {
-                "$ref": "#/$defs/HookCommand"
+                "$ref": "#/$defs/PreTaskCommand"
               },
               "default": []
             },
@@ -10820,6 +10937,45 @@
                 "$ref": "#/$defs/HookCommand"
               }
             }
+          ]
+        },
+        "PreTaskCommand": {
+          "description": "A named pre-task command declared in the project environment config.\n\nPre-task commands run in the task-run Pod before the supervisor starts.\nEach command carries an optional name (auto-generated as `pre_task_N`\nwhen omitted), a shell command string, a timeout, and a failure policy.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Optional display/identity name. When `None`, resolved to\n`pre_task_1`, `pre_task_2`, etc. at validation time.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "command": {
+              "description": "Shell command passed to `/bin/sh -c`.",
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "description": "Maximum wall-clock seconds the command may run. Default 300 (5 min).",
+              "type": "integer",
+              "format": "int64",
+              "default": 300
+            },
+            "failure_policy": {
+              "description": "What to do when the command exits non-zero.",
+              "$ref": "#/$defs/PreTaskFailurePolicy",
+              "default": "blocking"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        },
+        "PreTaskFailurePolicy": {
+          "description": "Failure policy for a pre-task command.\n\n* `blocking` (default) — the task run fails if the command fails.\n* `best_effort` — failures are logged but do not abort the task run.",
+          "type": "string",
+          "enum": [
+            "blocking",
+            "best_effort"
           ]
         },
         "CargoCachePolicy": {
@@ -11347,7 +11503,7 @@
               "description": "Runs in the task-run Pod before the supervisor starts.",
               "type": "array",
               "items": {
-                "$ref": "#/$defs/HookCommand"
+                "$ref": "#/$defs/PreTaskCommand"
               },
               "default": []
             },
@@ -11379,6 +11535,45 @@
                 "$ref": "#/$defs/HookCommand"
               }
             }
+          ]
+        },
+        "PreTaskCommand": {
+          "description": "A named pre-task command declared in the project environment config.\n\nPre-task commands run in the task-run Pod before the supervisor starts.\nEach command carries an optional name (auto-generated as `pre_task_N`\nwhen omitted), a shell command string, a timeout, and a failure policy.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Optional display/identity name. When `None`, resolved to\n`pre_task_1`, `pre_task_2`, etc. at validation time.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "command": {
+              "description": "Shell command passed to `/bin/sh -c`.",
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "description": "Maximum wall-clock seconds the command may run. Default 300 (5 min).",
+              "type": "integer",
+              "format": "int64",
+              "default": 300
+            },
+            "failure_policy": {
+              "description": "What to do when the command exits non-zero.",
+              "$ref": "#/$defs/PreTaskFailurePolicy",
+              "default": "blocking"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        },
+        "PreTaskFailurePolicy": {
+          "description": "Failure policy for a pre-task command.\n\n* `blocking` (default) — the task run fails if the command fails.\n* `best_effort` — failures are logged but do not abort the task run.",
+          "type": "string",
+          "enum": [
+            "blocking",
+            "best_effort"
           ]
         },
         "CargoCachePolicy": {
@@ -11880,7 +12075,7 @@
               "description": "Runs in the task-run Pod before the supervisor starts.",
               "type": "array",
               "items": {
-                "$ref": "#/$defs/HookCommand"
+                "$ref": "#/$defs/PreTaskCommand"
               },
               "default": []
             },
@@ -11912,6 +12107,45 @@
                 "$ref": "#/$defs/HookCommand"
               }
             }
+          ]
+        },
+        "PreTaskCommand": {
+          "description": "A named pre-task command declared in the project environment config.\n\nPre-task commands run in the task-run Pod before the supervisor starts.\nEach command carries an optional name (auto-generated as `pre_task_N`\nwhen omitted), a shell command string, a timeout, and a failure policy.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Optional display/identity name. When `None`, resolved to\n`pre_task_1`, `pre_task_2`, etc. at validation time.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "command": {
+              "description": "Shell command passed to `/bin/sh -c`.",
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "description": "Maximum wall-clock seconds the command may run. Default 300 (5 min).",
+              "type": "integer",
+              "format": "int64",
+              "default": 300
+            },
+            "failure_policy": {
+              "description": "What to do when the command exits non-zero.",
+              "$ref": "#/$defs/PreTaskFailurePolicy",
+              "default": "blocking"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        },
+        "PreTaskFailurePolicy": {
+          "description": "Failure policy for a pre-task command.\n\n* `blocking` (default) — the task run fails if the command fails.\n* `best_effort` — failures are logged but do not abort the task run.",
+          "type": "string",
+          "enum": [
+            "blocking",
+            "best_effort"
           ]
         },
         "CargoCachePolicy": {
