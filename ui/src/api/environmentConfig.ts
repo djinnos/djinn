@@ -190,7 +190,7 @@ export function normalizePreTaskCommands(raw: unknown): PreTaskCommand[] {
     if (item && typeof item === "object") {
       const obj = item as Record<string, unknown>;
       return {
-        ...(obj as PreTaskCommand),
+        ...(obj as unknown as PreTaskCommand),
         timeout_seconds:
           typeof obj.timeout_seconds === "number"
             ? obj.timeout_seconds
