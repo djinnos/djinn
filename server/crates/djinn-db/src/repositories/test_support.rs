@@ -702,3 +702,18 @@ pub async fn ensure_doctor_findings_schema(db: &Database) {
         .await
         .expect("create doctor_findings_entity_ids_gin_idx");
 }
+
+/// Overwrite the `encrypted_value` column of a credential row with arbitrary
+/// raw bytes. Used by tests that need to simulate decryption failures (corrupt
+/// or truncated ciphertext) without going through the encrypt/decrypt round-trip.
+///
+/// This is a **test-only** escape hatch — all production writes MUST go through
+/// the `CredentialRepository` boundary in `djinn-provider`.
+pub async fn corrupt_credential_encrypted_value(db: &Database, key_name: &str, raw_bytes: Vec<u8>) {
+    sqlx::query("UPDATE credentials SET encrypted_value = $1 WHERE key_name = $2")
+        .bind(raw_bytes)
+        .bind(key_name)
+        .execute(db.pool())
+        .await
+        .expect("corrupt_credential_encrypted_value: update failed");
+}

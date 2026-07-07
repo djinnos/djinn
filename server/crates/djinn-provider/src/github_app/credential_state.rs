@@ -859,14 +859,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Now corrupt the encrypted value directly in the DB.
-        // Write random bytes that will fail decryption.
-        sqlx::query("UPDATE credentials SET encrypted_value = $1 WHERE key_name = $2")
-            .bind(vec![0u8, 1, 2, 3, 4, 5]) // too short / invalid
-            .bind(CRED_KEY_NAME)
-            .execute(db.pool())
-            .await
-            .unwrap();
+        // Now corrupt the encrypted value using the djinn-db test-support
+        // helper (raw SQL lives inside the djinn-db crate boundary).
+        djinn_db::test_support::corrupt_credential_encrypted_value(
+            &db,
+            CRED_KEY_NAME,
+            vec![0u8, 1, 2, 3, 4, 5], // too short / invalid
+        )
+        .await;
 
         let state = resolve_credential_source(Some(&repo)).await;
         assert!(
