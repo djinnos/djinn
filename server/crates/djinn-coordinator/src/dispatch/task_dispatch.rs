@@ -1515,20 +1515,28 @@ impl CoordinatorActor {
             // fresh spawn/admission side-effects.  Guard ordering:
             // 1. Open-PR adoption: when the task has an existing open PR
             //    (task.pr_url), adopt it and record an adopted_pr audit row.
-            //    Adoption is bypassed when the task's required-CI gate is
-            //    failing (task.ci_status == "failing"): the PrCiFailed
-            //    remediation flow reopened the task so a worker can fix the
-            //    failing PR, and adopting would starve that remediation.
+            //    Adoption is bypassed when the PR needs rework — the reopen
+            //    flow returned the task to open so a worker can fix the PR,
+            //    and adopting would starve that rework: failing required CI
+            //    (task.ci_status == "failing", PrCiFailed flow), an
+            //    unresolved merge conflict (task.merge_conflict_metadata,
+            //    PrConflict flow), or a reopened-latest attempt (paths with
+            //    no task-row column, e.g. PrChangesRequested / merge-queue
+            //    dequeue with green PR-head checks).
             // 2. Non-terminal attempt: if a pending or submitted attempt
             //    already exists for this task+role, defer dispatch and record
             //    a guard-only audit row.  No dispatch / provider / reopen
             //    counters are incremented for the deferral.
+            let pr_rework_signal = super::respawn_guard::PrReworkSignal::from_task_row(
+                task.ci_status.as_str(),
+                task.merge_conflict_metadata.as_deref(),
+            );
             match super::respawn_guard::run_respawn_guard(
                 &self.db,
                 &task.id,
                 role,
                 task.pr_url.as_deref(),
-                Some(task.ci_status.as_str()),
+                pr_rework_signal,
             )
             .await
             {
