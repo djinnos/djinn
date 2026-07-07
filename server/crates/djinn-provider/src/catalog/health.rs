@@ -300,6 +300,11 @@ pub struct HealthTracker {
     /// by the coordinator at its redispatch streak/cooldown site. Independent of
     /// the `(scope, model)` breaker buckets above.
     task_failures: Arc<Mutex<HashMap<String, TaskFailureSignal>>>,
+    /// Deferred breaker observations: keys recorded by
+    /// [`record_failure_observation`] during failover-chain traversal.
+    /// Flushed by [`take_pending_observations`] and evaluated by
+    /// [`apply_breaker_check_for`] after chain exhaustion.
+    pending_breaker_observations: Arc<Mutex<Vec<HealthKey>>>,
 }
 
 impl HealthTracker {
@@ -307,6 +312,7 @@ impl HealthTracker {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             task_failures: Arc::new(Mutex::new(HashMap::new())),
+            pending_breaker_observations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -329,6 +335,84 @@ impl HealthTracker {
     /// consumed).
     pub fn take_task_provider_failure(&self, task_id: &str) -> Option<TaskFailureSignal> {
         self.task_failures.lock().unwrap().remove(task_id)
+    }
+
+    /// Record a failure **observation** — increments consecutive/total failure
+    /// counters and buffers the key for a later breaker check, but does NOT
+    /// trip the circuit breaker.
+    ///
+    /// Use this during failover-chain traversal so each candidate's failure is
+    /// observed immediately (for diagnostics and per-candidate health state),
+    /// while breaker demotion/cooldown is deferred until the chain is exhausted.
+    /// Call [`apply_breaker_check_for`] after chain exhaustion to evaluate
+    /// whether the breaker should trip for each observed failure.
+    pub fn record_failure_observation(&self, scope: Option<&str>, model_id: &str) {
+        let mut map = self.inner.lock().unwrap();
+        let key = HealthKey::new(scope, model_id);
+        let state = map.entry(key.clone()).or_default();
+        state.consecutive_failures += 1;
+        state.total_failures += 1;
+        drop(map);
+        self.pending_breaker_observations.lock().unwrap().push(key);
+    }
+
+    /// Take all pending breaker observations recorded by
+    /// [`record_failure_observation`] since the last call.
+    /// The returned keys should be passed to [`apply_breaker_check_for`] after
+    /// chain exhaustion to evaluate whether the breaker should trip.
+    pub fn take_pending_observations(&self) -> Vec<HealthKey> {
+        std::mem::take(&mut *self.pending_breaker_observations.lock().unwrap())
+    }
+
+    /// Evaluate and apply the circuit-breaker trip for a single `(scope, model)`
+    /// key.  Called after failover-chain exhaustion for each candidate that was
+    /// observed to fail.
+    ///
+    /// Mirrors the breaker-trip logic in [`record_failure`] (cooldown expiry
+    /// check → threshold check → trip), but operates on a key whose failure
+    /// counts were already incremented by [`record_failure_observation`].
+    pub fn apply_breaker_check_for(&self, scope: Option<&str>, model_id: &str) {
+        let now = SystemClock::new().now_instant();
+        let mut map = self.inner.lock().unwrap();
+        let key = HealthKey::new(scope, model_id);
+        let Some(state) = map.get_mut(&key) else {
+            return;
+        };
+
+        // If the previous cooldown expired, clear the flag so we can re-trip.
+        if state.auto_disabled && state.is_available(now) {
+            state.auto_disabled = false;
+            state.cooldown_until = None;
+        }
+
+        if !state.auto_disabled && state.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+            let cooldown = state.compute_cooldown();
+            state.auto_disabled = true;
+            state.cooldown_until = Some(now + cooldown);
+            state.disable_ttl_trips += 1;
+            let hard_disabled = state.register_trip(now);
+            djinn_telemetry::breaker::increment_trip();
+            tracing::warn!(
+                model_id = %key.model_id,
+                scope = ?key.scope,
+                consecutive_failures = state.consecutive_failures,
+                cooldown_secs = cooldown.as_secs(),
+                disable_ttl_trips = state.disable_ttl_trips,
+                trips_in_window = state.trips_in_window(now),
+                hard_disabled,
+                "model circuit-breaker tripped after failover-chain exhaustion"
+            );
+            if hard_disabled {
+                tracing::error!(
+                    model_id = %key.model_id,
+                    scope = ?key.scope,
+                    trips_in_window = TRIP_RATE_CEILING,
+                    window_hours = TRIP_RATE_WINDOW.as_secs() / 3600,
+                    "model breaker hit trip-rate ceiling — HARD-DISABLED until a human \
+                     re-enables it via model_health(enable)"
+                );
+            }
+        }
     }
 
     /// Record a successful invocation.  Resets consecutive failure counter;

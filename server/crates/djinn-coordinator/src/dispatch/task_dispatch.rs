@@ -940,12 +940,13 @@ impl CoordinatorActor {
                 }
                 Err(e) => {
                     // Failover-chain traversal: record the per-candidate
-                    // health observation immediately (so the circuit breaker
-                    // tracks consecutive failures for this (scope, model)
-                    // pair), log the failure, and continue to the next
-                    // eligible candidate.  Terminal task/session side effects
-                    // are deferred until all candidates are exhausted.
-                    self.health.record_failure(scope, model_id);
+                    // health *observation* immediately (failure counts are
+                    // incremented for diagnostics and candidate health state),
+                    // but do NOT trip the circuit breaker yet — breaker
+                    // demotion/cooldown is deferred until the chain is
+                    // exhausted (AC2).  Log the failure and continue to the
+                    // next eligible candidate.
+                    self.health.record_failure_observation(scope, model_id);
                     tracing::Span::current().record("outcome", "error");
                     tracing::debug!(outcome = "error", model_id = %model_id, label);
                     tracing::warn!(
@@ -990,11 +991,24 @@ impl CoordinatorActor {
     ///
     /// Extracted from `dispatch_ready_tasks` so the chain-exhaustion terminal
     /// side-effect contract is unit-testable without the full dispatch loop.
+    ///
+    /// **AC2 breaker deferral**: This method also applies the circuit-breaker
+    /// trip for each candidate that was observed to fail during chain traversal
+    /// (recorded by [`HealthTracker::record_failure_observation`]). Breaker
+    /// demotion/cooldown is deferred from per-candidate failure time to this
+    /// point — after all candidates are exhausted — so a successful fallback
+    /// never triggers a breaker trip for an earlier candidate.
     pub(crate) async fn apply_chain_exhaustion_side_effects(
         &mut self,
         task: &djinn_core::models::Task,
         role: &str,
     ) {
+        // Apply deferred breaker checks for all candidates that failed during
+        // chain traversal.  This is the "chain-exhausted" evaluation point:
+        // breaker demotion/cooldown is intentionally NOT applied during the
+        // per-candidate loop (see `record_failure_observation`).
+        self.apply_breaker_for_observed_candidate_failures();
+
         let streak = {
             let s = self
                 .dispatch_failure_streak
@@ -1045,6 +1059,21 @@ impl CoordinatorActor {
                 },
             )
             .await;
+        }
+    }
+
+    /// Apply deferred breaker checks for all candidates that were observed to
+    /// fail during the most recent failover-chain traversal.
+    ///
+    /// Called from [`apply_chain_exhaustion_side_effects`] after all candidates
+    /// are exhausted. Takes the pending observations from [`HealthTracker`] and
+    /// evaluates the breaker trip for each. This ensures breaker
+    /// demotion/cooldown is deferred until chain exhaustion (AC2).
+    fn apply_breaker_for_observed_candidate_failures(&self) {
+        let observations = self.health.take_pending_observations();
+        for key in observations {
+            self.health
+                .apply_breaker_check_for(key.scope.as_deref(), &key.model_id);
         }
     }
 
@@ -4432,8 +4461,9 @@ mod failover_chain_tests {
     }
 
     /// AC3: First-candidate pool error followed by a successful fallback does
-    /// NOT advance the failure streak, apply a dispatch cooldown, or
-    /// increment park/intervention counters.
+    /// NOT advance the failure streak, apply a dispatch cooldown, trip the
+    /// circuit breaker for the failed candidate, or increment park/intervention
+    /// counters.
     ///
     /// Scenario: 2 candidates — model-a fails with a pool error (SlotBusy),
     /// model-b dispatches successfully. The test asserts:
@@ -4441,8 +4471,12 @@ mod failover_chain_tests {
     /// 2. No failure streak was recorded for the task.
     /// 3. No dispatch cooldown was applied.
     /// 4. Per-candidate health failure was recorded for model-a (the failing
-    ///    candidate), but the task-level terminal side effects are NOT applied
-    ///    because the chain was not exhausted.
+    ///    candidate), but the circuit breaker was NOT tripped because the chain
+    ///    was not exhausted (AC2 deferral).
+    /// 5. The session was NOT suspended, the task was NOT reopened/quality-struck,
+    ///    and park/intervention counters were NOT incremented — because terminal
+    ///    side effects only flow through `apply_chain_exhaustion_side_effects`,
+    ///    which is called ONLY when `try_dispatch_to_pool` returns `Failed`.
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn failover_chain_first_candidate_failure_fallback_succeeds_no_terminal_effects() {
@@ -4510,6 +4544,29 @@ mod failover_chain_tests {
             "model-a should still be available after a single pool error (below breaker threshold)"
         );
 
+        // ── AC3c2: circuit breaker was NOT tripped (AC2 deferral) ────────
+        // The breaker must NOT be tripped for model-a even though it failed,
+        // because the chain was not exhausted — a later candidate succeeded.
+        // Breaker demotion is deferred to `apply_chain_exhaustion_side_effects`.
+        let model_a_health = actor.health.model_health(None, "provider/model-a");
+        assert!(
+            !model_a_health.auto_disabled,
+            "model-a breaker must NOT be tripped when chain was not exhausted \
+             (breaker demotion deferred until chain exhaustion — AC2)"
+        );
+
+        // ── AC3c3: pending breaker observations are buffered, not consumed ─
+        // `record_failure_observation` buffered model-a's failure for a later
+        // breaker check.  Since the chain succeeded, these observations are
+        // NOT consumed — they would be flushed by `apply_breaker_for_observed_candidate_failures`
+        // (called from `apply_chain_exhaustion_side_effects`) only on chain
+        // exhaustion.  Verify the observation was recorded.
+        let pending = actor.health.take_pending_observations();
+        assert!(
+            pending.iter().any(|k| k.model_id == "provider/model-a"),
+            "model-a failure observation must be pending for deferred breaker check"
+        );
+
         // ── AC3d: no failure streak was recorded for the task ────────────
         assert!(
             !actor.dispatch_failure_streak.contains_key("fallback-task"),
@@ -4522,11 +4579,26 @@ mod failover_chain_tests {
             "no dispatch cooldown should be applied when the chain was not exhausted"
         );
 
-        // ── AC3f: terminal side-effect diagnostics are NOT logged ────────
+        // ── AC3f: terminal side effects were NOT applied ─────────────────
+        // `apply_chain_exhaustion_side_effects` is called ONLY when
+        // `try_dispatch_to_pool` returns `DispatchOutcome::Failed`.  Since
+        // the outcome was `Dispatched`, the method was never invoked, so:
+        //   - Session was NOT suspended (terminally_fail_task not called)
+        //   - Task was NOT reopened / quality-struck
+        //   - Park/intervention counters were NOT incremented
+        //   - Dispatch failure streak was NOT advanced
+        // These are verified above (AC3d, AC3e).  The negative log assertions
+        // below confirm the terminal path was not entered:
         assert!(
             !logs_contain("all failover candidates exhausted"),
             "must NOT log chain-exhaustion message when fallback succeeded"
         );
+        assert!(
+            !logs_contain("circuit-breaker tripped after failover-chain exhaustion"),
+            "must NOT log breaker trip when chain was not exhausted"
+        );
+
+        // Per-candidate observation and acceptance logs ARE emitted:
         assert!(
             logs_contain("failover_candidate_attempt"),
             "must log per-candidate attempt for the failed model-a"
@@ -4709,6 +4781,160 @@ mod failover_chain_tests {
             actor.dispatch_failure_streak.get("exhausted-task-uuid"),
             Some(&2),
             "failure streak should be 2 after second chain exhaustion"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC2 regression: circuit breaker IS tripped after chain exhaustion when
+    /// consecutive failure threshold is reached, and breaker demotion/cooldown
+    /// was deferred until this point (not applied during per-candidate traversal).
+    ///
+    /// Scenario: 2 candidates fail, 3 chain exhaustions in a row.
+    /// After the 3rd exhaustion (consecutive_failures reaches
+    /// CIRCUIT_BREAKER_THRESHOLD = 3), `apply_chain_exhaustion_side_effects`
+    /// trips the breaker for both candidates.  Before the 3rd exhaustion,
+    /// the breaker should NOT be tripped even though failures were observed.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn breaker_tripped_after_chain_exhaustion_reaches_threshold() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (mut actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        let task = djinn_core::models::Task {
+            id: "breaker-task-uuid".to_owned(),
+            project_id: String::new(),
+            short_id: "breaker-task".to_owned(),
+            epic_id: None,
+            title: String::new(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_owned(),
+            status: "open".to_owned(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".to_owned(),
+            acceptance_criteria: "[]".to_owned(),
+            reopen_count: 0,
+            continuation_count: 0,
+            total_reopen_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-06-12T00:00:00Z".to_owned(),
+            updated_at: "2026-06-12T00:00:00Z".to_owned(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_owned(),
+            agent_type: None,
+            created_by_user_id: None,
+            ci_status: "unknown".to_owned(),
+            ci_head_sha: None,
+            ci_pr_number: None,
+            ci_blocking_required_check_names: "[]".to_owned(),
+            ci_failure_fingerprint: None,
+            ci_first_seen_at: None,
+            ci_last_seen_at: None,
+            ci_same_signature_count: 0,
+            ci_last_remediation_base_sha: None,
+            unresolved_blocker_count: 0,
+        };
+
+        // Run 2 chain exhaustions — breaker threshold is 3, so breaker should
+        // NOT be tripped yet even though failures are observed.
+        for round in 1..=2 {
+            let outcome = actor
+                .try_dispatch_to_pool(
+                    &task.short_id,
+                    "worker",
+                    0,
+                    None,
+                    &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                    |_pool, _model_id| async {
+                        Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                    },
+                )
+                .await;
+            assert!(matches!(outcome, DispatchOutcome::Failed));
+
+            // Breaker should still be available before side-effects are applied
+            assert!(
+                actor.health.is_available(None, "provider/model-a"),
+                "model-a should be available before side-effects (round {round})"
+            );
+
+            actor
+                .apply_chain_exhaustion_side_effects(&task, "worker")
+                .await;
+
+            // After round 2: consecutive_failures = 2 for each candidate.
+            // Breaker threshold is 3, so NOT tripped yet.
+            let model_a_health = actor.health.model_health(None, "provider/model-a");
+            assert!(
+                !model_a_health.auto_disabled,
+                "model-a breaker must NOT be tripped after {round} exhaustions (threshold is 3)"
+            );
+            let model_b_health = actor.health.model_health(None, "provider/model-b");
+            assert!(
+                !model_b_health.auto_disabled,
+                "model-b breaker must NOT be tripped after {round} exhaustions (threshold is 3)"
+            );
+        }
+
+        // 3rd chain exhaustion: consecutive_failures reaches 3 → breaker trips.
+        let outcome = actor
+            .try_dispatch_to_pool(
+                &task.short_id,
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |_pool, _model_id| async {
+                    Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                },
+            )
+            .await;
+        assert!(matches!(outcome, DispatchOutcome::Failed));
+
+        // Before side-effects: breaker should still be available
+        // (observation-only recording does not trip the breaker).
+        assert!(
+            actor.health.is_available(None, "provider/model-a"),
+            "model-a must still be available before side-effects are applied (AC2 deferral)"
+        );
+
+        // Apply chain-exhaustion side effects → breaker trips for both.
+        actor
+            .apply_chain_exhaustion_side_effects(&task, "worker")
+            .await;
+
+        // Breaker IS tripped for model-a after chain exhaustion.
+        let model_a_health = actor.health.model_health(None, "provider/model-a");
+        assert!(
+            model_a_health.auto_disabled,
+            "model-a breaker MUST be tripped after 3 chain exhaustions reach threshold"
+        );
+
+        // Breaker IS tripped for model-b after chain exhaustion.
+        let model_b_health = actor.health.model_health(None, "provider/model-b");
+        assert!(
+            model_b_health.auto_disabled,
+            "model-b breaker MUST be tripped after 3 chain exhaustions reach threshold"
+        );
+
+        // Pending observations are consumed after chain exhaustion.
+        let remaining_pending = actor.health.take_pending_observations();
+        assert!(
+            remaining_pending.is_empty(),
+            "pending breaker observations must be consumed by apply_chain_exhaustion_side_effects"
         );
 
         cancel.cancel();
