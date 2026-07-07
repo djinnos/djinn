@@ -56,8 +56,8 @@ use djinn_supervisor::services::{
     SerializableCreateSessionParams, SerializableCreateTaskRunParams,
 };
 use djinn_supervisor::{
-    AuthHelloMsg, AuthResultMsg, Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse,
-    StageError, StageOutcome, SupervisorServices, TaskRunOutcome,
+    AuthHelloMsg, AuthResultMsg, BranchPublicationResult, Frame, FramePayload, ServiceRpcRequest,
+    ServiceRpcResponse, StageError, StageOutcome, SupervisorServices, TaskRunOutcome,
 };
 use djinn_workspace::Workspace;
 use tempfile::TempDir;
@@ -415,6 +415,17 @@ async fn handle_rpc(
         }
         ServiceRpcRequest::CompleteMonitoredReopen { .. } => {
             ServiceRpcResponse::CompleteMonitoredReopen(Ok(()))
+        }
+        ServiceRpcRequest::PublishBranchToGithub { .. } => {
+            ServiceRpcResponse::PublishBranchToGithub(BranchPublicationResult {
+                success: false,
+                pushed_sha: None,
+                mirror_head: String::new(),
+                attempted_github_head: String::new(),
+                pr_branch_existed: false,
+                error_class: Some("fake server".into()),
+                error_message: Some("fake server: publish_branch_to_github stub".into()),
+            })
         }
     }
 }

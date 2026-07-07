@@ -952,7 +952,7 @@ async fn task_branch_commits_ahead(
     Ok(count)
 }
 
-async fn push_task_branch_to_github(
+pub(crate) async fn push_task_branch_to_github(
     mirror: &MirrorManager,
     project_id: &str,
     task_branch: &str,
@@ -1032,7 +1032,7 @@ async fn push_task_branch_to_github(
 /// Recognise GitHub's "cannot lock ref" rejection, which surfaces when two
 /// processes push to the same task branch within the same ref-transaction
 /// window. See `push_task_branch_to_github` for the recovery path.
-fn is_concurrent_push_race(err: &GitError) -> bool {
+pub(crate) fn is_concurrent_push_race(err: &GitError) -> bool {
     let msg = err.to_string();
     msg.contains("cannot lock ref") && msg.contains("reference already exists")
 }

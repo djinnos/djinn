@@ -60,7 +60,8 @@ use djinn_supervisor::services::{
     SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
 };
 use djinn_supervisor::{
-    RpcServices, StageError, StageOutcome, SupervisorServices, TaskRunOutcome, TaskRunSpec,
+    BranchPublicationResult, RpcServices, StageError, StageOutcome, SupervisorServices,
+    TaskRunOutcome, TaskRunSpec,
 };
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
@@ -598,6 +599,14 @@ impl SupervisorServices for WorkerSupervisorServices {
 
     async fn complete_monitored_reopen(&self, task_id: String) -> Result<(), String> {
         self.rpc.complete_monitored_reopen(task_id).await
+    }
+
+    async fn publish_branch_to_github(
+        &self,
+        spec: &TaskRunSpec,
+        task: &Task,
+    ) -> BranchPublicationResult {
+        self.rpc.publish_branch_to_github(spec, task).await
     }
 }
 
