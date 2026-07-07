@@ -775,7 +775,10 @@ fn block_content_rejects_self_closing_decisions_attr_form() {
     let blocks = parse_mdx_blocks(body).unwrap();
     let err = validate_block_content(&blocks).unwrap_err();
     assert!(err.contains("Decisions block"), "error was: {err}");
-    assert!(err.contains("`auth`"), "error must name the block id: {err}");
+    assert!(
+        err.contains("`auth`"),
+        "error must name the block id: {err}"
+    );
     assert!(
         err.contains("###"),
         "decisions error must direct the author to `###` heading children: {err}"
