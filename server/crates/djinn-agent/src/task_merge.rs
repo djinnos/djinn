@@ -446,8 +446,8 @@ pub(crate) async fn try_auto_merge_target_into_task_branch(
                 };
                 let message = format!("Merge {merge_target} into {task_branch}");
                 match workspace.commit(&message, identity).await {
-                    Ok(true) => {}
-                    Ok(false) => {
+                    Ok(outcome) if outcome.committed() => {}
+                    Ok(_) => {
                         // Staged a non-empty diff but nothing to commit — the
                         // merge produced no tree change. Treat as already-current.
                     }
