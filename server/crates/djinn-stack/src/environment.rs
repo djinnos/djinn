@@ -43,6 +43,11 @@ const MAX_LANGUAGE_LIST: usize = 64;
 const MAX_STRING_LEN: usize = 512;
 const MAX_WORKSPACE_TAGS: usize = 32;
 const MAX_HOOK_SHELL_LEN: usize = 16 * 1024;
+const MAX_PRE_TASK_COMMANDS: usize = 20;
+const MAX_PRE_TASK_COMMAND_LEN: usize = 4096;
+const PRE_TASK_TIMEOUT_DEFAULT: u64 = 300;
+const PRE_TASK_TIMEOUT_MIN: u64 = 1;
+const PRE_TASK_TIMEOUT_MAX: u64 = 1800;
 
 #[derive(Debug, Error)]
 pub enum EnvironmentConfigError {
@@ -70,6 +75,15 @@ pub enum EnvironmentConfigError {
     InvalidEnvKey { key: String },
     #[error("env var {key:?}: value contains disallowed newline/NUL")]
     InvalidEnvValue { key: String },
+    #[error("{field}: value {value} out of range [{min}, {max}]")]
+    OutOfRange {
+        field: String,
+        value: u64,
+        min: u64,
+        max: u64,
+    },
+    #[error("{field}: duplicate name after normalization: {name:?}")]
+    DuplicateName { field: String, name: String },
 }
 
 pub type EnvResult<T> = std::result::Result<T, EnvironmentConfigError>;
@@ -827,6 +841,115 @@ impl HookCommand {
     }
 }
 
+/// Failure policy for a pre-task command.
+///
+/// * `blocking` (default) — the task run fails if the command fails.
+/// * `best_effort` — failures are logged but do not abort the task run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreTaskFailurePolicy {
+    #[default]
+    Blocking,
+    BestEffort,
+}
+
+/// A named pre-task command declared in the project environment config.
+///
+/// Pre-task commands run in the task-run Pod before the supervisor starts.
+/// Each command carries an optional name (auto-generated as `pre_task_N`
+/// when omitted), a shell command string, a timeout, and a failure policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PreTaskCommand {
+    /// Optional display/identity name. When `None`, resolved to
+    /// `pre_task_1`, `pre_task_2`, etc. at validation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Shell command passed to `/bin/sh -c`.
+    pub command: String,
+    /// Maximum wall-clock seconds the command may run. Default 300 (5 min).
+    #[serde(default = "default_pre_task_timeout")]
+    pub timeout_seconds: u64,
+    /// What to do when the command exits non-zero.
+    #[serde(default)]
+    pub failure_policy: PreTaskFailurePolicy,
+}
+
+fn default_pre_task_timeout() -> u64 {
+    PRE_TASK_TIMEOUT_DEFAULT
+}
+
+impl PreTaskCommand {
+    /// Return the effective name: supplied or auto-generated from the
+    /// 1-based index.
+    pub fn resolved_name(&self, index: usize) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| format!("pre_task_{}", index + 1))
+    }
+
+    fn validate(&self, field: &str) -> EnvResult<()> {
+        // Name — only validate when explicitly supplied.
+        if let Some(name) = &self.name {
+            validate_identifier(&format!("{field}.name"), name)?;
+        }
+
+        // Command — non-empty and capped.
+        if self.command.is_empty() {
+            return Err(EnvironmentConfigError::EmptyValue {
+                field: format!("{field}.command"),
+            });
+        }
+        if self.command.len() > MAX_PRE_TASK_COMMAND_LEN {
+            return Err(EnvironmentConfigError::TooLong {
+                field: format!("{field}.command"),
+                len: self.command.len(),
+                max: MAX_PRE_TASK_COMMAND_LEN,
+            });
+        }
+
+        // Timeout — inclusive range.
+        if self.timeout_seconds < PRE_TASK_TIMEOUT_MIN
+            || self.timeout_seconds > PRE_TASK_TIMEOUT_MAX
+        {
+            return Err(EnvironmentConfigError::OutOfRange {
+                field: format!("{field}.timeout_seconds"),
+                value: self.timeout_seconds,
+                min: PRE_TASK_TIMEOUT_MIN,
+                max: PRE_TASK_TIMEOUT_MAX,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Validate a list of [`PreTaskCommand`]s: cap the list length, validate
+/// each command, then check that resolved names are unique.
+fn validate_pre_task_commands(field: &str, commands: &[PreTaskCommand]) -> EnvResult<()> {
+    if commands.len() > MAX_PRE_TASK_COMMANDS {
+        return Err(EnvironmentConfigError::ListTooLong {
+            field: field.into(),
+            len: commands.len(),
+            max: MAX_PRE_TASK_COMMANDS,
+        });
+    }
+
+    let mut seen_names = HashSet::new();
+    for (i, cmd) in commands.iter().enumerate() {
+        let cmd_field = format!("{field}[{i}]");
+        cmd.validate(&cmd_field)?;
+
+        let resolved = cmd.resolved_name(i);
+        if !seen_names.insert(resolved.clone()) {
+            return Err(EnvironmentConfigError::DuplicateName {
+                field: field.into(),
+                name: resolved,
+            });
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 // Not `deny_unknown_fields`: the 2026-04-22 rename `pre_warm` → `pre_anything`
 // means older rows carry a `pre_warm` key that we need to tolerate on read.
@@ -844,7 +967,7 @@ pub struct LifecycleHooks {
     pub pre_anything: Vec<HookCommand>,
     /// Runs in the task-run Pod before the supervisor starts.
     #[serde(default)]
-    pub pre_task: Vec<HookCommand>,
+    pub pre_task: Vec<PreTaskCommand>,
     /// Workspace setup hook that runs once in the task-run Pod before the
     /// supervisor starts. Typically `pnpm install` / `cargo build` / similar
     /// — commands that prepare the workspace for the agent session.
@@ -856,7 +979,7 @@ impl LifecycleHooks {
     fn validate(&self) -> EnvResult<()> {
         validate_lifecycle_phase("lifecycle.post_build", &self.post_build)?;
         validate_lifecycle_phase("lifecycle.pre_anything", &self.pre_anything)?;
-        validate_lifecycle_phase("lifecycle.pre_task", &self.pre_task)?;
+        validate_pre_task_commands("lifecycle.pre_task", &self.pre_task)?;
         validate_lifecycle_phase("lifecycle.pre_verification", &self.pre_verification)?;
         Ok(())
     }
@@ -1652,7 +1775,7 @@ mod tests {
             "lifecycle": {
                 "post_build": ["echo build-time"],
                 "pre_anything": [["bash", "-lc", "echo ready"]],
-                "pre_task": [{"index": "scip-python", "deps": "pip install -e ."}]
+                "pre_task": [{"command": "pip install -e .", "name": "install-deps"}]
             }
         }"#;
         let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
@@ -1661,10 +1784,11 @@ mod tests {
             cfg.lifecycle.pre_anything[0],
             HookCommand::Exec(_)
         ));
-        assert!(matches!(
-            cfg.lifecycle.pre_task[0],
-            HookCommand::Parallel(_)
-        ));
+        assert_eq!(cfg.lifecycle.pre_task[0].command, "pip install -e .");
+        assert_eq!(
+            cfg.lifecycle.pre_task[0].name.as_deref(),
+            Some("install-deps")
+        );
         assert!(cfg.validate().is_ok());
     }
 
@@ -1983,11 +2107,11 @@ mod tests {
         // A HookCommand::Exec with an empty argv list must report the
         // indexed field path so callers know which phase and hook failed.
         let mut cfg = valid_minimal();
-        cfg.lifecycle.pre_task = vec![HookCommand::Exec(vec![])];
+        cfg.lifecycle.post_build = vec![HookCommand::Exec(vec![])];
         let err = cfg.validate().unwrap_err();
         assert!(
-            matches!(err, EnvironmentConfigError::EmptyValue { ref field } if field == "lifecycle.pre_task[0]"),
-            "expected lifecycle.pre_task[0] EmptyValue, got: {err:?}"
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field } if field == "lifecycle.post_build[0]"),
+            "expected lifecycle.post_build[0] EmptyValue, got: {err:?}"
         );
     }
 
@@ -2043,6 +2167,338 @@ mod tests {
         assert!(
             matches!(err, EnvironmentConfigError::UnsafeIdentifier { ref field, .. } if field == "cargo_cache_policy.policy.features"),
             "expected features conflict, got: {err:?}"
+        );
+    }
+
+    // ---- PreTaskCommand / PreTaskFailurePolicy tests --------------------
+
+    fn make_pre_task_cmd(command: &str) -> PreTaskCommand {
+        PreTaskCommand {
+            name: None,
+            command: command.into(),
+            timeout_seconds: PRE_TASK_TIMEOUT_DEFAULT,
+            failure_policy: PreTaskFailurePolicy::default(),
+        }
+    }
+
+    #[test]
+    fn pretask_default_serde_roundtrip() {
+        // Minimal JSON: only `command` is required; everything else defaults.
+        let raw = r#"{"command": "echo hi"}"#;
+        let cmd: PreTaskCommand = serde_json::from_str(raw).unwrap();
+        assert_eq!(cmd.command, "echo hi");
+        assert!(cmd.name.is_none());
+        assert_eq!(cmd.timeout_seconds, 300);
+        assert_eq!(cmd.failure_policy, PreTaskFailurePolicy::Blocking);
+        // Roundtrip: serialize and re-parse.
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: PreTaskCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(cmd, back);
+    }
+
+    #[test]
+    fn pretask_failure_policy_best_effort_parses() {
+        let raw = r#"{"command": "echo ok", "failure_policy": "best_effort"}"#;
+        let cmd: PreTaskCommand = serde_json::from_str(raw).unwrap();
+        assert_eq!(cmd.failure_policy, PreTaskFailurePolicy::BestEffort);
+    }
+
+    #[test]
+    fn pretask_failure_policy_blocking_parses() {
+        let raw = r#"{"command": "echo ok", "failure_policy": "blocking"}"#;
+        let cmd: PreTaskCommand = serde_json::from_str(raw).unwrap();
+        assert_eq!(cmd.failure_policy, PreTaskFailurePolicy::Blocking);
+    }
+
+    #[test]
+    fn pretask_failure_policy_invalid_value_rejected() {
+        let raw = r#"{"command": "echo ok", "failure_policy": "ignore"}"#;
+        let err = serde_json::from_str::<PreTaskCommand>(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("ignore"),
+            "expected parse error mentioning invalid value, got: {err}"
+        );
+    }
+
+    #[test]
+    fn pretask_name_supplied_roundtrip() {
+        let raw = r#"{"command": "echo hi", "name": "my-step"}"#;
+        let cmd: PreTaskCommand = serde_json::from_str(raw).unwrap();
+        assert_eq!(cmd.name.as_deref(), Some("my-step"));
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"name\""), "name should be serialized");
+        let back: PreTaskCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name.as_deref(), Some("my-step"));
+    }
+
+    #[test]
+    fn pretask_name_none_not_serialized() {
+        let cmd = make_pre_task_cmd("echo hi");
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(
+            !json.contains("\"name\""),
+            "name: None should be skipped in serialization, got: {json}"
+        );
+    }
+
+    #[test]
+    fn pretask_resolved_name_auto_generated() {
+        let cmd = make_pre_task_cmd("echo hi");
+        assert_eq!(cmd.resolved_name(0), "pre_task_1");
+        assert_eq!(cmd.resolved_name(4), "pre_task_5");
+    }
+
+    #[test]
+    fn pretask_resolved_name_uses_supplied() {
+        let cmd = PreTaskCommand {
+            name: Some("custom".into()),
+            command: "echo hi".into(),
+            timeout_seconds: 100,
+            failure_policy: PreTaskFailurePolicy::BestEffort,
+        };
+        assert_eq!(cmd.resolved_name(0), "custom");
+        assert_eq!(cmd.resolved_name(99), "custom");
+    }
+
+    #[test]
+    fn pretask_valid_command_passes() {
+        let cmd = make_pre_task_cmd("pip install -e .");
+        assert!(cmd.validate("test").is_ok());
+    }
+
+    #[test]
+    fn pretask_empty_command_rejected() {
+        let mut cmd = make_pre_task_cmd("echo ok");
+        cmd.command = String::new();
+        let err = cmd.validate("test").unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field } if field == "test.command"),
+            "expected EmptyValue for command, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pretask_command_too_long_rejected() {
+        let mut cmd = make_pre_task_cmd("echo ok");
+        cmd.command = "x".repeat(MAX_PRE_TASK_COMMAND_LEN + 1);
+        let err = cmd.validate("test").unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::TooLong { ref field, max, .. } if field == "test.command" && max == MAX_PRE_TASK_COMMAND_LEN),
+            "expected TooLong for command, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pretask_command_at_max_len_accepted() {
+        let mut cmd = make_pre_task_cmd("echo ok");
+        cmd.command = "x".repeat(MAX_PRE_TASK_COMMAND_LEN);
+        assert!(cmd.validate("test").is_ok());
+    }
+
+    #[test]
+    fn pretask_timeout_zero_rejected() {
+        let mut cmd = make_pre_task_cmd("echo ok");
+        cmd.timeout_seconds = 0;
+        let err = cmd.validate("test").unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::OutOfRange { ref field, value, min, max }
+                if field == "test.timeout_seconds" && value == 0 && min == 1 && max == 1800),
+            "expected OutOfRange for timeout=0, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pretask_timeout_too_high_rejected() {
+        let mut cmd = make_pre_task_cmd("echo ok");
+        cmd.timeout_seconds = PRE_TASK_TIMEOUT_MAX + 1;
+        let err = cmd.validate("test").unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::OutOfRange { ref field, value, max, .. }
+                if field == "test.timeout_seconds" && value == PRE_TASK_TIMEOUT_MAX + 1 && max == PRE_TASK_TIMEOUT_MAX),
+            "expected OutOfRange for timeout too high, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pretask_timeout_at_boundary_accepted() {
+        let mut cmd = make_pre_task_cmd("echo ok");
+        cmd.timeout_seconds = PRE_TASK_TIMEOUT_MIN;
+        assert!(cmd.validate("test").is_ok());
+        cmd.timeout_seconds = PRE_TASK_TIMEOUT_MAX;
+        assert!(cmd.validate("test").is_ok());
+    }
+
+    #[test]
+    fn pretask_unsafe_name_rejected() {
+        let mut cmd = make_pre_task_cmd("echo ok");
+        cmd.name = Some("bad name!".into());
+        let err = cmd.validate("test").unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::UnsafeIdentifier { ref field, .. } if field == "test.name"),
+            "expected UnsafeIdentifier for name, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pretask_empty_name_rejected() {
+        let mut cmd = make_pre_task_cmd("echo ok");
+        cmd.name = Some(String::new());
+        let err = cmd.validate("test").unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field } if field == "test.name"),
+            "expected EmptyValue for empty name, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pretask_max_commands_accepted() {
+        let mut cfg = valid_minimal();
+        cfg.lifecycle.pre_task = (0..MAX_PRE_TASK_COMMANDS)
+            .map(|i| PreTaskCommand {
+                name: Some(format!("step_{i}")),
+                command: "echo ok".into(),
+                timeout_seconds: 10,
+                failure_policy: PreTaskFailurePolicy::BestEffort,
+            })
+            .collect();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn pretask_too_many_commands_rejected() {
+        let mut cfg = valid_minimal();
+        cfg.lifecycle.pre_task = (0..MAX_PRE_TASK_COMMANDS + 1)
+            .map(|i| make_pre_task_cmd(&format!("echo {i}")))
+            .collect();
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::ListTooLong { ref field, len, max }
+                if field == "lifecycle.pre_task" && len == MAX_PRE_TASK_COMMANDS + 1 && max == MAX_PRE_TASK_COMMANDS),
+            "expected ListTooLong for pre_task, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pretask_duplicate_supplied_names_rejected() {
+        let mut cfg = valid_minimal();
+        cfg.lifecycle.pre_task = vec![
+            PreTaskCommand {
+                name: Some("same".into()),
+                command: "echo a".into(),
+                ..make_pre_task_cmd("echo a")
+            },
+            PreTaskCommand {
+                name: Some("same".into()),
+                command: "echo b".into(),
+                ..make_pre_task_cmd("echo b")
+            },
+        ];
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::DuplicateName { ref field, ref name }
+                if field == "lifecycle.pre_task" && name == "same"),
+            "expected DuplicateName for \"same\", got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pretask_auto_generated_name_conflict_rejected() {
+        // First command has no name → auto-generated as "pre_task_1".
+        // Second command explicitly named "pre_task_1" → conflict.
+        let mut cfg = valid_minimal();
+        cfg.lifecycle.pre_task = vec![
+            make_pre_task_cmd("echo a"),
+            PreTaskCommand {
+                name: Some("pre_task_1".into()),
+                command: "echo b".into(),
+                ..make_pre_task_cmd("echo b")
+            },
+        ];
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::DuplicateName { ref field, ref name }
+                if field == "lifecycle.pre_task" && name == "pre_task_1"),
+            "expected DuplicateName for auto-generated conflict, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pretask_empty_list_still_valid() {
+        let mut cfg = valid_minimal();
+        cfg.lifecycle.pre_task = vec![];
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn pretask_absent_lifecycle_defaults_to_empty() {
+        // `{ "schema_version": 1 }` with no `lifecycle` key.
+        let raw = r#"{"schema_version": 1}"#;
+        let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
+        assert!(cfg.lifecycle.pre_task.is_empty());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn pretask_absent_pre_task_defaults_to_empty() {
+        // `{ "lifecycle": {} }` — no `pre_task` key.
+        let raw = r#"{"schema_version": 1, "lifecycle": {}}"#;
+        let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
+        assert!(cfg.lifecycle.pre_task.is_empty());
+    }
+
+    #[test]
+    fn pretask_empty_json_object_defaults_to_empty() {
+        // The Dolt column default: `'{}'`
+        let cfg: EnvironmentConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.lifecycle.pre_task.is_empty());
+    }
+
+    #[test]
+    fn pretask_empty_array_valid() {
+        let raw = r#"{"schema_version": 1, "lifecycle": {"pre_task": []}}"#;
+        let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
+        assert!(cfg.lifecycle.pre_task.is_empty());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn pretask_full_command_roundtrip() {
+        let raw = r#"{
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_task": [{
+                    "name": "setup-db",
+                    "command": "pg_isready || pg_ctlcluster 16 main start",
+                    "timeout_seconds": 60,
+                    "failure_policy": "best_effort"
+                }]
+            }
+        }"#;
+        let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
+        assert_eq!(cfg.lifecycle.pre_task.len(), 1);
+        let cmd = &cfg.lifecycle.pre_task[0];
+        assert_eq!(cmd.name.as_deref(), Some("setup-db"));
+        assert_eq!(cmd.command, "pg_isready || pg_ctlcluster 16 main start");
+        assert_eq!(cmd.timeout_seconds, 60);
+        assert_eq!(cmd.failure_policy, PreTaskFailurePolicy::BestEffort);
+        assert!(cfg.validate().is_ok());
+        // Full serde roundtrip.
+        let json = serde_json::to_string_pretty(&cfg).unwrap();
+        let back: EnvironmentConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn pretask_json_schema_contains_definition_names() {
+        let schema = schemars::schema_for!(EnvironmentConfig);
+        let schema_str = serde_json::to_string(&schema).unwrap();
+        assert!(
+            schema_str.contains("PreTaskCommand"),
+            "schema should contain PreTaskCommand definition"
+        );
+        assert!(
+            schema_str.contains("PreTaskFailurePolicy"),
+            "schema should contain PreTaskFailurePolicy definition"
         );
     }
 }
