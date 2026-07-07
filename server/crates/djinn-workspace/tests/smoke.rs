@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use djinn_workspace::{GitIdentity, MirrorManager};
+use djinn_workspace::{CommitOutcome, GitIdentity, MirrorManager};
 use tempfile::TempDir;
 use tokio::process::Command;
 
@@ -76,11 +76,17 @@ async fn mirror_clone_commit_cycle() {
         .await
         .unwrap();
     let made = ws.commit("wip", id).await.unwrap();
-    assert!(made, "expected a commit since hello.txt was added");
+    assert!(
+        matches!(made, CommitOutcome::Committed),
+        "expected a commit since hello.txt was added; got {made:?}"
+    );
 
     // Clean tree → no commit.
     let made_again = ws.commit("empty", id).await.unwrap();
-    assert!(!made_again, "clean tree should not produce a commit");
+    assert!(
+        matches!(made_again, CommitOutcome::NoChanges),
+        "clean tree should not produce a commit; got {made_again:?}"
+    );
 }
 
 /// Worker-side push path: after committing inside the ephemeral clone,
@@ -115,7 +121,10 @@ async fn push_to_origin_lands_worker_commit_in_mirror() {
         email: "bot@example.com",
     };
     let made = ws.commit("worker stage", id).await.unwrap();
-    assert!(made, "expected a commit since from-worker.txt was added");
+    assert!(
+        matches!(made, CommitOutcome::Committed),
+        "expected a commit since from-worker.txt was added; got {made:?}"
+    );
 
     ws.push_to_origin(task_branch)
         .await
