@@ -2383,6 +2383,10 @@ impl CoordinatorActor {
     /// accounting (protocol violations increment attempts; slow extensions
     /// do not — but slow extensions never reach this path because they never
     /// end the session).
+    ///
+    /// `role` is the session's `agent_type`: for `failed`/`interrupted` exits
+    /// on a nonterminal task this function also terminalizes the live
+    /// `task_attempts` row for the (task, role) pair (see step 6 below).
     #[tracing::instrument(
         name = "djinn.session_recovery.classify_exit",
         skip(self),
@@ -2394,6 +2398,7 @@ impl CoordinatorActor {
         task_id: &str,
         task_run_id: Option<&str>,
         session_status: &str,
+        role: &str,
     ) -> Option<ClassificationResult> {
         tracing::Span::current().record("task_id", task_id);
         tracing::Span::current().record("session_id", session_id);
@@ -2506,6 +2511,35 @@ impl CoordinatorActor {
                 "classify_session_exit_liveness: protocol violation detected — \
                  session exited while task is nonterminal; counts as failed attempt"
             );
+        }
+
+        // ── 6. Terminalize the live attempt for failed/interrupted exits ──
+        // A cleanly-failed run (e.g. provider error → TaskRunOutcome::Failed)
+        // self-finalizes its session, so none of the session-recovery /
+        // zombie-reap terminalizers ever fires for it. Without this step the
+        // `pending` task_attempts row created at dispatch-start stays
+        // non-terminal forever and the respawn guard defers every future
+        // dispatch of this (task, role) pair — a permanent wedge.
+        //
+        // `advance_to_terminal` is forward-only and idempotent, so duplicate
+        // exit events (or overlap with the recovery-scan terminalizers) are
+        // safe. `KillNoop` means the task is already terminal — leave the
+        // attempt to the terminal-path owners (PR poller / force-close).
+        if matches!(session_status, "failed" | "interrupted")
+            && result.outcome != Some(LivenessOutcome::KillNoop)
+        {
+            self.terminalize_recovery_attempt(
+                task_id,
+                role,
+                TaskAttemptOutcome::Crashed,
+                "session_exit_liveness",
+                Some(session_id),
+                task_run_id,
+                Some(result.verdict.as_str()),
+                Some("session_exit_nonterminal"),
+                Some("session exited failed/interrupted while task nonterminal"),
+            )
+            .await;
         }
 
         Some(result)

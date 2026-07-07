@@ -25,6 +25,18 @@ pub struct TaskAttemptRepository {
     db: Database,
 }
 
+/// A `pending` attempt row identified as orphaned by
+/// [`TaskAttemptRepository::list_orphaned_pending`]: older than the caller's
+/// threshold with no live `task_run` and no `running` session for its task.
+#[derive(Clone, Debug)]
+pub struct OrphanedPendingAttempt {
+    pub id: String,
+    pub task_id: String,
+    pub role: String,
+    pub dispatch_key: String,
+    pub created_at: String,
+}
+
 /// Parameters for creating or idempotently returning a pending attempt row.
 #[derive(Clone, Debug)]
 pub struct CreateTaskAttemptParams<'a> {
@@ -594,6 +606,52 @@ impl TaskAttemptRepository {
             .await?
         };
         Ok(row)
+    }
+
+    /// List `pending` attempt rows that look orphaned: created before
+    /// `created_before_iso` (lexicographic compare over the ISO-8601 UTC text
+    /// timestamps, same convention as `TaskRunRepository::reap_stale_running`)
+    /// with no live (`starting`/`running`, NULL `ended_at`) `task_run` and no
+    /// `running` session for their task.
+    ///
+    /// `task_attempts` rows do not carry a `task_run` FK (the session link is
+    /// NULL for fresh dispatches), so "linked task_run is terminal or absent"
+    /// is evaluated at task granularity: any live run or running session for
+    /// the task keeps every one of its pending attempts out of the result
+    /// (conservative — a later sweep re-evaluates).
+    ///
+    /// Used by the coordinator's orphaned-attempt reaper: a `pending` row with
+    /// nothing executing behind it can never be advanced by the normal
+    /// lifecycle paths, yet it hard-blocks the respawn guard for its
+    /// (task, role) pair forever.
+    pub async fn list_orphaned_pending(
+        &self,
+        created_before_iso: &str,
+    ) -> Result<Vec<OrphanedPendingAttempt>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            OrphanedPendingAttempt,
+            r#"SELECT ta.id AS "id!", ta.task_id AS "task_id!", ta.role AS "role!",
+                ta.dispatch_key AS "dispatch_key!", ta.created_at AS "created_at!"
+             FROM task_attempts ta
+             WHERE ta.outcome = 'pending'
+               AND ta.created_at < $1
+               AND NOT EXISTS (
+                   SELECT 1 FROM task_runs tr
+                   WHERE tr.task_id = ta.task_id
+                     AND tr.status IN ('starting', 'running')
+                     AND tr.ended_at IS NULL
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM sessions s
+                   WHERE s.task_id = ta.task_id
+                     AND s.status = 'running'
+               )
+             ORDER BY ta.created_at ASC"#,
+            created_before_iso
+        )
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     /// Latest `submitted` attempt for a task, optionally filtered by role.

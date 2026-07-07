@@ -637,9 +637,21 @@ impl LlmProvider for OpenAIResponsesProvider {
                             }
                         }
                     }
-                    // Raw EOF before the OpenAI Responses terminal frame.
-                    // Yield a typed retryable failure.
-                    if !seen_done {
+                    // Raw EOF. The Responses API's authoritative terminal frame
+                    // is `response.completed`, and the connection normally
+                    // closes right after it WITHOUT an OpenAI `[DONE]`
+                    // transport sentinel (see the `openai_responses_sse_template`
+                    // fixture in tests/provider_client_requests.rs, which ends
+                    // at `response.completed`). If the terminal frame was
+                    // observed, this EOF is a clean end of stream — yield Done.
+                    // (When a `[DONE]` sentinel does arrive, the SseFrame::Done
+                    // branch above returns first, so Done is emitted exactly
+                    // once either way.)
+                    if seen_done {
+                        yield Ok(StreamEvent::Done);
+                    } else {
+                        // Raw EOF before the OpenAI Responses terminal frame.
+                        // Yield a typed retryable failure.
                         // Discard any partial accumulator state.
                         if !accumulated_items.is_empty() || in_flight_function_calls > 0 {
                             tracing::warn!(
@@ -1407,6 +1419,85 @@ mod tests {
         ));
         assert!(matches!(&events[1], StreamEvent::Usage(_)));
         assert!(matches!(&events[2], StreamEvent::Done));
+    }
+
+    #[tokio::test]
+    async fn test_stream_eof_after_completed_without_done_sentinel_tool_call() {
+        let seen_auth = Arc::new(Mutex::new(None));
+        // The Responses API's authoritative terminal frame is
+        // `response.completed`; the connection then closes with NO `[DONE]`
+        // transport sentinel. This is the exact production shape for
+        // tool-call-only turns (gpt-5.5 via Codex OAuth): the stream must end
+        // with a clean StreamEvent::Done, not an EOF-truncation error.
+        let body = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_eof\",\"name\":\"bash\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.function_call_arguments.done\n",
+            "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"output_index\":0,\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_eof\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":9}}}\n\n"
+            // NO [DONE] sentinel — the server closes the connection here.
+        );
+        let mut config = test_provider().config.clone();
+        config.base_url = spawn_sse_server(200, body, seen_auth);
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
+        let events: Vec<_> = stream.try_collect().await.expect("stream events");
+
+        assert!(
+            matches!(&events[0], StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) if id == "call_eof" && name == "bash" && input["cmd"] == "ls")
+        );
+        assert!(matches!(
+            &events[1],
+            StreamEvent::Usage(TokenUsage {
+                input: 7,
+                output: 9,
+                ..
+            })
+        ));
+        assert!(matches!(&events[2], StreamEvent::Done));
+        assert_eq!(events.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_stream_eof_after_completed_without_done_sentinel_text() {
+        let seen_auth = Arc::new(Mutex::new(None));
+        // Text-only stream ending at `response.completed` with NO `[DONE]`
+        // sentinel: must terminate with StreamEvent::Done, not an error.
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}}\n\n"
+            // NO [DONE] sentinel — the server closes the connection here.
+        );
+        let mut config = test_provider().config.clone();
+        config.base_url = spawn_sse_server(200, body, seen_auth);
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
+        let events: Vec<_> = stream.try_collect().await.expect("stream events");
+
+        assert!(matches!(
+            &events[0],
+            StreamEvent::Delta(ContentBlock::Text { text }) if text == "Hi"
+        ));
+        assert!(matches!(&events[1], StreamEvent::Usage(_)));
+        assert!(matches!(&events[2], StreamEvent::Done));
+        assert_eq!(events.len(), 3);
     }
 
     #[tokio::test]
