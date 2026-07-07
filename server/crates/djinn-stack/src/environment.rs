@@ -868,6 +868,7 @@ pub struct PreTaskCommand {
     pub command: String,
     /// Maximum wall-clock seconds the command may run. Default 300 (5 min).
     #[serde(default = "default_pre_task_timeout")]
+    #[schemars(with = "i64")]
     pub timeout_seconds: u64,
     /// What to do when the command exits non-zero.
     #[serde(default)]
