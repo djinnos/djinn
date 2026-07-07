@@ -1,3 +1,4 @@
+// djinn:allow-oversize — pre-task runner + legacy phase runner; split when touched substantively.
 //! Lifecycle runner for warm + task-run Pods.
 //!
 //! Post-P5 this module is no longer tied to the devcontainer spec. It
