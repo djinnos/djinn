@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   type EnvironmentConfig,
+  DEFAULT_PRE_TASK_FAILURE_POLICY,
+  DEFAULT_PRE_TASK_TIMEOUT,
   cargoFeaturesCsv,
   normalizeConfig,
+  normalizePreTaskCommands,
   pruneOrphanLanguages,
   setCargoFeaturesCsv,
 } from "@/api/environmentConfig";
@@ -134,5 +137,129 @@ describe("cargo features CSV helpers", () => {
       mode: "explicit",
       policy: { all_features: true },
     });
+  });
+});
+
+describe("normalizePreTaskCommands", () => {
+  it("returns [] for non-array input", () => {
+    expect(normalizePreTaskCommands(undefined)).toEqual([]);
+    expect(normalizePreTaskCommands(null)).toEqual([]);
+    expect(normalizePreTaskCommands("string")).toEqual([]);
+    expect(normalizePreTaskCommands(42)).toEqual([]);
+  });
+
+  it("returns [] for an empty array", () => {
+    expect(normalizePreTaskCommands([])).toEqual([]);
+  });
+
+  it("applies defaults for a well-formed PreTaskCommand object with missing optional fields", () => {
+    const result = normalizePreTaskCommands([{ command: "pip install -e ." }]);
+    expect(result).toEqual([
+      {
+        command: "pip install -e .",
+        timeout_seconds: DEFAULT_PRE_TASK_TIMEOUT,
+        failure_policy: DEFAULT_PRE_TASK_FAILURE_POLICY,
+      },
+    ]);
+  });
+
+  it("preserves explicit timeout_seconds and failure_policy", () => {
+    const result = normalizePreTaskCommands([
+      { command: "echo ok", timeout_seconds: 120, failure_policy: "best_effort" },
+    ]);
+    expect(result).toEqual([
+      { command: "echo ok", timeout_seconds: 120, failure_policy: "best_effort" },
+    ]);
+  });
+
+  it("preserves the optional name field", () => {
+    const result = normalizePreTaskCommands([
+      { command: "make setup", name: "setup-step" },
+    ]);
+    expect(result[0].name).toBe("setup-step");
+    expect(result[0].command).toBe("make setup");
+  });
+
+  it("wraps a bare string into a PreTaskCommand with defaults", () => {
+    const result = normalizePreTaskCommands(["echo hello"]);
+    expect(result).toEqual([
+      {
+        command: "echo hello",
+        timeout_seconds: DEFAULT_PRE_TASK_TIMEOUT,
+        failure_policy: DEFAULT_PRE_TASK_FAILURE_POLICY,
+      },
+    ]);
+  });
+
+  it("wraps an argv array into a PreTaskCommand by joining with spaces", () => {
+    const result = normalizePreTaskCommands([["pip", "install", "-e", "."]]);
+    expect(result).toEqual([
+      {
+        command: "pip install -e .",
+        timeout_seconds: DEFAULT_PRE_TASK_TIMEOUT,
+        failure_policy: DEFAULT_PRE_TASK_FAILURE_POLICY,
+      },
+    ]);
+  });
+
+  it("normalizes a mix of objects, strings, and arrays", () => {
+    const result = normalizePreTaskCommands([
+      { command: "cargo build", timeout_seconds: 600 },
+      "echo inline",
+      ["make", "test"],
+    ]);
+    expect(result).toHaveLength(3);
+    expect(result[0].timeout_seconds).toBe(600);
+    expect(result[0].failure_policy).toBe("blocking");
+    expect(result[1].command).toBe("echo inline");
+    expect(result[2].command).toBe("make test");
+  });
+});
+
+describe("normalizeConfig pre_task defaults", () => {
+  it("defaults pre_task to [] when lifecycle is absent", () => {
+    const cfg = normalizeConfig({ schema_version: 1 });
+    expect(cfg.lifecycle.pre_task).toEqual([]);
+  });
+
+  it("defaults pre_task to [] when lifecycle.pre_task is absent", () => {
+    const cfg = normalizeConfig({ schema_version: 1, lifecycle: { post_build: [] } });
+    expect(cfg.lifecycle.pre_task).toEqual([]);
+  });
+
+  it("normalizes pre_task items through normalizePreTaskCommands", () => {
+    const cfg = normalizeConfig({
+      schema_version: 1,
+      lifecycle: {
+        pre_task: [{ command: "setup-db" }],
+      },
+    });
+    expect(cfg.lifecycle.pre_task).toEqual([
+      {
+        command: "setup-db",
+        timeout_seconds: DEFAULT_PRE_TASK_TIMEOUT,
+        failure_policy: DEFAULT_PRE_TASK_FAILURE_POLICY,
+      },
+    ]);
+  });
+
+  it("preserves post_build and pre_anything as HookCommand[]", () => {
+    const cfg = normalizeConfig({
+      schema_version: 1,
+      lifecycle: {
+        post_build: ["apt-get install -y curl"],
+        pre_anything: ["echo warming up"],
+        pre_task: [{ command: "make prepare" }],
+      },
+    });
+    expect(cfg.lifecycle.post_build).toEqual(["apt-get install -y curl"]);
+    expect(cfg.lifecycle.pre_anything).toEqual(["echo warming up"]);
+    expect(cfg.lifecycle.pre_task).toEqual([
+      {
+        command: "make prepare",
+        timeout_seconds: DEFAULT_PRE_TASK_TIMEOUT,
+        failure_policy: DEFAULT_PRE_TASK_FAILURE_POLICY,
+      },
+    ]);
   });
 });
