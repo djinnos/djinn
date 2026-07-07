@@ -456,7 +456,7 @@ impl NoteRepository {
         sqlx::query(
             r#"INSERT INTO note_associations
                  (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind, source)
-               VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), $4, $5)
+               VALUES ($1, $2, $3, 0, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), $4, $5)
                ON CONFLICT (note_a_id, note_b_id, kind, source) DO UPDATE SET
                    weight = GREATEST(note_associations.weight, EXCLUDED.weight),
                    kind = EXCLUDED.kind,
