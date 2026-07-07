@@ -1259,6 +1259,21 @@ async fn dispatch(
                 .await;
             ServiceRpcResponse::RecordArbiterDecision(result)
         }
+        ServiceRpcRequest::StartMonitoredReopen {
+            task_id,
+            directive,
+            verification_command,
+            exclude_models,
+        } => {
+            let result = services
+                .start_monitored_reopen(task_id, directive, verification_command, exclude_models)
+                .await;
+            ServiceRpcResponse::StartMonitoredReopen(result)
+        }
+        ServiceRpcRequest::CompleteMonitoredReopen { task_id } => {
+            let result = services.complete_monitored_reopen(task_id).await;
+            ServiceRpcResponse::CompleteMonitoredReopen(result)
+        }
     }
 }
 
@@ -1455,6 +1470,20 @@ mod tests {
             _decision: String,
             _evidence_json: String,
         ) -> Result<(), String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn start_monitored_reopen(
+            &self,
+            _task_id: String,
+            _directive: String,
+            _verification_command: String,
+            _exclude_models: Vec<String>,
+        ) -> Result<(), String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
             unimplemented!("not exercised in server tests")
         }
     }
