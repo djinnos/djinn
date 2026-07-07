@@ -12,6 +12,71 @@ use std::fmt;
 // them from this module as before.
 pub use djinn_provider::error_classify::{is_context_length_error, is_orphaned_tool_call_error};
 
+/// Provider/account failure patterns that may appear as "successful" assistant
+/// prose when the model echoes back a rate-limit, quota, out-of-credits, or
+/// provider error message instead of refusing or erroring at the HTTP/stream
+/// level.  When detected, the turn should be reclassified as a typed provider
+/// failure and must not be persisted as a successful assistant message.
+const PROVIDER_FAILURE_PROSE_PATTERNS: &[&str] = &[
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "too many requests",
+    "too many retries",
+    "requests per minute",
+    "tokens per minute",
+    "tpm limit",
+    "rpm limit",
+    "quota exceeded",
+    "quota_exceeded",
+    "insufficient_quota",
+    "out of credits",
+    "out of quota",
+    "credit balance",
+    "billing",
+    "subscription required",
+    "payment required",
+    "usage limit",
+    "monthly limit",
+    "api key not valid",
+    "invalid api key",
+    "authentication error",
+    "account suspended",
+    "account disabled",
+    "service unavailable",
+    "provider error",
+    "internal server error",
+    "overloaded",
+    "capacity",
+    "try again later",
+    "temporarily unavailable",
+    "exceeded the maximum",
+    "usage cap",
+    "spending limit",
+];
+
+/// Detect assistant text that looks like a disguised provider failure rather
+/// than genuine model output.  Prose in [`PROVIDER_FAILURE_PROSE_PATTERNS`] is
+/// matched case-insensitively and must dominate the text (not just an
+/// incidental mention inside an otherwise productive response).
+///
+/// Returns `true` when the text is short (< 200 chars) and contains any of the
+/// failure patterns.  Long responses that happen to mention "rate limit" in
+/// passing are not flagged.
+pub fn is_provider_failure_prose(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let normalized = lower.trim();
+    if normalized.is_empty() {
+        return false;
+    }
+    // Only flag short texts that contain a failure pattern — avoid false
+    // positives on a long response that happens to mention "rate limit" once.
+    normalized.len() < 200
+        && PROVIDER_FAILURE_PROSE_PATTERNS
+            .iter()
+            .any(|pat| normalized.contains(pat))
+}
+
 /// Maximum retries for empty assistant turns before treating as a hard failure.
 pub const MAX_EMPTY_TURN_RETRIES: u32 = 2;
 
@@ -102,8 +167,16 @@ pub fn supports_tool_choice_required(model_id: &str) -> bool {
     )
 }
 
-pub fn should_retry_empty_stream(saw_round_event: bool, empty_turn_retries: u32) -> Option<u32> {
-    if !saw_round_event && empty_turn_retries < MAX_EMPTY_TURN_RETRIES {
+pub fn should_retry_empty_stream(
+    saw_round_event: bool,
+    empty_turn_retries: u32,
+    is_codex: bool,
+) -> Option<u32> {
+    // Non-Codex providers fail immediately on the first empty/no-event stream.
+    // Codex/OpenAI consumers signal over-quota by answering with an empty 200,
+    // so the existing bounded retry lets us distinguish a one-off blip from a
+    // real throttle.
+    if !saw_round_event && empty_turn_retries < MAX_EMPTY_TURN_RETRIES && is_codex {
         Some(empty_turn_retries + 1)
     } else {
         None
@@ -113,8 +186,12 @@ pub fn should_retry_empty_stream(saw_round_event: bool, empty_turn_retries: u32)
 pub fn should_retry_empty_assistant_turn(
     assistant_content_is_empty: bool,
     empty_turn_retries: u32,
+    is_codex: bool,
 ) -> Option<u32> {
-    if assistant_content_is_empty && empty_turn_retries < MAX_EMPTY_TURN_RETRIES {
+    // Same rationale as `should_retry_empty_stream`: only Codex-family
+    // providers use empty assistant turns as a throttle signal; other
+    // providers should fail immediately.
+    if assistant_content_is_empty && empty_turn_retries < MAX_EMPTY_TURN_RETRIES && is_codex {
         Some(empty_turn_retries + 1)
     } else {
         None
@@ -252,5 +329,99 @@ mod tests {
         assert!(supports_tool_choice_required("openai/gpt-5.4"));
         assert!(supports_tool_choice_required("anthropic/claude-sonnet-4-5"));
         assert!(supports_tool_choice_required("chatgpt_codex/codex-mini"));
+    }
+    #[test]
+    fn should_retry_empty_stream_codex_allows_retries() {
+        // Codex gets bounded retries.
+        assert_eq!(
+            should_retry_empty_stream(false, 0, true),
+            Some(1),
+            "Codex retry 0→1"
+        );
+        assert_eq!(
+            should_retry_empty_stream(false, 1, true),
+            Some(2),
+            "Codex retry 1→2"
+        );
+        assert_eq!(
+            should_retry_empty_stream(false, 2, true),
+            None,
+            "Codex exhausted retries → terminal"
+        );
+    }
+    #[test]
+    fn should_retry_empty_stream_non_codex_fails_immediately() {
+        // Non-Codex providers fail on the first empty turn with no retries.
+        assert_eq!(
+            should_retry_empty_stream(false, 0, false),
+            None,
+            "non-Codex empty stream → immediate terminal failure"
+        );
+        assert_eq!(
+            should_retry_empty_stream(false, 1, false),
+            None,
+            "non-Codex always terminal"
+        );
+    }
+    #[test]
+    fn should_retry_empty_assistant_turn_codex_allows_retries() {
+        assert_eq!(should_retry_empty_assistant_turn(true, 0, true), Some(1));
+        assert_eq!(should_retry_empty_assistant_turn(true, 1, true), Some(2));
+        assert_eq!(
+            should_retry_empty_assistant_turn(true, 2, true),
+            None,
+            "Codex exhausted → terminal"
+        );
+    }
+    #[test]
+    fn should_retry_empty_assistant_turn_non_codex_fails_immediately() {
+        assert_eq!(
+            should_retry_empty_assistant_turn(true, 0, false),
+            None,
+            "non-Codex empty assistant → immediate terminal failure"
+        );
+    }
+    #[test]
+    fn is_provider_failure_prose_detects_rate_limit_short_text() {
+        assert!(is_provider_failure_prose(
+            "Rate limit exceeded. Please try again later."
+        ));
+        assert!(is_provider_failure_prose(
+            "You have exceeded your quota. Please check your billing."
+        ));
+        assert!(is_provider_failure_prose(
+            "insufficient_quota: you need to add credits"
+        ));
+        assert!(is_provider_failure_prose("429 Too Many Requests"));
+        assert!(is_provider_failure_prose(
+            "Out of credits. Please top up your account."
+        ));
+        assert!(is_provider_failure_prose(
+            "Account suspended due to unpaid balance."
+        ));
+        assert!(is_provider_failure_prose(
+            "API key not valid. Please pass a valid API key."
+        ));
+        assert!(is_provider_failure_prose(
+            "Service unavailable. Please try again."
+        ));
+    }
+    #[test]
+    fn is_provider_failure_prose_ignores_long_productive_text() {
+        // Long assistant response that happens to mention "rate limit" should not be flagged.
+        let long_text = format!(
+            "I've analyzed the codebase and found several issues. First, the error handling \
+             in the networking module doesn't properly handle rate limit scenarios from the \
+             upstream provider. We need to implement retry logic with exponential backoff. \
+             {} \
+             Here's my plan to fix this:\n1. Add a retry wrapper\n2. Implement backoff\n3. Write tests",
+            "Additional context that makes this a long response. "
+        );
+        assert!(!is_provider_failure_prose(&long_text));
+    }
+    #[test]
+    fn is_provider_failure_prose_empty_is_false() {
+        assert!(!is_provider_failure_prose(""));
+        assert!(!is_provider_failure_prose("   "));
     }
 }

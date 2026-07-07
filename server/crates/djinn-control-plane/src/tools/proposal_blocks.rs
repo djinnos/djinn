@@ -31,8 +31,9 @@ pub use catalog::{
     proposal_block_definition_for_tag, proposal_block_registry, proposal_block_tags,
 };
 pub use parser::{
-    extract_custom_block_tags, parse_mdx_blocks, validate_block_ids, validate_mdx_blocks,
-    validate_question_form_placement, validate_question_form_placement_for_format,
+    extract_custom_block_tags, parse_mdx_blocks, validate_block_content, validate_block_ids,
+    validate_mdx_blocks, validate_question_form_placement,
+    validate_question_form_placement_for_format,
 };
 pub use types::{
     BlockCatalogEntry, BlockError, BlockRegistry, GetBlockCatalogParams, GetBlockCatalogResponse,
