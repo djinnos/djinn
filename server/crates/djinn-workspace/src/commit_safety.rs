@@ -386,7 +386,7 @@ pub fn is_root_scratch(path: &str, config: &CommitSafetyConfig) -> bool {
     }
     // Prefix match.
     for prefix in &config.root_scratch_prefixes {
-        if basename.starts_with(prefix) && basename.len() > prefix.len() {
+        if basename.starts_with(prefix) && basename.len() >= prefix.len() {
             return true;
         }
     }
@@ -524,13 +524,13 @@ mod tests {
     }
 
     #[test]
-    fn root_scratch_prefix_requires_suffix() {
+    fn root_scratch_prefix_matches_bare_patch() {
         let config = default_config();
-        // Bare "patch" by itself should match (it has 0 chars after prefix,
-        // so the `len() > prefix.len()` check fails — this is intentional:
-        // a bare "patch" file at root is suspicious but we only match names
-        // that extend the prefix).
-        assert!(!is_root_scratch("patch", &config));
+        // Bare "patch" at root is rejected: the "patch" prefix covers
+        // "patch" exactly (via `>=`), "patch.txt", "patch.json", etc.
+        assert!(is_root_scratch("patch", &config));
+        assert!(is_root_scratch("patch.txt", &config));
+        assert!(is_root_scratch("patch_output", &config));
     }
 
     #[test]
