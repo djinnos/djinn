@@ -194,6 +194,11 @@ struct Inner {
     /// restart. See [`CredentialSourceState`] for the typed resolution
     /// states.
     pub app_config: tokio::sync::RwLock<Option<Arc<GitHubAppConfig>>>,
+    /// One-time boot token for the self-setup flow. Generated at startup
+    /// when `DJINN_ENABLE_SELF_SETUP=true` and no usable credentials exist.
+    /// `None` when the gate is disabled, credentials are present, or the
+    /// token was already consumed.
+    pub boot_token: tokio::sync::RwLock<Option<crate::server::auth::boot_token::BootToken>>,
     /// Per-project bare git mirrors on disk. Single shared instance so
     /// fetches serialize correctly and clones hit the same hardlink pool.
     /// Path resolution mirrors the vault key: `$DJINN_HOME/mirrors` or
@@ -237,6 +242,16 @@ struct Inner {
     /// dispatch through this handle rather than constructing a warmer
     /// per-call.
     pub graph_warmer: tokio::sync::RwLock<Option<Arc<dyn GraphWarmerService>>>,
+}
+
+/// Result of a boot token exchange attempt.
+pub enum BootTokenExchangeResult {
+    /// Token was valid and consumed; the inner value is the session token.
+    Ok(String),
+    /// No boot token exists (setup not enabled or already consumed).
+    NotAvailable,
+    /// The provided token was invalid or already used.
+    InvalidOrUsed,
 }
 
 impl AppState {
@@ -285,6 +300,7 @@ impl AppState {
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 memory_mount: Mutex::new(None),
                 app_config: tokio::sync::RwLock::new(None),
+                boot_token: tokio::sync::RwLock::new(None),
                 mirror,
                 rpc_server: tokio::sync::Mutex::new(None),
                 rpc_registry: Arc::new(ConnectionRegistry::new()),
@@ -534,6 +550,36 @@ impl AppState {
         *self.inner.app_config.write().await = cfg;
     }
 
+    /// Inject a boot token for testing. Not used in production code.
+    #[cfg(test)]
+    pub(crate) async fn set_boot_token_for_tests(
+        &self,
+        token: Option<crate::server::auth::boot_token::BootToken>,
+    ) {
+        *self.inner.boot_token.write().await = token;
+    }
+
+    /// Exchange a raw boot token for a setup session.
+    ///
+    /// Validates the token, atomically marks it consumed, and returns
+    /// a result the auth handler can map to HTTP responses.
+    pub async fn exchange_boot_token(&self, raw_token: &str) -> BootTokenExchangeResult {
+        let mut guard = self.inner.boot_token.write().await;
+        let Some(bt) = guard.as_mut() else {
+            return BootTokenExchangeResult::NotAvailable;
+        };
+
+        if !bt.verify(raw_token) {
+            return BootTokenExchangeResult::InvalidOrUsed;
+        }
+
+        if !bt.mark_used() {
+            return BootTokenExchangeResult::InvalidOrUsed;
+        }
+
+        BootTokenExchangeResult::Ok(crate::server::auth::random_token_b64())
+    }
+
     /// Initialise the in-memory App config using the deterministic credential
     /// source state machine.
     ///
@@ -588,6 +634,21 @@ impl AppState {
         }
 
         *self.inner.app_config.write().await = state.app_config().cloned();
+
+        // Generate a one-time boot token when self-setup is enabled and no
+        // usable credentials exist. The raw token is logged once; only the
+        // digest is stored in memory.
+        if crate::server::auth::self_setup_enabled() && !state.is_usable() {
+            let (raw, bt) = crate::server::auth::boot_token::BootToken::generate();
+            let public_url = crate::server::auth::public_url();
+            let setup_url = format!("{public_url}/auth/github/create-app?setup_token={raw}");
+            tracing::info!(
+                setup_url = %setup_url,
+                "self-setup: generated one-time boot token — \
+                 use this URL to begin GitHub App creation"
+            );
+            *self.inner.boot_token.write().await = Some(bt);
+        }
     }
 
     /// Persist new GitHub App credentials (e.g., after a manifest exchange)
