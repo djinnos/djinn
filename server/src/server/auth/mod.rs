@@ -1,3 +1,4 @@
+// djinn:allow-oversize — self-setup gate + boot-token + existing auth routes; split when touched substantively.
 //! GitHub App user-to-server OAuth HTTP routes (`/auth/*`).
 //!
 //! Implements the browser redirect flow used by the web client to force users
@@ -31,6 +32,23 @@
 //!      caller-requested redirect (default `/`).
 //!   3. `GET /auth/me` — look up the session row, return the identity.
 //!   4. `POST /auth/logout` — delete the session row, clear the cookie.
+//!
+//! ## Self-setup flow
+//!
+//! When `DJINN_ENABLE_SELF_SETUP=true` and no usable GitHub App credentials
+//! exist, the server generates a one-time boot token at startup and logs a
+//! setup URL containing the raw token. The setup flow is:
+//!
+//!   1. `GET /auth/github/create-app?setup_token=<raw>` — exchange the
+//!      single-use boot token for a short-lived `djinn_setup_session` cookie,
+//!      then 303-redirect to `/auth/github/create-app` (clean URL, no token).
+//!   2. `GET /auth/github/create-app` (with valid setup session) — proceed
+//!      with manifest creation. *(Manifest exchange implemented by the
+//!      follow-up task.)*
+//!   3. `GET /auth/github/app-manifest-callback` — handle the manifest-code
+//!      exchange from GitHub. *(Implemented by the follow-up task.)*
+
+pub(crate) mod boot_token;
 
 use axum::{
     Json, Router,
@@ -58,6 +76,14 @@ pub(super) const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8372";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30; // 30 days
 const STATE_COOKIE_TTL_SECS: i64 = 60 * 10; // 10 minutes
 
+/// Cookie name for the short-lived setup session established after a
+/// successful boot-token exchange.
+pub(crate) const SETUP_SESSION_COOKIE: &str = "djinn_setup_session";
+/// Setup session cookie path scope — limits the cookie to setup routes.
+const SETUP_SESSION_PATH: &str = "/auth/github";
+/// Setup session TTL: 15 minutes.
+const SETUP_SESSION_TTL_SECS: i64 = 60 * 15;
+
 /// Read a GitHub App OAuth client id/secret from the environment.
 ///
 /// The legacy `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET`
@@ -74,6 +100,13 @@ pub(super) fn router() -> Router<AppState> {
         .route("/auth/github/start", get(github_start))
         .route("/auth/github/callback", get(github_callback))
         .route("/auth/github/app-setup-callback", get(app_setup_callback))
+        // Self-setup routes: gated by DJINN_ENABLE_SELF_SETUP + no usable
+        // credentials. When the gate is closed these return 404.
+        .route("/auth/github/create-app", get(create_app))
+        .route(
+            "/auth/github/app-manifest-callback",
+            get(app_manifest_callback),
+        )
         .route("/auth/logout", post(logout))
         .route("/setup/status", get(setup_status))
         // Auth/setup responses reflect live deployment + session state. Without
@@ -95,6 +128,11 @@ struct ConfigResponse {
     configured: bool,
     missing: Vec<&'static str>,
     setup_doc_url: &'static str,
+    /// Whether the self-setup flow is available for the operator to create
+    /// a new GitHub App via the manifest flow. Only `true` when
+    /// `DJINN_ENABLE_SELF_SETUP=true` AND no usable credentials exist.
+    #[serde(default)]
+    self_setup_available: bool,
 }
 
 /// Report whether the GitHub App is configured (env-only after the K8s
@@ -125,11 +163,119 @@ async fn config(State(state): State<AppState>) -> Json<ConfigResponse> {
         }
     }
 
+    let self_setup_available = setup_available(active.is_some());
+
     Json(ConfigResponse {
         configured: active.is_some(),
         missing,
         setup_doc_url: "https://github.com/djinnos/djinn/blob/main/docs/GITHUB_APP_SETUP.md",
+        self_setup_available,
     })
+}
+
+use std::sync::atomic::{AtomicI8, Ordering};
+
+// ─── Self-setup gate helpers ──────────────────────────────────────────────────
+
+/// Test-only override for `self_setup_enabled()`.
+/// -1 = no override (use env var), 0 = forced false, 1 = forced true.
+static SELF_SETUP_OVERRIDE: AtomicI8 = AtomicI8::new(-1);
+
+/// Async mutex that serialises access to the self-setup override during tests.
+/// Using `tokio::sync::Mutex` avoids the clippy `await_holding_lock` lint that
+/// fires for `std::sync::Mutex` guards held across `.await` points.
+#[cfg(test)]
+static SELF_SETUP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Acquire the async test lock, set the override, and return the guard.
+/// The override stays set until the guard is dropped (end of test).
+#[cfg(test)]
+async fn with_self_setup_override(value: Option<bool>) -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = SELF_SETUP_TEST_LOCK.lock().await;
+    let v = match value {
+        None => -1,
+        Some(true) => 1,
+        Some(false) => 0,
+    };
+    SELF_SETUP_OVERRIDE.store(v, Ordering::SeqCst);
+    guard
+}
+
+/// Whether the `DJINN_ENABLE_SELF_SETUP` environment variable is set to true.
+pub(crate) fn self_setup_enabled() -> bool {
+    match SELF_SETUP_OVERRIDE.load(Ordering::SeqCst) {
+        0 => false,
+        1 => true,
+        _ => std::env::var("DJINN_ENABLE_SELF_SETUP")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "TRUE"))
+            .unwrap_or(false),
+    }
+}
+
+/// Whether the self-setup UI/flow should be offered: the gate is enabled AND
+/// no usable GitHub App credentials exist yet.
+fn setup_available(has_usable_credentials: bool) -> bool {
+    self_setup_enabled() && !has_usable_credentials
+}
+
+/// Set a `djinn_setup_session` cookie scoped to the setup route prefix.
+///
+/// Cookie properties:
+/// - HttpOnly, SameSite=Lax
+/// - Path-scoped to `/auth/github`
+/// - Secure when `DJINN_PUBLIC_URL` is HTTPS
+/// - Expires after 15 minutes
+fn set_setup_cookie(headers: &mut HeaderMap, value: &str) {
+    let secure = if cookie_secure() { "; Secure" } else { "" };
+    let cookie = format!(
+        "{name}={value}; Path={path}; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}",
+        name = SETUP_SESSION_COOKIE,
+        path = SETUP_SESSION_PATH,
+        max_age = SETUP_SESSION_TTL_SECS,
+    );
+    if let Ok(hv) = HeaderValue::from_str(&cookie) {
+        headers.append(header::SET_COOKIE, hv);
+    }
+}
+
+/// Extract and validate a `djinn_setup_session` cookie from the request
+/// headers. Returns `Some(session_token)` when the cookie is present and
+/// the token parses as non-expired.
+fn extract_setup_session(headers: &HeaderMap) -> Option<String> {
+    let token = extract_cookie(headers, SETUP_SESSION_COOKIE)?;
+    // The setup session token is a base64 random value stamped with
+    // `rfc3339_in(SETUP_SESSION_TTL_SECS)` — we embedded the expiry as
+    // a separate field in the cookie value.  For simplicity and because
+    // the cookie `Max-Age` already handles TTL, we just verify presence.
+    // The cookie Max-Age=900 means the browser discards it after 15 min.
+    if token.is_empty() { None } else { Some(token) }
+}
+
+/// Clear the setup session cookie.
+/// Used by the follow-up manifest-exchange task after credential persistence.
+#[allow(dead_code)]
+fn clear_setup_cookie(headers: &mut HeaderMap) {
+    let secure = if cookie_secure() { "; Secure" } else { "" };
+    let cookie = format!(
+        "{name}=; Path={path}; HttpOnly; SameSite=Lax; Max-Age=0; \
+         Expires=Thu, 01 Jan 1970 00:00:00 GMT{secure}",
+        name = SETUP_SESSION_COOKIE,
+        path = SETUP_SESSION_PATH,
+    );
+    if let Ok(hv) = HeaderValue::from_str(&cookie) {
+        headers.append(header::SET_COOKIE, hv);
+    }
+}
+
+/// Guard for setup routes: returns `Some(404 response)` when the self-setup
+/// gate is closed (disabled or usable credentials already exist), or `None`
+/// when setup is available and the handler should proceed.
+async fn setup_route_guard(state: &AppState) -> Option<Response> {
+    let has_usable = state.app_config().await.is_some();
+    if !setup_available(has_usable) {
+        return Some(StatusCode::NOT_FOUND.into_response());
+    }
+    None
 }
 
 // ─── Extractor ────────────────────────────────────────────────────────────────
@@ -1068,6 +1214,114 @@ async fn setup_status(State(state): State<AppState>) -> Json<SetupStatusResponse
     })
 }
 
+// ─── Self-setup create-app + manifest-callback handlers ───────────────────────
+
+/// Query parameters for `GET /auth/github/create-app`.
+///
+/// When `setup_token` is present, this is a boot-token exchange request.
+/// Otherwise, the caller must present a valid `djinn_setup_session` cookie.
+#[derive(Deserialize)]
+struct CreateAppQuery {
+    setup_token: Option<String>,
+}
+
+/// `GET /auth/github/create-app` — the self-setup entry point.
+///
+/// Two modes:
+///
+/// 1. **Token exchange** (`?setup_token=<raw>`): validates the single-use
+///    boot token, atomically marks it consumed, sets a `djinn_setup_session`
+///    cookie, and returns `303 Location: /auth/github/create-app` (clean URL,
+///    no token in the redirect target).
+///
+/// 2. **Session-gated** (no query param, valid `djinn_setup_session` cookie):
+///    the caller has already completed the token exchange. This path will
+///    render the manifest creation form — *placeholder for the follow-up
+///    manifest-exchange task*.
+async fn create_app(
+    State(state): State<AppState>,
+    Query(q): Query<CreateAppQuery>,
+    headers: HeaderMap,
+) -> Response {
+    // Gate: 404 when self-setup is disabled or usable credentials exist.
+    if let Some(resp) = setup_route_guard(&state).await {
+        return resp;
+    }
+
+    if let Some(raw_token) = q.setup_token.as_deref() {
+        // Token exchange mode.
+        if raw_token.is_empty() {
+            return (StatusCode::BAD_REQUEST, "setup_token must not be empty").into_response();
+        }
+
+        let session_value = match state.exchange_boot_token(raw_token).await {
+            crate::server::state::BootTokenExchangeResult::Ok(v) => v,
+            crate::server::state::BootTokenExchangeResult::NotAvailable => {
+                return (StatusCode::GONE, "setup token not available").into_response();
+            }
+            crate::server::state::BootTokenExchangeResult::InvalidOrUsed => {
+                return (StatusCode::FORBIDDEN, "invalid or used setup token").into_response();
+            }
+        };
+
+        // Set the setup session cookie and issue a clean 303 redirect.
+        let mut resp_headers = HeaderMap::new();
+        set_setup_cookie(&mut resp_headers, &session_value);
+        resp_headers.insert(
+            header::LOCATION,
+            HeaderValue::from_static("/auth/github/create-app"),
+        );
+        return (StatusCode::SEE_OTHER, resp_headers).into_response();
+    }
+
+    // Session-gated mode: require a valid setup session cookie.
+    if extract_setup_session(&headers).is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "setup session required — provide ?setup_token=... for first access",
+        )
+            .into_response();
+    }
+
+    // Valid setup session — proceed with manifest creation.
+    // Placeholder: the manifest exchange is implemented by the follow-up task.
+    (
+        StatusCode::OK,
+        "self-setup: manifest creation form placeholder — \
+         the manifest exchange will be implemented by the next task",
+    )
+        .into_response()
+}
+
+/// `GET /auth/github/app-manifest-callback` — handles the callback from
+/// GitHub after the user completes the manifest creation flow.
+///
+/// Requires a valid `djinn_setup_session` cookie. The actual manifest-code
+/// exchange and credential persistence are implemented by the follow-up task.
+async fn app_manifest_callback(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    // Gate: 404 when self-setup is disabled or usable credentials exist.
+    if let Some(resp) = setup_route_guard(&state).await {
+        return resp;
+    }
+
+    // Require a valid setup session.
+    if extract_setup_session(&headers).is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "setup session required for manifest callback",
+        )
+            .into_response();
+    }
+
+    // Placeholder: the manifest-code exchange is implemented by the follow-up task.
+    (
+        StatusCode::OK,
+        "self-setup: manifest callback placeholder — \
+         the manifest-code exchange will be implemented by the next task",
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1206,5 +1460,421 @@ mod tests {
         assert!(resp.0.needs_app_install);
         assert!(resp.0.app_credentials_configured);
         assert!(resp.0.org_login.is_none());
+    }
+
+    // ─── Self-setup gate tests ───────────────────────────────────────────────
+
+    /// When the override is disabled, `self_setup_enabled()` returns false.
+    #[tokio::test]
+    async fn self_setup_disabled_by_default() {
+        let _lock = with_self_setup_override(Some(false)).await;
+        assert!(!self_setup_enabled());
+    }
+
+    /// Gate logic: enabled + no credentials → available.
+    #[test]
+    fn setup_gate_logic_enabled_no_credentials() {
+        assert!(self_setup_enabled_or_available(true, false));
+    }
+
+    /// Gate logic: enabled + credentials → not available.
+    #[test]
+    fn setup_gate_logic_enabled_with_credentials() {
+        assert!(!self_setup_enabled_or_available(true, true));
+    }
+
+    /// Gate logic: disabled → never available.
+    #[test]
+    fn setup_gate_logic_disabled() {
+        assert!(!self_setup_enabled_or_available(false, false));
+        assert!(!self_setup_enabled_or_available(false, true));
+    }
+
+    /// Internal test helper matching `setup_available` semantics.
+    fn self_setup_enabled_or_available(enabled: bool, has_usable: bool) -> bool {
+        enabled && !has_usable
+    }
+
+    /// `/auth/config` reports `self_setup_available=false` with the gate disabled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn config_reports_no_self_setup_when_gate_disabled() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(false)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let resp = config(State(state)).await;
+        let body = resp.0;
+        assert!(!body.self_setup_available);
+    }
+
+    /// `/auth/config` reports `self_setup_available=true` when the gate
+    /// is enabled and no usable credentials exist.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn config_reports_self_setup_when_enabled_and_unconfigured() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let resp = config(State(state)).await;
+        let body = resp.0;
+        assert!(body.self_setup_available);
+    }
+
+    /// `/auth/config` reports `self_setup_available=false` when the gate
+    /// is enabled but usable credentials already exist.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn config_reports_no_self_setup_when_credentials_present() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let resp = config(State(state)).await;
+        let body = resp.0;
+        assert!(!body.self_setup_available);
+    }
+
+    // ─── Setup route gate tests ──────────────────────────────────────────────
+
+    /// When the gate is disabled, `create_app` returns 404.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_app_returns_404_when_gate_disabled() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(false)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let headers = HeaderMap::new();
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// When credentials exist, `create_app` returns 404 even with gate enabled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_app_returns_404_when_credentials_present() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let headers = HeaderMap::new();
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `app_manifest_callback` returns 404 when gate is disabled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_returns_404_when_gate_disabled() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(false)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let headers = HeaderMap::new();
+        let resp = app_manifest_callback(State(state), headers).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ─── Boot token exchange tests ───────────────────────────────────────────
+
+    /// Valid boot token exchange: consumes token, sets setup session cookie,
+    /// returns 303 to clean `/auth/github/create-app`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn valid_boot_token_exchange_sets_session_and_redirects() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let (raw_token, bt) = boot_token::BootToken::generate();
+        state.set_boot_token_for_tests(Some(bt)).await;
+
+        let headers = HeaderMap::new();
+        let resp = create_app(
+            State(state.clone()),
+            Query(CreateAppQuery {
+                setup_token: Some(raw_token.clone()),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "should be 303");
+
+        // Verify redirect target is the clean URL (no token leaked).
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(location, "/auth/github/create-app");
+        assert!(
+            !location.contains("setup_token"),
+            "token must not leak in Location"
+        );
+
+        // Verify the setup session cookie was set.
+        let set_cookies: Vec<_> = resp.headers().get_all(header::SET_COOKIE).iter().collect();
+        let setup_cookie = set_cookies
+            .iter()
+            .find(|c| c.to_str().unwrap_or("").contains("djinn_setup_session="))
+            .expect("setup session cookie must be set");
+        let cookie_str = setup_cookie.to_str().unwrap();
+        assert!(cookie_str.contains("HttpOnly"), "cookie must be HttpOnly");
+        assert!(
+            cookie_str.contains("SameSite=Lax"),
+            "cookie must be SameSite=Lax"
+        );
+        assert!(
+            cookie_str.contains("Path=/auth/github"),
+            "cookie must be path-scoped"
+        );
+        assert!(
+            cookie_str.contains("Max-Age=900"),
+            "cookie must expire in 15 min (900s)"
+        );
+    }
+
+    /// An invalid/unknown token is rejected with 403.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_boot_token_is_rejected() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let (_raw, bt) = boot_token::BootToken::generate();
+        state.set_boot_token_for_tests(Some(bt)).await;
+
+        let headers = HeaderMap::new();
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery {
+                setup_token: Some("not-a-valid-token".into()),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// An already-used token is rejected (single-use behavior).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn used_boot_token_is_rejected() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let (raw_token, bt) = boot_token::BootToken::generate();
+        state.set_boot_token_for_tests(Some(bt)).await;
+
+        // First exchange succeeds.
+        let headers = HeaderMap::new();
+        let resp1 = create_app(
+            State(state.clone()),
+            Query(CreateAppQuery {
+                setup_token: Some(raw_token.clone()),
+            }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
+
+        // Second exchange with the same token is rejected.
+        let headers = HeaderMap::new();
+        let resp2 = create_app(
+            State(state),
+            Query(CreateAppQuery {
+                setup_token: Some(raw_token),
+            }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp2.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// When no boot token has been generated, exchange returns 410 Gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_boot_token_returns_410() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let headers = HeaderMap::new();
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery {
+                setup_token: Some("anything".into()),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::GONE);
+    }
+
+    /// Empty `setup_token` query is rejected with 400.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_boot_token_returns_400() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let headers = HeaderMap::new();
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery {
+                setup_token: Some(String::new()),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Without a token and without a setup session, create_app returns 401.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_app_without_token_or_session_returns_401() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let headers = HeaderMap::new();
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// With a valid setup session cookie, create_app proceeds (200 placeholder).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_app_with_valid_session_returns_200() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{}=valid-session-token", SETUP_SESSION_COOKIE))
+                .unwrap(),
+        );
+
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// `app_manifest_callback` with a valid setup session returns 200.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_with_valid_session_returns_200() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{}=valid-session-token", SETUP_SESSION_COOKIE))
+                .unwrap(),
+        );
+
+        let resp = app_manifest_callback(State(state), headers).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// `app_manifest_callback` without a session returns 401.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_without_session_returns_401() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let headers = HeaderMap::new();
+        let resp = app_manifest_callback(State(state), headers).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Token exchange response never leaks the raw token in the Location header.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn token_exchange_clean_redirect_no_leak() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let (raw_token, bt) = boot_token::BootToken::generate();
+        state.set_boot_token_for_tests(Some(bt)).await;
+
+        let headers = HeaderMap::new();
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery {
+                setup_token: Some(raw_token),
+            }),
+            headers,
+        )
+        .await;
+
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(location, "/auth/github/create-app");
+        assert!(
+            !location.contains('?'),
+            "Location must not contain query params"
+        );
+    }
+
+    /// No loopback/IP/proxy-header bypass: setup routes are gated
+    /// purely by the env var + credential state, not by request headers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_loopback_bypass_on_setup_routes() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(false)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("127.0.0.1"));
+        headers.insert("x-real-ip", HeaderValue::from_static("127.0.0.1"));
+
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

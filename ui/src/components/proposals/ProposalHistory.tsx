@@ -37,7 +37,7 @@ function truncatePreview(text: string, maxLength = 140): string {
 }
 
 function revisionBodyPreview(revision: ProposalHistoryEntry): string {
-  const body = revision.body.trim();
+  const body = (revision.body ?? "").trim();
   if (!body) return "No body.";
 
   const format = revisionBodyFormat(revision);
@@ -279,7 +279,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                       the spec over {rounds} {rounds === 1 ? "round" : "rounds"};
                       diff is your original → the converged result.
                     </p>
-                    <DiffView before={before?.body ?? ""} after={head.body} />
+                    <DiffView before={before?.body ?? ""} after={head.body ?? ""} />
                   </div>
                 )}
               </li>
@@ -512,7 +512,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                       → <span className="text-foreground">{r.title}</span>
                     </p>
                   )}
-                  <DiffView before={prev?.body ?? ""} after={r.body} />
+                  <DiffView before={prev?.body ?? ""} after={r.body ?? ""} />
                   {!prev && (
                     <p className="text-xs text-muted-foreground">
                       Initial spec.

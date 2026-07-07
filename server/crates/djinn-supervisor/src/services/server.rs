@@ -1274,6 +1274,10 @@ async fn dispatch(
             let result = services.complete_monitored_reopen(task_id).await;
             ServiceRpcResponse::CompleteMonitoredReopen(result)
         }
+        ServiceRpcRequest::PublishBranchToGithub { spec, task } => {
+            let result = services.publish_branch_to_github(&spec, &task).await;
+            ServiceRpcResponse::PublishBranchToGithub(result)
+        }
     }
 }
 

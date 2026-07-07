@@ -76,10 +76,42 @@ export type HookCommand =
   | string[]
   | { [name: string]: HookCommand };
 
+/**
+ * Failure policy for a pre-task command.  Mirrors
+ * `djinn_stack::environment::PreTaskFailurePolicy`.
+ *
+ * * `blocking` (default) — the task run fails if the command fails.
+ * * `best_effort` — failures are logged but do not abort the task run.
+ */
+export type PreTaskFailurePolicy = "blocking" | "best_effort";
+
+export const DEFAULT_PRE_TASK_TIMEOUT = 300;
+export const DEFAULT_PRE_TASK_FAILURE_POLICY: PreTaskFailurePolicy = "blocking";
+
+/**
+ * A named pre-task command declared in the project environment config.
+ *
+ * Pre-task commands run in the task-run Pod before the supervisor starts.
+ * Each command carries an optional name (auto-generated as `pre_task_N`
+ * when omitted), a shell command string, a timeout, and a failure policy.
+ *
+ * Mirrors `djinn_stack::environment::PreTaskCommand`.
+ */
+export interface PreTaskCommand {
+  /** Optional display/identity name. Auto-generated as `pre_task_N` when omitted. */
+  name?: string;
+  /** Shell command passed to `/bin/sh -c`. */
+  command: string;
+  /** Maximum wall-clock seconds the command may run. Default 300 (5 min). */
+  timeout_seconds?: number;
+  /** What to do when the command exits non-zero. */
+  failure_policy?: PreTaskFailurePolicy;
+}
+
 export interface LifecycleHooks {
   post_build: HookCommand[];
   pre_anything: HookCommand[];
-  pre_task: HookCommand[];
+  pre_task: PreTaskCommand[];
 }
 
 /**
@@ -128,6 +160,57 @@ export interface EnvironmentConfig {
 }
 
 /**
+ * Normalize a raw `pre_task` value into `PreTaskCommand[]`, applying the
+ * same serde defaults the Rust `PreTaskCommand` struct carries:
+ * `timeout_seconds` → 300, `failure_policy` → "blocking".
+ *
+ * Tolerates non-object items (legacy `HookCommand` shapes) by wrapping
+ * bare strings/arrays as `{ command }`.
+ */
+export function normalizePreTaskCommands(raw: unknown): PreTaskCommand[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    // Bare string: wrap as a minimal PreTaskCommand.
+    if (typeof item === "string") {
+      return {
+        command: item,
+        timeout_seconds: DEFAULT_PRE_TASK_TIMEOUT,
+        failure_policy: DEFAULT_PRE_TASK_FAILURE_POLICY,
+      };
+    }
+    // Array (argv form): join into a shell string.
+    if (Array.isArray(item)) {
+      return {
+        command: item.join(" "),
+        timeout_seconds: DEFAULT_PRE_TASK_TIMEOUT,
+        failure_policy: DEFAULT_PRE_TASK_FAILURE_POLICY,
+      };
+    }
+    // Object: apply defaults for missing fields.
+    if (item && typeof item === "object") {
+      const obj = item as Record<string, unknown>;
+      return {
+        ...(obj as unknown as PreTaskCommand),
+        timeout_seconds:
+          typeof obj.timeout_seconds === "number"
+            ? obj.timeout_seconds
+            : DEFAULT_PRE_TASK_TIMEOUT,
+        failure_policy:
+          obj.failure_policy === "best_effort"
+            ? "best_effort"
+            : DEFAULT_PRE_TASK_FAILURE_POLICY,
+      };
+    }
+    // Fallback: treat as an empty command (server will reject it).
+    return {
+      command: "",
+      timeout_seconds: DEFAULT_PRE_TASK_TIMEOUT,
+      failure_policy: DEFAULT_PRE_TASK_FAILURE_POLICY,
+    };
+  });
+}
+
+/**
  * Normalize a raw JSON blob from the server into a fully-populated
  * `EnvironmentConfig`. Applies the same defaults `EnvironmentConfig::empty()`
  * does on the Rust side so the form bindings never have to branch on
@@ -163,9 +246,7 @@ export function normalizeConfig(
         ? (lifecycle.post_build as HookCommand[])
         : [],
       pre_anything: preAnything,
-      pre_task: Array.isArray(lifecycle.pre_task)
-        ? (lifecycle.pre_task as HookCommand[])
-        : [],
+      pre_task: normalizePreTaskCommands(lifecycle.pre_task),
     },
   };
 

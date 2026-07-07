@@ -29,8 +29,8 @@ use djinn_runtime::{
 };
 use djinn_supervisor::services::SerializableCreateSessionParams;
 use djinn_supervisor::{
-    AuthHelloMsg, AuthResultMsg, Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse,
-    TaskRunOutcome,
+    AuthHelloMsg, AuthResultMsg, BranchPublicationResult, Frame, FramePayload, ServiceRpcRequest,
+    ServiceRpcResponse, TaskRunOutcome,
 };
 use tempfile::TempDir;
 use tokio::process::Command;
@@ -341,6 +341,19 @@ async fn start_fake_server(
                         }
                         ServiceRpcRequest::CompleteMonitoredReopen { .. } => {
                             ServiceRpcResponse::CompleteMonitoredReopen(Ok(()))
+                        }
+                        ServiceRpcRequest::PublishBranchToGithub { .. } => {
+                            ServiceRpcResponse::PublishBranchToGithub(BranchPublicationResult {
+                                success: false,
+                                pushed_sha: None,
+                                mirror_head: String::new(),
+                                attempted_github_head: String::new(),
+                                pr_branch_existed: false,
+                                error_class: Some("fake server".into()),
+                                error_message: Some(
+                                    "fake server: publish_branch_to_github stub".into(),
+                                ),
+                            })
                         }
                     };
                     let reply = Frame {
