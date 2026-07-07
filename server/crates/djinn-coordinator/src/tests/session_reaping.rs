@@ -5764,7 +5764,7 @@ async fn failed_session_exit_terminalizes_pending_attempt_and_unblocks_respawn_g
     );
 
     // ── The respawn guard no longer wedges the (task, role) pair ──
-    let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+    let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(
         decision,
         RespawnGuardDecision::Allow,
@@ -5894,13 +5894,13 @@ async fn orphaned_pending_attempt_reaper_finalizes_stale_rows_only() {
 
     // The reaped tasks' respawn guards unblock; the live one still defers.
     assert_eq!(
-        run_respawn_guard(&db, &task_a.id, "worker", None).await,
+        run_respawn_guard(&db, &task_a.id, "worker", None, None).await,
         RespawnGuardDecision::Allow,
         "guard must allow dispatch for a reaped task"
     );
     assert!(
         matches!(
-            run_respawn_guard(&db, &task_d.id, "worker", None).await,
+            run_respawn_guard(&db, &task_d.id, "worker", None, None).await,
             RespawnGuardDecision::Defer(_)
         ),
         "guard must still defer while a live run backs the pending attempt"
