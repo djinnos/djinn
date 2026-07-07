@@ -2006,6 +2006,16 @@ mod tests {
             ) -> Result<(), String> {
                 unimplemented!()
             }
+
+            async fn start_monitored_reopen(
+                &self,
+                _task_id: String,
+                _directive: String,
+                _verification_command: String,
+                _exclude_models: Vec<String>,
+            ) -> Result<(), String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

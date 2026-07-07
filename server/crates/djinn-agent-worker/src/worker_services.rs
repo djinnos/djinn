@@ -583,6 +583,18 @@ impl SupervisorServices for WorkerSupervisorServices {
             .record_arbiter_decision(task_id, decision, evidence_json)
             .await
     }
+
+    async fn start_monitored_reopen(
+        &self,
+        task_id: String,
+        directive: String,
+        verification_command: String,
+        exclude_models: Vec<String>,
+    ) -> Result<(), String> {
+        self.rpc
+            .start_monitored_reopen(task_id, directive, verification_command, exclude_models)
+            .await
+    }
 }
 
 #[cfg(test)]

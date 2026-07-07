@@ -2060,10 +2060,34 @@ impl TaskRunSupervisor {
                     }
                     StageOutcome::LeadReopen {
                         reason,
-                        directive: _,
-                        verification_command: _,
-                        exclude_models: _,
+                        directive,
+                        verification_command,
+                        exclude_models,
                     } => {
+                        // Persist the directive / verification command /
+                        // excluded models on the current arbitration row
+                        // and atomically mark the monitored-reopen attempt
+                        // start so re-entry cannot inject the directive twice.
+                        // The directive is injected into exactly one next
+                        // worker prompt (see prompt_context::load_arbiter_directive).
+                        if !self.services.cancel().is_cancelled()
+                            && let Err(e) = self
+                                .services
+                                .start_monitored_reopen(
+                                    spec.task_id.clone(),
+                                    directive.clone(),
+                                    verification_command.clone(),
+                                    exclude_models.clone(),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: start_monitored_reopen failed — proceeding with lead_intervention_complete transition"
+                            );
+                        }
                         if !self.services.cancel().is_cancelled()
                             && let Err(e) = self
                                 .services
@@ -2897,6 +2921,16 @@ mod tests {
             _task_id: String,
             _decision: String,
             _evidence_json: String,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn start_monitored_reopen(
+            &self,
+            _task_id: String,
+            _directive: String,
+            _verification_command: String,
+            _exclude_models: Vec<String>,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -5263,6 +5297,16 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+
+        async fn start_monitored_reopen(
+            &self,
+            _task_id: String,
+            _directive: String,
+            _verification_command: String,
+            _exclude_models: Vec<String>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     // ── Arbiter pre-approval gate tests ──────────────────────────────────────
@@ -5278,6 +5322,20 @@ mod tests {
         gate_result: Result<ArbiterGateResult, String>,
         transition_calls: std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
         open_pr_called: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        /// zkk9: records (directive, verification_command, exclude_models)
+        /// passed to `start_monitored_reopen` so the reopen settlement test
+        /// can assert the directive was persisted before the transition.
+        start_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<MonitoredReopenCall>>>,
+    }
+
+    /// Recorded `start_monitored_reopen` call for assertion.
+    #[derive(Clone, Debug)]
+    #[allow(dead_code)]
+    struct MonitoredReopenCall {
+        task_id: String,
+        directive: String,
+        verification_command: String,
+        exclude_models: Vec<String>,
     }
 
     #[async_trait]
@@ -5456,6 +5514,25 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+
+        async fn start_monitored_reopen(
+            &self,
+            task_id: String,
+            directive: String,
+            verification_command: String,
+            exclude_models: Vec<String>,
+        ) -> Result<(), String> {
+            self.start_monitored_reopen_calls
+                .lock()
+                .expect("start_monitored_reopen_calls mutex poisoned")
+                .push(MonitoredReopenCall {
+                    task_id,
+                    directive,
+                    verification_command,
+                    exclude_models,
+                });
+            Ok(())
+        }
     }
 
     /// Build a minimal mirror + supervisor for arbiter gate tests.
@@ -5472,6 +5549,32 @@ mod tests {
         std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
+        let (root, supervisor, spec, transition_calls, open_pr_called, _reopen) =
+            build_arbiter_gate_test_env_with_reopen(
+                task_id,
+                project_id,
+                stage_outcome,
+                gate_result,
+            )
+            .await;
+        (root, supervisor, spec, transition_calls, open_pr_called)
+    }
+
+    /// Variant of [`build_arbiter_gate_test_env`] that also returns the
+    /// `start_monitored_reopen` call tracker for reopen settlement tests.
+    async fn build_arbiter_gate_test_env_with_reopen(
+        task_id: &str,
+        project_id: &str,
+        stage_outcome: StageOutcome,
+        gate_result: Result<ArbiterGateResult, String>,
+    ) -> (
+        tempfile::TempDir,
+        TaskRunSupervisor,
+        TaskRunSpec,
+        std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::Arc<std::sync::Mutex<Vec<MonitoredReopenCall>>>,
+    ) {
         let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
             .expect("temp test root");
         let source_dir = root.path().join("source");
@@ -5485,6 +5588,9 @@ mod tests {
 
         let transition_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let open_pr_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let start_monitored_reopen_calls: std::sync::Arc<
+            std::sync::Mutex<Vec<MonitoredReopenCall>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let services: std::sync::Arc<dyn SupervisorServices> =
             std::sync::Arc::new(ArbiterGateTestServices {
@@ -5494,6 +5600,7 @@ mod tests {
                 gate_result,
                 transition_calls: transition_calls.clone(),
                 open_pr_called: open_pr_called.clone(),
+                start_monitored_reopen_calls: start_monitored_reopen_calls.clone(),
             });
 
         let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
@@ -5515,7 +5622,14 @@ mod tests {
             is_evidence_spike: false,
         };
 
-        (root, supervisor, spec, transition_calls, open_pr_called)
+        (
+            root,
+            supervisor,
+            spec,
+            transition_calls,
+            open_pr_called,
+            start_monitored_reopen_calls,
+        )
     }
 
     #[tokio::test]
@@ -5729,6 +5843,92 @@ mod tests {
         assert!(
             open_pr_called.load(std::sync::atomic::Ordering::SeqCst),
             "infra error must fall through to open_pr"
+        );
+    }
+
+    // ── Monitored reopen settlement tests (zkk9) ─────────────────────────────
+
+    #[tokio::test]
+    async fn arbiter_reopen_persists_directive_and_fires_transition() {
+        // A valid arbiter `reopen` must:
+        // 1. Call `start_monitored_reopen` to persist the directive / verification
+        //    command / excluded models and mark the attempt start.
+        // 2. Fire `lead_intervention_complete` to return the task to `open`.
+        // 3. NOT call open_pr (reopen is terminal for this run).
+        let (_root, supervisor, spec, transition_calls, _open_pr, reopen_calls) =
+            build_arbiter_gate_test_env_with_reopen(
+                "T-reopen-persist",
+                "proj-reopen",
+                StageOutcome::LeadReopen {
+                    reason: "needs different approach".into(),
+                    directive: "Fix the retry loop in dispatch.rs by adding a circuit breaker"
+                        .into(),
+                    verification_command: "cargo test -p djinn-coordinator".into(),
+                    exclude_models: vec!["gpt-4o-mini".into()],
+                },
+                Ok(ArbiterGateResult::Pass),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // start_monitored_reopen was called with the directive payload.
+        let reopen = reopen_calls.lock().unwrap();
+        assert_eq!(
+            reopen.len(),
+            1,
+            "start_monitored_reopen must be called exactly once"
+        );
+        assert_eq!(
+            reopen[0].directive,
+            "Fix the retry loop in dispatch.rs by adding a circuit breaker"
+        );
+        assert_eq!(
+            reopen[0].verification_command,
+            "cargo test -p djinn-coordinator"
+        );
+        assert_eq!(reopen[0].exclude_models, vec!["gpt-4o-mini".to_string()]);
+
+        // lead_intervention_complete transition fired.
+        let calls = transition_calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.action == "lead_intervention_complete"),
+            "reopen must fire lead_intervention_complete transition, got: {calls:?}"
+        );
+
+        // Reopen is terminal for this run — produces Closed.
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Closed { .. }),
+            "reopen must produce Closed, got: {:?}",
+            report.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn arbiter_reopen_does_not_call_open_pr() {
+        // Reopen must NOT fall through to open_pr — it returns the task to
+        // `open` for a fresh worker dispatch.
+        let (_root, supervisor, spec, _transition_calls, open_pr_called, _reopen_calls) =
+            build_arbiter_gate_test_env_with_reopen(
+                "T-reopen-no-pr",
+                "proj-reopen",
+                StageOutcome::LeadReopen {
+                    reason: "blocked on deps".into(),
+                    directive: "Update the API client to use the new endpoint".into(),
+                    verification_command: "cargo test".into(),
+                    exclude_models: vec![],
+                },
+                Ok(ArbiterGateResult::Pass),
+            )
+            .await;
+
+        let _report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            !open_pr_called.load(std::sync::atomic::Ordering::SeqCst),
+            "reopen must NOT fall through to open_pr"
         );
     }
 }

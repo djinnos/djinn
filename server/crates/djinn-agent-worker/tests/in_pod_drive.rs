@@ -403,12 +403,15 @@ async fn handle_rpc(
             ServiceRpcResponse::TransitionTask(Ok(()))
         }
         ServiceRpcRequest::RunArbiterPreapprovalGate { .. } => {
-            ServiceRpcResponse::RunArbiterPreapprovalGate(
-                Ok(djinn_supervisor::ArbiterGateResult::Pass),
-            )
+            ServiceRpcResponse::RunArbiterPreapprovalGate(Ok(
+                djinn_supervisor::ArbiterGateResult::Pass,
+            ))
         }
         ServiceRpcRequest::RecordArbiterDecision { .. } => {
             ServiceRpcResponse::RecordArbiterDecision(Ok(()))
+        }
+        ServiceRpcRequest::StartMonitoredReopen { .. } => {
+            ServiceRpcResponse::StartMonitoredReopen(Ok(()))
         }
     }
 }
