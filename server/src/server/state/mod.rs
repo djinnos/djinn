@@ -25,6 +25,8 @@ use djinn_k8s::{K8sGraphWarmer, KubernetesConfig, TokenReviewer};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::embeddings::{EmbeddingService, default_embedding_cache_dir};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
+use djinn_provider::github_app::CredentialSourceState;
+use djinn_provider::repos::CredentialRepository;
 use djinn_runtime::GraphWarmerService;
 use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve_on_tcp};
 use djinn_workspace::{MirrorManager, WorkspaceStore, mirrors_root, workspaces_root};
@@ -80,7 +82,7 @@ fn qdrant_code_chunk_config_from_env() -> QdrantCodeChunkConfig {
 }
 
 /// Report which `GITHUB_APP_*` env vars are unset or empty, so `init_app_config`
-/// can surface a useful diagnosis when `GitHubAppConfig::load()` returns `None`.
+/// can surface a useful diagnosis when the credential source state is `Unconfigured`.
 fn missing_github_app_env_vars() -> Vec<&'static str> {
     fn empty(key: &str) -> bool {
         std::env::var(key).ok().filter(|v| !v.is_empty()).is_none()
@@ -184,10 +186,13 @@ struct Inner {
     /// The entry is removed by the spawned task in its completion branch.
     pub canonical_warm_inflight: Arc<std::sync::Mutex<HashSet<String>>>,
     pub memory_mount: Mutex<Option<MountedMemoryFilesystem>>,
-    /// Active GitHub App configuration (DB row → env fallback). Populated
-    /// lazily on first read; hot-swapped by the manifest auto-provision
-    /// callback so subsequent requests pick up new credentials without a
-    /// process restart.
+    /// Active GitHub App configuration resolved by the credential-source
+    /// state machine (Secret/env → persisted → unconfigured). Populated
+    /// by `init_app_config` at startup; hot-swapped by
+    /// `persist_and_reload_app_config` after a manifest exchange so
+    /// subsequent requests pick up new credentials without a process
+    /// restart. See [`CredentialSourceState`] for the typed resolution
+    /// states.
     pub app_config: tokio::sync::RwLock<Option<Arc<GitHubAppConfig>>>,
     /// Per-project bare git mirrors on disk. Single shared instance so
     /// fetches serialize correctly and clones hit the same hardlink pool.
@@ -522,34 +527,90 @@ impl AppState {
         self.inner.app_config.read().await.clone()
     }
 
-    /// Hot-swap the in-memory GitHub App configuration. Retained for tests
-    /// that seed an in-memory state — the production path only writes once
-    /// from `init_app_config` (env vars require a Pod restart to change).
+    /// Hot-swap the in-memory GitHub App configuration. Used by tests that
+    /// seed in-memory state and by [`Self::persist_and_reload_app_config`]
+    /// after a manifest exchange persists new credentials.
     pub async fn set_app_config(&self, cfg: Option<Arc<GitHubAppConfig>>) {
         *self.inner.app_config.write().await = cfg;
     }
 
-    /// Initialise the in-memory App config from environment variables on
-    /// startup. Called during server bootstrap.
+    /// Initialise the in-memory App config using the deterministic credential
+    /// source state machine.
+    ///
+    /// Checks Secret/env credentials first (highest priority); if absent,
+    /// falls back to persisted credentials from the encrypted store. An
+    /// invalid/incomplete Secret produces a fatal state and does NOT silently
+    /// fall through to persisted credentials.
+    ///
+    /// Called during server bootstrap.
     pub async fn init_app_config(&self) {
-        let cfg = GitHubAppConfig::load();
-        if cfg.is_some() {
-            tracing::info!("github_app: loaded App configuration from env");
-        } else {
-            // Previously logged at `debug!` which is invisible at the default
-            // log level, producing a silent "GitHub App not configured"
-            // outcome for operators who thought they wired the Secret
-            // correctly. Log at `warn!` with the specific unset vars so
-            // operators get a single-line diagnosis in `kubectl logs`.
-            let missing = missing_github_app_env_vars();
-            tracing::warn!(
-                missing = missing.join(",").as_str(),
-                "github_app: App configuration not loaded — \
-                 mount the djinn-github-app Secret or set the listed \
-                 GITHUB_APP_* env vars to enable GitHub integration"
-            );
+        let credential_repo = CredentialRepository::new(self.db().clone(), self.event_bus());
+        let state =
+            djinn_provider::github_app::resolve_credential_source(Some(&credential_repo)).await;
+
+        match &state {
+            CredentialSourceState::ValidSecret(cfg) => {
+                tracing::info!(
+                    source = "secret",
+                    app_id = cfg.app_id,
+                    "github_app: loaded App configuration from env/Secret"
+                );
+            }
+            CredentialSourceState::InvalidSecret(detail) => {
+                tracing::error!(
+                    issues = ?detail.issues,
+                    "github_app: env/Secret credentials are present but invalid — \
+                     FIX the listed env vars; NOT falling back to persisted credentials"
+                );
+            }
+            CredentialSourceState::ValidPersisted(cfg) => {
+                tracing::info!(
+                    source = "persisted",
+                    app_id = cfg.app_id,
+                    "github_app: loaded App configuration from encrypted persistence store"
+                );
+            }
+            CredentialSourceState::UndecryptablePersisted => {
+                tracing::error!(
+                    "github_app: persisted credentials exist but cannot be decrypted — \
+                     re-provision via the setup flow or fix the encryption key"
+                );
+            }
+            CredentialSourceState::Unconfigured => {
+                let missing = missing_github_app_env_vars();
+                tracing::warn!(
+                    missing = missing.join(",").as_str(),
+                    "github_app: App configuration not loaded from any source — \
+                     mount the djinn-github-app Secret, set GITHUB_APP_* env vars, \
+                     or complete the self-setup flow"
+                );
+            }
         }
-        *self.inner.app_config.write().await = cfg.map(Arc::new);
+
+        *self.inner.app_config.write().await = state.app_config().cloned();
+    }
+
+    /// Persist new GitHub App credentials (e.g., after a manifest exchange)
+    /// and hot-reload the in-memory config without a process restart.
+    ///
+    /// Returns the new credential source state so callers can handle errors.
+    pub async fn persist_and_reload_app_config(
+        &self,
+        config: &GitHubAppConfig,
+    ) -> Result<CredentialSourceState, String> {
+        let credential_repo = CredentialRepository::new(self.db().clone(), self.event_bus());
+        djinn_provider::github_app::persist_app_config(&credential_repo, config).await?;
+
+        // Hot-reload: re-resolve to pick up the persisted credentials.
+        let state =
+            djinn_provider::github_app::resolve_credential_source(Some(&credential_repo)).await;
+        *self.inner.app_config.write().await = state.app_config().cloned();
+        tracing::info!(
+            source = ?state.source(),
+            app_id = config.app_id,
+            "github_app: persisted and hot-reloaded App configuration"
+        );
+        Ok(state)
     }
 
     /// Server-wide single-flight gate for SCIP indexer subprocess
