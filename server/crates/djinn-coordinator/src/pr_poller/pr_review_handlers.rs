@@ -914,6 +914,23 @@ impl CoordinatorActor {
             },
         )
         .await;
+
+        // Rework reopens must leave a durable `reopened` signal even when no
+        // in-flight attempt existed to terminalize above (the kv6i
+        // invisible-reopen gap: e.g. a merge-queue dequeue or changes-requested
+        // reopen fired while no worker attempt was live). `ensure_rework_marker`
+        // is a no-op when the terminalization above already produced a
+        // `reopened` latest attempt, so this only fires for the no-in-flight
+        // case.
+        if outcome == TaskAttemptOutcome::Reopened {
+            crate::dispatch::attempt_lifecycle::ensure_rework_marker(
+                &self.db,
+                task_id,
+                "worker",
+                Some(&summary),
+            )
+            .await;
+        }
     }
 }
 
