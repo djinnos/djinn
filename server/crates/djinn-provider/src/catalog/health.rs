@@ -143,6 +143,11 @@ pub struct ModelHealth {
     pub scope: Option<String>,
     pub auto_disabled: bool,
     pub consecutive_failures: u32,
+    /// Consecutive failures that are eligible to trip the breaker. This is
+    /// persisted separately from diagnostic `consecutive_failures` so
+    /// fallback-rescued observations cannot later contribute to breaker trips.
+    #[serde(default)]
+    pub breaker_eligible_consecutive_failures: u32,
     pub total_failures: u32,
     pub total_successes: u32,
     /// Current escalating-cooldown tier: how many times the breaker has tripped
@@ -170,6 +175,15 @@ struct ModelState {
     auto_disabled: bool,
     cooldown_until: Option<Instant>,
     consecutive_failures: u32,
+    /// Consecutive failures that are eligible to trip the circuit breaker.
+    ///
+    /// This intentionally differs from `consecutive_failures`: failover
+    /// traversal records every per-candidate failure immediately for
+    /// diagnostics, but failures rescued by a later fallback candidate must
+    /// remain diagnostic-only forever. Only observations from chains that
+    /// actually exhaust increment this counter via
+    /// `HealthTracker::apply_breaker_check_for`.
+    breaker_eligible_consecutive_failures: u32,
     total_failures: u32,
     total_successes: u32,
     disable_ttl_trips: u32,
@@ -239,6 +253,7 @@ impl ModelState {
             // has not yet expired.
             auto_disabled: self.hard_disabled || (self.auto_disabled && !self.is_available(now)),
             consecutive_failures: self.consecutive_failures,
+            breaker_eligible_consecutive_failures: self.breaker_eligible_consecutive_failures,
             total_failures: self.total_failures,
             total_successes: self.total_successes,
             disable_ttl_trips: self.disable_ttl_trips,
@@ -351,13 +366,17 @@ impl HealthTracker {
         state.total_failures += 1;
     }
 
-    /// Evaluate and apply the circuit-breaker trip for a single `(scope, model)`
-    /// key.  Called after failover-chain exhaustion for each candidate that was
-    /// observed to fail.
+    /// Evaluate and apply one circuit-breaker-eligible failure for a single
+    /// `(scope, model)` key. Called after failover-chain exhaustion for each
+    /// candidate that was observed to fail in that exhausted chain.
     ///
-    /// Mirrors the breaker-trip logic in [`record_failure`] (cooldown expiry
-    /// check → threshold check → trip), but operates on a key whose failure
-    /// counts were already incremented by [`record_failure_observation`].
+    /// The diagnostic counters were already incremented by
+    /// [`record_failure_observation`], so this method must NOT consult
+    /// `consecutive_failures` for breaker eligibility. Fallback-rescued chains
+    /// also increment that diagnostic counter, and allowing it to trip the
+    /// breaker later would leak non-terminal observations into an unrelated
+    /// exhausted chain. Instead, this advances a separate breaker-eligible
+    /// consecutive-failure counter scoped to chain exhaustions only.
     pub fn apply_breaker_check_for(&self, scope: Option<&str>, model_id: &str) {
         let now = SystemClock::new().now_instant();
         let mut map = self.inner.lock().unwrap();
@@ -372,7 +391,13 @@ impl HealthTracker {
             state.cooldown_until = None;
         }
 
-        if !state.auto_disabled && state.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+        state.breaker_eligible_consecutive_failures = state
+            .breaker_eligible_consecutive_failures
+            .saturating_add(1);
+
+        if !state.auto_disabled
+            && state.breaker_eligible_consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD
+        {
             let cooldown = state.compute_cooldown();
             state.auto_disabled = true;
             state.cooldown_until = Some(now + cooldown);
@@ -383,6 +408,7 @@ impl HealthTracker {
                 model_id = %key.model_id,
                 scope = ?key.scope,
                 consecutive_failures = state.consecutive_failures,
+                breaker_eligible_consecutive_failures = state.breaker_eligible_consecutive_failures,
                 cooldown_secs = cooldown.as_secs(),
                 disable_ttl_trips = state.disable_ttl_trips,
                 trips_in_window = state.trips_in_window(now),
@@ -409,6 +435,7 @@ impl HealthTracker {
         let mut map = self.inner.lock().unwrap();
         let state = map.entry(HealthKey::new(scope, model_id)).or_default();
         state.consecutive_failures = 0;
+        state.breaker_eligible_consecutive_failures = 0;
         state.total_successes += 1;
         // A productive session is proof the model recovered — reset the
         // escalating-cooldown tier and clear the rolling trip window so the next
@@ -430,6 +457,7 @@ impl HealthTracker {
         let key = HealthKey::new(scope, model_id);
         let state = map.entry(key.clone()).or_default();
         state.consecutive_failures += 1;
+        state.breaker_eligible_consecutive_failures += 1;
         state.total_failures += 1;
 
         // If the previous cooldown expired, clear the flag so we can re-trip.
@@ -438,7 +466,9 @@ impl HealthTracker {
             state.cooldown_until = None;
         }
 
-        if !state.auto_disabled && state.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+        if !state.auto_disabled
+            && state.breaker_eligible_consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD
+        {
             let cooldown = state.compute_cooldown();
             state.auto_disabled = true;
             state.cooldown_until = Some(now + cooldown);
@@ -449,6 +479,7 @@ impl HealthTracker {
                 model_id = %key.model_id,
                 scope = ?key.scope,
                 consecutive_failures = state.consecutive_failures,
+                breaker_eligible_consecutive_failures = state.breaker_eligible_consecutive_failures,
                 cooldown_secs = cooldown.as_secs(),
                 disable_ttl_trips = state.disable_ttl_trips,
                 trips_in_window = state.trips_in_window(now),
@@ -676,6 +707,7 @@ impl HealthTracker {
                 auto_disabled: health.auto_disabled,
                 cooldown_until: None,
                 consecutive_failures: health.consecutive_failures,
+                breaker_eligible_consecutive_failures: health.breaker_eligible_consecutive_failures,
                 total_failures: health.total_failures,
                 total_successes: health.total_successes,
                 disable_ttl_trips: health.disable_ttl_trips,
@@ -725,6 +757,7 @@ impl HealthTracker {
                 scope: scope.map(str::to_owned),
                 auto_disabled: false,
                 consecutive_failures: 0,
+                breaker_eligible_consecutive_failures: 0,
                 total_failures: 0,
                 total_successes: 0,
                 disable_ttl_trips: 0,

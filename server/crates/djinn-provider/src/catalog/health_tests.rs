@@ -547,6 +547,7 @@ fn restore_all_rehydrates_disabled_state_without_new_trip() {
         scope: Some("user-a".to_string()),
         auto_disabled: true,
         consecutive_failures: CIRCUIT_BREAKER_THRESHOLD,
+        breaker_eligible_consecutive_failures: CIRCUIT_BREAKER_THRESHOLD,
         total_failures: 10,
         total_successes: 2,
         disable_ttl_trips: 1,
@@ -601,6 +602,7 @@ fn restore_all_rehydrates_disabled_state_without_new_trip() {
         scope: Some("user-a".to_string()),
         auto_disabled: true,
         consecutive_failures: CIRCUIT_BREAKER_THRESHOLD,
+        breaker_eligible_consecutive_failures: CIRCUIT_BREAKER_THRESHOLD,
         total_failures: 10,
         total_successes: 2,
         disable_ttl_trips: 1,
@@ -787,19 +789,17 @@ fn record_failure_observation_does_not_trip_breaker() {
 }
 
 #[test]
-fn apply_breaker_check_for_trips_when_threshold_reached() {
+fn apply_breaker_check_for_trips_when_eligible_threshold_reached() {
     let ht = HealthTracker::new();
-    // Record threshold failures via observation.
+
     for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
         ht.record_failure_observation(S, TEST_MODEL);
+        ht.apply_breaker_check_for(S, TEST_MODEL);
     }
-    assert!(ht.is_available(S, TEST_MODEL));
 
-    // Apply breaker check → trips the breaker.
-    ht.apply_breaker_check_for(S, TEST_MODEL);
     assert!(
         !ht.is_available(S, TEST_MODEL),
-        "breaker must be tripped after apply_breaker_check_for with threshold failures"
+        "breaker must trip only after the breaker-eligible exhausted-chain threshold"
     );
     let health = ht.model_health(S, TEST_MODEL);
     assert!(health.auto_disabled);
@@ -807,15 +807,15 @@ fn apply_breaker_check_for_trips_when_threshold_reached() {
 }
 
 #[test]
-fn apply_breaker_check_for_does_not_trip_below_threshold() {
+fn apply_breaker_check_for_does_not_trip_below_eligible_threshold() {
     let ht = HealthTracker::new();
     for _ in 0..CIRCUIT_BREAKER_THRESHOLD - 1 {
         ht.record_failure_observation(S, TEST_MODEL);
+        ht.apply_breaker_check_for(S, TEST_MODEL);
     }
-    ht.apply_breaker_check_for(S, TEST_MODEL);
     assert!(
         ht.is_available(S, TEST_MODEL),
-        "breaker must NOT trip below threshold"
+        "breaker must NOT trip below the breaker-eligible exhausted-chain threshold"
     );
     let health = ht.model_health(S, TEST_MODEL);
     assert!(!health.auto_disabled);
@@ -872,27 +872,39 @@ fn breaker_trips_on_chain_exhaustion_after_deferred_observations() {
 }
 
 #[test]
-fn successful_fallback_does_not_apply_breaker_check() {
+fn fallback_rescued_observations_never_count_toward_later_breaker_trip() {
     let ht = HealthTracker::new();
-    // Record 2 observations (below threshold) for model-a.
+
+    // Reviewer repro: two model-a failures rescued by successful fallback leave
+    // diagnostic consecutive_failures == 2, but no breaker-eligible failures.
     ht.record_failure_observation(S, "model-a");
     ht.record_failure_observation(S, "model-a");
-    // Simulate a successful fallback: `apply_chain_exhaustion_side_effects`
-    // is NOT called on the success path, so the breaker check is never
-    // evaluated and the observations are discarded.  model-a stays
-    // available because (a) breaker threshold (3) is not reached and
-    // (b) the dispatcher never invoked `apply_breaker_check_for`.
-    assert!(
-        ht.is_available(S, "model-a"),
-        "model-a should be available — 2 failures below threshold, no breaker check applied"
-    );
-    // `apply_breaker_check_for` is also a no-op as long as the threshold is
-    // not reached, mirroring the chain-exhaustion path's "no premature trip"
-    // contract.
+    let diagnostic = ht.model_health(S, "model-a");
+    assert_eq!(diagnostic.consecutive_failures, 2);
+    assert!(ht.is_available(S, "model-a"));
+
+    // A later exhausted chain containing model-a records one more diagnostic
+    // observation and exactly one breaker-eligible exhausted-chain failure.
+    ht.record_failure_observation(S, "model-a");
     ht.apply_breaker_check_for(S, "model-a");
+
+    let after_one_exhaustion = ht.model_health(S, "model-a");
+    assert_eq!(after_one_exhaustion.consecutive_failures, 3);
     assert!(
         ht.is_available(S, "model-a"),
-        "model-a must remain available: breaker check below threshold is a no-op"
+        "three diagnostic observations must not trip the breaker when only one \
+         breaker-eligible exhausted-chain failure occurred"
+    );
+
+    // Only repeated exhausted-chain failures reaching the configured threshold
+    // trip the breaker.
+    for _ in 1..CIRCUIT_BREAKER_THRESHOLD {
+        ht.record_failure_observation(S, "model-a");
+        ht.apply_breaker_check_for(S, "model-a");
+    }
+    assert!(
+        !ht.is_available(S, "model-a"),
+        "breaker trips after the eligible exhausted-chain threshold is reached"
     );
 }
 
