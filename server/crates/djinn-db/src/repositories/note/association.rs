@@ -19,17 +19,20 @@ pub struct NoteAssociationEntry {
 }
 
 /// The typed-edge kinds that can be written via
-/// [`NoteRepository::upsert_typed_association`].
+/// [`NoteRepository::upsert_typed_association`] or the provenance-rich
+/// [`NoteRepository::upsert_provenance_association`].
 ///
 /// These are the values the F5 `note_associations.kind` substrate accepts for
 /// semantic / provenance edges. The LLM enrichment pass (diei) writes these
 /// directly; the consolidation pipeline writes `DerivedFrom` as a provenance
 /// edge when a canonical note is synthesized from source notes.
 ///
-/// `co_access` is intentionally **not** a member of this enum — implicit
-/// Hebbian co-access upserts stay on [`NoteRepository::upsert_association`],
-/// which uses multiplicative weight growth and a distinct event model.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// `co_access` is now a member of this enum (needed by the provenance-rich
+/// substrate so callers can reason about all edge kinds uniformly), but
+/// implicit Hebbian co-access upserts continue to use
+/// [`NoteRepository::upsert_association`], which uses multiplicative weight
+/// growth and a distinct event model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum NoteAssociationKind {
     /// A note that builds on the related note (additive dependency).
     BuildsOn,
@@ -41,6 +44,15 @@ pub enum NoteAssociationKind {
     Exemplifies,
     /// A note that was derived from the related note (provenance).
     DerivedFrom,
+    /// Implicit Hebbian co-access edge. Included so the provenance-rich
+    /// substrate can represent co-access edges with full provenance metadata;
+    /// existing Hebbian upsert paths continue to use
+    /// [`NoteRepository::upsert_association`] unchanged.
+    CoAccess,
+    /// A manually authored or human-curated edge.
+    Authored,
+    /// An edge minted from embedding similarity analysis.
+    EmbeddingRelated,
 }
 
 impl NoteAssociationKind {
@@ -55,7 +67,157 @@ impl NoteAssociationKind {
             NoteAssociationKind::Supersedes => "supersedes",
             NoteAssociationKind::Exemplifies => "exemplifies",
             NoteAssociationKind::DerivedFrom => "derived_from",
+            NoteAssociationKind::CoAccess => "co_access",
+            NoteAssociationKind::Authored => "authored",
+            NoteAssociationKind::EmbeddingRelated => "embedding_related",
         }
+    }
+
+    /// Parse a kind string from the database back into a typed enum variant.
+    ///
+    /// Returns `None` for unrecognized kind strings so callers can degrade
+    /// gracefully if a future migration adds new kinds.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "builds_on" => Some(NoteAssociationKind::BuildsOn),
+            "contradicts" => Some(NoteAssociationKind::Contradicts),
+            "supersedes" => Some(NoteAssociationKind::Supersedes),
+            "exemplifies" => Some(NoteAssociationKind::Exemplifies),
+            "derived_from" => Some(NoteAssociationKind::DerivedFrom),
+            "co_access" => Some(NoteAssociationKind::CoAccess),
+            "authored" => Some(NoteAssociationKind::Authored),
+            "embedding_related" => Some(NoteAssociationKind::EmbeddingRelated),
+            _ => None,
+        }
+    }
+}
+
+/// Known provenance sources for note↔note associations.
+///
+/// These correspond to the `source` column on `note_associations` introduced
+/// by migration 97. Callers of the provenance-rich upsert API pass one of
+/// these (or a custom string via [`NoteAssociationSource::Custom`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+pub enum NoteAssociationSource {
+    /// Implicit Hebbian co-access, written by session co-access tracking.
+    /// This is the default `source` for legacy rows (migration 97 backfill).
+    SessionCoAccess,
+    /// Edges minted by embedding similarity analysis.
+    EmbeddingSimilarity,
+    /// Edges minted by the LLM enrichment pass (diei).
+    LlmEnrichment,
+    /// Edges minted by the consolidation pipeline.
+    ConsolidationPipeline,
+    /// A custom/unknown source. The inner string is stored verbatim.
+    Custom(String),
+}
+
+impl NoteAssociationSource {
+    /// Returns the string stored in `note_associations.source`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            NoteAssociationSource::SessionCoAccess => "session_co_access",
+            NoteAssociationSource::EmbeddingSimilarity => "embedding_similarity",
+            NoteAssociationSource::LlmEnrichment => "llm_enrichment",
+            NoteAssociationSource::ConsolidationPipeline => "consolidation_pipeline",
+            NoteAssociationSource::Custom(s) => s.as_str(),
+        }
+    }
+}
+
+/// Input parameters for a provenance-rich note association upsert.
+///
+/// Combines the edge kind, provenance source, weight, and optional
+/// embedding-provenance metadata into a single struct so callers of
+/// [`NoteRepository::upsert_provenance_association`] pass structured data
+/// rather than a long positional argument list.
+#[derive(Clone, Debug)]
+pub struct NoteAssociationProvenanceUpsert {
+    /// The semantic kind of the edge (e.g. `EmbeddingRelated`, `CoAccess`).
+    pub kind: NoteAssociationKind,
+    /// The provenance source that minted this edge.
+    pub source: NoteAssociationSource,
+    /// Edge confidence/weight in `[0.0, 1.0]`; clamped before insert.
+    pub weight: f64,
+    /// Optional confidence score (may differ from weight for embedding edges).
+    pub confidence: Option<f64>,
+    /// Optional algorithm version string.
+    pub algorithm_version: Option<String>,
+    /// Optional embedding model identifier.
+    pub embedding_model: Option<String>,
+    /// Optional embedding dimensionality.
+    pub embedding_dim: Option<i32>,
+}
+
+/// A fully-materialized provenance-rich note association row.
+///
+/// Returned by [`NoteRepository::get_provenance_association`] and
+/// [`NoteRepository::list_provenance_associations_for_note`]. Carries every
+/// column from the provenance-ready schema (migration 97) so downstream
+/// consumers (embedding refresh, health metrics, pruning) can inspect
+/// provenance metadata without a second query.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct NoteAssociationProvenanceRow {
+    pub note_a_id: String,
+    pub note_b_id: String,
+    pub kind: NoteAssociationKind,
+    pub source: NoteAssociationSource,
+    pub weight: f64,
+    pub co_access_count: i64,
+    pub last_co_access: String,
+    pub confidence: Option<f64>,
+    pub algorithm_version: Option<String>,
+    pub embedding_model: Option<String>,
+    pub embedding_dim: Option<i32>,
+    pub last_refreshed_at: Option<String>,
+}
+
+/// Raw column projection from `note_associations` for the provenance-rich
+/// read path. Decoded into [`NoteAssociationProvenanceRow`] after fetch.
+#[derive(sqlx::FromRow)]
+struct NoteAssociationProvenanceRaw {
+    note_a_id: String,
+    note_b_id: String,
+    kind: String,
+    source: String,
+    weight: f64,
+    co_access_count: i64,
+    last_co_access: String,
+    confidence: Option<f64>,
+    algorithm_version: Option<String>,
+    embedding_model: Option<String>,
+    embedding_dim: Option<i32>,
+    last_refreshed_at: Option<String>,
+}
+
+impl NoteAssociationProvenanceRaw {
+    fn into_typed(self) -> crate::error::DbResult<NoteAssociationProvenanceRow> {
+        let kind = NoteAssociationKind::from_str_opt(&self.kind).ok_or_else(|| {
+            crate::error::DbError::InvalidData(format!(
+                "unknown note_associations.kind: {}",
+                self.kind
+            ))
+        })?;
+        Ok(NoteAssociationProvenanceRow {
+            note_a_id: self.note_a_id,
+            note_b_id: self.note_b_id,
+            kind,
+            source: match self.source.as_str() {
+                "session_co_access" => NoteAssociationSource::SessionCoAccess,
+                "embedding_similarity" => NoteAssociationSource::EmbeddingSimilarity,
+                "llm_enrichment" => NoteAssociationSource::LlmEnrichment,
+                "consolidation_pipeline" => NoteAssociationSource::ConsolidationPipeline,
+                other => NoteAssociationSource::Custom(other.to_owned()),
+            },
+            weight: self.weight,
+            co_access_count: self.co_access_count,
+            last_co_access: self.last_co_access,
+            confidence: self.confidence,
+            algorithm_version: self.algorithm_version,
+            embedding_model: self.embedding_model,
+            embedding_dim: self.embedding_dim,
+            last_refreshed_at: self.last_refreshed_at,
+        })
     }
 }
 
@@ -294,7 +456,7 @@ impl NoteRepository {
         sqlx::query(
             r#"INSERT INTO note_associations
                  (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind, source)
-               VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), $4, $5)
+               VALUES ($1, $2, $3, 0, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), $4, $5)
                ON CONFLICT (note_a_id, note_b_id, kind, source) DO UPDATE SET
                    weight = GREATEST(note_associations.weight, EXCLUDED.weight),
                    kind = EXCLUDED.kind,
@@ -569,5 +731,263 @@ impl NoteRepository {
         .await?;
 
         Ok(result.rows_affected())
+    }
+
+    // ── Provenance-rich note association APIs (ao5x) ────────────────────────
+
+    /// Upsert a provenance-rich note association.
+    ///
+    /// Canonicalizes note IDs (`note_a_id < note_b_id`) and upserts by the
+    /// four-column key `(note_a_id, note_b_id, kind, source)`. This means
+    /// the same note pair can carry multiple rows distinguished by
+    /// (kind, source) — e.g. a `co_access / session_co_access` row alongside
+    /// an `embedding_related / embedding_similarity` row.
+    ///
+    /// **Idempotent**: repeated writes for the same key update in place.
+    /// `weight` uses max-merge (the greater of old/new is kept); provenance
+    /// metadata columns (`confidence`, `algorithm_version`, `embedding_model`,
+    /// `embedding_dim`) are overwritten with the latest values.
+    /// `last_refreshed_at` and `last_co_access` are set to the current UTC
+    /// timestamp.
+    ///
+    /// **Non-co-access isolation**: when `kind != CoAccess`, the upsert does
+    /// **not** increment `co_access_count` — it is set to 0 on insert and
+    /// left unchanged on update. Only `upsert_association` (Hebbian path)
+    /// increments `co_access_count`.
+    ///
+    /// `weight` and `confidence` are clamped to `[0.0, 1.0]`.
+    pub async fn upsert_provenance_association(
+        &self,
+        note_a_id: &str,
+        note_b_id: &str,
+        upsert: &NoteAssociationProvenanceUpsert,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+
+        let (a_id, b_id) = canonical_pair(note_a_id, note_b_id);
+        let weight = upsert.weight.clamp(0.0, 1.0);
+        let confidence = upsert.confidence.map(|c| c.clamp(0.0, 1.0));
+        let kind_str = upsert.kind.as_str();
+        let source_str = upsert.source.as_str();
+        let is_co_access = matches!(upsert.kind, NoteAssociationKind::CoAccess);
+
+        // Runtime (non-macro) query: the wider uniqueness tuple
+        // (note_a_id, note_b_id, kind, source) and provenance columns are
+        // added by migration 97, which is not in the offline .sqlx/ cache.
+        if is_co_access {
+            // Co-access upsert: increment co_access_count (same semantics as
+            // the Hebbian path, but with full provenance metadata).
+            sqlx::query(
+                r#"INSERT INTO note_associations
+                     (note_a_id, note_b_id, weight, co_access_count, last_co_access,
+                      kind, source,
+                      confidence, algorithm_version, embedding_model, embedding_dim,
+                      last_refreshed_at)
+                   VALUES ($1, $2, $3, 1,
+                           to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                           $4, $5,
+                           $6, $7, $8, $9,
+                           to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+                   ON CONFLICT (note_a_id, note_b_id, kind, source) DO UPDATE SET
+                       weight = GREATEST(note_associations.weight, EXCLUDED.weight),
+                       co_access_count = note_associations.co_access_count + 1,
+                       last_co_access = EXCLUDED.last_co_access,
+                       confidence = EXCLUDED.confidence,
+                       algorithm_version = EXCLUDED.algorithm_version,
+                       embedding_model = EXCLUDED.embedding_model,
+                       embedding_dim = EXCLUDED.embedding_dim,
+                       last_refreshed_at = EXCLUDED.last_refreshed_at"#,
+            )
+            .bind(a_id)
+            .bind(b_id)
+            .bind(weight)
+            .bind(kind_str)
+            .bind(source_str)
+            .bind(confidence)
+            .bind(upsert.algorithm_version.as_deref())
+            .bind(upsert.embedding_model.as_deref())
+            .bind(upsert.embedding_dim)
+            .execute(self.db.pool())
+            .await?;
+        } else {
+            // Non-co-access upsert: do NOT increment co_access_count.
+            // Set co_access_count to 0 on insert; leave unchanged on update.
+            sqlx::query(
+                r#"INSERT INTO note_associations
+                     (note_a_id, note_b_id, weight, co_access_count, last_co_access,
+                      kind, source,
+                      confidence, algorithm_version, embedding_model, embedding_dim,
+                      last_refreshed_at)
+                   VALUES ($1, $2, $3, 0,
+                           to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                           $4, $5,
+                           $6, $7, $8, $9,
+                           to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+                   ON CONFLICT (note_a_id, note_b_id, kind, source) DO UPDATE SET
+                       weight = GREATEST(note_associations.weight, EXCLUDED.weight),
+                       last_co_access = EXCLUDED.last_co_access,
+                       confidence = EXCLUDED.confidence,
+                       algorithm_version = EXCLUDED.algorithm_version,
+                       embedding_model = EXCLUDED.embedding_model,
+                       embedding_dim = EXCLUDED.embedding_dim,
+                       last_refreshed_at = EXCLUDED.last_refreshed_at"#,
+            )
+            .bind(a_id)
+            .bind(b_id)
+            .bind(weight)
+            .bind(kind_str)
+            .bind(source_str)
+            .bind(confidence)
+            .bind(upsert.algorithm_version.as_deref())
+            .bind(upsert.embedding_model.as_deref())
+            .bind(upsert.embedding_dim)
+            .execute(self.db.pool())
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Read back a single provenance-rich association by its canonical key
+    /// `(note_a_id, note_b_id, kind, source)`.
+    ///
+    /// Returns `None` when no row exists for the given quadruple. Note IDs
+    /// are canonicalized internally.
+    pub async fn get_provenance_association(
+        &self,
+        note_a_id: &str,
+        note_b_id: &str,
+        kind: NoteAssociationKind,
+        source: &NoteAssociationSource,
+    ) -> Result<Option<NoteAssociationProvenanceRow>> {
+        self.db.ensure_initialized().await?;
+
+        let (a_id, b_id) = canonical_pair(note_a_id, note_b_id);
+        let kind_str = kind.as_str();
+        let source_str = source.as_str();
+
+        let raw: Option<NoteAssociationProvenanceRaw> = sqlx::query_as(
+            r#"SELECT note_a_id, note_b_id, kind, source,
+                      weight, co_access_count, last_co_access,
+                      confidence, algorithm_version, embedding_model,
+                      embedding_dim, last_refreshed_at
+               FROM note_associations
+               WHERE note_a_id = $1 AND note_b_id = $2
+                 AND kind = $3 AND source = $4"#,
+        )
+        .bind(a_id)
+        .bind(b_id)
+        .bind(kind_str)
+        .bind(source_str)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        match raw {
+            Some(r) => Ok(Some(r.into_typed()?)),
+            None => Ok(None),
+        }
+    }
+
+    /// List provenance-rich associations for a note, optionally filtered by
+    /// `kind` and/or `source`.
+    ///
+    /// Returns every row where the note appears as either `note_a_id` or
+    /// `note_b_id`, carrying full provenance metadata. Results are ordered
+    /// by `weight DESC`.
+    ///
+    /// * `note_id`    – the note whose associations to fetch.
+    /// * `kind`       – if `Some`, filter to only this edge kind.
+    /// * `source`     – if `Some`, filter to only this provenance source.
+    /// * `min_weight` – exclude rows with `weight < min_weight`.
+    /// * `limit`      – cap result count (`0` = unlimited).
+    ///
+    /// This is the primary read path for downstream embedding refresh and
+    /// health-metric epics that need provenance fields without a second
+    /// query.
+    pub async fn list_provenance_associations_for_note(
+        &self,
+        note_id: &str,
+        kind: Option<NoteAssociationKind>,
+        source: Option<&NoteAssociationSource>,
+        min_weight: f64,
+        limit: i64,
+    ) -> Result<Vec<NoteAssociationProvenanceRow>> {
+        self.db.ensure_initialized().await?;
+
+        let effective_limit: i64 = if limit <= 0 { i64::MAX } else { limit };
+
+        // Build the query dynamically based on optional filters.
+        // We always have: note_id (x2), min_weight, limit.
+        // Optional: kind, source.
+        let mut sql = String::from(
+            r#"SELECT note_a_id, note_b_id, kind, source,
+                      weight, co_access_count, last_co_access,
+                      confidence, algorithm_version, embedding_model,
+                      embedding_dim, last_refreshed_at
+               FROM note_associations
+               WHERE (note_a_id = $1 OR note_b_id = $2)
+                 AND weight >= $3"#,
+        );
+
+        let mut bind_idx: usize = 4; // next $N placeholder
+
+        if kind.is_some() {
+            sql.push_str(&format!(" AND kind = ${bind_idx}"));
+            bind_idx += 1;
+        }
+        if source.is_some() {
+            sql.push_str(&format!(" AND source = ${bind_idx}"));
+            bind_idx += 1;
+        }
+
+        sql.push_str(&format!(" ORDER BY weight DESC LIMIT ${bind_idx}"));
+
+        let mut query = sqlx::query_as::<sqlx::Postgres, NoteAssociationProvenanceRaw>(&sql)
+            .bind(note_id)
+            .bind(note_id)
+            .bind(min_weight);
+
+        if let Some(k) = kind {
+            query = query.bind(k.as_str());
+        }
+        if let Some(s) = source {
+            query = query.bind(s.as_str());
+        }
+        query = query.bind(effective_limit);
+
+        let raw_rows: Vec<NoteAssociationProvenanceRaw> = query.fetch_all(self.db.pool()).await?;
+
+        raw_rows.into_iter().map(|r| r.into_typed()).collect()
+    }
+
+    /// List all provenance-rich associations for a note pair.
+    ///
+    /// Returns every row for the canonical `(note_a_id, note_b_id)` pair,
+    /// across all `(kind, source)` combinations. Useful for discovering
+    /// what provenance sources have edges between two notes.
+    pub async fn list_provenance_associations_for_pair(
+        &self,
+        note_a_id: &str,
+        note_b_id: &str,
+    ) -> Result<Vec<NoteAssociationProvenanceRow>> {
+        self.db.ensure_initialized().await?;
+
+        let (a_id, b_id) = canonical_pair(note_a_id, note_b_id);
+
+        let raw_rows: Vec<NoteAssociationProvenanceRaw> = sqlx::query_as(
+            r#"SELECT note_a_id, note_b_id, kind, source,
+                      weight, co_access_count, last_co_access,
+                      confidence, algorithm_version, embedding_model,
+                      embedding_dim, last_refreshed_at
+               FROM note_associations
+               WHERE note_a_id = $1 AND note_b_id = $2
+               ORDER BY weight DESC"#,
+        )
+        .bind(a_id)
+        .bind(b_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        raw_rows.into_iter().map(|r| r.into_typed()).collect()
     }
 }
