@@ -6,6 +6,10 @@
 //! 1. **Open-PR adoption**: when the task already has an open PR
 //!    (`task.pr_url`), adopt it and record an `adopted_pr` audit row.  This
 //!    prevents spawning a duplicate worker when a PR is already in review.
+//!    Adoption is **bypassed** when the task's required-CI gate is failing
+//!    (`ci_status == "failing"`): the PrCiFailed remediation flow reopens the
+//!    task precisely so a worker can be dispatched to fix the failing PR, so
+//!    the guard must fall through to step 2 instead of adopting.
 //! 2. **Non-terminal attempt**: when a `pending` or `submitted` attempt already
 //!    exists for the task+role, defer dispatch and record a `deferred` audit
 //!    row.
@@ -23,6 +27,7 @@
 //! should the existing `try_dispatch_to_pool` + `record_dispatch_start` path
 //! proceed.
 
+use djinn_core::models::CiStatus;
 use djinn_core::models::task_attempt::{GuardDecision, GuardReason};
 use djinn_db::{
     GuardAdoptedPrTaskAttemptParams, GuardDeferTaskAttemptParams, TaskAttemptRepository,
@@ -53,11 +58,20 @@ pub enum RespawnGuardDecision {
 /// Guard ordering:
 /// 1. **Open-PR adoption** — when `pr_url` is `Some`, an existing open PR is
 ///    detected.  Returns [`RespawnGuardDecision::Adopted`] so the caller can
-///    record an `adopted_pr` audit row and skip dispatch.
+///    record an `adopted_pr` audit row and skip dispatch.  Adoption is
+///    **bypassed** when `ci_status` is `failing` (a required check is red on
+///    the PR head): the PrCiFailed remediation flow reopened the task so a
+///    worker can fix the failing PR, and adopting here would starve that
+///    remediation forever.  The guard falls through to step 2 instead, so a
+///    remediation worker dispatches exactly once.
 /// 2. **Non-terminal attempt** — consults
 ///    [`TaskAttemptRepository::latest_pending_or_submitted`] for the task/role
 ///    pair.  If a non-terminal attempt already exists the dispatch is deferred
 ///    with [`GuardReason::RespawnGuard`].
+///
+/// `ci_status` is the task's promoted required-CI gate state (the wire string
+/// of [`CiStatus`], e.g. `task.ci_status`).  `None` or any non-`failing` value
+/// (green / pending / unknown) preserves the adoption behavior.
 ///
 /// Returns [`RespawnGuardDecision::Allow`] when neither guard fires.
 ///
@@ -68,22 +82,37 @@ pub async fn run_respawn_guard(
     task_id: &str,
     role: &str,
     pr_url: Option<&str>,
+    ci_status: Option<&str>,
 ) -> RespawnGuardDecision {
     // 1. Open-PR adoption: when the task already has an open PR, adopt it
     //    and skip dispatch.  This prevents spawning a duplicate worker when
-    //    a PR is already in review.
+    //    a PR is already in review — unless required CI is failing on the PR
+    //    head, in which case the task was reopened for remediation and a
+    //    worker MUST be dispatched to fix the PR (step 2 still prevents
+    //    duplicate remediation workers).
     if let Some(url) = pr_url
         && !url.is_empty()
     {
-        tracing::info!(
-            task_id = %task_id,
-            role = %role,
-            pr_url = %url,
-            "respawn_guard: existing open PR detected — adopting"
-        );
-        return RespawnGuardDecision::Adopted {
-            pr_url: url.to_owned(),
-        };
+        if ci_status == Some(CiStatus::Failing.as_str()) {
+            tracing::info!(
+                task_id = %task_id,
+                role = %role,
+                pr_url = %url,
+                ci_status = %CiStatus::Failing,
+                "respawn_guard: open PR has failing required CI — bypassing adoption so a \
+                 remediation worker can dispatch"
+            );
+        } else {
+            tracing::info!(
+                task_id = %task_id,
+                role = %role,
+                pr_url = %url,
+                "respawn_guard: existing open PR detected — adopting"
+            );
+            return RespawnGuardDecision::Adopted {
+                pr_url: url.to_owned(),
+            };
+        }
     }
 
     // 2. Non-terminal attempt: when a pending or submitted attempt already
@@ -259,7 +288,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
 
-        let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
         assert_eq!(decision, RespawnGuardDecision::Allow);
     }
 
@@ -274,7 +303,7 @@ mod tests {
             .await
             .expect("record_dispatch_start should succeed");
 
-        let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
         assert_eq!(
             decision,
             RespawnGuardDecision::Defer(GuardReason::RespawnGuard)
@@ -307,7 +336,7 @@ mod tests {
         )
         .await;
 
-        let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
         assert_eq!(
             decision,
             RespawnGuardDecision::Defer(GuardReason::RespawnGuard)
@@ -343,7 +372,7 @@ mod tests {
         )
         .await;
 
-        let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
         assert_eq!(decision, RespawnGuardDecision::Allow);
     }
 
@@ -361,7 +390,7 @@ mod tests {
         .expect("record_dispatch_start should succeed");
 
         // Guard for "worker" role should allow (different role).
-        let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
         assert_eq!(decision, RespawnGuardDecision::Allow);
     }
 
@@ -383,7 +412,7 @@ mod tests {
 
         // The guard should allow because `deferred` is not in
         // ('pending', 'submitted').
-        let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
         assert_eq!(decision, RespawnGuardDecision::Allow);
     }
 
@@ -529,7 +558,7 @@ mod tests {
             .unwrap();
 
         // Guard must defer (pending exists).
-        let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
         assert_eq!(
             decision,
             RespawnGuardDecision::Defer(GuardReason::RespawnGuard)
@@ -548,6 +577,7 @@ mod tests {
             &task.id,
             "worker",
             Some("https://github.example/owner/repo/pull/42"),
+            None,
         )
         .await;
         assert_eq!(
@@ -564,7 +594,7 @@ mod tests {
         let task = create_task(&db).await;
 
         // An empty pr_url should not trigger adoption.
-        let decision = run_respawn_guard(&db, &task.id, "worker", Some("")).await;
+        let decision = run_respawn_guard(&db, &task.id, "worker", Some(""), None).await;
         assert_eq!(decision, RespawnGuardDecision::Allow);
     }
 
@@ -585,6 +615,7 @@ mod tests {
             &task.id,
             "worker",
             Some("https://github.example/owner/repo/pull/42"),
+            None,
         )
         .await;
         assert_eq!(
@@ -593,6 +624,85 @@ mod tests {
                 pr_url: "https://github.example/owner/repo/pull/42".to_owned(),
             }
         );
+    }
+
+    // ─── CI-remediation adoption bypass tests ───────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guard_does_not_adopt_when_ci_gate_failing() {
+        let db = test_db();
+        let task = create_task(&db).await;
+
+        // Open PR + failing required CI (PrCiFailed remediation reopen): the
+        // guard must NOT adopt.  With no pending attempt it must Allow so a
+        // remediation worker dispatches.
+        let decision = run_respawn_guard(
+            &db,
+            &task.id,
+            "worker",
+            Some("https://github.example/owner/repo/pull/42"),
+            Some(CiStatus::Failing.as_str()),
+        )
+        .await;
+        assert_eq!(decision, RespawnGuardDecision::Allow);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guard_defers_when_ci_gate_failing_and_pending_attempt_exists() {
+        let db = test_db();
+        let task = create_task(&db).await;
+
+        // A remediation worker is already in flight (pending attempt).
+        let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
+        super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .expect("record_dispatch_start should succeed");
+
+        // Open PR + failing required CI: adoption is bypassed, but step 2
+        // still defers so no duplicate remediation worker is dispatched.
+        let decision = run_respawn_guard(
+            &db,
+            &task.id,
+            "worker",
+            Some("https://github.example/owner/repo/pull/42"),
+            Some(CiStatus::Failing.as_str()),
+        )
+        .await;
+        assert_eq!(
+            decision,
+            RespawnGuardDecision::Defer(GuardReason::RespawnGuard)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guard_adopts_when_ci_gate_green_pending_or_absent() {
+        let db = test_db();
+        let task = create_task(&db).await;
+
+        // Any non-failing CI gate state preserves the adoption behavior: the
+        // PR is merely awaiting review/merge, so no duplicate worker spawns.
+        for ci_status in [
+            Some(CiStatus::Passing.as_str()),
+            Some(CiStatus::Pending.as_str()),
+            Some(CiStatus::Unknown.as_str()),
+            None,
+        ] {
+            let decision = run_respawn_guard(
+                &db,
+                &task.id,
+                "worker",
+                Some("https://github.example/owner/repo/pull/42"),
+                ci_status,
+            )
+            .await;
+            assert_eq!(
+                decision,
+                RespawnGuardDecision::Adopted {
+                    pr_url: "https://github.example/owner/repo/pull/42".to_owned(),
+                },
+                "ci_status={ci_status:?} must still adopt"
+            );
+        }
     }
 
     // ─── record_adopted_pr_attempt tests ────────────────────────────────
@@ -710,7 +820,7 @@ mod tests {
         // Simulates the case where the 422 backstop in supervisor_pr_open
         // would handle a race: the task has no pr_url yet and no pending
         // attempt, so the guard allows and the spawn path proceeds.
-        let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
         assert_eq!(decision, RespawnGuardDecision::Allow);
     }
 }

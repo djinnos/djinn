@@ -1390,6 +1390,10 @@ impl CoordinatorActor {
             // fresh spawn/admission side-effects.  Guard ordering:
             // 1. Open-PR adoption: when the task has an existing open PR
             //    (task.pr_url), adopt it and record an adopted_pr audit row.
+            //    Adoption is bypassed when the task's required-CI gate is
+            //    failing (task.ci_status == "failing"): the PrCiFailed
+            //    remediation flow reopened the task so a worker can fix the
+            //    failing PR, and adopting would starve that remediation.
             // 2. Non-terminal attempt: if a pending or submitted attempt
             //    already exists for this task+role, defer dispatch and record
             //    a guard-only audit row.  No dispatch / provider / reopen
@@ -1399,6 +1403,7 @@ impl CoordinatorActor {
                 &task.id,
                 role,
                 task.pr_url.as_deref(),
+                Some(task.ci_status.as_str()),
             )
             .await
             {
