@@ -1283,6 +1283,10 @@ async fn dispatch(
                 .await;
             ServiceRpcResponse::RecordArbiterSessionTermination(result)
         }
+        ServiceRpcRequest::PublishBranchToGithub { spec, task } => {
+            let result = services.publish_branch_to_github(&spec, &task).await;
+            ServiceRpcResponse::PublishBranchToGithub(result)
+        }
     }
 }
 

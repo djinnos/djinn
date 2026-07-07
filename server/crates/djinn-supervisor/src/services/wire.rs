@@ -36,7 +36,10 @@ use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkerEvent, WorkspaceRef};
 use serde::{Deserialize, Serialize};
 
-use crate::{ArbiterGateResult, RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
+use crate::{
+    ArbiterGateResult, BranchPublicationResult, RoleKind, StageError, StageOutcome, TaskRunOutcome,
+    TaskRunSpec,
+};
 
 /// Top-level wire envelope.
 ///
@@ -456,6 +459,11 @@ pub enum ServiceRpcRequest {
         task_id: String,
         is_infra_failure: bool,
     },
+    /// [`crate::SupervisorServices::publish_branch_to_github`].
+    /// Pushes the task branch to GitHub for a task with an existing open PR
+    /// so GitHub Actions evaluates the latest mirror commit.  Appended at the
+    /// enum tail for bincode stability.
+    PublishBranchToGithub { spec: TaskRunSpec, task: Task },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -541,6 +549,10 @@ pub enum ServiceRpcResponse {
     /// decision-failure cap was reached and the arbitration was parked.
     /// Appended at the enum tail for bincode stability.
     RecordArbiterSessionTermination(Result<bool, String>),
+    /// Branch publication result.  `Ok` carries the publication outcome;
+    /// `Err` is a transport/infra failure.  Appended at the enum tail for
+    /// bincode stability.
+    PublishBranchToGithub(BranchPublicationResult),
 }
 
 #[cfg(test)]
@@ -1762,6 +1774,78 @@ mod tests {
             FramePayload::AuthResult(AuthResultMsg { accepted, error }) => {
                 assert!(!accepted);
                 assert_eq!(error.as_deref(), Some("invalid bearer token"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_branch_to_github_request_roundtrip() {
+        let req = ServiceRpcRequest::PublishBranchToGithub {
+            spec: fake_spec(),
+            task: fake_task(),
+        };
+        let f = Frame {
+            correlation_id: 88,
+            payload: FramePayload::Rpc(req),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.correlation_id, 88);
+        assert!(matches!(
+            back.payload,
+            FramePayload::Rpc(ServiceRpcRequest::PublishBranchToGithub { .. })
+        ));
+    }
+
+    #[test]
+    fn publish_branch_to_github_reply_roundtrip() {
+        let resp = ServiceRpcResponse::PublishBranchToGithub(BranchPublicationResult {
+            success: true,
+            pushed_sha: Some("abc123".into()),
+            mirror_head: "mirror_sha".into(),
+            attempted_github_head: "abc123".into(),
+            pr_branch_existed: true,
+            error_class: None,
+            error_message: None,
+        });
+        let f = Frame {
+            correlation_id: 88,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::PublishBranchToGithub(result)) => {
+                assert!(result.success);
+                assert_eq!(result.pushed_sha.as_deref(), Some("abc123"));
+                assert_eq!(result.mirror_head, "mirror_sha");
+                assert!(result.pr_branch_existed);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Failure case roundtrip.
+        let resp = ServiceRpcResponse::PublishBranchToGithub(BranchPublicationResult {
+            success: false,
+            pushed_sha: None,
+            mirror_head: "mirror_sha".into(),
+            attempted_github_head: "attempted_sha".into(),
+            pr_branch_existed: true,
+            error_class: Some("push_rejected".into()),
+            error_message: Some("force-push rejected".into()),
+        });
+        let f = Frame {
+            correlation_id: 89,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::PublishBranchToGithub(result)) => {
+                assert!(!result.success);
+                assert_eq!(result.error_class.as_deref(), Some("push_rejected"));
+                assert_eq!(result.error_message.as_deref(), Some("force-push rejected"));
             }
             other => panic!("unexpected: {other:?}"),
         }

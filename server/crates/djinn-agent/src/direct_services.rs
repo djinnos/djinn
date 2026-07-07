@@ -30,7 +30,8 @@ use djinn_supervisor::services::{
     SerializableDjinnEvent,
 };
 use djinn_supervisor::{
-    RoleKind, StageError, StageOutcome, SupervisorServices, TaskRunOutcome, TaskRunSpec,
+    BranchPublicationResult, RoleKind, StageError, StageOutcome, SupervisorServices,
+    TaskRunOutcome, TaskRunSpec,
 };
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
@@ -1287,6 +1288,207 @@ impl SupervisorServices for DirectServices {
         }
 
         Ok(false)
+    }
+
+    async fn publish_branch_to_github(
+        &self,
+        spec: &TaskRunSpec,
+        _task: &Task,
+    ) -> BranchPublicationResult {
+        use crate::supervisor_impl::pr::push_task_branch_to_github;
+        use crate::task_merge::build_app_push_url;
+        use djinn_db::ProjectRepository;
+        use djinn_git::run_git_command;
+        use djinn_provider::github_app::{
+            app_id as github_app_id, installations::get_installation_token,
+        };
+
+        // Pre-populate the fields we'll always fill in.
+        let empty_result =
+            |success: bool, error_class: Option<String>, error_message: Option<String>| {
+                BranchPublicationResult {
+                    success,
+                    pushed_sha: None,
+                    mirror_head: String::new(),
+                    attempted_github_head: String::new(),
+                    pr_branch_existed: false,
+                    error_class,
+                    error_message,
+                }
+            };
+
+        // GitHub App must be configured.
+        if github_app_id().is_err() {
+            return empty_result(
+                false,
+                Some("no_github_app".into()),
+                Some("GitHub App is not configured on this deployment".into()),
+            );
+        }
+
+        let app_state = &self.callbacks.agent_context;
+        let mirror = match app_state.mirror.as_ref() {
+            Some(m) => m.clone(),
+            None => {
+                return empty_result(
+                    false,
+                    Some("no_mirror".into()),
+                    Some("AgentContext has no MirrorManager".into()),
+                );
+            }
+        };
+
+        let project_repo =
+            ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+
+        // Resolve GitHub coords.
+        let (owner, repo_name) = match project_repo.get_github_coords(&spec.project_id).await {
+            Ok(Some(coords)) => coords,
+            Ok(None) => {
+                return empty_result(
+                    false,
+                    Some("no_github_coords".into()),
+                    Some(format!(
+                        "project {} has no github_owner/github_repo persisted",
+                        spec.project_id
+                    )),
+                );
+            }
+            Err(e) => {
+                return empty_result(
+                    false,
+                    Some("db_error".into()),
+                    Some(format!(
+                        "failed to read github coords for project {}: {e}",
+                        spec.project_id
+                    )),
+                );
+            }
+        };
+
+        // Resolve installation token.
+        let installation_id = match project_repo.get_installation_id(&spec.project_id).await {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                return empty_result(
+                    false,
+                    Some("no_installation_id".into()),
+                    Some(format!(
+                        "project {} ({}/{}) has no cached installation_id",
+                        spec.project_id, owner, repo_name
+                    )),
+                );
+            }
+            Err(e) => {
+                return empty_result(
+                    false,
+                    Some("db_error".into()),
+                    Some(format!(
+                        "failed to read installation_id for project {}: {e}",
+                        spec.project_id
+                    )),
+                );
+            }
+        };
+
+        let install_token = match get_installation_token(installation_id).await {
+            Ok(t) => t,
+            Err(e) => {
+                return empty_result(
+                    false,
+                    Some("auth".into()),
+                    Some(format!("could not mint installation token: {e}")),
+                );
+            }
+        };
+        let push_url = build_app_push_url(&owner, &repo_name, &install_token.token);
+
+        // Capture mirror HEAD from the bare mirror for structured failure
+        // reporting.  Use the same rev-parse pattern as
+        // `MirrorManager::branch_ahead_of_base`.
+        let mirror_path = mirror.mirror_path(&spec.project_id);
+        let mirror_head = match run_git_command(
+            mirror_path.clone(),
+            vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                format!("refs/heads/{}", spec.task_branch),
+            ],
+        )
+        .await
+        {
+            Ok(out) => out.stdout.trim().to_string(),
+            Err(e) => {
+                return empty_result(
+                    false,
+                    Some("mirror_error".into()),
+                    Some(format!(
+                        "failed to resolve mirror HEAD for {}: {e}",
+                        spec.task_branch
+                    )),
+                );
+            }
+        };
+
+        // Check if the PR branch already exists on GitHub via ls-remote
+        // against the push URL.
+        let pr_branch_existed = match run_git_command(
+            mirror_path,
+            vec![
+                "ls-remote".into(),
+                push_url.clone(),
+                format!("refs/heads/{}", spec.task_branch),
+            ],
+        )
+        .await
+        {
+            Ok(out) => !out.stdout.trim().is_empty(),
+            Err(_) => false,
+        };
+
+        // Delegate to the existing push helper — reuses the concurrent-push
+        // race guard, ephemeral clone, and force-push logic.
+        match push_task_branch_to_github(
+            mirror.as_ref(),
+            &spec.project_id,
+            &spec.task_branch,
+            &push_url,
+        )
+        .await
+        {
+            Ok(sha) => BranchPublicationResult {
+                success: true,
+                pushed_sha: Some(sha.clone()),
+                mirror_head,
+                attempted_github_head: sha,
+                pr_branch_existed,
+                error_class: None,
+                error_message: None,
+            },
+            Err(e) => {
+                let error_class = if e.to_string().contains("rejected") {
+                    "push_rejected"
+                } else {
+                    "push_error"
+                };
+                tracing::warn!(
+                    task_branch = %spec.task_branch,
+                    project_id = %spec.project_id,
+                    error = %e,
+                    "publish_branch_to_github: push failed"
+                );
+                BranchPublicationResult {
+                    success: false,
+                    pushed_sha: None,
+                    mirror_head: mirror_head.clone(),
+                    attempted_github_head: mirror_head,
+                    pr_branch_existed,
+                    error_class: Some(error_class.into()),
+                    error_message: Some(e.to_string()),
+                }
+            }
+        }
     }
 }
 

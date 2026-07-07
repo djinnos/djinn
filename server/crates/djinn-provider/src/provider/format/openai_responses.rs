@@ -1437,8 +1437,7 @@ mod tests {
             "event: response.output_item.done\n",
             "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_eof\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}\n\n",
             "event: response.completed\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":9}}}\n\n"
-            // NO [DONE] sentinel — the server closes the connection here.
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":9}}}\n\n" // NO [DONE] sentinel — the server closes the connection here.
         );
         let mut config = test_provider().config.clone();
         config.base_url = spawn_sse_server(200, body, seen_auth);
@@ -1476,8 +1475,7 @@ mod tests {
             "event: response.output_text.delta\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
             "event: response.completed\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}}\n\n"
-            // NO [DONE] sentinel — the server closes the connection here.
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}}\n\n" // NO [DONE] sentinel — the server closes the connection here.
         );
         let mut config = test_provider().config.clone();
         config.base_url = spawn_sse_server(200, body, seen_auth);
