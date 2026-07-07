@@ -36,9 +36,7 @@ use crate::tools::acting_user::acting_caps;
 use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
-use crate::tools::proposal_blocks::{
-    parse_mdx_blocks, validate_mdx_blocks, validate_question_form_placement,
-};
+use crate::tools::proposal_blocks::{parse_mdx_blocks, validate_question_form_placement};
 use crate::tools::proposal_ops::{
     ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListRow,
     ProposalListSummary, ProposalModel, ProposalShowResponse, ProposalSignoffModel,
@@ -47,8 +45,9 @@ use crate::tools::proposal_ops::{
 };
 use crate::tools::proposal_readiness::evaluate_proposal_readiness;
 use crate::tools::validation::{
-    validate_ac_count, validate_design, validate_limit, validate_mdx_body, validate_offset,
-    validate_proposal_create_status, validate_proposal_status, validate_sort, validate_title,
+    resolve_body_format_and_validate, validate_ac_count, validate_design, validate_limit,
+    validate_offset, validate_proposal_create_status, validate_proposal_status, validate_sort,
+    validate_title,
 };
 use djinn_db::{
     EpicRepository, ProjectRepository, ProposalListQuery, ProposalListSummaryRow,
@@ -277,10 +276,12 @@ impl DjinnMcpServer {
         if let Err(e) = validate_design(body) {
             return Json(err_single(e));
         }
-        if let Err(e) = validate_mdx_body(body, p.body_format.as_deref()) {
-            return Json(err_single(e));
-        }
-        let body_format = p.body_format.as_deref().unwrap_or("markdown");
+        // Resolve the persisted body_format (auto-upgrading a markdown body that
+        // carries block tags to mdx) and run the full MDX block-validation stack.
+        let body_format = match resolve_body_format_and_validate(body, p.body_format.as_deref()) {
+            Ok(f) => f,
+            Err(e) => return Json(err_single(e)),
+        };
         if body_format == "mdx"
             && let Err(e) = validate_question_form_placement(body)
         {
@@ -335,7 +336,7 @@ impl DjinnMcpServer {
                 body,
                 acceptance_criteria: Some(&ac_json),
                 status,
-                body_format: p.body_format.as_deref(),
+                body_format: Some(body_format),
             })
             .await
         {
@@ -406,16 +407,13 @@ impl DjinnMcpServer {
         if let Err(e) = validate_design(imported.body) {
             return Json(err_single(e));
         }
-        if imported.body_format == "mdx"
-            && let Err(e) = validate_mdx_blocks(imported.body)
-        {
-            return Json(err_single(e.to_string()));
-        }
-        if imported.body_format == "mdx"
-            && let Err(e) = parse_mdx_blocks(imported.body)
-        {
-            return Json(err_single(e.to_string()));
-        }
+        // Resolve the persisted format — a markdown-frontmatter body that carries
+        // block tags is upgraded to mdx — and validate the full block stack.
+        let body_format =
+            match resolve_body_format_and_validate(imported.body, Some(&imported.body_format)) {
+                Ok(f) => f,
+                Err(e) => return Json(err_single(e)),
+            };
 
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
         let proposal = if let Some(id) = imported.id.as_deref() {
@@ -457,7 +455,7 @@ impl DjinnMcpServer {
                         acceptance_criteria: &imported.acceptance_criteria_json,
                         status: &existing.status,
                         superseded_by: existing.superseded_by.as_deref(),
-                        body_format: Some(&imported.body_format),
+                        body_format: Some(body_format),
                         // Imported proposals restore historical state — they
                         // are not authoring operations and carry no
                         // block-patch / native-skill attribution.
@@ -476,7 +474,7 @@ impl DjinnMcpServer {
                     body: imported.body,
                     acceptance_criteria: Some(&imported.acceptance_criteria_json),
                     status: None,
-                    body_format: Some(&imported.body_format),
+                    body_format: Some(body_format),
                 })
                 .await
             {
@@ -951,15 +949,18 @@ impl DjinnMcpServer {
         if let Err(e) = validate_design(body) {
             return Json(err_single(e));
         }
-        // Effective body_format: explicitly passed, else the proposal's current
-        // format (matches the repository's own fallback on update).
-        let body_format = p
+        // Effective declared format: explicitly passed, else the proposal's
+        // current format (matches the repository's own fallback on update).
+        let declared_format = p
             .body_format
             .as_deref()
             .unwrap_or(existing.body_format.as_str());
-        if let Err(e) = validate_mdx_body(body, Some(body_format)) {
-            return Json(err_single(e));
-        }
+        // Resolve the persisted format (auto-upgrading a markdown body that
+        // carries block tags) and run the full MDX block-validation stack.
+        let body_format = match resolve_body_format_and_validate(body, Some(declared_format)) {
+            Ok(f) => f,
+            Err(e) => return Json(err_single(e)),
+        };
         if p.body.is_some()
             && body_format == "mdx"
             && let Err(e) = validate_question_form_placement(body)
@@ -1015,7 +1016,7 @@ impl DjinnMcpServer {
                     acceptance_criteria: &ac_json,
                     status,
                     superseded_by: superseded_by.as_deref(),
-                    body_format: p.body_format.as_deref(),
+                    body_format: Some(body_format),
                     // Plain `proposal_update` writes carry no authoring
                     // attribution metadata — block-patch / native-skill tagging
                     // is reserved for the targeted patch primitive.

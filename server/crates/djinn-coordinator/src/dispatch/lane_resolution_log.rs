@@ -1,8 +1,12 @@
-//! Structured logging for lane-resolution candidate ordering.
+//! Structured logging for lane-resolution candidate ordering and failover
+//! candidate traversal.
 //!
 //! Emits one `info`-level log record per candidate after final de-duplication
 //! and before capacity filtering / dispatch attempts, so post-apply and
 //! post-rollback model order can be inspected without production-only tooling.
+//!
+//! Also emits per-candidate attempt records during failover-chain traversal so
+//! each tried candidate (and its outcome) is visible for observability.
 
 /// Split a `provider/model` id into `(provider_id, model_id)`.
 ///
@@ -50,6 +54,76 @@ pub(crate) fn emit_lane_resolution_candidates(
             "lane_resolution_candidate"
         );
     }
+}
+
+/// Outcome of a single failover-candidate dispatch attempt.
+#[derive(Clone, Debug)]
+pub(crate) enum CandidateAttemptOutcome {
+    /// The candidate breaker was open (health tracker unavailable).
+    BreakerOpen,
+    /// The candidate was at capacity.
+    AtCapacity,
+    /// The dispatch returned an error.
+    Error(String),
+}
+
+impl std::fmt::Display for CandidateAttemptOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BreakerOpen => write!(f, "breaker_open"),
+            Self::AtCapacity => write!(f, "at_capacity"),
+            Self::Error(msg) => write!(f, "error: {msg}"),
+        }
+    }
+}
+
+/// Emit a structured `warn`-level log for a single failover-candidate attempt
+/// that did NOT succeed.  Called during failover-chain traversal when a
+/// candidate is skipped (breaker/capacity) or fails (dispatch error), so each
+/// tried candidate is visible for observability.
+pub(crate) fn emit_failover_candidate_attempt(
+    task_id: &str,
+    role: &str,
+    candidate_model: &str,
+    candidate_index: usize,
+    total_candidates: usize,
+    attempt_outcome: &CandidateAttemptOutcome,
+) {
+    let (provider_id, model_id) = parse_provider_model(candidate_model);
+    tracing::warn!(
+        task_id,
+        role,
+        candidate_index,
+        total_candidates,
+        provider_id,
+        model_id,
+        outcome = %attempt_outcome,
+        "failover_candidate_attempt"
+    );
+}
+
+/// Emit a structured `info`-level log when a failover candidate succeeds.
+/// Called during failover-chain traversal when the first candidate that
+/// accepts the dispatch is found.
+pub(crate) fn emit_failover_candidate_accepted(
+    task_id: &str,
+    role: &str,
+    candidate_model: &str,
+    candidate_index: usize,
+    total_candidates: usize,
+    skipped_count: usize,
+) {
+    let (provider_id, model_id) = parse_provider_model(candidate_model);
+    tracing::info!(
+        task_id,
+        role,
+        candidate_index,
+        total_candidates,
+        skipped_count,
+        provider_id,
+        model_id,
+        "failover_candidate_accepted"
+    );
 }
 
 #[cfg(test)]
@@ -136,5 +210,59 @@ mod tests {
                 "kimi-for-coding/k2p7".to_owned(),
             ],
         );
+    }
+
+    // ── emit_failover_candidate_attempt ─────────────────────────────────
+
+    #[test]
+    fn emit_failover_candidate_attempt_does_not_panic() {
+        emit_failover_candidate_attempt(
+            "t1",
+            "worker",
+            "xiaomi/mimo-v2.5-pro",
+            0,
+            3,
+            &CandidateAttemptOutcome::BreakerOpen,
+        );
+        emit_failover_candidate_attempt(
+            "t2",
+            "worker",
+            "zai/glm-5.2",
+            1,
+            3,
+            &CandidateAttemptOutcome::AtCapacity,
+        );
+        emit_failover_candidate_attempt(
+            "t3",
+            "worker",
+            "kimi-for-coding/k2p7",
+            2,
+            3,
+            &CandidateAttemptOutcome::Error("pool dispatch failed".to_owned()),
+        );
+    }
+
+    #[test]
+    fn candidate_attempt_outcome_display() {
+        assert_eq!(
+            CandidateAttemptOutcome::BreakerOpen.to_string(),
+            "breaker_open"
+        );
+        assert_eq!(
+            CandidateAttemptOutcome::AtCapacity.to_string(),
+            "at_capacity"
+        );
+        assert_eq!(
+            CandidateAttemptOutcome::Error("timeout".to_owned()).to_string(),
+            "error: timeout"
+        );
+    }
+
+    // ── emit_failover_candidate_accepted ────────────────────────────────
+
+    #[test]
+    fn emit_failover_candidate_accepted_does_not_panic() {
+        emit_failover_candidate_accepted("t1", "worker", "zai/glm-5.2", 1, 3, 1);
+        emit_failover_candidate_accepted("t2", "worker", "xiaomi/mimo-v2.5-pro", 0, 3, 0);
     }
 }

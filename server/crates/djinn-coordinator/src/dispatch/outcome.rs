@@ -1,10 +1,11 @@
-/// Result of a single `try_dispatch_to_pool` attempt.
+/// Result of a `try_dispatch_to_pool` failover-chain traversal.
 pub(crate) enum DispatchOutcome {
     /// Successfully dispatched to a slot.
     Dispatched,
     /// All candidate models are at capacity.
     AtCapacity,
-    /// No healthy model could accept the dispatch (non-capacity errors).
+    /// All failover candidates were tried but none accepted the dispatch
+    /// (breaker-open or non-capacity errors); the chain is exhausted.
     Failed,
     /// The slot pool actor is dead — caller should abort.
     PoolDead,
