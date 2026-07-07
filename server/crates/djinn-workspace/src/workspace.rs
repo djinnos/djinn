@@ -12,6 +12,34 @@ use tracing::{debug, warn};
 
 use crate::git_helpers;
 
+/// Outcome of a [`Workspace::commit`] attempt.
+///
+/// Replaces the previous `Result<bool, _>` return where `Ok(true)` meant a
+/// commit was created and `Ok(false)` meant nothing to commit.  The new
+/// variant carries enough information for callers to distinguish a clean tree
+/// from a junk-only tree without re-running `git status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// A legitimate diff was staged and committed.
+    Committed,
+    /// The tree was clean — nothing to commit.
+    NoChanges,
+    /// Only files excluded by the commit-safety filter changed; no commit was
+    /// created.  The `excluded` field lists the repo-relative paths that were
+    /// rejected by [`crate::commit_safety::classify_path`].
+    NoLegitimateChanges {
+        /// Repo-relative paths of files that were excluded.
+        excluded: Vec<String>,
+    },
+}
+
+impl CommitOutcome {
+    /// Returns `true` if a commit was created.
+    pub fn committed(&self) -> bool {
+        matches!(self, CommitOutcome::Committed)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum EphemeralWorkspaceError {
     #[error("i/o: {0}")]
@@ -151,24 +179,94 @@ impl Workspace {
         &self.branch
     }
 
-    /// Stage every change and commit with `message` under `identity`.
+    /// Stage filter-eligible changes and commit with `message` under `identity`.
     ///
-    /// Returns `Ok(true)` if a commit was created, `Ok(false)` if the tree
-    /// was clean (nothing to commit). Both outcomes are success — callers
-    /// that require a commit should check the return value.
+    /// Unlike the old implementation that ran unconditional `git add -A`, this
+    /// method enumerates dirty/untracked paths via `git status --porcelain=v1`,
+    /// classifies each path through the shared [`crate::commit_safety`] filter,
+    /// and stages **only** eligible paths.  Root-level scratch files
+    /// (`patch.txt`, `test2.txt`, etc.) are excluded while intentional
+    /// fixture/testdata paths are preserved.
+    ///
+    /// Already-staged entries (e.g. from a prior `try_merge`) are left
+    /// untouched — the filter applies only to new working-tree changes.
+    ///
+    /// Returns a [`CommitOutcome`] distinguishing a real commit, a clean tree,
+    /// and a junk-only tree with excluded-path details.
     pub async fn commit(
         &self,
         message: &str,
         identity: GitIdentity<'_>,
-    ) -> Result<bool, EphemeralWorkspaceError> {
-        self.run_git(&["add", "-A"], &[]).await?;
+    ) -> Result<CommitOutcome, EphemeralWorkspaceError> {
+        // ── Step 1: Enumerate dirty/untracked paths ──────────────────────
+        let status_raw = self.run_git(&["status", "--porcelain=v1"], &[]).await?;
+
+        let entries = parse_porcelain_status(&status_raw);
+
+        if entries.is_empty() {
+            return Ok(CommitOutcome::NoChanges);
+        }
+
+        // ── Step 2: Classify and separate ────────────────────────────────
+        let config = crate::commit_safety::CommitSafetyConfig::default();
+        let mut eligible: Vec<String> = Vec::new();
+        let mut excluded: Vec<String> = Vec::new();
+
+        for entry in &entries {
+            // Only consider entries with working-tree changes or untracked
+            // files.  Already-staged entries (index-only, Y == ' ') are left
+            // alone — they came from merge staging and should be preserved.
+            if entry.worktree == ' ' {
+                continue;
+            }
+            // Ignored files (rarely seen without --ignored) — skip.
+            if entry.index == '!' && entry.worktree == '!' {
+                continue;
+            }
+
+            match crate::commit_safety::classify_path(&entry.path, &config) {
+                crate::commit_safety::PathClassification::Allowed => {
+                    eligible.push(entry.path.clone());
+                }
+                crate::commit_safety::PathClassification::Excluded(reason) => {
+                    tracing::debug!(
+                        path = %entry.path,
+                        reason = ?reason,
+                        "commit: excluding path from staging"
+                    );
+                    excluded.push(entry.path.clone());
+                }
+            }
+        }
+
+        // ── Step 3: Stage eligible paths ─────────────────────────────────
+        if !eligible.is_empty() {
+            let mut add_args: Vec<&str> = vec!["add", "--"];
+            for path in &eligible {
+                add_args.push(path.as_str());
+            }
+            self.run_git(&add_args, &[]).await?;
+        }
+
+        // ── Step 4: Check staged content ─────────────────────────────────
         let staged = self
             .run_git(&["diff", "--cached", "--name-only"], &[])
             .await?;
         if staged.trim().is_empty() {
-            return Ok(false);
+            if excluded.is_empty() {
+                return Ok(CommitOutcome::NoChanges);
+            }
+            tracing::info!(
+                excluded_paths = ?excluded,
+                "commit: no legitimate changes; only excluded files present"
+            );
+            return Ok(CommitOutcome::NoLegitimateChanges { excluded });
         }
+
+        // ── Step 5: Defense-in-depth oversized file check ────────────────
         self.reject_oversized_staged_files(&staged).await?;
+
+        // ── Step 6: Commit ───────────────────────────────────────────────
         self.run_git(
             &["commit", "-m", message],
             &[
@@ -179,7 +277,7 @@ impl Workspace {
             ],
         )
         .await?;
-        Ok(true)
+        Ok(CommitOutcome::Committed)
     }
 
     /// Refuse to commit any staged file larger than GitHub's 100 MiB hard limit.
@@ -187,16 +285,16 @@ impl Workspace {
     /// GitHub's pre-receive hook rejects a push containing a blob > 100 MiB
     /// (`GH001`), and once such a blob is in branch history the only fix is a
     /// history rewrite — there is no in-band recovery from the push itself. The
-    /// blob is almost always a cache/store directory swept in by `git add -A`
-    /// after a tool wrote it inside the worktree (observed: a `pnpm` store under
+    /// blob is almost always a cache/store directory swept in by staging after a
+    /// tool wrote it inside the worktree (observed: a `pnpm` store under
     /// `.local/share/pnpm` when `HOME` drifted into the worktree; also cargo
     /// target dirs and `node_modules`). Catching it here, at commit time, turns a
     /// dead-end push rejection into an actionable error the worker can fix within
     /// its own run (gitignore or delete the file) before it ever enters history.
     ///
-    /// Staged content equals on-disk content (we just ran `add -A`), so the
-    /// on-disk size of each staged regular file is its blob size. Deleted paths
-    /// don't stat (skipped — a deletion can't be oversized); symlinks report
+    /// Staged content equals on-disk content (we just staged eligible paths),
+    /// so the on-disk size of each staged regular file is its blob size. Deleted
+    /// paths don't stat (skipped — a deletion can't be oversized); symlinks report
     /// their own small size via `symlink_metadata` and never false-trigger.
     async fn reject_oversized_staged_files(
         &self,
@@ -601,6 +699,85 @@ impl Workspace {
     }
 }
 
+// ─── git-status porcelain parsing helpers ──────────────────────────────────
+
+/// A single parsed entry from `git status --porcelain=v1` output.
+struct PorcelainEntry {
+    /// Index (staging-area) status character.
+    index: char,
+    /// Working-tree status character.
+    worktree: char,
+    /// Repo-relative path (the destination path for renames/copies).
+    path: String,
+}
+
+/// Parse `git status --porcelain=v1` output into structured entries.
+///
+/// Handles quoted paths and rename/copy entries (`XY old -> new`) by
+/// extracting the destination path.
+fn parse_porcelain_status(raw: &str) -> Vec<PorcelainEntry> {
+    let mut entries = Vec::new();
+    for line in raw.lines() {
+        if line.len() < 3 {
+            continue;
+        }
+        let x = line.as_bytes()[0] as char;
+        let y = line.as_bytes()[1] as char;
+        let rest = &line[3..]; // skip "XY "
+
+        let path = if x == 'R' || x == 'C' {
+            // Rename or copy: "XY old_path -> new_path"
+            if let Some(pos) = rest.find(" -> ") {
+                unquote_path(&rest[pos + 4..])
+            } else {
+                unquote_path(rest)
+            }
+        } else {
+            unquote_path(rest)
+        };
+
+        entries.push(PorcelainEntry {
+            index: x,
+            worktree: y,
+            path,
+        });
+    }
+    entries
+}
+
+/// Unquote a path from git-status porcelain output.
+///
+/// Paths containing special characters are double-quoted with C-style escapes
+/// (e.g. `"path with spaces"`).  This function strips the quotes and decodes
+/// the escapes.
+fn unquote_path(path: &str) -> String {
+    if path.len() >= 2 && path.starts_with('"') && path.ends_with('"') {
+        let inner = &path[1..path.len() - 1];
+        let mut result = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('n') => result.push('\n'),
+                    Some('t') => result.push('\t'),
+                    Some('\\') => result.push('\\'),
+                    Some('"') => result.push('"'),
+                    Some(other) => {
+                        result.push('\\');
+                        result.push(other);
+                    }
+                    None => result.push('\\'),
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    } else {
+        path.to_string()
+    }
+}
+
 /// Cap on the `git log` walk so a deep-history repo can't make this run
 /// unbounded. 10k commits comfortably covers every tracked file in practice
 /// (the walk stops the instant the seen-set covers the universe); if it
@@ -888,7 +1065,7 @@ mod tests {
             other => panic!("expected clean merge, got {other:?}"),
         }
         // Commit the staged merge (mirrors the supervisor's proactive-sync commit).
-        let committed = ws
+        let outcome = ws
             .commit(
                 "Merge main into task",
                 GitIdentity {
@@ -898,7 +1075,10 @@ mod tests {
             )
             .await
             .expect("commit");
-        assert!(committed, "clean behind-base merge must produce a commit");
+        assert!(
+            outcome.committed(),
+            "clean behind-base merge must produce a commit"
+        );
 
         let head_after = git(cp, &["rev-parse", "HEAD"]);
         assert_ne!(
@@ -1343,7 +1523,7 @@ mod tests {
 
     /// `commit` must refuse to stage a file over GitHub's 100 MB hard limit —
     /// the exact footgun behind the `task/aqmk` GH001 push rejection (a pnpm
-    /// store swept in by `add -A` when HOME drifted into the worktree). The
+    /// store swept in by staging when HOME drifted into the worktree). The
     /// error must name the offending path, and NO commit may be created.
     #[tokio::test]
     async fn commit_rejects_oversized_staged_file() {
@@ -1382,14 +1562,212 @@ mod tests {
         // A few MB is well under the limit and must pass.
         sparse_file(&cp.join("medium.bin"), 5 * 1024 * 1024);
 
-        assert!(
-            ws.commit("work", TEST_IDENT).await.expect("commit"),
-            "a sub-limit change must commit"
-        );
+        let outcome = ws.commit("work", TEST_IDENT).await.expect("commit");
+        assert!(outcome.committed(), "a sub-limit change must commit");
         assert_eq!(
             git(cp, &["log", "--oneline"]).lines().count(),
             2,
             "exactly the base commit plus the worker commit"
+        );
+    }
+
+    // ── Filtered-staging regression tests ──────────────────────────────────
+
+    /// Legitimate source edit plus root-level scratch files: only the
+    /// legitimate file must be committed; scratch files must be excluded.
+    #[tokio::test]
+    async fn commit_filters_scratch_stages_only_legitimate() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        // Legitimate change
+        write(cp, "real.rs", "fn main() {}\n");
+        // Scratch files at root
+        write(cp, "patch.txt", "scratch content\n");
+        write(cp, "test2.txt", "scratch content\n");
+        write(cp, "test3.txt", "scratch content\n");
+
+        let outcome = ws
+            .commit("work", TEST_IDENT)
+            .await
+            .expect("commit must succeed with mixed legitimate + scratch");
+        assert!(
+            outcome.committed(),
+            "legitimate changes must produce a CommitOutcome::Committed"
+        );
+
+        // Verify only the legitimate file was committed.
+        let committed_files = git(cp, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            committed_files.contains("real.rs"),
+            "legitimate file must be committed, got: {committed_files}"
+        );
+        assert!(
+            !committed_files.contains("patch.txt"),
+            "scratch patch.txt must not be committed, got: {committed_files}"
+        );
+        assert!(
+            !committed_files.contains("test2.txt"),
+            "scratch test2.txt must not be committed, got: {committed_files}"
+        );
+        assert!(
+            !committed_files.contains("test3.txt"),
+            "scratch test3.txt must not be committed, got: {committed_files}"
+        );
+    }
+
+    /// Junk-only changes produce NoLegitimateChanges with excluded paths.
+    #[tokio::test]
+    async fn commit_junk_only_returns_no_legitimate_changes() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+        let head_before = git(cp, &["rev-parse", "HEAD"]).trim().to_string();
+
+        // Only scratch files at root
+        write(cp, "patch.txt", "scratch content\n");
+        write(cp, "test.txt", "scratch content\n");
+
+        let outcome = ws
+            .commit("work", TEST_IDENT)
+            .await
+            .expect("commit must succeed (not error) even for junk-only");
+        match &outcome {
+            CommitOutcome::NoLegitimateChanges { excluded } => {
+                assert!(
+                    excluded.contains(&"patch.txt".to_string()),
+                    "patch.txt must be in excluded list, got: {excluded:?}"
+                );
+                assert!(
+                    excluded.contains(&"test.txt".to_string()),
+                    "test.txt must be in excluded list, got: {excluded:?}"
+                );
+            }
+            other => panic!("expected NoLegitimateChanges, got {other:?}"),
+        }
+
+        // No new commit may be created.
+        assert_eq!(
+            git(cp, &["rev-parse", "HEAD"]).trim(),
+            head_before,
+            "no commit may be created for junk-only changes"
+        );
+    }
+
+    /// Fixture/testdata paths with scratch-like basenames are allowed.
+    #[tokio::test]
+    async fn commit_allows_fixture_paths_even_with_scratch_basename() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        // Create fixture directory structure
+        std::fs::create_dir_all(cp.join("tests/fixtures")).expect("mkdir");
+        write(cp, "tests/fixtures/patch.txt", "fixture data\n");
+
+        let outcome = ws
+            .commit("work", TEST_IDENT)
+            .await
+            .expect("commit must succeed");
+        assert!(outcome.committed(), "fixture paths must be committed");
+
+        let committed_files = git(cp, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            committed_files.contains("tests/fixtures/patch.txt"),
+            "fixture file must be committed even with scratch-like basename, got: {committed_files}"
+        );
+    }
+
+    /// Clean tree returns NoChanges.
+    #[tokio::test]
+    async fn commit_clean_tree_returns_no_changes() {
+        let (_origin, _clone, ws) = fixture();
+
+        let outcome = ws
+            .commit("work", TEST_IDENT)
+            .await
+            .expect("commit must succeed on clean tree");
+        assert_eq!(
+            outcome,
+            CommitOutcome::NoChanges,
+            "clean tree must return NoChanges"
+        );
+    }
+
+    /// Fixture path with testdata directory component is also allowed.
+    #[tokio::test]
+    async fn commit_allows_testdata_fixture_paths() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        std::fs::create_dir_all(cp.join("testdata")).expect("mkdir");
+        write(cp, "testdata/test.txt", "testdata fixture\n");
+
+        let outcome = ws
+            .commit("work", TEST_IDENT)
+            .await
+            .expect("commit must succeed");
+        assert!(
+            outcome.committed(),
+            "testdata fixture paths must be committed"
+        );
+
+        let committed_files = git(cp, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            committed_files.contains("testdata/test.txt"),
+            "testdata fixture must be committed even with scratch-like basename, got: {committed_files}"
+        );
+    }
+
+    /// Root-level patch prefix file (e.g. `patch_output`) is also excluded.
+    #[tokio::test]
+    async fn commit_excludes_root_patch_prefix_files() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        // Legitimate change (write to the already-tracked file)
+        write(cp, "shared.txt", "modified\n");
+        // Root-level file matching "patch" prefix
+        write(cp, "patch_output", "scratch\n");
+
+        let outcome = ws
+            .commit("work", TEST_IDENT)
+            .await
+            .expect("commit must succeed");
+        assert!(outcome.committed(), "legitimate change must commit");
+
+        let committed_files = git(cp, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            committed_files.contains("shared.txt"),
+            "legitimate file must be committed, got: {committed_files}"
+        );
+        assert!(
+            !committed_files.contains("patch_output"),
+            "patch prefix file must not be committed, got: {committed_files}"
+        );
+    }
+
+    /// Nested scratch files (not at root) are allowed.
+    #[tokio::test]
+    async fn commit_allows_nested_scratch_like_files() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        // Create subdirectory and write a scratch-like file there
+        std::fs::create_dir_all(cp.join("src")).expect("mkdir");
+        write(cp, "src/patch.txt", "// nested\n");
+
+        let outcome = ws
+            .commit("work", TEST_IDENT)
+            .await
+            .expect("commit must succeed");
+        assert!(
+            outcome.committed(),
+            "nested scratch-like files must be allowed"
+        );
+
+        let committed_files = git(cp, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            committed_files.contains("src/patch.txt"),
+            "nested scratch-like file must be committed, got: {committed_files}"
         );
     }
 }
