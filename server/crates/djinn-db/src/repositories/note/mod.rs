@@ -14,7 +14,10 @@ mod association;
 pub(crate) mod consolidation;
 mod context;
 mod crud;
+mod embedding_associations;
 mod embeddings;
+
+pub use embedding_associations::EmbeddingAssociationRefreshStats;
 mod entity_association;
 mod file_helpers;
 mod graph;
