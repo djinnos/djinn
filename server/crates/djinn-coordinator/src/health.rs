@@ -23,6 +23,17 @@ const STALE_TASK_RUN_THRESHOLD_SECS: i64 = 4 * 60 * 60;
 /// start (we know our previous self is gone).
 const STARTUP_TASK_RUN_THRESHOLD_SECS: i64 = 10;
 
+/// How long a `task_attempts` row may stay `pending` — with no live
+/// (`starting`/`running`) `task_run` and no `running` session for its task —
+/// before the orphaned-attempt reaper finalizes it to `crashed`.
+///
+/// Conservative: dispatch-start → session/run creation is seconds, so a
+/// 15-minute-old pending attempt with nothing executing behind it can never
+/// be advanced by the normal lifecycle paths. Left un-reaped it hard-blocks
+/// the respawn guard for its (task, role) pair forever (the guard defers any
+/// dispatch while a `pending`/`submitted` attempt exists).
+const ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS: i64 = 15 * 60;
+
 const CARGO_TARGET_RUNS_ROOT: &str = djinn_supervisor::CARGO_TARGET_RUNS_ROOT;
 
 /// Default durable output-stash retention window for coordinator maintenance.
@@ -47,6 +58,7 @@ pub(super) async fn sweep_stale_resources(
     app_state: &crate::context::CoordinatorContext,
 ) {
     reap_stale_task_runs(db).await;
+    reap_orphaned_pending_attempts(db).await;
     reap_orphaned_taskrun_jobs(db, app_state, "periodic").await;
     sweep_orphan_worker_sessions(db).await;
     sweep_orphaned_cargo_target_run_dirs(db, app_state.cargo_target_runs_root.as_deref()).await;
@@ -1748,6 +1760,128 @@ async fn reap_stale_task_runs_with_threshold(
         Ok(_) => {}
         Err(e) => {
             tracing::warn!(error = %e, reason = reason, "CoordinatorActor: reap_stale_task_runs failed");
+        }
+    }
+}
+
+// ─── Orphaned pending task_attempt sweep ─────────────────────────────────────
+
+/// Finalize to `crashed` any `pending` `task_attempts` row older than
+/// [`ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS`] whose task has no live
+/// (`starting`/`running`) `task_run` and no `running` session.
+///
+/// Defense-in-depth backstop for the event-path terminalization in
+/// `classify_session_exit_liveness`: a run that fails without ever emitting a
+/// terminal session event (host crash mid-dispatch, session left unfinalized
+/// by an early stage error, missed event during a coordinator restart) leaves
+/// its dispatch-start `pending` attempt orphaned, and the respawn guard then
+/// defers every future dispatch of that (task, role) pair — a permanent wedge.
+///
+/// State-driven off DB truth and idempotent: `advance_to_terminal` is
+/// forward-only, so a row concurrently advanced by the normal lifecycle is
+/// left untouched. Deliberately restricted to `pending` rows — `submitted`
+/// rows are owned by the PR poller's adoption/terminalization flow.
+async fn reap_orphaned_pending_attempts(db: &djinn_db::Database) {
+    reap_orphaned_pending_attempts_with_threshold(
+        db,
+        ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS,
+        "periodic",
+    )
+    .await;
+}
+
+/// Startup variant of [`reap_orphaned_pending_attempts`]. Runs with the same
+/// conservative threshold (a fresh boot proves nothing about a minutes-old
+/// dispatch on another coordinator instance behind the same DB), but firing
+/// at boot means long-orphaned rows self-heal immediately after a deploy
+/// instead of waiting for the first periodic stale sweep.
+pub(super) async fn reap_orphaned_pending_attempts_for_startup(db: &djinn_db::Database) {
+    reap_orphaned_pending_attempts_with_threshold(
+        db,
+        ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS,
+        "startup",
+    )
+    .await;
+}
+
+pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
+    db: &djinn_db::Database,
+    threshold_secs: i64,
+    reason: &'static str,
+) {
+    let cutoff = time::OffsetDateTime::now_utc() - time::Duration::seconds(threshold_secs);
+    let format = time::macros::format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+    );
+    let threshold_iso = match cutoff.format(&format) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "reap_orphaned_pending_attempts: failed to format threshold");
+            return;
+        }
+    };
+
+    let repo = djinn_db::TaskAttemptRepository::new(db.clone());
+    let orphans = match repo.list_orphaned_pending(&threshold_iso).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                reason = reason,
+                "CoordinatorActor: reap_orphaned_pending_attempts lookup failed"
+            );
+            return;
+        }
+    };
+
+    for orphan in orphans {
+        let summary_json = serde_json::json!({
+            "recovery_classifier": "orphaned_pending_attempt_reaper",
+            "reason": reason,
+            "threshold_secs": threshold_secs,
+            "failure_class": "orphaned_pending_attempt",
+        })
+        .to_string();
+        match repo
+            .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
+                id: &orphan.id,
+                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some(
+                    "orphaned pending attempt reaped: no live task_run or running session",
+                ),
+                summary_json: Some(&summary_json),
+                log_tail: None,
+            })
+            .await
+        {
+            Ok(updated) => {
+                tracing::warn!(
+                    attempt_id = %orphan.id,
+                    task_id = %orphan.task_id,
+                    role = %orphan.role,
+                    dispatch_key = %orphan.dispatch_key,
+                    attempt_created_at = %orphan.created_at,
+                    threshold = %threshold_iso,
+                    outcome = %updated.outcome,
+                    reason = reason,
+                    "CoordinatorActor: reaped orphaned pending task_attempt"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    attempt_id = %orphan.id,
+                    task_id = %orphan.task_id,
+                    role = %orphan.role,
+                    error = %e,
+                    reason = reason,
+                    "CoordinatorActor: failed to reap orphaned pending task_attempt"
+                );
+            }
         }
     }
 }
