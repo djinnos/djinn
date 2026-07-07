@@ -1188,20 +1188,13 @@ mod tests {
     #[test]
     fn get_environment_config_reply_roundtrip() {
         // Pre-fix, this worked only because `EnvironmentConfig::empty()`
-        // ships zero `HookCommand`s. Build a config WITH all three
-        // untagged-enum HookCommand variants (Shell, Exec, Parallel) to
-        // prove the opaque-JSON wire shape survives the trap shape
-        // production sees once `lifecycle.*` lists are non-empty.
-        use djinn_stack::environment::{EnvironmentConfig, HookCommand, LifecycleHooks};
-        let mut parallel = std::collections::BTreeMap::new();
-        parallel.insert(
-            "install".into(),
-            HookCommand::Shell("pip install -e .".into()),
-        );
-        parallel.insert(
-            "index".into(),
-            HookCommand::Exec(vec!["scip-python".into(), "index".into()]),
-        );
+        // ships zero `HookCommand`s. Build a config WITH HookCommand
+        // variants (Shell, Exec) for post_build/pre_anything and a
+        // PreTaskCommand for pre_task to prove the opaque-JSON wire shape
+        // survives bincode round-trip.
+        use djinn_stack::environment::{
+            EnvironmentConfig, HookCommand, LifecycleHooks, PreTaskCommand,
+        };
         let cfg = EnvironmentConfig {
             lifecycle: LifecycleHooks {
                 post_build: vec![HookCommand::Shell("echo build".into())],
@@ -1210,7 +1203,12 @@ mod tests {
                     "-lc".into(),
                     "echo ready".into(),
                 ])],
-                pre_task: vec![HookCommand::Parallel(parallel)],
+                pre_task: vec![PreTaskCommand {
+                    name: Some("install".into()),
+                    command: "pip install -e .".into(),
+                    timeout_seconds: 300,
+                    failure_policy: Default::default(),
+                }],
                 pre_verification: vec![],
             },
             ..EnvironmentConfig::empty()
@@ -1223,7 +1221,7 @@ mod tests {
         };
         let bytes = bincode::serialize(&f).unwrap();
         let back: Frame = bincode::deserialize(&bytes).expect(
-            "GetEnvironmentConfig with non-empty HookCommand lists must roundtrip via bincode \
+            "GetEnvironmentConfig with non-empty hook lists must roundtrip via bincode \
              (regression guard for the #[serde(untagged)] HookCommand DeserializeAnyNotSupported trap)",
         );
         match back.payload {
@@ -1234,10 +1232,7 @@ mod tests {
                 assert_eq!(cfg_back.lifecycle.post_build.len(), 1);
                 assert_eq!(cfg_back.lifecycle.pre_anything.len(), 1);
                 assert_eq!(cfg_back.lifecycle.pre_task.len(), 1);
-                assert!(matches!(
-                    cfg_back.lifecycle.pre_task[0],
-                    HookCommand::Parallel(_)
-                ));
+                assert_eq!(cfg_back.lifecycle.pre_task[0].command, "pip install -e .");
             }
             other => panic!("unexpected: {other:?}"),
         }
