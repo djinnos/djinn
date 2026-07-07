@@ -8,14 +8,17 @@
 use crate::server::auth::{constant_time_eq, random_token_b64};
 use sha2::{Digest, Sha256};
 
-/// Process-wide boot token state: raw token + SHA-256 digest.
+/// Process-wide boot token state: SHA-256 digest + single-use flag.
+///
+/// Only the digest is kept in memory — the raw token is returned from
+/// [`generate`], logged once by the caller, and never stored. This ensures a
+/// memory dump (crash dump, `/proc/<pid>/mem`, memory-safety exploit) cannot
+/// recover the raw token.
 ///
 /// Stored as `Option<BootToken>` behind a `RwLock` on [`AppState`]. `None`
 /// means either no token was generated (setup disabled / credentials present)
 /// or the token was already consumed.
 pub(crate) struct BootToken {
-    #[allow(dead_code)]
-    raw: String,
     digest: Vec<u8>,
     used: bool,
 }
@@ -23,11 +26,11 @@ pub(crate) struct BootToken {
 impl BootToken {
     /// Generate a fresh 32-byte (256-bit) random token, returning both the
     /// raw value (for the boot log URL) and the wrapped struct (for storage).
+    /// The raw value is **not** retained inside the struct — only its digest.
     pub(crate) fn generate() -> (String, Self) {
         let raw = random_token_b64();
         let digest = Self::hash(&raw);
         let token = Self {
-            raw: raw.clone(),
             digest,
             used: false,
         };
