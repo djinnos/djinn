@@ -58,6 +58,59 @@ pub mod github_error_render;
 pub mod output_stash;
 pub(crate) mod preapproval_gate;
 pub use preapproval_gate::run_arbiter_preapproval_gate;
+
+/// Terminalize the worker's in-flight attempt (and record a durable `reopened`
+/// marker) for a supervisor-driven rework reopen that the PR poller's
+/// `apply_pr_transition` does not own.
+///
+/// The reviewer's `task_review_reject*` and the lead's `lead_approve_conflict`
+/// transitions reopen the task to a dispatchable state but historically left
+/// the worker's `submitted` attempt untouched (the ylme orphan: a `submitted`
+/// row with no pr_url that made the respawn guard's step-2 dedup defer forever,
+/// which the orphan reaper deliberately skipped).  Called from the transition
+/// apply layer (`DirectServices::transition_task`, the single chokepoint for
+/// both in-process and RPC-hosted supervisor transitions) after the board
+/// transition succeeds; a no-op for non-rework actions.  Best-effort.
+pub async fn record_supervisor_rework_reopen(
+    db: &djinn_db::Database,
+    task_id: &str,
+    action: &djinn_core::models::TransitionAction,
+    reason: Option<&str>,
+) {
+    use djinn_core::models::TransitionAction;
+    let is_supervisor_rework = matches!(
+        action,
+        TransitionAction::TaskReviewReject
+            | TransitionAction::TaskReviewRejectStale
+            | TransitionAction::TaskReviewRejectConflict
+            | TransitionAction::LeadApproveConflict
+    );
+    if !is_supervisor_rework {
+        return;
+    }
+    // Best-effort: read the task's pr_url so the terminalized attempt keeps its
+    // PR linkage when one exists (internal task-review rejects often have none).
+    let pr_url = match djinn_db::TaskRepository::new(
+        db.clone(),
+        djinn_core::events::EventBus::noop(),
+    )
+    .get(task_id)
+    .await
+    {
+        Ok(Some(t)) => t.pr_url,
+        _ => None,
+    };
+    crate::dispatch::attempt_lifecycle::record_rework_reopen(
+        db,
+        task_id,
+        "worker",
+        pr_url.as_deref(),
+        reason,
+        None,
+    )
+    .await;
+}
+
 pub mod resource_monitor;
 pub mod roles;
 pub mod supervisor_impl;
