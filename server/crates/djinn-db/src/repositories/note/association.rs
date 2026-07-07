@@ -83,31 +83,40 @@ impl NoteRepository {
 
         let growth_factor = (0..n_co_accesses).fold(1.0_f64, |acc, _| acc * 1.01);
         let new_co_accesses = i64::from(n_co_accesses);
-        sqlx::query!(
+        // Runtime (non-macro) query for the same offline-cache reason as
+        // `upsert_typed_association` below: the wider uniqueness tuple
+        // `(note_a_id, note_b_id, kind, source)` introduced by the
+        // provenance-ready migration (97_note_association_provenance.sql)
+        // isn't reflected in the committed `.sqlx/` cache, so a `query!`
+        // would fail under `SQLX_OFFLINE=true`. The co-access substrate
+        // writes `kind='co_access'` and `source='session_co_access'` so it
+        // occupies its own slot in the wider primary key and never collides
+        // with typed edges written by `upsert_typed_association`.
+        sqlx::query(
             r#"INSERT INTO note_associations
-             (note_a_id, note_b_id, weight, co_access_count, last_co_access)
-             VALUES ($1, $2, 0.01, $3, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
-             ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET
+             (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind, source)
+             VALUES ($1, $2, 0.01, $3, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'co_access', 'session_co_access')
+             ON CONFLICT (note_a_id, note_b_id, kind, source) DO UPDATE SET
                  weight = LEAST(1.0, note_associations.weight * $4),
                  co_access_count = note_associations.co_access_count + EXCLUDED.co_access_count,
                  last_co_access = EXCLUDED.last_co_access"#,
-            a_id,
-            b_id,
-            new_co_accesses,
-            growth_factor
         )
+        .bind(a_id)
+        .bind(b_id)
+        .bind(new_co_accesses)
+        .bind(growth_factor)
         .execute(self.db.pool())
         .await?;
 
         Ok::<NoteAssociation, crate::error::DbError>(
-            sqlx::query_as!(
-                NoteAssociation,
+            sqlx::query_as(
                 "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access
                  FROM note_associations
-                 WHERE note_a_id = $1 AND note_b_id = $2",
-                a_id,
-                b_id
+                 WHERE note_a_id = $1 AND note_b_id = $2
+                   AND kind = 'co_access' AND source = 'session_co_access'",
             )
+            .bind(a_id)
+            .bind(b_id)
             .fetch_one(self.db.pool())
             .await?,
         )
@@ -131,30 +140,38 @@ impl NoteRepository {
         let (a_id, b_id) = canonical_pair(note_a_id, note_b_id);
         let min_weight = min_weight.clamp(0.0, 1.0);
 
-        sqlx::query!(
+        // Runtime (non-macro) query for the same offline-cache reason as
+        // `upsert_association` above: the wider uniqueness tuple
+        // `(note_a_id, note_b_id, kind, source)` introduced by the
+        // provenance-ready migration (97_note_association_provenance.sql)
+        // isn't reflected in the committed `.sqlx/` cache, so a `query!`
+        // would fail under `SQLX_OFFLINE=true`. The co-access substrate
+        // writes `kind='co_access'` and `source='session_co_access'` so it
+        // occupies its own slot in the wider primary key.
+        sqlx::query(
             r#"INSERT INTO note_associations
-             (note_a_id, note_b_id, weight, co_access_count, last_co_access)
-             VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
-             ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET
+             (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind, source)
+             VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'co_access', 'session_co_access')
+             ON CONFLICT (note_a_id, note_b_id, kind, source) DO UPDATE SET
                  weight = GREATEST(note_associations.weight, EXCLUDED.weight),
                  co_access_count = note_associations.co_access_count + 1,
                  last_co_access = EXCLUDED.last_co_access"#,
-            a_id,
-            b_id,
-            min_weight
         )
+        .bind(a_id)
+        .bind(b_id)
+        .bind(min_weight)
         .execute(self.db.pool())
         .await?;
 
         Ok::<NoteAssociation, crate::error::DbError>(
-            sqlx::query_as!(
-                NoteAssociation,
+            sqlx::query_as(
                 "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access
                  FROM note_associations
-                 WHERE note_a_id = $1 AND note_b_id = $2",
-                a_id,
-                b_id
+                 WHERE note_a_id = $1 AND note_b_id = $2
+                   AND kind = 'co_access' AND source = 'session_co_access'",
             )
+            .bind(a_id)
+            .bind(b_id)
             .fetch_one(self.db.pool())
             .await?,
         )
@@ -234,6 +251,38 @@ impl NoteRepository {
         let (a_id, b_id) = canonical_pair(note_a_id, note_b_id);
         let weight = weight.clamp(0.0, 1.0);
         let kind_str = kind.as_str();
+        // Fixed source for typed edges minted by this helper. The provenance-
+        // ready migration (97_note_association_provenance.sql) widens the
+        // primary key to `(note_a_id, note_b_id, kind, source)` and seeds
+        // the `source` column default to `'session_co_access'` for every
+        // pre-existing row (including the legacy typed edges this helper
+        // wrote before the migration landed). Reusing that same default
+        // here means the new typed upsert lands on the same primary-key
+        // slot the legacy typed rows occupy, so repeated writes of the
+        // same `(a, b, kind)` continue to hit `ON CONFLICT … DO UPDATE`
+        // and keep the max-weight merge — a follow-up epic (ixib) will
+        // widen this helper's surface so callers can pass provenance-rich
+        // sources (e.g. `embedding_similarity`, `consolidation_pipeline`,
+        // `llm_enrichment`).
+        let source_str = "session_co_access";
+
+        // Upgrade semantics: when this helper writes a typed edge for a
+        // canonical pair that already carries an implicit `co_access` row
+        // (minted by `upsert_association`), the typed edge is the stronger
+        // signal. Remove the implicit co_access row first so the typed edge
+        // replaces it in place — `get_association_kind` and the
+        // `list_associations_*` readers (which filter by `note_a_id` /
+        // `note_b_id` only) keep returning a single row per pair for
+        // existing tests and call sites that pre-date the wider substrate.
+        sqlx::query(
+            "DELETE FROM note_associations
+             WHERE note_a_id = $1 AND note_b_id = $2
+               AND kind = 'co_access' AND source = 'session_co_access'",
+        )
+        .bind(a_id)
+        .bind(b_id)
+        .execute(self.db.pool())
+        .await?;
 
         // Runtime (non-macro) query for the same offline-cache reason as
         // `record_derived_from` and `get_association_kind` below: the typed
@@ -244,9 +293,9 @@ impl NoteRepository {
         // function.
         sqlx::query(
             r#"INSERT INTO note_associations
-                 (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind)
-               VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), $4)
-               ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET
+                 (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind, source)
+               VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), $4, $5)
+               ON CONFLICT (note_a_id, note_b_id, kind, source) DO UPDATE SET
                    weight = GREATEST(note_associations.weight, EXCLUDED.weight),
                    kind = EXCLUDED.kind,
                    last_co_access = EXCLUDED.last_co_access"#,
@@ -255,6 +304,7 @@ impl NoteRepository {
         .bind(b_id)
         .bind(weight)
         .bind(kind_str)
+        .bind(source_str)
         .execute(self.db.pool())
         .await?;
 
