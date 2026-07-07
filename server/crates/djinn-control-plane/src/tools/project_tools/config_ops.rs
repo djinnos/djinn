@@ -427,12 +427,18 @@ mod tests {
         StubCoordinatorOps, StubGitOps, StubLspOps, StubRepoGraphOps, StubSlotPoolOps,
     };
 
-    /// RuntimeOps stub whose `apply_environment_config` is a no-op.
-    ///
-    /// The tool's validation + parse + source-tagging logic is exercised
-    /// through `dispatch_tool`; the test seeds the DB directly after a
-    /// successful set so the subsequent get/reset can read it back.
-    struct TestRuntimeOps;
+    /// RuntimeOps stub that persists the `EnvironmentConfig` passed to
+    /// `apply_environment_config` to the underlying test DB. Production
+    /// runtimes upsert a Kubernetes ConfigMap and may mirror the JSON into
+    /// Dolt; in-process tests just need the JSON write so a subsequent
+    /// `project_environment_config_get` round-trip can read it back. The
+    /// tool's parse + validate + source-tagging logic is exercised
+    /// end-to-end through `dispatch_tool` — the test double captures
+    /// exactly what the tool persisted, so any field dropped or mutated
+    /// before this call would surface as a failed round-trip assertion.
+    struct TestRuntimeOps {
+        db: Database,
+    }
 
     #[async_trait::async_trait]
     impl RuntimeOps for TestRuntimeOps {
@@ -452,9 +458,18 @@ mod tests {
         async fn persist_model_health_state(&self) {}
         async fn apply_environment_config(
             &self,
-            _: &str,
-            _: &djinn_stack::environment::EnvironmentConfig,
+            project_id: &str,
+            config: &djinn_stack::environment::EnvironmentConfig,
         ) -> Result<(), String> {
+            // Serialize the exact `EnvironmentConfig` (including the
+            // `UserEdited` source tag applied by the set path) and write
+            // it to the DB. This is the production-equivalent
+            // persistence side-effect: the next `get` reads this row.
+            let json = serde_json::to_string(config).map_err(|e| format!("serialize: {e}"))?;
+            let repo = ProjectRepository::new(self.db.clone(), EventBus::noop());
+            repo.set_environment_config(project_id, &json)
+                .await
+                .map_err(|e| format!("set_environment_config: {e}"))?;
             Ok(())
         }
         async fn trigger_mirror_refresh(&self, _: &str) {}
@@ -474,7 +489,7 @@ mod tests {
 
     async fn test_server(db: Database) -> DjinnMcpServer {
         let state = McpState::new(
-            db,
+            db.clone(),
             EventBus::noop(),
             djinn_provider::catalog::CatalogService::new(),
             djinn_provider::catalog::HealthTracker::new(),
@@ -483,7 +498,7 @@ mod tests {
             None,
             None,
             Arc::new(StubLspOps),
-            Arc::new(TestRuntimeOps),
+            Arc::new(TestRuntimeOps { db }),
             Arc::new(StubGitOps),
             Arc::new(StubRepoGraphOps),
         );
@@ -564,11 +579,12 @@ mod tests {
             set_result
         );
 
-        // The TestRuntimeOps stub is a no-op; seed the DB with the
-        // source-tagged config to complete the round-trip.
-        let mut tagged = cfg.clone();
-        tagged["source"] = json!("user_edited");
-        seed_environment_config(&db, &project_id, &tagged.to_string()).await;
+        // The TestRuntimeOps stub persists the exact
+        // `EnvironmentConfig` (including the `UserEdited` source tag
+        // applied by the set path) to the test DB, mirroring what the
+        // production runtime bridge writes. No manual seeding after the
+        // set call — that would mask any field dropped or mutated
+        // before `apply_environment_config`.
 
         // ── get: verifies fields survive ──
         let get_result = server
@@ -854,11 +870,10 @@ mod tests {
             .await
             .expect("dispatch");
 
-        // Seed with UserEdited source (as the real bridge would serialize it).
-        let mut tagged = cfg.clone();
-        tagged["source"] = json!("user-edited");
-        seed_environment_config(&db, &project_id, &tagged.to_string()).await;
-
+        // The TestRuntimeOps stub persists the source-tagged
+        // `EnvironmentConfig` (with `UserEdited` → `"user-edited"` via
+        // `rename_all = "kebab-case"`) to the test DB. No manual
+        // seeding after the set call.
         let get = server
             .dispatch_tool(
                 "project_environment_config_get",
@@ -921,10 +936,11 @@ mod tests {
             .expect("dispatch");
         assert_eq!(set_result["status"], "ok", "set failed: {set_result}");
 
-        let mut tagged = cfg.clone();
-        tagged["source"] = json!("user_edited");
-        seed_environment_config(&db, &project_id, &tagged.to_string()).await;
-
+        // The TestRuntimeOps stub persists the exact
+        // `EnvironmentConfig` (with the `UserEdited` source tag applied
+        // by the set path) to the test DB. No manual seeding after the
+        // set call — that would mask any field dropped or mutated
+        // before `apply_environment_config`.
         let get = server
             .dispatch_tool(
                 "project_environment_config_get",
