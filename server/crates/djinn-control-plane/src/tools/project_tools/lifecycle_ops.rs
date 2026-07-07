@@ -71,26 +71,42 @@ Thumbs.db
 /// already exists (the common case for cloned repos), this content is
 /// **not** written — the commit filter remains the sole guard for
 /// existing projects.
+///
+/// All patterns below are anchored with a leading `/` so they apply
+/// **only at the repository root**.  This is deliberate: it keeps
+/// intentional fixture / testdata files under `tests/fixtures/`,
+/// `testdata/`, `fixtures/`, etc. available even when their basenames
+/// resemble scratch artifacts (e.g. `tests/fixtures/test.txt`,
+/// `testdata/patch_expected.txt`).  The authoritative commit filter
+/// applies its own root-only / fixture-allowlist logic, so we
+/// deliberately do NOT mirror broad unanchored patterns like `*.log`
+/// or `*.tmp` here — those would hide fixture content.
 const DJINN_ROOT_SCRATCH_GITIGNORE: &str = "\
 # ── Djinn defense-in-depth: worker scratch / editor / cache ignores ──
 # Auto-seeded by Djinn on project add.  These patterns are a
 # convenience layer — the authoritative junk filter is the staged-commit
 # path in djinn-workspace::commit_safety.  Safe to remove.
-patch.txt
-patch*
-test.txt
-test2.txt
-test3.txt
-*.swp
-*.swo
-*~
-*.bak
-*.tmp
-*.log
-.DS_Store
-Thumbs.db
-.gitattributes.bak
-.cache/
+#
+# Every pattern below is root-anchored (leading `/`) so it applies
+# only at the repo root.  Intentional fixture / testdata files with
+# scratch-like basenames (tests/fixtures/test.txt, testdata/patch_*)
+# remain tracked.  The authoritative commit filter handles the rest.
+# ── Root-level worker scratch droppings ──
+/patch
+/patch*
+/patch.txt
+/test.txt
+/test2.txt
+/test3.txt
+# ── Root-level editor / cache droppings ──
+/.DS_Store
+/Thumbs.db
+/.gitattributes.bak
+/*.swp
+/*.swo
+/*~
+/*.bak
+/.cache/
 ";
 
 // ── Param structs ────────────────────────────────────────────────────────────
@@ -632,47 +648,136 @@ mod tests {
         );
     }
 
-    /// Verify the root-level scratch gitignore includes expected patterns.
+    /// Verify the root-level scratch gitignore includes expected patterns
+    /// (all root-anchored so they don't leak into fixture/testdata dirs).
     #[test]
-    fn root_scratch_gitignore_includes_scratch_names() {
-        for pattern in &["patch.txt", "test.txt", "test2.txt", "test3.txt"] {
+    fn root_scratch_gitignore_includes_anchored_scratch_names() {
+        // Root-anchored scratch names (leading `/`).
+        for pattern in &["/patch.txt", "/test.txt", "/test2.txt", "/test3.txt"] {
             assert!(
                 DJINN_ROOT_SCRATCH_GITIGNORE.contains(pattern),
-                "DJINN_ROOT_SCRATCH_GITIGNORE missing scratch pattern: {pattern}"
+                "DJINN_ROOT_SCRATCH_GITIGNORE missing root-anchored scratch pattern: {pattern}"
             );
         }
+        // Root-anchored patch prefix (covers /patch, /patch.json, /patch_output, …).
         assert!(
-            DJINN_ROOT_SCRATCH_GITIGNORE.contains("patch*"),
-            "DJINN_ROOT_SCRATCH_GITIGNORE must contain patch* glob"
+            DJINN_ROOT_SCRATCH_GITIGNORE.contains("/patch*"),
+            "DJINN_ROOT_SCRATCH_GITIGNORE must contain root-anchored /patch* glob"
+        );
+        assert!(
+            DJINN_ROOT_SCRATCH_GITIGNORE
+                .lines()
+                .any(|l| l.trim() == "/patch"),
+            "DJINN_ROOT_SCRATCH_GITIGNORE must contain a root-anchored /patch entry \
+             (covers a bare root-level 'patch' artifact)"
         );
     }
 
     #[test]
-    fn root_scratch_gitignore_includes_editor_droppings() {
+    fn root_scratch_gitignore_includes_anchored_editor_droppings() {
         for pattern in &[
-            "*.swp",
-            "*.swo",
-            "*~",
-            "*.bak",
-            ".DS_Store",
-            "Thumbs.db",
-            ".gitattributes.bak",
+            "/*.swp",
+            "/*.swo",
+            "/*~",
+            "/*.bak",
+            "/.DS_Store",
+            "/Thumbs.db",
+            "/.gitattributes.bak",
         ] {
             assert!(
                 DJINN_ROOT_SCRATCH_GITIGNORE.contains(pattern),
-                "DJINN_ROOT_SCRATCH_GITIGNORE missing editor/cache pattern: {pattern}"
+                "DJINN_ROOT_SCRATCH_GITIGNORE missing root-anchored editor/cache pattern: {pattern}"
             );
         }
     }
 
     #[test]
-    fn root_scratch_gitignore_includes_temp_log_and_cache() {
-        for pattern in &["*.tmp", "*.log", ".cache/"] {
+    fn root_scratch_gitignore_includes_anchored_cache_dir() {
+        assert!(
+            DJINN_ROOT_SCRATCH_GITIGNORE.contains("/.cache/"),
+            "DJINN_ROOT_SCRATCH_GITIGNORE must contain root-anchored /.cache/ entry"
+        );
+    }
+
+    /// Root-scratch patterns must be root-anchored so they do NOT match
+    /// intentional fixture/testdata basenames.  This is the regression
+    /// guard for the review feedback about unanchored patterns like
+    /// `test.txt`, `patch*`, `*.log`, `*.tmp` hiding fixture content.
+    #[test]
+    fn root_scratch_gitignore_does_not_contain_unanchored_scratch_names() {
+        // Bare basename patterns (no leading `/`) would match at any depth
+        // and hide files like `tests/fixtures/test.txt`,
+        // `testdata/patch_expected.txt`, `fixtures/output.log`.
+        for unanchored in &[
+            "\npatch.txt\n",
+            "\ntest.txt\n",
+            "\ntest2.txt\n",
+            "\ntest3.txt\n",
+            "\npatch*\n",
+            "\n.DS_Store\n",
+            "\nThumbs.db\n",
+            "\n.gitattributes.bak\n",
+        ] {
             assert!(
-                DJINN_ROOT_SCRATCH_GITIGNORE.contains(pattern),
-                "DJINN_ROOT_SCRATCH_GITIGNORE missing pattern: {pattern}"
+                !DJINN_ROOT_SCRATCH_GITIGNORE.contains(unanchored),
+                "DJINN_ROOT_SCRATCH_GITIGNORE contains unanchored pattern {unanchored:?} \
+                 which would match fixture/testdata basenames at any depth; \
+                 all root patterns must be prefixed with `/`"
             );
         }
+    }
+
+    /// Broad unanchored patterns like `*.log` and `*.tmp` are intentionally
+    /// omitted from the root template because they would hide fixture
+    /// content (logs and tmp files are sometimes used as test fixtures).
+    /// The authoritative commit-safety filter handles those cases using
+    /// its own root-only / fixture-allowlist logic.
+    #[test]
+    fn root_scratch_gitignore_omits_broad_temp_log_patterns() {
+        for broad in &["*.tmp", "*.log"] {
+            assert!(
+                !DJINN_ROOT_SCRATCH_GITIGNORE.contains(broad),
+                "DJINN_ROOT_SCRATCH_GITIGNORE must not contain broad pattern {broad:?}; \
+                 the authoritative commit filter covers temp/log files and \
+                 applying it here at any depth would hide fixture content"
+            );
+        }
+    }
+
+    /// Verify the fixture-preservation guard explicitly: every fixture
+    /// basename that the reviewer flagged (tests/fixtures/test.txt,
+    /// testdata/patch_expected.txt, fixtures/output.log,
+    /// tests/fixtures/example.tmp) must not be ignored by the root
+    /// template.  We can't introspect gitignore resolution without a
+    /// git repo, so we assert the negative: the patterns that would
+    /// cause those ignores are absent from the template.
+    #[test]
+    fn root_scratch_gitignore_preserves_named_fixture_paths() {
+        // None of these bare patterns (which would catch fixture paths) are present.
+        assert!(
+            !DJINN_ROOT_SCRATCH_GITIGNORE
+                .lines()
+                .any(|l| l.trim() == "test.txt"),
+            "Bare 'test.txt' pattern would ignore tests/fixtures/test.txt"
+        );
+        assert!(
+            !DJINN_ROOT_SCRATCH_GITIGNORE
+                .lines()
+                .any(|l| l.trim() == "patch*"),
+            "Bare 'patch*' pattern would ignore testdata/patch_expected.txt"
+        );
+        assert!(
+            !DJINN_ROOT_SCRATCH_GITIGNORE
+                .lines()
+                .any(|l| l.trim() == "*.log"),
+            "Bare '*.log' pattern would ignore fixtures/output.log"
+        );
+        assert!(
+            !DJINN_ROOT_SCRATCH_GITIGNORE
+                .lines()
+                .any(|l| l.trim() == "*.tmp"),
+            "Bare '*.tmp' pattern would ignore tests/fixtures/example.tmp"
+        );
     }
 
     /// Both templates document their defense-in-depth nature.
@@ -707,17 +812,123 @@ mod tests {
 
     /// Verify the templates do NOT contain fixture/testdata exclusions —
     /// fixture directories must remain allowed (intentional test data).
+    /// The check skips comment lines (starting with `#`) and blank lines
+    /// so explanatory comments referring to `fixtures/`/`testdata/` are
+    /// permitted.
     #[test]
     fn gitignore_templates_preserve_fixture_directories() {
         for template in &[DJINN_GITIGNORE, DJINN_ROOT_SCRATCH_GITIGNORE] {
+            let offending: Vec<&str> = template
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .filter(|l| l.contains("fixtures/") || l.contains("testdata/"))
+                .collect();
             assert!(
-                !template.contains("fixtures/"),
-                "Templates must not ignore fixture directories"
-            );
-            assert!(
-                !template.contains("testdata/"),
-                "Templates must not ignore testdata directories"
+                offending.is_empty(),
+                "Template must not ignore fixture/testdata directories, \
+                 offending pattern lines: {offending:?}"
             );
         }
+    }
+
+    /// End-to-end regression test for the reviewer feedback:
+    /// create a real git repo, write the root gitignore template, and
+    /// verify with `git check-ignore` that:
+    ///
+    /// 1. root-level scratch files (e.g. `/patch.txt`) ARE ignored, and
+    /// 2. fixture paths with scratch-like basenames (e.g.
+    ///    `tests/fixtures/test.txt`, `testdata/patch_expected.txt`) are
+    ///    NOT ignored.
+    #[test]
+    fn root_scratch_gitignore_does_not_ignore_fixture_paths() {
+        use std::process::Command;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "djinn_root_gitignore_test_{}_{}",
+            std::process::id(),
+            unique_test_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+
+        // Initialize a real git repo and write the root gitignore.
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&tmp)
+                .output()
+                .expect("git command failed to spawn");
+            (
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+        };
+
+        let (code, _, err) = run(&["init", "-q", "."]);
+        assert_eq!(code, 0, "git init failed: {err}");
+
+        std::fs::write(tmp.join(".gitignore"), DJINN_ROOT_SCRATCH_GITIGNORE)
+            .expect("write .gitignore");
+
+        // Configure a committer so git status / check-ignore don't complain.
+        let _ = run(&["config", "user.email", "test@example.com"]);
+        let _ = run(&["config", "user.name", "test"]);
+
+        // The cases the reviewer flagged as broken under the old template.
+        // Each (path, expected_ignored) pair.
+        let cases: &[(&str, bool)] = &[
+            // Root scratch files must be ignored.
+            ("patch.txt", true),
+            ("test.txt", true),
+            ("test2.txt", true),
+            ("test3.txt", true),
+            ("patch", true),
+            ("patch.json", true),
+            ("patch_output", true),
+            (".DS_Store", true),
+            ("Thumbs.db", true),
+            (".gitattributes.bak", true),
+            ("scratch.swp", true),
+            ("scratch.swo", true),
+            ("scratch~", true),
+            ("scratch.bak", true),
+            // Fixture / testdata paths with scratch-like basenames MUST NOT be ignored.
+            ("tests/fixtures/test.txt", false),
+            ("tests/fixtures/test2.txt", false),
+            ("tests/fixtures/patch.txt", false),
+            ("tests/fixtures/example.tmp", false),
+            ("testdata/patch_expected.txt", false),
+            ("fixtures/output.log", false),
+            ("testdata/sample.log", false),
+            // Deeply nested fixture paths must also remain tracked.
+            ("crates/x/tests/fixtures/data.json", false),
+            // Intentionally-tracked source files must not be ignored.
+            ("src/main.rs", false),
+            ("README.md", false),
+        ];
+
+        for (path, expected_ignored) in cases {
+            let (code, stdout, stderr) = run(&["check-ignore", "-v", "--no-index", path]);
+            let actually_ignored = code == 0;
+            assert_eq!(
+                actually_ignored, *expected_ignored,
+                "path {path}: expected_ignored={}, got={}\n\
+                 stdout: {stdout}\nstderr: {stderr}\n\
+                 gitignore content:\n{DJINN_ROOT_SCRATCH_GITIGNORE}",
+                *expected_ignored, actually_ignored,
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Test-local nanos counter for unique temp dir names.
+    /// Uses `time::OffsetDateTime` (the project's preferred clock) and
+    /// its timestamp nanos so concurrent test runs don't collide.
+    fn unique_test_nanos() -> String {
+        let now = time::OffsetDateTime::now_utc();
+        format!("{}", now.unix_timestamp_nanos())
     }
 }
