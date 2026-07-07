@@ -331,6 +331,22 @@ async fn count_persisted_messages(slot_ctx: &crate::host::SlotContext, session_i
         .unwrap_or(0)
 }
 
+async fn count_persisted_assistant_messages(
+    slot_ctx: &crate::host::SlotContext,
+    session_id: &str,
+) -> usize {
+    let repo = SessionMessageRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
+    repo.load_conversation(session_id)
+        .await
+        .map(|c| {
+            c.messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 #[test]
 fn extract_stash_content_shell_extracts_stdout() {
     let value = serde_json::json!({
@@ -4078,4 +4094,276 @@ async fn load_conversation_projects_compacted_view_while_raw_preserves_history()
         "projected view must not be empty; got {} messages",
         projected.messages.len()
     );
+}
+
+// ── AC1: Non-Codex terminal empty/no-event turn fails immediately ─────────
+
+/// A non-Codex provider that produces a terminal empty/no-event stream must
+/// fail immediately on the first occurrence (no retries) with a typed
+/// `ProviderError::ProviderInternal` suitable for failover.
+#[tokio::test]
+async fn non_codex_empty_stream_fails_immediately_as_typed_provider_failure() {
+    use djinn_provider::provider::ProviderError;
+
+    // A provider whose first call returns an empty stream (no events).
+    // In consume_provider_stream, this means ctx.stream.next() → None
+    // immediately, so early_stream_end=true, saw_round_event=false.
+    let provider = test_helpers::FakeProvider::script(vec![vec![]]);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, _, _, _, _) = h
+        .run_with_model(&provider, &[], "synthetic/kimi-k2.5")
+        .await;
+    let err = result.expect_err("non-Codex empty stream must produce a terminal error");
+    let typed = err
+        .downcast_ref::<ProviderError>()
+        .expect("error must carry a typed ProviderError for failover classification");
+    // Non-Codex providers get a transient ProviderInternal(500).
+    assert_eq!(*typed, ProviderError::ProviderInternal { status: 500 });
+    assert!(
+        typed.retryable(),
+        "empty-turn failure must be retryable for failover"
+    );
+    assert!(
+        err.to_string().contains("empty"),
+        "error must mention empty for diagnostics: {err}"
+    );
+    // No assistant content was produced, so nothing should be persisted.
+    // (The initial user message IS persisted by design — we check assistant only.)
+    let persisted = count_persisted_assistant_messages(&h.slot_ctx, &h.session_id).await;
+    assert_eq!(
+        persisted, 0,
+        "empty-stream failure must not persist any assistant turn"
+    );
+}
+
+// ── AC1 (Codex preservation): Codex retries before terminal failure ────────
+
+/// A Codex/OpenAI-family provider must retry empty streams up to
+/// MAX_EMPTY_TURN_RETRIES before failing, preserving the existing throttle
+/// handling behavior for ChatGPT-account Codex rate limits.
+#[tokio::test]
+async fn codex_empty_stream_retries_before_terminal_failure() {
+    use super::error_handling::MAX_EMPTY_TURN_RETRIES;
+    use djinn_provider::provider::ProviderError;
+
+    // MAX_EMPTY_TURN_RETRIES + 1 empty-stream calls (initial + all retries
+    // exhausted). Each produces an empty stream.
+    let provider = test_helpers::FakeProvider::script(
+        (0..=MAX_EMPTY_TURN_RETRIES)
+            .map(|_| vec![])
+            .collect::<Vec<_>>(),
+    );
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, _, _, _, _) = h.run_with_model(&provider, &[], "openai/gpt-5.4").await;
+    let err = result.expect_err("Codex empty stream must eventually produce a terminal error");
+    let typed = err
+        .downcast_ref::<ProviderError>()
+        .expect("Codex error must carry EmptyCompletion");
+    assert_eq!(*typed, ProviderError::EmptyCompletion);
+}
+
+// ── AC2: Provider failure prose reclassified as typed failure ───────────────
+
+/// Assistant text shaped like rate-limit prose must be reclassified as a typed
+/// `ProviderError::RateLimit` and must NOT be persisted as a successful turn.
+#[tokio::test]
+async fn rate_limit_prose_reclassified_and_not_persisted() {
+    use djinn_provider::provider::ProviderError;
+
+    let provider = MockProvider::new(vec![MockResponse::text_only(
+        "Rate limit exceeded. Please try again later.",
+        50,
+    )]);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, _, _, _, _) = h.run(&provider, &[]).await;
+    let err = result.expect_err("rate-limit prose must produce a typed provider failure");
+    let typed = err
+        .downcast_ref::<ProviderError>()
+        .expect("error must carry a typed ProviderError for failover");
+    assert!(
+        matches!(typed, ProviderError::RateLimit { .. }),
+        "rate-limit prose must be classified as RateLimit, got: {typed:?}"
+    );
+    let persisted = count_persisted_assistant_messages(&h.slot_ctx, &h.session_id).await;
+    assert_eq!(
+        persisted, 0,
+        "rate-limit prose must NOT be persisted as a successful assistant turn"
+    );
+}
+
+/// Quota-exhaustion prose (insufficient_quota) from a provider is also
+/// reclassified and not persisted.
+#[tokio::test]
+async fn quota_exhaustion_prose_reclassified_and_not_persisted() {
+    use djinn_provider::provider::ProviderError;
+
+    let provider = MockProvider::new(vec![MockResponse::text_only(
+        "Error: insufficient_quota — you need to add credits.",
+        50,
+    )]);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, _, _, _, _) = h.run(&provider, &[]).await;
+    assert!(result.is_err(), "quota prose must produce a failure");
+    let typed = result
+        .unwrap_err()
+        .downcast_ref::<ProviderError>()
+        .expect("quota prose error must carry a typed ProviderError")
+        .clone();
+    assert!(
+        matches!(typed, ProviderError::RateLimit { .. }),
+        "quota prose must be classified as RateLimit: {typed:?}"
+    );
+    let persisted = count_persisted_assistant_messages(&h.slot_ctx, &h.session_id).await;
+    assert_eq!(persisted, 0, "quota prose must not be persisted");
+}
+
+// ── AC3: Failed/truncated turns not persisted as complete messages ──────────
+
+/// An empty-stream failure does not persist any assistant message, even when
+/// the stream ends early (early_stream_end path).
+#[tokio::test]
+async fn failed_turn_not_persisted_as_complete_assistant_message() {
+    let provider = test_helpers::FakeProvider::script(vec![vec![]]);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _, _, _, _, _) = h.run_with_model(&provider, &[], "synthetic/glm-4.7").await;
+    assert!(result.is_err(), "empty stream must fail");
+    let persisted = count_persisted_assistant_messages(&h.slot_ctx, &h.session_id).await;
+    assert_eq!(
+        persisted, 0,
+        "an empty-stream failure must not persist any assistant turn"
+    );
+}
+
+/// A stream that emits partial assistant text and then ends without
+/// `StreamEvent::Done` is a truncated provider turn. The observed partial text
+/// may be flushed for resume/timeline durability, but it must not be finalized
+/// into the in-memory conversation as a successful complete assistant turn (nor
+/// duplicated through the normal complete-message persistence path).
+#[tokio::test]
+async fn partial_truncated_stream_not_finalized_as_complete_assistant_turn() {
+    use djinn_provider::provider::ProviderError;
+
+    let provider =
+        test_helpers::FakeProvider::script(vec![vec![StreamEvent::Delta(ContentBlock::Text {
+            text: "partial assistant output".to_string(),
+        })]]);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _, _, _, _, _) = h.run_with_model(&provider, &[], "synthetic/glm-4.7").await;
+
+    assert!(result.is_err(), "truncated partial stream must fail");
+    let err = result.unwrap_err();
+    let typed = err
+        .downcast_ref::<ProviderError>()
+        .expect("truncated stream error must carry a typed ProviderError");
+    assert!(
+        matches!(typed, ProviderError::ProviderInternal { .. }),
+        "truncated stream must be classified as provider-internal failure, got: {typed:?}"
+    );
+
+    assert!(
+        h.conv
+            .messages
+            .iter()
+            .all(|message| message.role != Role::Assistant),
+        "partial truncated output must not be finalized as a complete assistant turn"
+    );
+
+    let repo = SessionMessageRepository::new(h.slot_ctx.db.clone(), h.slot_ctx.event_bus.clone());
+    let raw = repo
+        .load_raw_conversation(&h.session_id)
+        .await
+        .expect("load raw conversation");
+    let persisted_assistant = raw
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .count();
+    assert_eq!(
+        persisted_assistant, 1,
+        "only the observed in-flight assistant artifact should be durable; \
+         normal complete-message finalization must not add a duplicate"
+    );
+    assert!(
+        raw.messages
+            .iter()
+            .any(|message| message.text_content().contains("partial assistant output")),
+        "observed partial assistant text should remain durable for resume"
+    );
+}
+
+/// Productive turns ARE still persisted normally (baseline correctness check).
+/// This ensures the persistence guardrails don't break normal operation.
+#[tokio::test]
+async fn productive_turns_persisted_normally() {
+    let tools = vec![dummy_tool_schema("submit_work")];
+    let provider = MockProvider::new(vec![
+        MockResponse::text_only("I'm working on the task.", 100),
+        MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            }],
+            input_tokens: 110,
+            output_tokens: 10,
+            _error: None,
+        },
+    ]);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, _, _, _, _) = h.run(&provider, &tools).await;
+    assert!(
+        result.is_ok(),
+        "productive session should succeed: {result:?}"
+    );
+    let persisted = count_persisted_assistant_messages(&h.slot_ctx, &h.session_id).await;
+    assert!(
+        persisted >= 1,
+        "productive assistant turns must be persisted; got {persisted}"
+    );
+}
+
+// ── AC4: Reuses existing invariants ────────────────────────────────────────
+
+/// Verify that non-Codex empty-stream failures carry a typed ProviderError
+/// suitable for the existing breaker/failover classification. This confirms
+/// the implementation reuses the existing stream invariants from 3pqv rather
+/// than introducing a parallel watchdog.
+#[tokio::test]
+async fn non_codex_empty_turn_error_is_breaker_classifiable() {
+    use djinn_provider::provider::ProviderError;
+
+    let provider = test_helpers::FakeProvider::script(vec![vec![]]);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _, _, _, _, _) = h
+        .run_with_model(&provider, &[], "kimi-for-coding/k2p7")
+        .await;
+    let err = result.expect_err("non-Codex empty stream must fail");
+    let typed = err
+        .downcast_ref::<ProviderError>()
+        .expect("must carry typed ProviderError");
+    assert_eq!(*typed, ProviderError::ProviderInternal { status: 500 });
+    assert!(typed.retryable(), "must be retryable for failover");
+}
+
+/// Codex empty-stream failures carry EmptyCompletion, preserving the
+/// distinction between throttle and genuine failure that existing breaker
+/// logic depends on.
+#[tokio::test]
+async fn codex_empty_turn_error_is_empty_completion_throttle() {
+    use super::error_handling::MAX_EMPTY_TURN_RETRIES;
+    use djinn_provider::provider::ProviderError;
+
+    let provider = test_helpers::FakeProvider::script(
+        (0..=MAX_EMPTY_TURN_RETRIES)
+            .map(|_| vec![])
+            .collect::<Vec<_>>(),
+    );
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _, _, _, _, _) = h.run_with_model(&provider, &[], "openai/gpt-5.4").await;
+    let err = result.expect_err("Codex must eventually fail");
+    let typed = err
+        .downcast_ref::<ProviderError>()
+        .expect("must carry EmptyCompletion");
+    assert_eq!(*typed, ProviderError::EmptyCompletion);
 }

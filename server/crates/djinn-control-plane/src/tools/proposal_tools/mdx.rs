@@ -21,10 +21,9 @@ use rmcp::schemars;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
-use crate::tools::proposal_blocks::{
-    extract_custom_block_tags, parse_mdx_blocks, validate_mdx_blocks,
+use crate::tools::validation::{
+    resolve_body_format_and_validate, validate_ac_count, validate_design,
 };
-use crate::tools::validation::{validate_ac_count, validate_design};
 
 // ── MDX frontmatter parsing (import path) ───────────────────────────────────
 
@@ -420,19 +419,12 @@ pub fn apply_block_patch(
         _ => unreachable!(),
     };
 
-    // Determine body_format: if the proposal is markdown and the patch
-    // introduces MDX block tags, upgrade to mdx.
-    let has_mdx_blocks = !extract_custom_block_tags(&new_body).is_empty();
-    let new_body_format = if existing_body_format == "mdx" || has_mdx_blocks {
-        "mdx"
-    } else {
-        "markdown"
-    };
-
-    if new_body_format == "mdx" {
-        validate_mdx_blocks(&new_body).map_err(|e| format!("resulting MDX is invalid: {e}"))?;
-        parse_mdx_blocks(&new_body).map_err(|e| format!("resulting MDX parse error: {e}"))?;
-    }
+    // Resolve the persisted body_format (upgrading markdown→mdx when the patch
+    // introduces block tags) and run the shared MDX block-validation stack — the
+    // same resolution + validation the create/update/import write paths use, so
+    // all four paths reject unknown tags and empty children-based blocks
+    // identically.
+    let new_body_format = resolve_body_format_and_validate(&new_body, Some(existing_body_format))?;
     validate_design(&new_body)?;
 
     let mut event_metadata = serde_json::json!({
@@ -571,6 +563,51 @@ mod import_tests {
             serde_json::from_str::<JsonValue>(&stored.acceptance_criteria).unwrap(),
             serde_json::json!([])
         );
+    }
+
+    /// A `proposal.mdx` whose frontmatter declares `body_format: markdown` but
+    /// whose body carries block tags is upgraded to mdx and validated on import
+    /// (previously the blocks were stored unvalidated as raw markdown).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_import_markdown_frontmatter_with_blocks_upgrades_to_mdx() {
+        let (server, db) = test_server().await;
+        let mdx = "---\ntitle: Imported blocks\nbody_format: markdown\n---\nIntro\n\n<Callout id=\"c\" tone=\"info\">\nNote.\n</Callout>\n";
+
+        let response = server
+            .dispatch_tool("proposal_import", serde_json::json!({ "mdx": mdx }))
+            .await
+            .unwrap();
+        assert!(
+            response.get("error").is_none(),
+            "import should succeed: {:?}",
+            response.get("error")
+        );
+        let id = response.get("id").and_then(|v| v.as_str()).unwrap();
+        let repo = ProposalRepository::new(db, EventBus::noop());
+        let stored = repo.get(id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.body_format, "mdx",
+            "markdown frontmatter + block tags must be stored as mdx"
+        );
+    }
+
+    /// Import likewise rejects an empty children-based block written in the
+    /// self-closing attribute form, even when the frontmatter says markdown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_import_rejects_self_closing_children_block() {
+        let (server, _db) = test_server().await;
+        let mdx = "---\ntitle: Bad decisions\nbody_format: markdown\n---\n<Decisions id=\"d\" decisions={[{\"decision\":\"x\"}]} />\n";
+
+        let response = server
+            .dispatch_tool("proposal_import", serde_json::json!({ "mdx": mdx }))
+            .await
+            .unwrap();
+        let err = response
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("error");
+        assert!(err.contains("Decisions block"), "error was: {err}");
+        assert!(err.contains("###"), "error was: {err}");
     }
 }
 

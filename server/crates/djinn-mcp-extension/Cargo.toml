@@ -28,6 +28,9 @@ uuid = { version = "1", features = ["v7"] }
 workspace-hack.workspace = true
 
 [dev-dependencies]
+# Activate test-support on djinn-control-plane so handler tests can build a
+# stub McpState (`state::stubs::test_mcp_state`) for the ExtensionContext seam.
+djinn-control-plane = { path = "../djinn-control-plane", features = ["test-support"] }
 insta = { version = "1", features = ["json"] }
 regex = "1"
 tempfile = "3"
