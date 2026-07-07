@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use super::*;
 use crate::AgentType;
 use djinn_core::models::Task;

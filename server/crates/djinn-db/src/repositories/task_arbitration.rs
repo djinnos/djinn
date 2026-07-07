@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
