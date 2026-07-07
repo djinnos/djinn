@@ -509,7 +509,7 @@ async fn i3mv_pending_attempt_causes_guard_defer() {
         .expect("dispatch start should succeed");
 
     // The guard defers because a pending attempt exists.
-    let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+    let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(
         decision,
         RespawnGuardDecision::Defer(GuardReason::RespawnGuard),
@@ -577,7 +577,7 @@ async fn i3mv_guard_delegates_to_attempt_repository() {
     let task = make_task_with_reopen_count(&db, &tx, 0).await;
 
     // Before any attempt: guard allows.
-    let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+    let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(decision, RespawnGuardDecision::Allow);
 
     // Insert a pending attempt via the repository.
@@ -588,7 +588,7 @@ async fn i3mv_guard_delegates_to_attempt_repository() {
 
     // After the attempt exists: guard defers.  This can only happen if the
     // guard is reading the repository API, not duplicating the lookup.
-    let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+    let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(
         decision,
         RespawnGuardDecision::Defer(GuardReason::RespawnGuard),
@@ -616,7 +616,7 @@ async fn i3mv_guard_delegates_to_attempt_repository() {
         .await
         .unwrap();
 
-    let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+    let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(
         decision,
         RespawnGuardDecision::Allow,
@@ -957,7 +957,7 @@ async fn audit_guard_defer_records_decision_and_reason_with_counter_proof() {
         .expect("dispatch start should succeed");
 
     // Run the guard — it should defer.
-    let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+    let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(
         decision,
         RespawnGuardDecision::Defer(GuardReason::RespawnGuard),
@@ -1036,7 +1036,7 @@ async fn audit_guard_defer_leaves_actor_counters_unchanged() {
 
     // Guard defers and writes an audit row — same code path as
     // dispatch_ready_tasks.
-    let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+    let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(
         decision,
         RespawnGuardDecision::Defer(GuardReason::RespawnGuard)
@@ -1099,7 +1099,7 @@ async fn audit_submitted_attempt_defer_audited_without_counter_ticks() {
     seed_submitted_attempt(&db, &task.id, "worker", Some("in-flight submit")).await;
 
     // Guard defers because a non-terminal submitted attempt exists.
-    let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+    let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(
         decision,
         RespawnGuardDecision::Defer(GuardReason::RespawnGuard),
@@ -1287,7 +1287,7 @@ async fn audit_adopted_pr_in_attempt_history_with_idempotent_guard_evaluation() 
     );
 
     // ── Assert: guard still adopts on re-evaluation ─────────────────────
-    let decision = run_respawn_guard(&db, &task.id, "worker", Some(pr_url)).await;
+    let decision = run_respawn_guard(&db, &task.id, "worker", Some(pr_url), None).await;
     assert_eq!(
         decision,
         RespawnGuardDecision::Adopted {
@@ -1322,7 +1322,7 @@ async fn audit_genuine_dispatch_delegates_attempt_creation_to_lifecycle_api() {
     let task = make_task_with_reopen_count(&db, &tx, 0).await;
 
     // Guard allows: no prior attempts and no open PR.
-    let decision = run_respawn_guard(&db, &task.id, "worker", None).await;
+    let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(
         decision,
         RespawnGuardDecision::Allow,
@@ -1361,7 +1361,7 @@ async fn audit_genuine_dispatch_delegates_attempt_creation_to_lifecycle_api() {
     );
 
     // ── Assert: subsequent guard defers (non-terminal pending exists) ───
-    let decision2 = run_respawn_guard(&db, &task.id, "worker", None).await;
+    let decision2 = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(
         decision2,
         RespawnGuardDecision::Defer(GuardReason::RespawnGuard),
