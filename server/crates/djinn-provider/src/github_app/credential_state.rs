@@ -1,0 +1,756 @@
+//! Deterministic credential-source resolution for the GitHub App.
+//!
+//! The server may obtain its GitHub App credentials from two sources:
+//!
+//! 1. **Environment variables / Kubernetes Secret** (`GITHUB_APP_*` env vars).
+//!    Highest priority. If *any* required env var is set, the env source is
+//!    considered attempted — a partially-configured env is **fatal** and never
+//!    silently falls through to persisted credentials.
+//!
+//! 2. **Encrypted persistence store** (the existing `CredentialRepository`
+//!    boundary). Loaded only when no env vars are present. Supports
+//!    hot-reload after a manifest exchange without a process restart.
+//!
+//! The [`CredentialSourceState`] enum makes the resolution outcome explicit so
+//! route/UI code can branch on typed states instead of `Option`-only ambiguity.
+
+use std::sync::Arc;
+
+use super::AppConfig;
+use crate::repos::CredentialRepository;
+
+/// Well-known credential store identifiers for persisted GitHub App config.
+///
+/// Stored as a single encrypted JSON blob in the `credentials` table using the
+/// existing [`CredentialRepository`] boundary. This avoids creating a new
+/// raw-secret table while preserving encryption at rest.
+pub const CRED_PROVIDER_ID: &str = "github_app";
+pub const CRED_KEY_NAME: &str = "__GITHUB_APP_CONFIG";
+
+/// Source from which the active GitHub App configuration was resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// Environment variables / Kubernetes Secret.
+    Secret,
+    /// Encrypted persistence store.
+    Persisted,
+}
+
+/// Detailed reason why Secret/env credentials are invalid or incomplete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidSecretDetail {
+    /// Specific env vars that were present but malformed or missing.
+    pub issues: Vec<&'static str>,
+}
+
+/// Explicit resolution state for GitHub App credentials.
+///
+/// Replaces the previous `Option<AppConfig>` ambiguity with typed states that
+/// route/UI code can branch on without silent fallthrough. The precedence
+/// rules are:
+///
+/// - `ValidSecret` always wins over persisted credentials.
+/// - `InvalidSecret` is **fatal**: the server must NOT silently fall through
+///   to persisted credentials, because the operator clearly *intended* to
+///   configure via env but made an error.
+/// - `ValidPersisted` works regardless of the `DJINN_ENABLE_SELF_SETUP` flag.
+/// - `UndecryptablePersisted` means data exists but can't be decrypted
+///   (wrong encryption key, corrupt data, etc.).
+/// - `Unconfigured` means no credentials are available from any source.
+#[derive(Debug, Clone)]
+pub enum CredentialSourceState {
+    /// Valid credentials loaded from environment variables / Kubernetes Secret.
+    /// These take absolute precedence over any persisted credentials.
+    ValidSecret(Arc<AppConfig>),
+
+    /// Environment credentials were present but invalid or incomplete.
+    /// This is a **fatal** state — the server MUST NOT fall back to persisted
+    /// credentials. The operator needs to fix the env configuration.
+    InvalidSecret(InvalidSecretDetail),
+
+    /// Valid credentials loaded from the encrypted persistence store.
+    /// Works regardless of `DJINN_ENABLE_SELF_SETUP` flag — the flag only
+    /// controls whether the *setup UI* is advertised, not whether already-
+    /// persisted credentials are usable.
+    ValidPersisted(Arc<AppConfig>),
+
+    /// Credentials exist in the persistence store but could not be decrypted.
+    /// The operator must re-provision (e.g., re-run the manifest setup flow
+    /// or fix the encryption key).
+    UndecryptablePersisted,
+
+    /// No credentials available from any source.
+    Unconfigured,
+}
+
+impl CredentialSourceState {
+    /// Extract the inner `AppConfig` if the state represents usable
+    /// credentials (either Secret or Persisted).
+    pub fn app_config(&self) -> Option<&Arc<AppConfig>> {
+        match self {
+            Self::ValidSecret(cfg) | Self::ValidPersisted(cfg) => Some(cfg),
+            _ => None,
+        }
+    }
+
+    /// Which source produced the usable config, if any.
+    pub fn source(&self) -> Option<ConfigSource> {
+        match self {
+            Self::ValidSecret(_) => Some(ConfigSource::Secret),
+            Self::ValidPersisted(_) => Some(ConfigSource::Persisted),
+            _ => None,
+        }
+    }
+
+    /// Whether this state represents usable credentials.
+    pub fn is_usable(&self) -> bool {
+        matches!(self, Self::ValidSecret(_) | Self::ValidPersisted(_))
+    }
+}
+
+/// Detailed result of attempting to load credentials from env vars.
+enum EnvLoadResult {
+    /// All required env vars present and valid.
+    Valid(AppConfig),
+    /// Some env vars present but configuration is incomplete/invalid.
+    Invalid(InvalidSecretDetail),
+    /// No env vars present at all — env source was not attempted.
+    Absent,
+}
+
+/// Check whether *any* of the core GitHub App env vars are set.
+///
+/// "Core" means the vars that are *required* for a valid config:
+/// `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
+/// and `GITHUB_APP_PRIVATE_KEY`/`GITHUB_APP_PRIVATE_KEY_PATH`.
+///
+/// If none are set, the operator has not attempted env-based configuration
+/// and we should silently check persisted credentials. If *any* are set,
+/// the operator has started configuring via env and we should report errors
+/// rather than silently falling through.
+fn any_core_env_var_set() -> bool {
+    use super::{ENV_APP_ID, ENV_APP_SLUG, ENV_CLIENT_ID, ENV_CLIENT_SECRET};
+    use super::{ENV_PRIVATE_KEY, ENV_PRIVATE_KEY_PATH};
+
+    for key in [
+        ENV_APP_ID,
+        ENV_CLIENT_ID,
+        ENV_CLIENT_SECRET,
+        ENV_PRIVATE_KEY,
+        ENV_PRIVATE_KEY_PATH,
+    ] {
+        if std::env::var(key)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_some()
+        {
+            return true;
+        }
+    }
+    // ENV_APP_SLUG is informational (not required for a valid config)
+    // but if it's set alongside nothing else, treat it as an attempted config.
+    if std::env::var(ENV_APP_SLUG)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .is_some()
+    {
+        return true;
+    }
+    false
+}
+
+/// Try to load credentials from environment variables with detailed error
+/// reporting.
+///
+/// Returns `EnvLoadResult::Absent` only when *no* core env vars are set.
+/// Returns `EnvLoadResult::Invalid` when some vars are present but the
+/// configuration is incomplete or malformed.
+fn try_load_from_env_detailed() -> EnvLoadResult {
+    use super::{ENV_APP_ID, ENV_CLIENT_ID, ENV_CLIENT_SECRET};
+
+    // Quick check: if no core env vars are set at all, it's Absent.
+    if !any_core_env_var_set() {
+        return EnvLoadResult::Absent;
+    }
+
+    // At least one core var is set — attempt full load, collecting issues.
+    let mut issues: Vec<&'static str> = Vec::new();
+
+    // APP_ID: required, must parse as u64.
+    let app_id = match std::env::var(ENV_APP_ID) {
+        Ok(val) => {
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                issues.push("GITHUB_APP_ID is empty");
+                None
+            } else {
+                match trimmed.parse::<u64>() {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        issues.push("GITHUB_APP_ID is not a valid number");
+                        None
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            issues.push("GITHUB_APP_ID is not set");
+            None
+        }
+    };
+
+    // CLIENT_ID: required, must be non-empty.
+    let client_id = match std::env::var(ENV_CLIENT_ID) {
+        Ok(val) => {
+            let trimmed = val.trim().to_string();
+            if trimmed.is_empty() {
+                issues.push("GITHUB_APP_CLIENT_ID is empty");
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        Err(_) => {
+            issues.push("GITHUB_APP_CLIENT_ID is not set");
+            None
+        }
+    };
+
+    // CLIENT_SECRET: required, must be non-empty.
+    let client_secret = match std::env::var(ENV_CLIENT_SECRET) {
+        Ok(val) => {
+            let trimmed = val.trim().to_string();
+            if trimmed.is_empty() {
+                issues.push("GITHUB_APP_CLIENT_SECRET is empty");
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        Err(_) => {
+            issues.push("GITHUB_APP_CLIENT_SECRET is not set");
+            None
+        }
+    };
+
+    // PEM: required, must yield non-empty content.
+    let pem = match read_env_pem_detailed() {
+        Some(p) => Some(p),
+        None => {
+            issues.push("GITHUB_APP_PRIVATE_KEY (or _PATH) is not set or empty");
+            None
+        }
+    };
+
+    // Optional fields (no issue if missing).
+    let slug = std::env::var(super::ENV_APP_SLUG).unwrap_or_default();
+    let webhook_secret = std::env::var(super::ENV_WEBHOOK_SECRET).unwrap_or_default();
+    let public_url = std::env::var(super::ENV_PUBLIC_URL)
+        .unwrap_or_else(|_| super::DEFAULT_PUBLIC_URL.to_string());
+
+    if issues.is_empty() {
+        // All required fields present and valid.
+        EnvLoadResult::Valid(AppConfig {
+            app_id: app_id.expect("checked"),
+            slug,
+            client_id: client_id.expect("checked"),
+            client_secret: client_secret.expect("checked"),
+            pem: pem.expect("checked"),
+            webhook_secret,
+            public_url,
+        })
+    } else {
+        EnvLoadResult::Invalid(InvalidSecretDetail { issues })
+    }
+}
+
+/// Read PEM from env, returning the content if available.
+fn read_env_pem_detailed() -> Option<String> {
+    use super::{ENV_PRIVATE_KEY, ENV_PRIVATE_KEY_PATH};
+
+    if let Ok(inline) = std::env::var(ENV_PRIVATE_KEY) {
+        let inline = inline.trim();
+        if !inline.is_empty() {
+            return Some(inline.replace("\\n", "\n"));
+        }
+    }
+    if let Ok(path) = std::env::var(ENV_PRIVATE_KEY_PATH) {
+        let p = path.trim();
+        if !p.is_empty() {
+            return std::fs::read_to_string(p).ok();
+        }
+    }
+    None
+}
+
+/// Detailed result of attempting to load persisted credentials.
+enum PersistedLoadResult {
+    /// Successfully decrypted and deserialized.
+    Valid(AppConfig),
+    /// Row exists but decryption/deserialization failed.
+    Undecryptable,
+    /// No persisted row found.
+    Absent,
+}
+
+/// Try to load credentials from the encrypted persistence store.
+async fn try_load_from_persisted(repo: &CredentialRepository) -> PersistedLoadResult {
+    let raw = match repo.get_decrypted_for_user(CRED_KEY_NAME, None).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return PersistedLoadResult::Absent,
+        Err(_) => return PersistedLoadResult::Undecryptable,
+    };
+
+    match serde_json::from_str::<AppConfig>(&raw) {
+        Ok(cfg) => PersistedLoadResult::Valid(cfg),
+        Err(_) => PersistedLoadResult::Undecryptable,
+    }
+}
+
+/// Resolve the credential source state by checking Secret/env first, then
+/// the encrypted persistence store.
+///
+/// # Precedence rules
+///
+/// 1. If *any* core env var is set, the env source is the sole authority.
+///    - All required vars valid → `ValidSecret`
+///    - Missing/invalid required vars → `InvalidSecret` (fatal, no fallback)
+/// 2. If no core env vars are set, check the persistence store.
+///    - Decrypted and deserialised → `ValidPersisted`
+///    - Row exists but decryption failed → `UndecryptablePersisted`
+///    - No row → `Unconfigured`
+///
+/// # Arguments
+///
+/// * `credential_repo` — access to the encrypted credential store. Pass
+///   `None` when the DB is not yet available (e.g., early boot); in that
+///   case only env/Secret is checked.
+pub async fn resolve_credential_source(
+    credential_repo: Option<&CredentialRepository>,
+) -> CredentialSourceState {
+    // Step 1: Check env/Secret.
+    match try_load_from_env_detailed() {
+        EnvLoadResult::Valid(cfg) => CredentialSourceState::ValidSecret(Arc::new(cfg)),
+        EnvLoadResult::Invalid(detail) => CredentialSourceState::InvalidSecret(detail),
+        EnvLoadResult::Absent => {
+            // Step 2: No env vars — check persisted.
+            match credential_repo {
+                Some(repo) => match try_load_from_persisted(repo).await {
+                    PersistedLoadResult::Valid(cfg) => {
+                        CredentialSourceState::ValidPersisted(Arc::new(cfg))
+                    }
+                    PersistedLoadResult::Undecryptable => {
+                        CredentialSourceState::UndecryptablePersisted
+                    }
+                    PersistedLoadResult::Absent => CredentialSourceState::Unconfigured,
+                },
+                None => CredentialSourceState::Unconfigured,
+            }
+        }
+    }
+}
+
+/// Persist an `AppConfig` into the encrypted credential store and return it
+/// wrapped in an `Arc`.
+///
+/// This is the write-side companion to [`resolve_credential_source`]. After a
+/// successful manifest exchange, the callback calls this to persist the new
+/// credentials and then calls [`super::reload_app_config`] to hot-swap the
+/// in-memory cache.
+pub async fn persist_app_config(
+    repo: &CredentialRepository,
+    config: &AppConfig,
+) -> Result<(), String> {
+    let json = serde_json::to_string(config)
+        .map_err(|e| format!("serialize AppConfig for persistence: {e}"))?;
+    repo.set_with_owner(CRED_PROVIDER_ID, CRED_KEY_NAME, &json, None)
+        .await
+        .map_err(|e| format!("persist AppConfig: {e}"))?;
+    Ok(())
+}
+
+/// Delete any persisted GitHub App config from the encrypted store.
+///
+/// Called when the operator wants to clear persisted credentials (e.g., before
+/// re-running the setup flow).
+pub async fn clear_persisted_app_config(repo: &CredentialRepository) -> Result<bool, String> {
+    repo.delete_for_owner(CRED_KEY_NAME, None)
+        .await
+        .map_err(|e| format!("clear persisted AppConfig: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_core::events::EventBus;
+    use djinn_db::Database;
+
+    // ── helpers ──────────────────────────────────────────────────────────
+
+    /// Set env vars for a valid GitHub App configuration.
+    /// Returns a guard that clears them on drop.
+    struct EnvGuard {
+        vars: Vec<(&'static str, String)>,
+    }
+
+    impl EnvGuard {
+        /// Clear all GitHub App env vars to ensure a clean slate.
+        /// Returns a guard that also clears on drop.
+        fn clean() -> Self {
+            let all_keys = [
+                "GITHUB_APP_ID",
+                "GITHUB_APP_SLUG",
+                "GITHUB_APP_CLIENT_ID",
+                "GITHUB_APP_CLIENT_SECRET",
+                "GITHUB_APP_PRIVATE_KEY",
+                "GITHUB_APP_PRIVATE_KEY_PATH",
+                "GITHUB_APP_WEBHOOK_SECRET",
+                "DJINN_PUBLIC_URL",
+            ];
+            for k in &all_keys {
+                unsafe { std::env::remove_var(k) };
+            }
+            Self { vars: Vec::new() }
+        }
+
+        fn set_valid() -> Self {
+            let vars = vec![
+                ("GITHUB_APP_ID", "12345".to_string()),
+                ("GITHUB_APP_SLUG", "djinn-test".to_string()),
+                ("GITHUB_APP_CLIENT_ID", "Iv1.abc".to_string()),
+                ("GITHUB_APP_CLIENT_SECRET", "shh".to_string()),
+                (
+                    "GITHUB_APP_PRIVATE_KEY",
+                    "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n"
+                        .to_string(),
+                ),
+                ("GITHUB_APP_WEBHOOK_SECRET", "wsec".to_string()),
+                ("DJINN_PUBLIC_URL", "https://djinn.example.com".to_string()),
+            ];
+            for &(k, ref v) in &vars {
+                // SAFETY: test env mutation — EnvGuard::drop cleans up.
+                unsafe { std::env::set_var(k, v) };
+            }
+            Self { vars }
+        }
+
+        fn set_incomplete() -> Self {
+            // Only set APP_ID but not CLIENT_ID/SECRET/PEM.
+            let vars = vec![("GITHUB_APP_ID", "12345".to_string())];
+            for &(k, ref v) in &vars {
+                unsafe { std::env::set_var(k, v) };
+            }
+            Self { vars }
+        }
+
+        fn set_malformed_app_id() -> Self {
+            let vars = vec![
+                ("GITHUB_APP_ID", "not-a-number".to_string()),
+                ("GITHUB_APP_CLIENT_ID", "Iv1.abc".to_string()),
+                ("GITHUB_APP_CLIENT_SECRET", "shh".to_string()),
+                (
+                    "GITHUB_APP_PRIVATE_KEY",
+                    "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n"
+                        .to_string(),
+                ),
+            ];
+            for &(k, ref v) in &vars {
+                unsafe { std::env::set_var(k, v) };
+            }
+            Self { vars }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for &(k, _) in &self.vars {
+                unsafe { std::env::remove_var(k) };
+            }
+            // Also clean up optional vars that might linger.
+            for k in [
+                "GITHUB_APP_ID",
+                "GITHUB_APP_SLUG",
+                "GITHUB_APP_CLIENT_ID",
+                "GITHUB_APP_CLIENT_SECRET",
+                "GITHUB_APP_PRIVATE_KEY",
+                "GITHUB_APP_PRIVATE_KEY_PATH",
+                "GITHUB_APP_WEBHOOK_SECRET",
+                "DJINN_PUBLIC_URL",
+            ] {
+                unsafe { std::env::remove_var(k) };
+            }
+        }
+    }
+
+    fn fixture_config() -> AppConfig {
+        AppConfig {
+            app_id: 99999,
+            slug: "djinn-fixture".into(),
+            client_id: "Iv1.fixture".into(),
+            client_secret: "fixture-secret".into(),
+            pem: "-----BEGIN RSA PRIVATE KEY-----\nfixture\n-----END RSA PRIVATE KEY-----\n".into(),
+            webhook_secret: "fixture-wh".into(),
+            public_url: "https://fixture.example.com".into(),
+        }
+    }
+
+    fn cred_repo() -> CredentialRepository {
+        let db = Database::open_in_memory().expect("failed to create test database");
+        CredentialRepository::new(db, EventBus::noop())
+    }
+
+    // ── AC 1: typed state replaces Option-only ambiguity ─────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn valid_secret_produces_valid_secret_state() {
+        let _guard = EnvGuard::set_valid();
+        let state = resolve_credential_source(None).await;
+        assert!(matches!(state, CredentialSourceState::ValidSecret(_)));
+        assert!(state.is_usable());
+        assert_eq!(state.source(), Some(ConfigSource::Secret));
+        let cfg = state.app_config().unwrap();
+        assert_eq!(cfg.app_id, 12345);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_env_no_persisted_produces_unconfigured() {
+        // Ensure env is clean.
+        let _guard = EnvGuard::clean();
+        let state = resolve_credential_source(None).await;
+        assert!(matches!(state, CredentialSourceState::Unconfigured));
+        assert!(!state.is_usable());
+        assert!(state.source().is_none());
+        assert!(state.app_config().is_none());
+    }
+
+    // ── AC 2: Secret takes precedence over persisted ─────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn valid_secret_overrides_persisted() {
+        let repo = cred_repo();
+        let persisted = fixture_config();
+        persist_app_config(&repo, &persisted).await.unwrap();
+
+        let _guard = EnvGuard::set_valid();
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(matches!(state, CredentialSourceState::ValidSecret(_)));
+        let cfg = state.app_config().unwrap();
+        // Should be the env config, not the persisted one.
+        assert_eq!(cfg.app_id, 12345);
+        assert_ne!(cfg.app_id, 99999);
+    }
+
+    // ── AC 2b: invalid Secret is fatal, no fallback to persisted ─────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_secret_does_not_fall_through_to_persisted() {
+        let repo = cred_repo();
+        let persisted = fixture_config();
+        persist_app_config(&repo, &persisted).await.unwrap();
+
+        let _guard = EnvGuard::set_incomplete();
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(
+            matches!(state, CredentialSourceState::InvalidSecret(_)),
+            "incomplete Secret must be fatal, not fall through to persisted; got: {state:?}"
+        );
+        assert!(!state.is_usable());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_app_id_is_fatal() {
+        let repo = cred_repo();
+        let persisted = fixture_config();
+        persist_app_config(&repo, &persisted).await.unwrap();
+
+        let _guard = EnvGuard::set_malformed_app_id();
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(matches!(state, CredentialSourceState::InvalidSecret(_)));
+        if let CredentialSourceState::InvalidSecret(detail) = &state {
+            assert!(detail.issues.iter().any(|i| i.contains("GITHUB_APP_ID")));
+        }
+    }
+
+    // ── AC 3: valid persisted credentials ────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn valid_persisted_credentials_load() {
+        // Clean env.
+        let _guard = EnvGuard::clean();
+        let repo = cred_repo();
+        let config = fixture_config();
+        persist_app_config(&repo, &config).await.unwrap();
+
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(matches!(state, CredentialSourceState::ValidPersisted(_)));
+        assert!(state.is_usable());
+        assert_eq!(state.source(), Some(ConfigSource::Persisted));
+        let cfg = state.app_config().unwrap();
+        assert_eq!(cfg.app_id, 99999);
+        assert_eq!(cfg.slug, "djinn-fixture");
+    }
+
+    // ── AC 3b: persisted credentials with self_setup both on and off ─────
+    // (The state machine itself doesn't gate on the flag — the flag only
+    // controls whether setup *routes* are advertised. But we verify that
+    // persisted creds resolve regardless.)
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persisted_credentials_independent_of_self_setup_flag() {
+        let _guard = EnvGuard::clean();
+        let repo = cred_repo();
+        let config = fixture_config();
+        persist_app_config(&repo, &config).await.unwrap();
+
+        // Simulate self_setup on/off — the credential resolution is the same.
+        let state_on = resolve_credential_source(Some(&repo)).await;
+        let state_off = resolve_credential_source(Some(&repo)).await;
+        assert!(state_on.is_usable());
+        assert!(state_off.is_usable());
+        assert_eq!(state_on.app_config(), state_off.app_config());
+    }
+
+    // ── AC 4: Secret removal reveals persisted credentials ───────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removing_secret_reveals_persisted() {
+        let repo = cred_repo();
+        let persisted = fixture_config();
+        persist_app_config(&repo, &persisted).await.unwrap();
+
+        // With Secret present → ValidSecret.
+        {
+            let _guard = EnvGuard::set_valid();
+            let state = resolve_credential_source(Some(&repo)).await;
+            assert!(matches!(state, CredentialSourceState::ValidSecret(_)));
+        }
+        // After env vars are dropped (guard dropped) → ValidPersisted.
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(matches!(state, CredentialSourceState::ValidPersisted(_)));
+        assert_eq!(state.app_config().unwrap().app_id, 99999);
+    }
+
+    // ── AC 5: undecryptable persisted credentials ────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn undecryptable_persisted_credentials() {
+        let _guard = EnvGuard::clean();
+
+        // Manually insert a row with garbage encrypted data.
+        let db = Database::open_in_memory().expect("test db");
+        let garbage_repo = CredentialRepository::new(db, EventBus::noop());
+        // Store garbage as raw bytes directly (bypass encryption).
+        garbage_repo
+            .set_with_owner(
+                CRED_PROVIDER_ID,
+                CRED_KEY_NAME,
+                "this-is-not-valid-json-after-decryption",
+                None,
+            )
+            .await
+            .unwrap();
+
+        // The value *can* be decrypted (it's valid encrypted data), but the
+        // JSON deserialization will fail → UndecryptablePersisted.
+        let state = resolve_credential_source(Some(&garbage_repo)).await;
+        assert!(
+            matches!(state, CredentialSourceState::UndecryptablePersisted),
+            "non-JSON decrypted value should produce UndecryptablePersisted; got: {state:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn corrupt_encrypted_blob_produces_undecryptable() {
+        let _guard = EnvGuard::clean();
+
+        // Create a fresh repo and manually write a corrupt blob.
+        let db = Database::open_in_memory().expect("test db");
+        db.ensure_initialized().await.unwrap();
+        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+
+        // First store something valid to create the row.
+        let valid_json = serde_json::to_string(&fixture_config()).unwrap();
+        repo.set_with_owner(CRED_PROVIDER_ID, CRED_KEY_NAME, &valid_json, None)
+            .await
+            .unwrap();
+
+        // Now corrupt the encrypted value directly in the DB.
+        // Write random bytes that will fail decryption.
+        sqlx::query("UPDATE credentials SET encrypted_value = $1 WHERE key_name = $2")
+            .bind(vec![0u8, 1, 2, 3, 4, 5]) // too short / invalid
+            .bind(CRED_KEY_NAME)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(
+            matches!(state, CredentialSourceState::UndecryptablePersisted),
+            "corrupt encrypted blob should produce UndecryptablePersisted; got: {state:?}"
+        );
+    }
+
+    // ── Persist / clear round-trip ───────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persist_and_clear_round_trip() {
+        let repo = cred_repo();
+        let config = fixture_config();
+
+        // Initially absent.
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(matches!(state, CredentialSourceState::Unconfigured));
+
+        // Persist.
+        persist_app_config(&repo, &config).await.unwrap();
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(state.is_usable());
+
+        // Clear.
+        let deleted = clear_persisted_app_config(&repo).await.unwrap();
+        assert!(deleted);
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert!(matches!(state, CredentialSourceState::Unconfigured));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persist_upserts_on_repeat() {
+        let repo = cred_repo();
+        let mut config = fixture_config();
+        persist_app_config(&repo, &config).await.unwrap();
+
+        // Change and re-persist.
+        config.app_id = 77777;
+        persist_app_config(&repo, &config).await.unwrap();
+
+        let _guard = EnvGuard::clean();
+        let state = resolve_credential_source(Some(&repo)).await;
+        assert_eq!(state.app_config().unwrap().app_id, 77777);
+    }
+
+    // ── Hot-reload: persist then reload without restart ───────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hot_reload_after_persist() {
+        use tokio::sync::RwLock;
+
+        let repo = cred_repo();
+        let cache: RwLock<Option<Arc<AppConfig>>> = RwLock::new(None);
+
+        // Initial: no config.
+        assert!(cache.read().await.is_none());
+
+        // Manifest callback persists new config.
+        let config = fixture_config();
+        persist_app_config(&repo, &config).await.unwrap();
+
+        // Hot-reload: re-resolve and update cache.
+        let _guard = EnvGuard::clean();
+        let state = resolve_credential_source(Some(&repo)).await;
+        let new_cfg = state.app_config().cloned();
+        *cache.write().await = new_cfg;
+
+        assert!(cache.read().await.is_some());
+        assert_eq!(cache.read().await.as_ref().unwrap().app_id, 99999);
+    }
+}

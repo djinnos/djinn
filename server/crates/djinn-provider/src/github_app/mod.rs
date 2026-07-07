@@ -24,11 +24,16 @@
 
 pub mod client;
 pub mod config;
+pub mod credential_state;
 pub mod installations;
 pub mod jwt;
 
 pub use client::{GitHubAppClient, InstallationRepo, find_installation_for_repo, install_url};
 pub use config::{AppConfig, DEFAULT_PUBLIC_URL, ENV_PUBLIC_URL, ENV_WEBHOOK_SECRET};
+pub use credential_state::{
+    CRED_KEY_NAME, CRED_PROVIDER_ID, ConfigSource, CredentialSourceState, InvalidSecretDetail,
+    clear_persisted_app_config, persist_app_config, resolve_credential_source,
+};
 pub use installations::{
     Installation, InstallationToken, get_installation_by_id, get_installation_token,
     list_installations_for_app, list_installations_for_user,
