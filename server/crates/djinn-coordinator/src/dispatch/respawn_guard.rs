@@ -6,11 +6,20 @@
 //! 1. **Open-PR adoption**: when the task already has an open PR
 //!    (`task.pr_url`), adopt it and record an `adopted_pr` audit row.  This
 //!    prevents spawning a duplicate worker when a PR is already in review.
-//!    Adoption is **bypassed** when the PR needs rework — any reopen-for-PR-
-//!    rework flow (PrCiFailed, PrConflict, PrChangesRequested, merge-queue
-//!    dequeue) returns the task to `open` precisely so a worker can be
-//!    dispatched to fix the PR, so the guard must fall through to step 2
-//!    instead of adopting.  The rework signals, in evaluation order:
+//!    Adoption is **worker-role only** (vd4w's intent was "before spawning a
+//!    duplicate WORKER"): reviewer / planner / arbiter / lead dispatches skip
+//!    straight to step 2 (task 4tl2 — a needs_task_review reviewer was starved
+//!    because its dispatch adopted the open PR and never ran).  Adoption is
+//!    also **bypassed** when the PR needs rework — any reopen-for-PR-rework flow
+//!    (PrCiFailed, PrConflict, PrChangesRequested, merge-queue dequeue,
+//!    task_review_reject*, lead_approve_conflict) returns the task to a
+//!    dispatchable state precisely so a worker can be dispatched to fix the PR,
+//!    so the guard must fall through to step 2 instead of adopting.  Rework is
+//!    detected **primarily** by the latest-attempt marker: every rework reopen
+//!    now durably records a `reopened` attempt (terminalizing the in-flight
+//!    attempt, or inserting a marker row when none was live), so a `reopened`
+//!    newest attempt is the single authoritative "needs rework" signal.  The
+//!    task-row `PrReworkSignal`s below are retained as defense-in-depth:
 //!    - [`PrReworkSignal::FailingCi`]: `task.ci_status == "failing"` (the
 //!      promoted required-CI gate is red on the PR head — PrCiFailed flow).
 //!    - [`PrReworkSignal::MergeConflict`]: `task.merge_conflict_metadata` is
@@ -49,6 +58,15 @@ use djinn_db::{
 };
 
 use super::attempt_lifecycle::make_dispatch_key;
+
+/// The role whose dispatches carry PR-write intent.  Open-PR adoption applies
+/// ONLY to worker dispatches: vd4w's intent was "before spawning a duplicate
+/// WORKER".  Reviewer / planner / arbiter / lead dispatches for a task that
+/// happens to have an open PR must fall through to the step-2 in-flight dedup
+/// instead of being adopted (which starved needs_task_review reviewer
+/// dispatches — task 4tl2).  Mirrors the `role == "worker"` literal used at the
+/// dispatch call sites in `task_dispatch.rs`.
+const WORKER_ROLE: &str = "worker";
 
 // ─── PR-rework signal ───────────────────────────────────────────────────────
 
@@ -164,8 +182,15 @@ pub async fn run_respawn_guard(
     //    a PR is already in review — unless the PR needs rework, in which
     //    case the task was reopened so a worker MUST be dispatched to fix
     //    the PR (step 2 still prevents duplicate rework workers).
+    //
+    //    Adoption is WORKER-ROLE ONLY.  vd4w's intent was "before spawning a
+    //    duplicate WORKER"; a reviewer / planner / arbiter / lead dispatch for
+    //    a task that carries an open PR must NOT be adopted (that starved
+    //    needs_task_review reviewer dispatches — task 4tl2).  Non-worker roles
+    //    skip straight to the step-2 pending/submitted dedup below.
     if let Some(url) = pr_url
         && !url.is_empty()
+        && role == WORKER_ROLE
     {
         if let Some(signal) = rework_signal {
             tracing::info!(
@@ -1112,6 +1137,217 @@ mod tests {
             RespawnGuardDecision::Adopted {
                 pr_url: "https://github.example/owner/repo/pull/42".to_owned(),
             }
+        );
+    }
+
+    // ─── Worker-role-only adoption tests (task 4tl2) ────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guard_does_not_adopt_for_reviewer_role_with_open_pr() {
+        let db = test_db();
+        let task = create_task(&db).await;
+
+        // A reviewer dispatch for a task that already carries an open PR (the
+        // needs_task_review shape) must NOT be adopted — adoption is worker-role
+        // only.  With no in-flight reviewer attempt the guard must Allow so the
+        // reviewer actually runs (task 4tl2: reviewer was starved by adoption).
+        let decision = run_respawn_guard(
+            &db,
+            &task.id,
+            "reviewer",
+            Some("https://github.example/owner/repo/pull/42"),
+            None,
+        )
+        .await;
+        assert_eq!(decision, RespawnGuardDecision::Allow);
+
+        // The guard itself records no attempt rows for an Allow.
+        let repo = TaskAttemptRepository::new(db);
+        let all = repo.list_for_task(&task.id).await.unwrap();
+        assert!(all.is_empty(), "reviewer guard must not create attempt rows");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guard_defers_reviewer_role_when_reviewer_attempt_in_flight() {
+        let db = test_db();
+        let task = create_task(&db).await;
+
+        // With adoption skipped for reviewers, the step-2 in-flight dedup still
+        // prevents a duplicate reviewer even when an open PR is present.
+        let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "reviewer");
+        super::super::attempt_lifecycle::record_dispatch_start(
+            &db, &task.id, "reviewer", None, &dk,
+        )
+        .await
+        .expect("record_dispatch_start should succeed");
+
+        let decision = run_respawn_guard(
+            &db,
+            &task.id,
+            "reviewer",
+            Some("https://github.example/owner/repo/pull/42"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            decision,
+            RespawnGuardDecision::Defer(GuardReason::RespawnGuard)
+        );
+    }
+
+    // ─── Rework-marker gate tests (ylme / kv6i) ─────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rework_reopen_terminalizes_inflight_submitted_and_guard_allows_worker() {
+        let db = test_db();
+        let task = create_task(&db).await;
+
+        // Worker submitted its work (task-review stage): pending → submitted.
+        let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
+        super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .expect("record_dispatch_start should succeed");
+        super::super::attempt_lifecycle::advance_to_submitted(
+            &db,
+            super::super::attempt_lifecycle::SubmitAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                submit_ref: Some("ref-1"),
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some("submitted for review"),
+                summary_json: None,
+            },
+        )
+        .await;
+
+        // Reviewer rejects (task_review_reject application path): the in-flight
+        // submitted worker attempt must be terminalized to `reopened`.
+        super::super::attempt_lifecycle::record_rework_reopen(
+            &db,
+            &task.id,
+            "worker",
+            None,
+            Some("review rejected"),
+            None,
+        )
+        .await;
+
+        let repo = TaskAttemptRepository::new(db.clone());
+        let terminalized = repo.get_by_dispatch_key(&dk).await.unwrap().unwrap();
+        assert_eq!(
+            terminalized.outcome, "reopened",
+            "the submitted worker attempt must terminalize to reopened"
+        );
+
+        // No marker row is inserted when an in-flight attempt was terminalized.
+        let all = repo.list_for_task(&task.id).await.unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "no extra marker row when in-flight attempt was terminalized"
+        );
+
+        // The guard now Allows a worker dispatch even though pr_url is set: the
+        // reopened latest attempt is the rework signal.
+        let decision = run_respawn_guard(
+            &db,
+            &task.id,
+            "worker",
+            Some("https://github.example/owner/repo/pull/7"),
+            None,
+        )
+        .await;
+        assert_eq!(decision, RespawnGuardDecision::Allow);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rework_reopen_inserts_marker_when_no_inflight_and_guard_allows_then_defers() {
+        let db = test_db();
+        let task = create_task(&db).await;
+
+        // kv6i: a rework reopen fires while NO attempt is in flight (nothing to
+        // terminalize) — a durable `reopened` marker row must be inserted so the
+        // guard still sees the task as rework.
+        super::super::attempt_lifecycle::record_rework_reopen(
+            &db,
+            &task.id,
+            "worker",
+            Some("https://github.example/owner/repo/pull/9"),
+            Some("changes requested, no live attempt"),
+            None,
+        )
+        .await;
+
+        let repo = TaskAttemptRepository::new(db.clone());
+        let all = repo.list_for_task(&task.id).await.unwrap();
+        assert_eq!(all.len(), 1, "a rework marker row must be inserted");
+        assert_eq!(all[0].outcome, "reopened");
+        assert_eq!(
+            all[0].dispatch_key,
+            super::super::attempt_lifecycle::rework_marker_dispatch_key(&task.id, "worker")
+        );
+
+        // Idempotent: a second reopen with still no in-flight attempt does not
+        // stack a second marker (latest is already reopened).
+        super::super::attempt_lifecycle::record_rework_reopen(
+            &db,
+            &task.id,
+            "worker",
+            None,
+            Some("still reworking"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            repo.list_for_task(&task.id).await.unwrap().len(),
+            1,
+            "marker insert must be idempotent"
+        );
+
+        // Guard Allows a worker dispatch: the marker is the rework signal.
+        let decision = run_respawn_guard(
+            &db,
+            &task.id,
+            "worker",
+            Some("https://github.example/owner/repo/pull/9"),
+            None,
+        )
+        .await;
+        assert_eq!(decision, RespawnGuardDecision::Allow);
+
+        // The rework worker dispatches: a fresh pending row lands (newer than
+        // the marker), so the marker is "consumed" — the latest attempt is no
+        // longer `reopened`.  A subsequent pass no longer Allows a duplicate:
+        // with the open PR present, step-1 adoption resumes (dedup — matching
+        // `guard_pr_adoption_takes_precedence_over_pending_attempt`).
+        let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
+        super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .expect("record_dispatch_start should succeed");
+        let decision2 = run_respawn_guard(
+            &db,
+            &task.id,
+            "worker",
+            Some("https://github.example/owner/repo/pull/9"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            decision2,
+            RespawnGuardDecision::Adopted {
+                pr_url: "https://github.example/owner/repo/pull/9".to_owned(),
+            },
+            "marker consumed: with the PR still open the guard adopts rather than re-dispatching"
+        );
+
+        // And when no PR is presented, the step-2 in-flight dedup defers on the
+        // live pending attempt directly.
+        let decision3 = run_respawn_guard(&db, &task.id, "worker", None, None).await;
+        assert_eq!(
+            decision3,
+            RespawnGuardDecision::Defer(GuardReason::RespawnGuard)
         );
     }
 
