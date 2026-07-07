@@ -117,6 +117,7 @@ fn make_ctx() -> TaskContext {
         reviewer_diff_context: None,
         ci_blocking_directive: None,
         worker_resume_note: None,
+        arbiter_directive: None,
     }
 }
 
