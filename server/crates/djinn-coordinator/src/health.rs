@@ -1917,23 +1917,32 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
         }
     }
 
-    // Also finalize orphaned `submitted` attempts whose task carries no open PR.
-    // The PR poller can only own `submitted` attempts that HAVE a PR (it drives
-    // adoption/terminalization off `tasks.pr_url`); a `submitted` attempt with
-    // NO PR — e.g. an internal task-review rejection that reopened the task
-    // without terminalizing the worker's `submitted` row (the ylme orphan) —
-    // can never be advanced by the poller and hard-blocks the respawn guard's
-    // step-2 dedup forever. Finalize it to `reopened` (submitted work existed):
-    // that also makes the guard's latest-attempt gate treat the task as rework,
-    // so a fresh worker dispatches to redo it. `submitted`-with-PR rows are
-    // strictly untouched (excluded by the query). Forward-only + idempotent.
-    let submitted_orphans = match repo.list_orphaned_submitted_no_pr(&threshold_iso).await {
+    // Also finalize orphaned `submitted` attempts the PR poller can never own.
+    // The poller drives adoption/terminalization ONLY for the statuses it polls
+    // (`pr_draft`/`pr_review`), keyed off `tasks.pr_url`. The old assumption
+    // "has pr_url ⟹ poller owns it" is FALSE for `open` tasks: the true rule is
+    // "the poller owns a `submitted` attempt only when the task is in a
+    // poller-polled status". Two poller-blind classes are reaped here, each of
+    // which otherwise hard-blocks the respawn guard's step-2 dedup forever:
+    //   1. PR-less tasks — e.g. an internal task-review rejection that reopened
+    //      the task without terminalizing the worker's `submitted` row (the
+    //      ylme orphan); the poller never sees a PR-less task.
+    //   2. `open` tasks (the sole dispatchable status) that RETAINED a stale
+    //      `pr_url` across a `PrConflict` reopen — never polled, so nothing
+    //      advances the `submitted` attempt and the task is permanently stuck
+    //      `open` yet un-dispatchable behind the guard.
+    // Finalize each to `reopened` (submitted work existed): that also makes the
+    // guard's latest-attempt gate treat the task as rework, so a fresh worker
+    // dispatches to redo it. `submitted` rows for poller-polled statuses
+    // (`pr_draft`/`pr_review`) with a PR are strictly untouched (excluded by the
+    // query). Forward-only + idempotent.
+    let submitted_orphans = match repo.list_orphaned_submitted_unowned(&threshold_iso).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 reason = reason,
-                "CoordinatorActor: reap_orphaned_submitted_no_pr lookup failed"
+                "CoordinatorActor: reap_orphaned_submitted_unowned lookup failed"
             );
             return;
         }
@@ -1941,10 +1950,10 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
 
     for orphan in submitted_orphans {
         let summary_json = serde_json::json!({
-            "recovery_classifier": "orphaned_submitted_no_pr_reaper",
+            "recovery_classifier": "orphaned_submitted_unowned_reaper",
             "reason": reason,
             "threshold_secs": threshold_secs,
-            "failure_class": "orphaned_submitted_no_pr",
+            "failure_class": "orphaned_submitted_unowned",
         })
         .to_string();
         match repo
@@ -1957,7 +1966,7 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
                 mirror_head_sha: None,
                 github_head_sha: None,
                 summary: Some(
-                    "orphaned submitted attempt (no PR) reaped: reopened for a fresh worker",
+                    "orphaned submitted attempt (poller-unowned: no PR, or retained-PR open task) reaped: reopened for a fresh worker",
                 ),
                 summary_json: Some(&summary_json),
                 log_tail: None,
@@ -1974,7 +1983,7 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
                     threshold = %threshold_iso,
                     outcome = %updated.outcome,
                     reason = reason,
-                    "CoordinatorActor: reaped orphaned no-PR submitted task_attempt to reopened"
+                    "CoordinatorActor: reaped poller-unowned submitted task_attempt to reopened"
                 );
             }
             Err(e) => {
@@ -1984,7 +1993,7 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
                     role = %orphan.role,
                     error = %e,
                     reason = reason,
-                    "CoordinatorActor: failed to reap orphaned no-PR submitted task_attempt"
+                    "CoordinatorActor: failed to reap poller-unowned submitted task_attempt"
                 );
             }
         }

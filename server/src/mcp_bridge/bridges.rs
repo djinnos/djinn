@@ -9,7 +9,13 @@ use djinn_control_plane::bridge::{
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
 
-pub(super) struct CoordinatorBridge(pub CoordinatorHandle);
+pub(super) struct CoordinatorBridge {
+    pub handle: CoordinatorHandle,
+    /// Needed by `record_supervisor_rework_reopen`, which delegates to the
+    /// free-function attempt-lifecycle chokepoint that operates on the DB
+    /// directly (the coordinator actor is not involved).
+    pub db: djinn_db::Database,
+}
 pub(super) struct SlotPoolBridge(pub SlotPoolHandle);
 pub(super) struct LspBridge(pub LspManager);
 
@@ -18,7 +24,7 @@ pub(super) struct LspBridge(pub LspManager);
 #[async_trait]
 impl CoordinatorOps for CoordinatorBridge {
     fn get_status(&self) -> Result<CoordinatorStatus, String> {
-        let s = self.0.get_status().map_err(|e| e.to_string())?;
+        let s = self.handle.get_status().map_err(|e| e.to_string())?;
         Ok(CoordinatorStatus {
             tasks_dispatched: s.tasks_dispatched,
             sessions_recovered: s.sessions_recovered,
@@ -28,7 +34,7 @@ impl CoordinatorOps for CoordinatorBridge {
     }
 
     async fn trigger_dispatch_for_project(&self, project_id: &str) -> Result<(), String> {
-        self.0
+        self.handle
             .trigger_dispatch_for_project(project_id)
             .await
             .map_err(|e| e.to_string())
@@ -38,7 +44,7 @@ impl CoordinatorOps for CoordinatorBridge {
         &self,
         request: ProposalRefinementStartRequest,
     ) -> Result<(), String> {
-        self.0
+        self.handle
             .start_proposal_refinement(
                 request.proposal_id,
                 request.current_revision_seq,
@@ -52,7 +58,7 @@ impl CoordinatorOps for CoordinatorBridge {
         &self,
         request: ProposalRefinementStartRequest,
     ) -> Result<(), String> {
-        self.0
+        self.handle
             .demand_proposal_refinement_round(request.proposal_id, request.current_revision_seq)
             .await
             .map_err(|e| e.to_string())
@@ -64,10 +70,25 @@ impl CoordinatorOps for CoordinatorBridge {
         accept: bool,
         feedback: Option<String>,
     ) -> Result<(), String> {
-        self.0
+        self.handle
             .resolve_refinement_review(proposal_id, accept, feedback)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn record_supervisor_rework_reopen(
+        &self,
+        task_id: &str,
+        action: &djinn_core::models::TransitionAction,
+        reason: Option<&str>,
+    ) {
+        // Delegate to the same attempt-lifecycle chokepoint the in-process/RPC
+        // transition path uses (`DirectServices::transition_task`). It no-ops
+        // for non-rework actions and swallows its own errors (best-effort).
+        djinn_agent::actors::coordinator::record_supervisor_rework_reopen(
+            &self.db, task_id, action, reason,
+        )
+        .await;
     }
 }
 
