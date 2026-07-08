@@ -904,6 +904,37 @@ impl CoordinatorActor {
             )
             .await;
 
+            // ── Zero-output wall-clock observation ────────────────────
+            // Record the wall-clock time this session spent before the
+            // stall/kill decision was made. Emitted after all gate checks
+            // pass so the metric only fires for genuine kills.
+            {
+                let (timeout_source, failure_class) = if never_active {
+                    (
+                        djinn_telemetry::liveness_metrics::TIMEOUT_SOURCE_FIRST_CALL_HANG,
+                        djinn_telemetry::liveness_metrics::FAILURE_CLASS_FIRST_CALL_HANG,
+                    )
+                } else {
+                    (
+                        djinn_telemetry::liveness_metrics::TIMEOUT_SOURCE_IDLE_STALL,
+                        djinn_telemetry::liveness_metrics::FAILURE_CLASS_IDLE_STALL,
+                    )
+                };
+                // chain_exhausted is set conservatively to false here; the
+                // strike_count escalation below may trigger planner
+                // intervention but the failover chain itself hasn't been
+                // exhausted at this point (the session was killed for stall,
+                // not for failover chain exhaustion). The "chain_exhausted"
+                // dimension captures the case where failover candidates were
+                // all tried; in the stall path there is no candidate chain.
+                djinn_telemetry::liveness_metrics::record_zero_output_stall(
+                    std::time::Duration::from_secs(idle),
+                    timeout_source,
+                    failure_class,
+                    false,
+                );
+            }
+
             // ── Second-strike stall escalation ──────────────────────────────
             // Record this stall cancel against the task. Two CONSECUTIVE stall
             // cancels with no durable task-status progress between them means the
@@ -1218,6 +1249,17 @@ impl CoordinatorActor {
                     );
                 }
             }
+
+            // ── Zero-output wall-clock observation (zombie reap) ────────
+            // Record the wall-clock time this zombie session spent with
+            // zero output before being reaped. `age` is the elapsed
+            // seconds since session start.
+            djinn_telemetry::liveness_metrics::record_zero_output_stall(
+                std::time::Duration::from_secs(age),
+                djinn_telemetry::liveness_metrics::TIMEOUT_SOURCE_FIRST_CALL_HANG,
+                djinn_telemetry::liveness_metrics::FAILURE_CLASS_FIRST_CALL_HANG,
+                false,
+            );
 
             let token_info = if session.tokens_in != 0 || session.tokens_out != 0 {
                 format!(

@@ -421,6 +421,7 @@ async fn load_knowledge_context(
 ///    lookups+formatting ‖ code-graph context ‖ reviewer-diff/git setup.
 /// 4. Prompt rendering (depends on all prior results).
 pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> PromptContext {
+    let total_start = tokio::time::Instant::now();
     let PromptContextInputs {
         task,
         runtime_role,
@@ -447,6 +448,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     let role_name = runtime_role.config().name;
 
     // ── Phase 1: activity + epic context concurrently ──
+    let phase1_start = tokio::time::Instant::now();
     let ((activity_text, worker_summary, worker_concerns), epic_context) = tokio::join!(
         {
             let span = tracing::info_span!(
@@ -471,12 +473,22 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             load_epic_context(task, needs_epic_context, app_state).instrument(span)
         }
     );
+    let phase1_elapsed = phase1_start.elapsed();
+    djinn_telemetry::prompt_context_metrics::record_child_span(
+        djinn_telemetry::prompt_context_metrics::SPAN_ACTIVITY_DB,
+        phase1_elapsed,
+    );
+    djinn_telemetry::prompt_context_metrics::record_child_span(
+        djinn_telemetry::prompt_context_metrics::SPAN_EPIC_CONTEXT,
+        phase1_elapsed,
+    );
 
     // ── Phase 2: knowledge, attempt history, code-graph, and reviewer-diff
     //    concurrently.  Knowledge and code-graph depend on epic_context (available
     //    from phase 1).  Attempt-history lookups are independent of epic_context
     //    but must complete before prompt rendering.  Reviewer-diff is fully
     //    independent once role_name is known. ──
+    let phase2_start = tokio::time::Instant::now();
     let task_paths_for_code_graph = derive_task_scope_paths(task, epic_context.as_deref());
     let (
         knowledge_context,
@@ -580,6 +592,23 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             .instrument(span)
         }
     );
+    let phase2_elapsed = phase2_start.elapsed();
+    djinn_telemetry::prompt_context_metrics::record_child_span(
+        djinn_telemetry::prompt_context_metrics::SPAN_KNOWLEDGE_CONTEXT,
+        phase2_elapsed,
+    );
+    djinn_telemetry::prompt_context_metrics::record_child_span(
+        djinn_telemetry::prompt_context_metrics::SPAN_ATTEMPT_HISTORY,
+        phase2_elapsed,
+    );
+    djinn_telemetry::prompt_context_metrics::record_child_span(
+        djinn_telemetry::prompt_context_metrics::SPAN_CODE_GRAPH,
+        phase2_elapsed,
+    );
+    djinn_telemetry::prompt_context_metrics::record_child_span(
+        djinn_telemetry::prompt_context_metrics::SPAN_REVIEWER_DIFF,
+        phase2_elapsed,
+    );
 
     // ── Phase 3: prompt rendering (depends on all prior results) ──
     let base_system_prompt = runtime_role.render_prompt(
@@ -621,6 +650,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         read_sources,
         mcp_server_instructions,
     );
+    djinn_telemetry::prompt_context_metrics::record_total(total_start.elapsed());
     PromptContext {
         conflict_files,
         activity_text,
