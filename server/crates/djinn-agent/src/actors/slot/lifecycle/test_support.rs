@@ -211,6 +211,10 @@ pub(crate) fn task_with_ci(
         ci_last_seen_at: None,
         ci_same_signature_count: 0,
         ci_last_remediation_base_sha: ci_last_remediation_base_sha.map(Into::into),
+        ci_mirror_head_sha: None,
+        ci_github_head_sha: None,
+        ci_heads_diverged: None,
+        ci_head_observation_error: None,
         unresolved_blocker_count: 0,
     }
 }

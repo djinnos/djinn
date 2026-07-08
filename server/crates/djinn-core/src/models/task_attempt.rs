@@ -319,6 +319,10 @@ pub struct TaskAttempt {
     pub pr_url: Option<String>,
     pub mirror_head_sha: Option<String>,
     pub github_head_sha: Option<String>,
+    /// Concise error string recorded when a GitHub branch publication
+    /// failed after the mirror push succeeded (m116/vy47).  Absent when
+    /// no publication failure occurred.
+    pub github_publication_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub submitted_at: Option<String>,
@@ -412,6 +416,9 @@ pub struct TaskAttemptHistoryRow {
     pub pr_url: Option<String>,
     pub mirror_head_sha: Option<String>,
     pub github_head_sha: Option<String>,
+    /// Concise error string recorded when a GitHub branch publication failed
+    /// (m116).  Absent when no publication failure occurred.
+    pub github_publication_error: Option<String>,
     pub created_at: String,
     pub submitted_at: Option<String>,
     pub terminal_at: Option<String>,
@@ -476,6 +483,9 @@ pub struct TaskAttemptLedgerRow {
     pub pr_url: Option<String>,
     pub mirror_head_sha: Option<String>,
     pub github_head_sha: Option<String>,
+    /// Concise error string recorded when a GitHub branch publication failed
+    /// (m116).  Absent when no publication failure occurred.
+    pub github_publication_error: Option<String>,
     pub created_at: String,
     pub submitted_at: Option<String>,
     pub terminal_at: Option<String>,
@@ -514,6 +524,7 @@ impl TaskAttemptLedgerRow {
             pr_url: attempt.pr_url.clone(),
             mirror_head_sha: attempt.mirror_head_sha.clone(),
             github_head_sha: attempt.github_head_sha.clone(),
+            github_publication_error: attempt.github_publication_error.clone(),
             created_at: attempt.created_at.clone(),
             submitted_at: attempt.submitted_at.clone(),
             terminal_at: attempt.terminal_at.clone(),
@@ -715,6 +726,7 @@ mod tests {
             pr_url: None,
             mirror_head_sha: None,
             github_head_sha: None,
+            github_publication_error: None,
             created_at: "2026-01-01T00:00:00.000Z".to_string(),
             updated_at: "2026-01-01T00:00:00.000Z".to_string(),
             submitted_at: None,
@@ -772,6 +784,7 @@ mod tests {
             pr_url: Some("https://example.com/pr/1".to_string()),
             mirror_head_sha: Some("sha-1".to_string()),
             github_head_sha: Some("sha-2".to_string()),
+            github_publication_error: None,
             created_at: "2026-01-01T00:00:00.000Z".to_string(),
             submitted_at: Some("2026-01-01T00:30:00.000Z".to_string()),
             terminal_at: Some("2026-01-01T01:00:00.000Z".to_string()),
@@ -831,6 +844,7 @@ mod tests {
             pr_url: Some("https://example.com/pr/1".to_string()),
             mirror_head_sha: Some("mirror-sha".to_string()),
             github_head_sha: Some("github-sha".to_string()),
+            github_publication_error: None,
             created_at: "2026-01-01T00:00:00.000Z".to_string(),
             updated_at: "2026-01-01T01:00:00.000Z".to_string(),
             submitted_at: Some("2026-01-01T00:30:00.000Z".to_string()),
@@ -891,6 +905,7 @@ mod tests {
             pr_url: None,
             mirror_head_sha: None,
             github_head_sha: None,
+            github_publication_error: None,
             created_at: "2026-01-01T00:00:00.000Z".to_string(),
             updated_at: "2026-01-01T00:00:00.000Z".to_string(),
             submitted_at: None,
