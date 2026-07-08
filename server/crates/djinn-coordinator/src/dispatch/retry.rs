@@ -9,6 +9,7 @@ use djinn_core::models::{ReopenClass, TransitionAction};
 use djinn_db::AgentRepository;
 use djinn_db::repositories::task_arbitration::{
     CreateArbitrationParams, TaskArbitrationRecord, TaskArbitrationRepository, TryCreateResult,
+    UpdateDispatchLedgerParams,
 };
 use djinn_db::repositories::task_attempt::TaskAttemptRepository;
 
@@ -1004,6 +1005,124 @@ impl CoordinatorActor {
         }
     }
 
+    fn arbitration_deadline_has_expired(record: &TaskArbitrationRecord) -> bool {
+        record
+            .deadline_at
+            .as_deref()
+            .and_then(|deadline| {
+                time::OffsetDateTime::parse(
+                    deadline,
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .ok()
+            })
+            .is_some_and(|deadline| deadline < time::OffsetDateTime::now_utc())
+    }
+
+    fn arbiter_deadline_expired_dossier(
+        task: &djinn_core::models::Task,
+        hold_cycle: i32,
+        record: &TaskArbitrationRecord,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "arbiter_deadline_expired",
+            "cause": "arbiter_deadline_expired",
+            "summary": format!(
+                "Arbitration deadline expired for hold cycle {}; auto-parking behind HumanReview.",
+                hold_cycle,
+            ),
+            "task_id": task.short_id,
+            "task_uuid": task.id,
+            "hold_cycle": hold_cycle,
+            "deadline_at": record.deadline_at,
+            "decision_failure_count": record.decision_failure_count,
+            "infra_retry_count": record.infra_retry_count,
+        })
+    }
+
+    /// Enforce an expired active arbiter deadline before dispatching/re-entering
+    /// another Lead arbiter session. This wall-clock lifecycle guard runs from
+    /// the normal dispatch pass for tasks already held at `needs_lead_intervention`,
+    /// not only from the second-strike route that originally created the row.
+    pub(crate) async fn enforce_expired_arbiter_deadline_before_dispatch(
+        &mut self,
+        task: &djinn_core::models::Task,
+    ) -> bool {
+        if task.status != "needs_lead_intervention" && task.status != "in_lead_intervention" {
+            return false;
+        }
+
+        let arbiter_repo = TaskArbitrationRepository::new(self.db.clone());
+        let (hold_cycle, record) = match arbiter_repo.resolve_current_hold_cycle(&task.id).await {
+            Ok((cycle, Some(record))) => (cycle, record),
+            Ok((_cycle, None)) => return false,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: failed to inspect active arbitration deadline before Lead dispatch"
+                );
+                return false;
+            }
+        };
+
+        if !Self::arbitration_deadline_has_expired(&record) {
+            return false;
+        }
+
+        let dossier = Self::arbiter_deadline_expired_dossier(task, hold_cycle, &record);
+        tracing::warn!(
+            task_id = %task.short_id,
+            hold_cycle,
+            deadline_at = ?record.deadline_at,
+            "CoordinatorActor: active arbitration deadline expired before Lead dispatch; auto-parking with failure dossier"
+        );
+
+        if let Err(e) = arbiter_repo.mark_failed(&task.id, hold_cycle).await {
+            tracing::warn!(
+                task_id = %task.short_id,
+                hold_cycle,
+                error = %e,
+                "CoordinatorActor: deadline auto-park — failed to mark arbitration failed"
+            );
+        }
+        if let Err(e) = arbiter_repo
+            .update_dispatch_ledger(UpdateDispatchLedgerParams {
+                task_id: &task.id,
+                hold_cycle,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                pr_url: None,
+                failing_ci_job_ids: None,
+                dossier: Some(&dossier),
+                directive: None,
+                verification_command: None,
+                excluded_models: None,
+            })
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                hold_cycle,
+                error = %e,
+                "CoordinatorActor: deadline auto-park — failed to store deadline dossier"
+            );
+        }
+
+        let quality_strikes = self
+            .task_repo()
+            .quality_reopen_count(&task.id)
+            .await
+            .unwrap_or(task.intervention_count);
+        self.park_source_human_review_with_dossier(
+            task,
+            &format!("Arbitration deadline expired for hold cycle {hold_cycle}"),
+            quality_strikes,
+            Some(dossier.clone()),
+            &dossier,
+        )
+        .await
+    }
     /// Shared intervention router behind triggers A and B: second-strike
     /// terminal park, idempotency marker keyed by the task's CURRENT
     /// quality strike count, backoff-state clearing, and the Planner escalation
@@ -1151,7 +1270,131 @@ impl CoordinatorActor {
             // path with a structured re-entry dossier.
             let arbiter_repo = TaskArbitrationRepository::new(self.db.clone());
             let hold_cycle = match arbiter_repo.resolve_current_hold_cycle(&task.id).await {
-                Ok((cycle, Some(_existing))) => {
+                Ok((cycle, Some(existing))) => {
+                    // Deadline auto-park: if the arbitration deadline has
+                    // expired and no valid decision has consumed the row,
+                    // auto-park with a generated failure dossier instead of
+                    // dispatching another arbiter.
+                    if let Some(ref deadline_str) = existing.deadline_at {
+                        let deadline_expired = time::OffsetDateTime::parse(
+                            deadline_str,
+                            &time::format_description::well_known::Rfc3339,
+                        )
+                        .map(|d| d < time::OffsetDateTime::now_utc())
+                        .unwrap_or(false);
+                        if deadline_expired {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                hold_cycle = cycle,
+                                deadline_at = %deadline_str,
+                                "CoordinatorActor: arbitration deadline expired; auto-parking with failure dossier"
+                            );
+
+                            // Mark the arbitration as failed.
+                            let _ = arbiter_repo
+                                .mark_failed(&task.id, cycle)
+                                .await
+                                .map_err(|e| {
+                                    tracing::warn!(
+                                        task_id = %task.short_id,
+                                        error = %e,
+                                        "CoordinatorActor: deadline auto-park — failed to mark arbitration failed"
+                                    );
+                                    e
+                                });
+
+                            // Generate a deadline-failure dossier.
+                            let deadline_dossier = serde_json::json!({
+                                "kind": "arbiter_deadline_expired",
+                                "summary": format!(
+                                    "Arbitration deadline expired for hold cycle {}; \
+                                     auto-parking behind HumanReview.",
+                                    cycle,
+                                ),
+                                "task_id": task.short_id,
+                                "hold_cycle": cycle,
+                                "deadline_at": deadline_str,
+                                "decision_failure_count": existing.decision_failure_count,
+                                "infra_retry_count": existing.infra_retry_count,
+                            });
+
+                            // Update the arbitration row with the dossier.
+                            use djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams;
+                            let _ = arbiter_repo
+                                .update_dispatch_ledger(UpdateDispatchLedgerParams {
+                                    task_id: &task.id,
+                                    hold_cycle: cycle,
+                                    mirror_head_sha: None,
+                                    github_head_sha: None,
+                                    pr_url: None,
+                                    failing_ci_job_ids: None,
+                                    dossier: Some(&deadline_dossier),
+                                    directive: None,
+                                    verification_command: None,
+                                    excluded_models: None,
+                                })
+                                .await
+                                .map_err(|e| {
+                                    tracing::warn!(
+                                        task_id = %task.short_id,
+                                        error = %e,
+                                        "CoordinatorActor: deadline auto-park — failed to update dossier"
+                                    );
+                                    e
+                                });
+
+                            return self
+                                .park_source_human_review_with_dossier(
+                                    task,
+                                    &format!(
+                                        "Arbitration deadline expired for hold cycle {}",
+                                        cycle
+                                    ),
+                                    quality_strikes,
+                                    Some(deadline_dossier.clone()),
+                                    &deadline_dossier,
+                                )
+                                .await;
+                        }
+                    }
+
+                    // Decision-failure cap check: if the existing
+                    // unconsumed arbitration has already hit the cap,
+                    // park instead of dispatching another arbiter.
+                    const DECISION_FAILURE_CAP: i32 = 2;
+                    if existing.decision_failure_count >= DECISION_FAILURE_CAP {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            hold_cycle = cycle,
+                            decision_failure_count = existing.decision_failure_count,
+                            "CoordinatorActor: decision-failure cap reached at dispatch time; parking"
+                        );
+
+                        let cap_dossier = serde_json::json!({
+                            "kind": "arbiter_decision_failure_cap",
+                            "summary": format!(
+                                "Decision-failure cap ({}) reached for hold cycle {}; \
+                                 parking behind HumanReview.",
+                                existing.decision_failure_count, cycle,
+                            ),
+                            "task_id": task.short_id,
+                            "hold_cycle": cycle,
+                            "decision_failure_count": existing.decision_failure_count,
+                            "infra_retry_count": existing.infra_retry_count,
+                            "deadline_at": existing.deadline_at,
+                        });
+
+                        return self
+                            .park_source_human_review_with_dossier(
+                                task,
+                                &format!("Decision-failure cap reached for hold cycle {}", cycle),
+                                quality_strikes,
+                                Some(cap_dossier.clone()),
+                                &cap_dossier,
+                            )
+                            .await;
+                    }
+
                     tracing::info!(
                         task_id = %task.short_id,
                         hold_cycle = cycle,

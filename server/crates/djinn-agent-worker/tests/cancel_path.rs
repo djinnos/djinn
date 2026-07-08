@@ -342,6 +342,9 @@ async fn start_fake_server(
                         ServiceRpcRequest::CompleteMonitoredReopen { .. } => {
                             ServiceRpcResponse::CompleteMonitoredReopen(Ok(()))
                         }
+                        ServiceRpcRequest::RecordArbiterSessionTermination { .. } => {
+                            ServiceRpcResponse::RecordArbiterSessionTermination(Ok(false))
+                        }
                         ServiceRpcRequest::PublishBranchToGithub { .. } => {
                             ServiceRpcResponse::PublishBranchToGithub(BranchPublicationResult {
                                 success: false,

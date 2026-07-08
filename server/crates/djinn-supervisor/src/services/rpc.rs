@@ -881,6 +881,25 @@ impl SupervisorServices for RpcServices {
         }
     }
 
+    async fn record_arbiter_session_termination(
+        &self,
+        task_id: String,
+        is_infra_failure: bool,
+    ) -> Result<bool, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::RecordArbiterSessionTermination {
+                task_id,
+                is_infra_failure,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::RecordArbiterSessionTermination(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn publish_branch_to_github(
         &self,
         spec: &TaskRunSpec,
@@ -1294,6 +1313,16 @@ impl SupervisorServices for UnimplementedRpcServices {
     async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
         unimplemented!(
             "UnimplementedRpcServices::complete_monitored_reopen — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn record_arbiter_session_termination(
+        &self,
+        _task_id: String,
+        _is_infra_failure: bool,
+    ) -> Result<bool, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::record_arbiter_session_termination — construct RpcServices for real RPC"
         )
     }
 
