@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 642
 expression: signatures
 ---
 [
@@ -20975,9 +20976,30 @@ expression: signatures
               "$ref": "#/$defs/CiGateState",
               "description": "Derived CI gate state combining raw CI status with task lifecycle.\n\nMaps to the upstream low-risk design contract:\n- `passing` / `failing` / `pending` / `unknown` mirror `CiStatus`\n  when the task is not in `pr_draft`.\n- `awaiting_ci` when the task is in `pr_draft` *and* the raw CI\n  status is `pending` or `unknown` (CI has not completed yet).\n\nUI consumers render this value directly as the badge text."
             },
+            "github_head_sha": {
+              "description": "Head SHA of the GitHub PR branch, when known.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head_observation_error": {
+              "description": "Concise error string from the most recent publication/observation\nfailure, when one is recorded.  Absent when no error is known.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "head_sha": {
               "description": "Git SHA of the PR head this snapshot describes.",
               "type": "string"
+            },
+            "heads_diverged": {
+              "description": "`true` only when both heads are known and differ; `false` only when\nboth are known and equal; absent/null-compatible when either side is\nunknown.",
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "last_remediation_base_sha": {
               "description": "Base SHA of the last remediation attempt for this failing signature.\n`None` when no remediation has been attempted yet.",
@@ -20992,6 +21014,13 @@ expression: signatures
             },
             "merge_blocked_reason": {
               "description": "Reason merge/close is blocked by CI, if applicable.\n\n`Some(_)` when the raw CI status is not `passing` (i.e. failing,\npending, or unknown).  `None` when CI is passing or when no\nsnapshot exists.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mirror_head_sha": {
+              "description": "Head SHA of the internal mirror branch, when known.",
               "type": [
                 "string",
                 "null"
