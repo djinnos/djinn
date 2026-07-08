@@ -64,7 +64,7 @@ These fields are **operator-supplied**. The worker must not populate them.
 | **Database name** | `TBD` | Operator on target environment |
 | **Harvest run timestamp (UTC)** | `TBD` (ISO-8601, e.g. `2026-MM-DDTHH:MM:SSZ`) | Operator at run time |
 | **Operator name / handle** | `TBD` | Operator at run time |
-| **Tooling version** | `TBD` (e.g. `psql 16.x`, or the active-row export helper shipped by sibling task `iykf`) | Operator at run time |
+| **Tooling version** | `TBD` (e.g. `psql 16.x`, or the active-row export helper `server/scripts/learned-prompt-inventory.sh` shipped by sibling task `iykf`) | Operator at run time |
 | **Cutover target window** | `TBD` (the window during which the destructive removal is planned) | Deployment owner |
 
 ### 2.1 Pre-flight checklist (operator)
@@ -120,6 +120,17 @@ and record the helper version in §2 alongside the tooling version. The helper
 **must** execute the exact query above — any deviation invalidates the
 inventory.
 
+> **Helper available.** Sibling task `iykf` ships
+> `server/scripts/learned-prompt-inventory.sql` (the verbatim query above) and
+> `server/scripts/learned-prompt-inventory.sh`, a safe-by-default wrapper that
+> runs the query against a target database (requires an explicit
+> `--db-url URL` or `DATABASE_URL` / `PG*` environment; dry-run by default;
+> read-only transaction), writes the TSV export, and prints the row count +
+> SHA-256 checksum + export path block to paste into §4. Operators should run it
+> with `--run` against the target environment's read-only role and copy the
+> evidence block into the table below. A worker environment must not point this
+> helper at production or staging to populate the artifact (see §1.1).
+
 ## 4. Row count, checksum & export reference
 
 | Field | Value | Supplied by |
@@ -132,7 +143,7 @@ inventory.
 | **Distinct project_id count** | `TBD` | Operator |
 | **Distinct (project_id, agent_id) count** | `TBD` | Operator |
 | **Breakdown by `action`** | `keep`: `TBD` / `confirmed`: `TBD` | Operator |
-| **Inventory query tool / version** | `TBD` (or sibling helper `iykf` version) | Operator |
+| **Inventory query tool / version** | `TBD` (e.g. `learned-prompt-inventory.sh` from `iykf`, or `psql 16.x`) | Operator |
 | **Run start time (UTC)** | `TBD` | Operator |
 | **Run end time (UTC)** | `TBD` | Operator |
 | **Reproducibility note** | Re-running the query against the same snapshot MUST yield the identical row count and checksum. If it does not, halt and treat the harvest as failed. | Operator |
@@ -367,4 +378,6 @@ counter-sign this section. Downstream destructive work (sibling epics `3x0w`,
 - Sibling epics (downstream, blocked by this artifact): `3x0w` (runtime
   removal), `3sle` (UI/generated artifacts), `8m3c` (schema drop).
 - Sibling task `iykf` — active-row inventory export and checksum helper
-  (preferred tooling for §3 / §4 when available).
+  (`server/scripts/learned-prompt-inventory.sql` canonical query +
+  `server/scripts/learned-prompt-inventory.sh` safe-by-default export/checksum
+  wrapper; preferred tooling for §3 / §4).
