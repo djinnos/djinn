@@ -253,6 +253,13 @@
             ) -> Result<(), String> {
                 Err("no refinement awaiting review".to_string())
             }
+            async fn record_supervisor_rework_reopen(
+                &self,
+                _: &str,
+                _: &djinn_core::models::TransitionAction,
+                _: Option<&str>,
+            ) {
+            }
         }
 
         let db = Database::open_in_memory().unwrap();
