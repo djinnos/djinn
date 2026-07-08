@@ -178,4 +178,38 @@ describe("TaskCard", () => {
 
     expect(screen.queryByTestId("taskcard-ci-badge")).not.toBeInTheDocument();
   });
+
+  // ── m116 forward-compatibility ────────────────────────────────────────────
+  //
+  // The backend CiGateSnapshot now includes additive nullable reconciliation
+  // fields (mirror_head_sha, github_head_sha, heads_diverged,
+  // head_observation_error) that the UI's TypeScript interface does not
+  // declare.  At runtime these arrive as extra JSON keys that are never
+  // accessed.  This test simulates the real wire shape (JSON.parse of a
+  // backend payload with the extra keys) and confirms the UI renders
+  // existing fields correctly — the additive fields do not break consumers
+  // that only read head_sha / status / etc.
+  it("renders correctly when CI payload carries additive m116 reconciliation fields", () => {
+    const ciWithM116Fields = JSON.parse(
+      JSON.stringify({
+        ...mockCiPassing,
+        mirror_head_sha: "mirror1234567890abcdef",
+        github_head_sha: "github9876543210fedcba",
+        heads_diverged: true,
+        head_observation_error: "push failed",
+      }),
+    );
+
+    const task = {
+      ...mockTaskA,
+      id: "task-ci-m116-fields",
+      short_id: "m116",
+      ci: ciWithM116Fields,
+    };
+
+    render(<TaskCard task={task} />);
+
+    const badge = screen.getByTestId("taskcard-ci-badge");
+    expect(badge).toHaveTextContent("CI: passing");
+  });
 });
