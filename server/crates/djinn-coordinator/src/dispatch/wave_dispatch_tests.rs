@@ -773,7 +773,9 @@ async fn wiring_reopened_terminalizes_live_submitted_attempt_to_reopened() {
         "branch-missing PrConflict must terminalize as reopened, not handoff"
     );
     assert_eq!(
-        newest_non_guard_worker_outcome(&db, &task.id).await.as_deref(),
+        newest_non_guard_worker_outcome(&db, &task.id)
+            .await
+            .as_deref(),
         Some("reopened"),
         "newest non-guard worker attempt must be reopened"
     );
@@ -797,7 +799,9 @@ async fn wiring_reopened_with_no_live_attempt_records_durable_marker() {
     .await;
 
     assert_eq!(
-        newest_non_guard_worker_outcome(&db, &task.id).await.as_deref(),
+        newest_non_guard_worker_outcome(&db, &task.id)
+            .await
+            .as_deref(),
         Some("reopened"),
         "a durable reopened marker must exist even with no live attempt to terminalize"
     );
