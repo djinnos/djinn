@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,\n                    outcome AS \"outcome!\", guard_decision, guard_reason, summary,\n                    checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,\n                    created_at AS \"created_at!\", submitted_at, terminal_at\n                 FROM task_attempts\n                 WHERE task_id = $1\n                 ORDER BY COALESCE(terminal_at, created_at) DESC\n                 LIMIT $2",
+  "query": "SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,\n                    outcome AS \"outcome!\", guard_decision, guard_reason, summary, summary_json::text,\n                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,\n                    created_at AS \"created_at!\", updated_at AS \"updated_at!\", submitted_at, terminal_at\n                 FROM task_attempts\n                 WHERE task_id = $1 AND outcome = 'submitted'\n                 ORDER BY created_at DESC\n                 LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -55,49 +55,68 @@
       },
       {
         "ordinal": 10,
-        "name": "checkpoint_ref",
-        "type_info": "Varchar"
+        "name": "summary_json",
+        "type_info": "Text"
       },
       {
         "ordinal": 11,
-        "name": "submit_ref",
+        "name": "log_tail",
         "type_info": "Varchar"
       },
       {
         "ordinal": 12,
-        "name": "pr_url",
+        "name": "checkpoint_ref",
         "type_info": "Varchar"
       },
       {
         "ordinal": 13,
-        "name": "mirror_head_sha",
+        "name": "submit_ref",
         "type_info": "Varchar"
       },
       {
         "ordinal": 14,
-        "name": "github_head_sha",
+        "name": "pr_url",
         "type_info": "Varchar"
       },
       {
         "ordinal": 15,
-        "name": "created_at!",
+        "name": "mirror_head_sha",
         "type_info": "Varchar"
       },
       {
         "ordinal": 16,
-        "name": "submitted_at",
+        "name": "github_head_sha",
         "type_info": "Varchar"
       },
       {
         "ordinal": 17,
+        "name": "github_publication_error",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 18,
+        "name": "created_at!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 19,
+        "name": "updated_at!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 20,
+        "name": "submitted_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 21,
         "name": "terminal_at",
         "type_info": "Varchar"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
-        "Int8"
+        "Text"
       ]
     },
     "nullable": [
@@ -111,15 +130,19 @@
       true,
       true,
       true,
+      null,
+      true,
+      true,
       true,
       true,
       true,
       true,
       true,
       false,
+      false,
       true,
       true
     ]
   },
-  "hash": "87d9c0fe7510b50cdbc3701983cc13883fc0a5f8207e91fcd23b498cc70af60e"
+  "hash": "d416c7efc78006093110edd78ceabccdd9378460a3e070ea94f4acd41a86f34b"
 }
