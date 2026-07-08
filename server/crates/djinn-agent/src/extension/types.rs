@@ -271,13 +271,6 @@ pub(super) struct MemoryOrphansLocalParams {
 }
 
 #[derive(Deserialize)]
-pub(super) struct AgentAmendPromptParams {
-    pub agent_id: String,
-    pub amendment: String,
-    pub metrics_snapshot: Option<String>,
-}
-
-#[derive(Deserialize)]
 pub(super) struct ShellParams {
     pub command: String,
     pub timeout_ms: Option<u64>,

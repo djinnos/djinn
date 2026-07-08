@@ -87,7 +87,7 @@ async fn put_update_rejects_direct_learned_prompt_set() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body = String::from_utf8(body.to_vec()).unwrap();
-    assert!(body.contains("Direct learned_prompt setting is deprecated"));
+    assert!(body.contains("Direct learned_prompt setting is no longer supported"));
 
     let persisted = AgentRepository::new(db, EventBus::noop())
         .get(&default_agent.id)
