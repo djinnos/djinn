@@ -1222,7 +1222,7 @@ fn crlf_guard_rejected_for_mixed_line_endings() {
 #[ignore]
 #[test]
 fn large_file_no_match_completes_under_budget() {
-    use std::time::Instant;
+    use djinn_core::clock::Clock as _;
 
     const BUDGET_MS: u128 = 250;
     const MB: usize = 1_048_576;
@@ -1247,7 +1247,7 @@ fn large_file_no_match_completes_under_budget() {
     assert_eq!(old_text_lines.lines().count(), LINE_COUNT);
     assert!(!content.contains("sentinel_0"));
 
-    let start = Instant::now();
+    let start = djinn_core::clock::SystemClock.now_instant();
     let m = find_match(&content, &old_text_lines);
     let elapsed = start.elapsed().as_millis();
 

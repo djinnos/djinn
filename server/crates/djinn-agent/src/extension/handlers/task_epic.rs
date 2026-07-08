@@ -956,98 +956,80 @@ pub(super) async fn call_task_update_ac(
     Ok(task_to_value(&updated))
 }
 
-pub(super) async fn call_request_lead(
+/// Deprecated compatibility route for stale `request_lead` calls from
+/// worker/reviewer sessions that were dispatched before the drain cutover
+/// (epic 10qg).  Logs a typed `deprecated_request_lead` activity and routes
+/// through `dispatch_planner_escalation` WITHOUT transitioning the task to
+/// `needs_lead_intervention`.
+pub(crate) async fn call_request_lead(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     #[derive(serde::Deserialize)]
-    struct RequestPmParams {
+    struct RequestLeadParams {
         id: String,
         reason: String,
         suggested_breakdown: Option<String>,
     }
 
-    let p: RequestPmParams = parse_args(arguments)?;
+    let p: RequestLeadParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
 
-    // Log the Lead request as a structured comment.
-    let mut body = format!("[LEAD_REQUEST] {}", p.reason);
+    // Emit a typed deprecated-request-lead activity so the drain window is
+    // observable.  Preserves the caller's reason and suggested_breakdown.
+    let mut body = format!(
+        "DEPRECATED: request_lead is deprecated for worker/reviewer; routing to Planner. {}",
+        p.reason
+    );
     if let Some(ref breakdown) = p.suggested_breakdown {
         body.push_str(&format!("\n\nSuggested breakdown:\n{breakdown}"));
     }
     let payload = serde_json::json!({ "body": body }).to_string();
     repo.log_activity(
         Some(&task.id),
-        "worker-agent",
-        "worker",
-        "comment",
+        "system",
+        "system",
+        "deprecated_request_lead",
         &payload,
     )
     .await
     .map_err(|e| e.to_string())?;
 
-    // Check escalation count via coordinator.
-    // On the 2nd+ escalation for the same task, auto-route to Planner
-    // (per ADR-051 §8 — Planner is now the escalation ceiling above Lead).
-    let coordinator = state.coordinator().await;
-    let escalation_count = if let Some(ref coord) = coordinator {
-        coord
-            .increment_escalation_count(&task.id)
-            .await
-            .unwrap_or(1)
-    } else {
-        1
+    // Dispatch to Planner via the shared escalation path — no
+    // needs_lead_intervention transition, no durable escalation count.
+    let Some(coordinator) = state.coordinator().await else {
+        return Ok(serde_json::json!({
+            "error": "coordinator not available — cannot dispatch Planner via deprecated request_lead"
+        }));
     };
 
-    if escalation_count >= 2 {
-        let planner_reason = format!(
-            "Auto-escalated to Planner after {} Lead escalations. Latest reason: {}",
-            escalation_count, p.reason
-        );
-        if let Some(ref coord) = coordinator {
-            let _ = coord
-                .dispatch_planner_escalation(&task.id, &planner_reason, &task.project_id)
-                .await;
-        }
-    }
+    // Fold suggested_breakdown into the reason so the Planner remediation
+    // task/comment receives the stale caller's full context — not just the
+    // bare reason.
+    let planner_reason = match p.suggested_breakdown {
+        Some(ref breakdown) => format!("{}\n\nSuggested breakdown:\n{breakdown}", p.reason),
+        None => p.reason.clone(),
+    };
+    let _ = coordinator
+        .dispatch_planner_escalation(&task.id, &planner_reason, &task.project_id)
+        .await;
 
-    // Escalate the task to needs_lead_intervention in all cases.
-    let updated = repo
-        .transition(
-            &task.id,
-            djinn_core::models::TransitionAction::Escalate,
-            "worker-agent",
-            "worker",
-            Some(&p.reason),
-            None,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if escalation_count >= 2 {
-        Ok(serde_json::json!({
-            "status": "planner_escalated",
-            "task_id": updated.id,
-            "new_status": updated.status,
-            "escalation_count": escalation_count,
-            "message": "Task has been escalated multiple times. Routing to Planner for board-level review. Your session should end now."
-        }))
-    } else {
-        Ok(serde_json::json!({
-            "status": "escalated",
-            "task_id": updated.id,
-            "new_status": updated.status,
-            "escalation_count": escalation_count,
-            "message": "Task escalated to Lead. Your session should end now."
-        }))
-    }
+    Ok(serde_json::json!({
+        "status": "planner_dispatched",
+        "deprecated": "request_lead",
+        "task_id": task.id,
+        "message": "request_lead is deprecated for worker/reviewer; the task has been routed to Planner. Your session should end now."
+    }))
 }
 
-pub(super) async fn call_request_planner(
+/// Route a planner escalation request from any role (worker, reviewer, or lead).
+/// Logs a role-neutral Planner-request activity that preserves the caller's
+/// reason, then dispatches `dispatch_planner_escalation`.
+pub(crate) async fn call_request_planner(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
@@ -1064,9 +1046,10 @@ pub(super) async fn call_request_planner(
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
 
-    let body = format!("[PLANNER_REQUEST] Lead escalating to Planner. {}", p.reason);
+    // Role-neutral planner-request activity — preserves the caller's reason.
+    let body = format!("[PLANNER_REQUEST] {}", p.reason);
     let payload = serde_json::json!({ "body": body }).to_string();
-    repo.log_activity(Some(&task.id), "lead-agent", "lead", "comment", &payload)
+    repo.log_activity(Some(&task.id), "system", "system", "comment", &payload)
         .await
         .map_err(|e| e.to_string())?;
 

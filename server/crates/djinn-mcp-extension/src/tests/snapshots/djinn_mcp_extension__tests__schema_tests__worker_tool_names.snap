@@ -25,5 +25,6 @@ expression: names
   "memory_write",
   "memory_edit",
   "request_lead",
+  "request_planner",
   "submit_work"
 ]

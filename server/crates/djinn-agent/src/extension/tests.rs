@@ -21,6 +21,7 @@ mod evidence_spike_dispatch_tests;
 mod lsp_dispatch_tests;
 mod lsp_tool_boundary_tests;
 mod memory_dispatch_tests;
+mod planner_routing_tests;
 mod proposal_dispatch_tests;
 mod schema_snapshot_tests;
 mod skill_read_tests;

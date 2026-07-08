@@ -319,6 +319,12 @@ env:
   # own default (`http://127.0.0.1:3000`, appropriate only for local dev).
   publicUrl: ""
   webUrl: ""
+  # When true, djinn-server exposes a token-gated GitHub App manifest setup
+  # flow (setup routes, /auth/config hints, /setup/status). When false (the
+  # production default), setup routes are hidden and the server continues to
+  # load GitHub App credentials from the mounted Secret only. This flag is
+  # rendered into the server ConfigMap as DJINN_ENABLE_SELF_SETUP.
+  enableSelfSetup: false
 
 # Arbitrary extra env injected into the server container. Useful for ad-hoc
 # tuning knobs without re-templating.
