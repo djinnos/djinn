@@ -497,6 +497,10 @@ pub async fn transition_task(
         return Json(ErrorOr::Error(not_found(&request.id)));
     };
 
+    // Preserve the action for the post-transition rework-reopen chokepoint
+    // (`repo.transition` consumes it by value).
+    let action = request.action.clone();
+
     match repo
         .transition(
             &task.id,
@@ -508,7 +512,26 @@ pub async fn transition_task(
         )
         .await
     {
-        Ok(updated) => Json(ErrorOr::Ok(task_to_response(&updated))),
+        Ok(updated) => {
+            // Supervisor-driven rework reopens applied through this tool
+            // (task_review_reject* / lead_approve_conflict) must terminalize the
+            // worker's in-flight `submitted` attempt to `reopened` and record a
+            // durable rework marker — otherwise the transition leaves an
+            // orphaned `submitted` attempt that wedges the respawn guard's
+            // step-2 dedup forever (the ylme bug, previously fixed for the
+            // in-process/RPC path in `DirectServices::transition_task`). The PR
+            // poller's `apply_pr_transition` already owns the
+            // PrCiFailed/PrChangesRequested/PrConflict reopens; the coordinator
+            // chokepoint (reached here via the bridge, since control-plane
+            // cannot depend on djinn-coordinator) is a no-op for every non-rework
+            // action. Best-effort.
+            if let Some(coordinator) = server.state.coordinator().await {
+                coordinator
+                    .record_supervisor_rework_reopen(&task.id, &action, request.reason.as_deref())
+                    .await;
+            }
+            Json(ErrorOr::Ok(task_to_response(&updated)))
+        }
         Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
     }
 }

@@ -5924,8 +5924,9 @@ async fn orphaned_pending_attempt_reaper_finalizes_stale_rows_only() {
 /// Reaper backstop for the ylme orphan: a stale `submitted` attempt whose task
 /// has NO open PR is finalized to `reopened` (submitted work existed, and the
 /// reopened marker lets a fresh worker dispatch); a `submitted` attempt whose
-/// task HAS a PR (owned by the PR poller) and a fresh `submitted`-no-PR row are
-/// left untouched; the sweep is idempotent.
+/// task is in a poller-polled status (`pr_review`) with a PR — genuinely owned
+/// by the PR poller — and a fresh `submitted`-no-PR row are left untouched; the
+/// sweep is idempotent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orphaned_submitted_no_pr_reaper_finalizes_stale_rows_only() {
     use crate::dispatch::respawn_guard::{RespawnGuardDecision, run_respawn_guard};
@@ -5966,14 +5967,19 @@ async fn orphaned_submitted_no_pr_reaper_finalizes_stale_rows_only() {
     let attempt_a = seed_submitted(task_a.id.clone()).await;
     backdate_attempt(&db, &attempt_a).await;
 
-    // B: stale submitted + task HAS a pr_url → untouched (PR poller owns it).
+    // B: stale submitted + task in `pr_review` with a PR → untouched (the PR
+    // poller genuinely owns it — poller-ownership requires a poller-polled
+    // status, NOT merely a retained pr_url; a retained pr_url on an `open` task
+    // is reaped, see `orphaned_submitted_open_retained_pr_reaper_reaps_only_unpolled`).
     let (task_b, _n) = create_task_with_note(&db, &tx, "submitted-reaper-with-pr").await;
     let attempt_b = seed_submitted(task_b.id.clone()).await;
     backdate_attempt(&db, &attempt_b).await;
-    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+    let task_b_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    task_b_repo
         .set_pr_url(&task_b.id, "https://github.example/owner/repo/pull/11")
         .await
         .unwrap();
+    task_b_repo.set_status(&task_b.id, "pr_review").await.unwrap();
 
     // C: FRESH submitted-no-PR (younger than threshold) → untouched.
     let (task_c, _n) = create_task_with_note(&db, &tx, "submitted-reaper-fresh").await;
@@ -6033,5 +6039,151 @@ async fn orphaned_submitted_no_pr_reaper_finalizes_stale_rows_only() {
     assert_eq!(
         attempt_repo.get(&attempt_b).await.unwrap().unwrap().outcome,
         "submitted"
+    );
+}
+
+/// Seed a `submitted` worker attempt (pending → submitted) for a task.
+async fn seed_submitted_worker_attempt(db: &Database, task_id: &str) -> String {
+    let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(task_id, "worker");
+    let id =
+        crate::dispatch::attempt_lifecycle::record_dispatch_start(db, task_id, "worker", None, &dk)
+            .await
+            .expect("pending attempt must insert");
+    TaskAttemptRepository::new(db.clone())
+        .advance_to_submitted(djinn_db::SubmitTaskAttemptParams {
+            id: &id,
+            submit_ref: Some("ref-1"),
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some("submitted for internal review"),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .expect("advance to submitted");
+    id
+}
+
+/// Hole A backstop: a stale `submitted` worker attempt on an `open` task that
+/// RETAINED a `pr_url` across a `PrConflict` reopen is finalized to `reopened`.
+/// `open` is the sole dispatchable status and the PR poller never polls it, so
+/// nothing else can advance the attempt and the task is otherwise permanently
+/// stuck behind the respawn guard's step-2 dedup. A same-shape task left in
+/// `pr_review` — which the poller DOES own — is untouched, as is a fresh
+/// `open`+PR row. The sweep is idempotent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orphaned_submitted_open_retained_pr_reaper_reaps_only_unpolled() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    const PR: &str = "https://github.example/owner/repo/pull/42";
+
+    // A: `open` + retained pr_url + stale submitted → reaped to `reopened`.
+    // (Tasks are created `open`; the retained PR simulates the PrConflict reopen
+    // that does NOT clear tasks.pr_url.)
+    let (task_a, _n) = create_task_with_note(&db, &tx, "open-retained-pr-stale").await;
+    let attempt_a = seed_submitted_worker_attempt(&db, &task_a.id).await;
+    backdate_attempt(&db, &attempt_a).await;
+    task_repo.set_pr_url(&task_a.id, PR).await.unwrap();
+
+    // B: `pr_review` + pr_url + stale submitted → UNTOUCHED (poller owns it).
+    let (task_b, _n) = create_task_with_note(&db, &tx, "pr-review-stale").await;
+    let attempt_b = seed_submitted_worker_attempt(&db, &task_b.id).await;
+    backdate_attempt(&db, &attempt_b).await;
+    task_repo.set_pr_url(&task_b.id, PR).await.unwrap();
+    task_repo.set_status(&task_b.id, "pr_review").await.unwrap();
+
+    // C: `open` + pr_url + FRESH submitted → UNTOUCHED (younger than threshold).
+    let (task_c, _n) = create_task_with_note(&db, &tx, "open-retained-pr-fresh").await;
+    let attempt_c = seed_submitted_worker_attempt(&db, &task_c.id).await;
+    task_repo.set_pr_url(&task_c.id, PR).await.unwrap();
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "test").await;
+
+    let a = attempt_repo.get(&attempt_a).await.unwrap().unwrap();
+    assert_eq!(
+        a.outcome, "reopened",
+        "open retained-PR stale submitted must reap to reopened"
+    );
+    assert!(a.terminal_at.is_some(), "terminal_at must be stamped");
+
+    for (attempt_id, label) in [(&attempt_b, "pr_review"), (&attempt_c, "fresh-open")] {
+        let attempt = attempt_repo.get(attempt_id).await.unwrap().unwrap();
+        assert_eq!(attempt.outcome, "submitted", "{label}: must NOT be reaped");
+        assert!(attempt.terminal_at.is_none(), "{label}: must stay live");
+    }
+
+    // Idempotency: a second sweep changes nothing and creates no rows.
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "test").await;
+    for task in [&task_a, &task_b, &task_c] {
+        assert_eq!(
+            attempt_repo.list_for_task(&task.id).await.unwrap().len(),
+            1,
+            "sweep must never create attempt rows"
+        );
+    }
+    assert_eq!(
+        attempt_repo.get(&attempt_a).await.unwrap().unwrap().outcome,
+        "reopened"
+    );
+    assert_eq!(
+        attempt_repo.get(&attempt_b).await.unwrap().unwrap().outcome,
+        "submitted"
+    );
+}
+
+/// Hole A end-to-end: the respawn guard DEFERS an `open`+retained-PR task with
+/// an in-flight `submitted` attempt (step 2 dedup, reached because the retained
+/// `PrConflict` conflict signal bypasses adoption), and only ALLOWS a fresh
+/// worker after the reaper finalizes the orphaned attempt to `reopened`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guard_defers_open_retained_pr_submitted_until_reaped_then_allows() {
+    use crate::dispatch::respawn_guard::{PrReworkSignal, RespawnGuardDecision, run_respawn_guard};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    const PR: &str = "https://github.example/owner/repo/pull/43";
+
+    let (task, _n) = create_task_with_note(&db, &tx, "open-retained-pr-guard").await;
+    let attempt = seed_submitted_worker_attempt(&db, &task.id).await;
+    backdate_attempt(&db, &attempt).await;
+    task_repo.set_pr_url(&task.id, PR).await.unwrap();
+
+    // Before reap: the PrConflict rework signal bypasses PR adoption (step 1),
+    // and the live `submitted` attempt makes step 2 defer.
+    assert!(
+        matches!(
+            run_respawn_guard(
+                &db,
+                &task.id,
+                "worker",
+                Some(PR),
+                Some(PrReworkSignal::MergeConflict),
+            )
+            .await,
+            RespawnGuardDecision::Defer(_)
+        ),
+        "guard must defer while a stale submitted attempt is in flight"
+    );
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "test").await;
+    assert_eq!(
+        attempt_repo.get(&attempt).await.unwrap().unwrap().outcome,
+        "reopened",
+        "reaper must finalize the orphaned submitted attempt"
+    );
+
+    // After reap: no live attempt remains, and the `reopened` latest attempt
+    // bypasses adoption, so a rework worker is allowed to dispatch.
+    assert_eq!(
+        run_respawn_guard(&db, &task.id, "worker", Some(PR), None).await,
+        RespawnGuardDecision::Allow,
+        "guard must allow a fresh worker once the orphan is reaped"
     );
 }

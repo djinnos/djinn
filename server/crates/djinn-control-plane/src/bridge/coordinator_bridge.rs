@@ -58,4 +58,22 @@ pub trait CoordinatorOps: Send + Sync {
         accept: bool,
         feedback: Option<String>,
     ) -> Result<(), String>;
+    /// Terminalize the worker's in-flight attempt (and record a durable
+    /// `reopened` marker) for a supervisor-driven rework reopen applied via the
+    /// control-plane `task_transition` tool.
+    ///
+    /// `djinn-control-plane` cannot depend on `djinn-coordinator` (the
+    /// dependency runs the other way), so the attempt-lifecycle chokepoint
+    /// `djinn_coordinator::record_supervisor_rework_reopen` is reached through
+    /// this bridge — the server binary implements it by delegating to that
+    /// function (exactly like `DirectServices::transition_task` does for the
+    /// in-process/RPC transition path). A no-op for non-rework actions and
+    /// best-effort (errors are swallowed inside the chokepoint), so this returns
+    /// unit rather than a `Result`.
+    async fn record_supervisor_rework_reopen(
+        &self,
+        task_id: &str,
+        action: &djinn_core::models::TransitionAction,
+        reason: Option<&str>,
+    );
 }

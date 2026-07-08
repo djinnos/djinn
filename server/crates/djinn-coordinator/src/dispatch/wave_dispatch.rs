@@ -1,5 +1,7 @@
 use super::super::*;
-use super::attempt_lifecycle::{TerminalAdvancementParams, advance_latest_to_terminal};
+use super::attempt_lifecycle::{
+    TerminalAdvancementParams, advance_latest_to_terminal, ensure_rework_marker,
+};
 use crate::pr_poller::pr_cleanup::CloseKind;
 use djinn_core::models::TransitionAction;
 use djinn_core::models::task::IssueType;
@@ -33,6 +35,14 @@ pub(super) enum WaveDispatchAttemptOutcome<'a> {
         reason: &'a str,
         replacement: &'a str,
     },
+    /// A rework reopen owned by wave dispatch: the task is re-queued to `open`
+    /// via a `PrConflict` transition (e.g. an approved task whose `task_branch`
+    /// never reached the mirror), so a fresh worker must redo the work. Unlike
+    /// [`Handoff`], this MUST leave a durable `reopened` latest attempt to honor
+    /// the rework-marker invariant the respawn guard's `latest_attempt_is_reopened`
+    /// check relies on — terminalizing any live attempt to `reopened` AND
+    /// inserting a marker when nothing was in-flight.
+    Reopened { reason: &'a str },
     /// Dispatch-owned ForceClose (oversized blob in branch history, etc.).
     ForceClosed {
         reason: &'a str,
@@ -397,17 +407,18 @@ impl CoordinatorActor {
                         }
                         self.pr_errors.remove(&task.project_id);
                         self.publish_status();
-                        // Attempt lifecycle: the current worker attempt stops
-                        // here and another worker process takes over (the task
-                        // is re-queued to `open` for a fresh worker run that
-                        // recreates and pushes the missing branch). Terminalize
-                        // as `handoff`. Best-effort.
+                        // Attempt lifecycle: this is a rework reopen — the
+                        // `PrConflict` transition re-queued the task to `open`
+                        // for a fresh worker run that recreates and pushes the
+                        // missing branch. Terminalize as `reopened` (NOT
+                        // `handoff`) and record a durable rework marker so the
+                        // respawn guard's `latest_attempt_is_reopened` gate sees
+                        // this reopen — honoring #1719's invariant that every
+                        // rework reopen leaves a `reopened` latest attempt.
+                        // Best-effort.
                         self.terminalize_wave_dispatch_attempt(
                             &task,
-                            WaveDispatchAttemptOutcome::Handoff {
-                                reason: &reason,
-                                replacement: "requeued_missing_branch",
-                            },
+                            WaveDispatchAttemptOutcome::Reopened { reason: &reason },
                         )
                         .await;
                     } else if task.pr_url.is_some() {
@@ -650,6 +661,27 @@ pub(super) fn build_wave_dispatch_terminal_params<'a>(
                 submit_ref,
             }
         }
+        WaveDispatchAttemptOutcome::Reopened { reason } => {
+            let summary =
+                format!("wave_dispatch: current worker attempt reopened for rework: {reason}");
+            let summary_json = serde_json::json!({
+                "source": "wave_dispatch",
+                "path": "reopened",
+                "reason": reason,
+                "submit_ref": submit_ref,
+                "pr_url": task.pr_url,
+                "task_branch": task_branch,
+            })
+            .to_string();
+            WaveDispatchTerminalParams {
+                outcome: TaskAttemptOutcome::Reopened,
+                pr_url: task.pr_url.as_deref(),
+                github_head_sha: task.ci_head_sha.as_deref(),
+                summary,
+                summary_json,
+                submit_ref,
+            }
+        }
         WaveDispatchAttemptOutcome::ForceClosed {
             reason,
             close_reason,
@@ -702,6 +734,7 @@ pub(super) async fn terminalize_wave_dispatch_attempt_on_db(
     outcome: WaveDispatchAttemptOutcome<'_>,
 ) {
     let params = build_wave_dispatch_terminal_params(task, outcome);
+    let is_rework_reopen = params.outcome == TaskAttemptOutcome::Reopened;
     advance_latest_to_terminal(
         db,
         TerminalAdvancementParams {
@@ -719,4 +752,12 @@ pub(super) async fn terminalize_wave_dispatch_attempt_on_db(
         },
     )
     .await;
+    // Rework-marker invariant (#1719): a `reopened` wave-dispatch outcome MUST
+    // leave a durable `reopened` latest attempt even when no live attempt
+    // existed to terminalize above. `ensure_rework_marker` is a no-op when a
+    // live attempt was just advanced or the latest attempt is already
+    // `reopened`, so this is idempotent.
+    if is_rework_reopen {
+        ensure_rework_marker(db, &task.id, "worker", Some(&params.summary)).await;
+    }
 }
