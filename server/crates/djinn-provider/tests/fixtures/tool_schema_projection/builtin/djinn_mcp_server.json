@@ -7954,6 +7954,38 @@
           ],
           "format": "int64"
         },
+        "authored_orphan_count": {
+          "description": "Notes with zero inbound authored wikilink or explicit authored\nassociation edges.  Machine-minted edges do *not* hide authored-link\ndebt.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "isolated_count": {
+          "description": "Notes with no retrieval-effective edges at all — the strictest\nconnectivity metric.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "isolated_pct": {
+          "description": "`isolated_count` as a percentage of non-singleton notes.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "machine_connected_orphan_count": {
+          "description": "Authored-orphan notes that are *not* graph-isolated because at\nleast one non-authored retrieval edge connects them.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
         "low_confidence_note_count": {
           "type": [
             "integer",
