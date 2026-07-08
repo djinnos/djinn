@@ -19,8 +19,6 @@ pub(crate) struct ResolvedRoleOverrides {
     pub runtime_role: Arc<dyn AgentRole>,
     /// Project/specialist system prompt extensions; empty when absent.
     pub system_prompt_extensions: String,
-    /// Auto-improvement amendments from `learned_prompt_history`.
-    pub learned_prompt: Option<String>,
     /// MCP server names from the DB row's JSON array. `None` means no row.
     pub mcp_servers: Option<Vec<String>>,
     /// Skill names from the DB row's JSON array; empty when absent.
@@ -36,7 +34,6 @@ impl ResolvedRoleOverrides {
         Self {
             runtime_role,
             system_prompt_extensions: String::new(),
-            learned_prompt: None,
             mcp_servers: None,
             skills: Vec::new(),
             model_preference: None,
@@ -45,7 +42,6 @@ impl ResolvedRoleOverrides {
     }
     fn apply_agent_fields(&mut self, agent: &Agent) {
         self.system_prompt_extensions = agent.system_prompt_extensions.clone();
-        self.learned_prompt = agent.learned_prompt.clone();
         self.mcp_servers = Some(parse_json_array(&agent.mcp_servers));
         self.skills = parse_json_array(&agent.skills);
         self.model_preference = agent.model_preference.clone();
@@ -236,7 +232,6 @@ mod tests {
         let ctx = agent_context(db);
         let out = resolve_role_overrides(&task, RoleKind::Worker, &ctx).await;
         assert_eq!(out.system_prompt_extensions, "");
-        assert!(out.learned_prompt.is_none());
         assert_eq!(out.mcp_servers, Some(Vec::<String>::new()));
         assert!(out.skills.is_empty());
         assert!(out.model_preference.is_none());

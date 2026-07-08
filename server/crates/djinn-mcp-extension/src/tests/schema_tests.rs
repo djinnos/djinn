@@ -1203,4 +1203,55 @@ fn evidence_spike_all_schemas_are_read_only_except_finalize() {
     }
 }
 
+// ── Cut-over regression guards (10qg) ───────────────────────────────────
+// These assertions pin the MCP extension role tool surfaces so future
+// changes cannot regress the request_lead → request_planner cut-over
+// or the Lead arbiter-only surface.
+
+/// Worker and reviewer schemas must expose `request_planner` and must NOT
+/// expose `request_lead` (epic 10qg).
+#[test]
+fn worker_reviewer_schemas_expose_request_planner_not_request_lead() {
+    for role in ["worker", "reviewer"] {
+        let names = tool_names_for_role(role);
+        assert!(
+            names.contains("request_planner"),
+            "{role} must expose request_planner in its tool schema, got: {:?}",
+            names
+        );
+        assert!(
+            !names.contains("request_lead"),
+            "{role} must NOT expose request_lead in its tool schema, got: {:?}",
+            names
+        );
+    }
+}
+
+/// Lead schema must NOT expose `request_planner` or `escalate` — the Lead
+/// only uses `submit_decision` as its finalize tool (10qg).
+#[test]
+fn lead_schema_does_not_expose_request_planner_or_escalate() {
+    let names = tool_names_for_role("lead");
+    assert!(
+        !names.contains("request_planner"),
+        "lead must NOT expose request_planner in its tool schema, got: {:?}",
+        names
+    );
+    assert!(
+        !names.contains("escalate"),
+        "lead must NOT expose escalate in its tool schema, got: {:?}",
+        names
+    );
+    assert!(
+        !names.contains("request_lead"),
+        "lead must NOT expose request_lead in its tool schema, got: {:?}",
+        names
+    );
+    assert!(
+        names.contains("submit_decision"),
+        "lead must expose submit_decision in its tool schema, got: {:?}",
+        names
+    );
+}
+
 // ── Expanded evidence-spike mutation exclusion tests ────────────────────────

@@ -1415,3 +1415,122 @@ fn attempt_history_is_not_separate_top_level_section() {
         "attempt history should appear inside activity section"
     );
 }
+
+// ── Lead prompt: forensic arbiter mandate regression (10qg) ────────────
+
+/// The Lead prompt must describe the forensic arbiter mandate after the
+/// role/tool/model-policy cut-over.  These assertions pin the prompt
+/// content so a future regression cannot silently revert the Lead to a
+/// generic intervention handler.
+#[test]
+fn lead_prompt_contains_forensic_arbiter_mandate() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Lead, &task, &ctx);
+
+    assert!(
+        prompt.contains("Forensic Arbiter"),
+        "lead prompt must declare the forensic arbiter mandate"
+    );
+    assert!(
+        prompt.contains("Evidence-Gated Decisions"),
+        "lead prompt must contain the evidence-gated decisions section"
+    );
+    assert!(
+        prompt.contains("submit_decision"),
+        "lead prompt must reference submit_decision as the finalize tool"
+    );
+    assert!(
+        prompt.contains("verifiable evidence"),
+        "lead prompt must require verifiable evidence for decisions"
+    );
+    assert!(
+        prompt.contains("dossier"),
+        "lead prompt must reference dossier for park decisions"
+    );
+    assert!(
+        prompt.contains("directive"),
+        "lead prompt must reference directive for reopen decisions"
+    );
+    assert!(
+        prompt.contains("verification_command"),
+        "lead prompt must reference verification_command for reopen"
+    );
+}
+
+/// The Lead prompt must NOT surface `request_planner` or `escalate` as
+/// tools the Lead agent should call — the Lead only uses `submit_decision`.
+#[test]
+fn lead_prompt_does_not_mention_request_planner_or_escalate_as_decision_tools() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Lead, &task, &ctx);
+
+    // The lead prompt must not instruct the agent to call request_planner.
+    // It is OK for the prompt to mention "planner" in context (e.g. explaining
+    // the board), but not as a tool call instruction.
+    assert!(
+        !prompt.contains("`request_planner`"),
+        "lead prompt must NOT reference request_planner as a callable tool"
+    );
+    assert!(
+        !prompt.contains("`escalate`"),
+        "lead prompt must NOT reference escalate as a decision option"
+    );
+}
+
+/// The Lead finalize tool config must be `submit_decision` only —
+/// no `request_planner`, no `request_lead`, no `escalate`.
+#[test]
+fn lead_config_finalize_tool_is_submit_decision_only() {
+    use crate::config::LEAD_CONFIG;
+
+    assert_eq!(
+        LEAD_CONFIG.finalize_tool_names,
+        &["submit_decision"],
+        "lead finalize tool must be submit_decision only, got: {:?}",
+        LEAD_CONFIG.finalize_tool_names
+    );
+}
+
+/// Worker finalize tools must include `request_planner` and must NOT
+/// include `request_lead`.
+#[test]
+fn worker_config_finalize_tools_include_request_planner_not_request_lead() {
+    use crate::config::WORKER_CONFIG;
+
+    assert!(
+        WORKER_CONFIG
+            .finalize_tool_names
+            .contains(&"request_planner"),
+        "worker finalize tools must include request_planner, got: {:?}",
+        WORKER_CONFIG.finalize_tool_names
+    );
+    assert!(
+        !WORKER_CONFIG.finalize_tool_names.contains(&"request_lead"),
+        "worker finalize tools must NOT include request_lead, got: {:?}",
+        WORKER_CONFIG.finalize_tool_names
+    );
+}
+
+/// Reviewer finalize tools must include `request_planner` and must NOT
+/// include `request_lead`.
+#[test]
+fn reviewer_config_finalize_tools_include_request_planner_not_request_lead() {
+    use crate::config::REVIEWER_CONFIG;
+
+    assert!(
+        REVIEWER_CONFIG
+            .finalize_tool_names
+            .contains(&"request_planner"),
+        "reviewer finalize tools must include request_planner, got: {:?}",
+        REVIEWER_CONFIG.finalize_tool_names
+    );
+    assert!(
+        !REVIEWER_CONFIG
+            .finalize_tool_names
+            .contains(&"request_lead"),
+        "reviewer finalize tools must NOT include request_lead, got: {:?}",
+        REVIEWER_CONFIG.finalize_tool_names
+    );
+}
