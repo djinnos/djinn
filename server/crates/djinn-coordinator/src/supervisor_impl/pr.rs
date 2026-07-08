@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 //! Supervisor-driven PR-open orchestration.
 //!
 //! Stays in `djinn-agent` (rather than moving to `djinn-supervisor`) because

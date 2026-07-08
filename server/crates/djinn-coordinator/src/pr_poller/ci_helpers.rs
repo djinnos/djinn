@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use super::*;
 use djinn_core::models::CiStatus;
 use djinn_provider::github_api::RequiredCheckReproduction;
@@ -225,7 +226,7 @@ impl CoordinatorActor {
             CiStatus::Failing,
             blocking_names,
             Some(fingerprint.clone()),
-            total_consecutive as i64,
+            total_consecutive,
             Some(current_sha.to_owned()),
         )
         .await;
