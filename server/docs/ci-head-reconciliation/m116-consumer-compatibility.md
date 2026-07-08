@@ -36,10 +36,45 @@ them.
 | `djinn_mcp_server.json` fixture           | Already synced with new fields.              |
 | `mcp_tools_schema.snap` snapshot          | Already synced with new fields.              |
 | Control-plane integration tests           | `task_tools.rs` snapshot test is additive.   |
+| UI `CiGateSnapshot` type (`ui/src/api/types.ts`) | Interface does not declare the new fields; runtime ignores extra JSON keys. |
+| UI `CiBadge` (`ui/src/components/TaskCard.tsx`) | Reads `status`, `gate_state`, `blocking_required_check_names`, etc.; never accesses reconciliation fields. |
+| UI `CiStatusSection` (`ui/src/components/TaskDetailPanel.tsx`) | Reads `head_sha`, `status`, `gate_state`, `summary_reason`, etc.; never accesses reconciliation fields. |
+| UI test fixtures (`ui/src/test/fixtures.ts`) | `mockCi*` objects omit the new fields; tests pass with or without them. |
 
-No `patrol`, `doctor`, or `health` surfaces reference `CiGateSnapshot` or
-CI task payloads; those surfaces were searched (`grep` for `patrol|doctor|health`
-in `server/`) and returned no matches.
+#### UI forward-compatibility evidence
+
+The UI deserializes the CI payload via standard `JSON.parse` (no strict
+schema validation that would reject unknown keys).  The TypeScript
+`CiGateSnapshot` interface (`ui/src/api/types.ts:24`) does **not** declare
+`mirror_head_sha`, `github_head_sha`, `heads_diverged`, or
+`head_observation_error`, so they are simply inaccessible properties at the
+type level and inert extra keys at runtime.
+
+The two rendering consumers read only pre-m116 fields:
+
+- `TaskCard.tsx` (`CiBadge`): `ci.status`, `ci.gate_state`,
+  `ci.blocking_required_check_names`, `ci.primary_blocking_check`,
+  `ci.merge_blocked_reason`, `ci.summary_reason`.
+- `TaskDetailPanel.tsx` (`CiStatusSection`): `ci.gate_state`, `ci.status`,
+  `ci.summary_reason`, `ci.merge_blocked_reason`, `ci.head_sha`,
+  `ci.pr_number`, `ci.blocking_required_check_names`,
+  `ci.failure_fingerprint`, `ci.same_signature_count`.
+
+Durable regression tests in `TaskCard.test.tsx` and
+`TaskDetailPanel.test.tsx` simulate the real wire shape (a CI payload with
+all four additive fields populated) and confirm that existing rendering
+(`head_sha`, `status`, badge text) is unaffected.
+
+#### Patrol / doctor / health surfaces
+
+A targeted search for `CiGateSnapshot`, `ci_head`, or `head_sha` references
+within `server/crates/` modules that import `patrol`, `doctor`, or `health`
+return **zero matches**.  While a broad `grep` for `patrol|doctor|health` in
+`server/` does return many results (health-check endpoints, DB repository
+modules like `doctor_finding.rs` and `board_health.rs`, and telemetry
+labels), **none of these surfaces reference `CiGateSnapshot` or task CI
+payload fields**.  The CI head reconciliation fields are confined to the
+control-plane task-tool DTO layer and its consumers listed above.
 
 ### Consumer contract
 
@@ -95,6 +130,8 @@ strike counts, park guards, and escalation.
 
 ## Companion regression tests
 
+### Control-plane (Rust)
+
 `server/crates/djinn-control-plane/src/tools/task_tools/types_tests.rs`
 contains the following CI head reconciliation regression tests (all
 operate on local in-memory `Task` fixtures; no live external
@@ -114,3 +151,22 @@ infrastructure required):
   — observation error present → serializes as string.
 - `ci_snapshot_reconciliation_fields_in_list_item`
   — list-item DTO also carries reconciliation fields.
+- `forward_compatible_consumer_ignores_new_reconciliation_fields`
+  — pre-m116 consumer struct deserializes a payload with all four new
+    fields and `head_sha` / `status` remain intact.
+- `forward_compatible_list_consumer_ignores_new_reconciliation_fields`
+  — same check via the list-item DTO path.
+
+### UI (vitest)
+
+`ui/src/components/TaskCard.test.tsx` and
+`ui/src/components/TaskDetailPanel.test.tsx` each contain a forward-
+compatibility test that simulates the real wire shape (a CI payload with
+all four additive m116 fields) and confirms existing rendering is
+unaffected:
+
+- `TaskCard`: renders `CI: passing` badge from a CI payload that also
+  carries `mirror_head_sha`, `github_head_sha`, `heads_diverged`, and
+  `head_observation_error`.
+- `TaskDetailPanel`: renders `head_sha` (sliced to 8 chars), `Passing`
+  status, and PR number from the same augmented payload.
