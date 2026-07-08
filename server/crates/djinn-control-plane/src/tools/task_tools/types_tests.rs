@@ -628,3 +628,72 @@ fn ci_snapshot_reconciliation_fields_in_list_item() {
     );
     assert_eq!(ci["heads_diverged"], true);
 }
+
+// ── Forward-compatible consumer simulation (m116) ──────────────────────
+
+/// Simulates a consumer that only knows about pre-m116 `CiGateSnapshot`
+/// fields.  When the JSON payload contains the new m116 reconciliation
+/// fields, the consumer's partial deserialization must succeed and the
+/// old `head_sha` value must be intact.  This is the durability contract:
+/// additive nullable fields do not break existing consumers.
+#[test]
+fn forward_compatible_consumer_ignores_new_reconciliation_fields() {
+    // A struct representing a pre-m116 consumer's view of the CI payload.
+    // It only knows about `head_sha` and `status`.
+    #[derive(serde::Deserialize)]
+    struct LegacyCiConsumer {
+        head_sha: String,
+        status: String,
+    }
+
+    // Build a task with ALL reconciliation fields populated.
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    task.ci_mirror_head_sha = Some("mirror111111111111111111111111111111111111".into());
+    task.ci_github_head_sha = Some("github222222222222222222222222222222222222".into());
+    task.ci_heads_diverged = Some(true);
+    task.ci_head_observation_error = Some("push failed".into());
+
+    let response = task_to_response(&task);
+    let serialized = serde_json::to_value(&response).unwrap();
+    let ci_value = &serialized["ci"];
+
+    // A legacy consumer deserializes only the fields it knows about.
+    let legacy: LegacyCiConsumer =
+        serde_json::from_value(ci_value.clone()).expect("legacy consumer must parse");
+
+    assert_eq!(
+        legacy.head_sha, "deadbeefcafebabe00000000000000000000ffff",
+        "head_sha must be preserved for legacy consumers"
+    );
+    assert_eq!(legacy.status, "failing");
+
+    // The full payload still has the new fields — they coexist.
+    assert_eq!(ci_value["heads_diverged"], true);
+    assert_eq!(ci_value["head_observation_error"], "push failed");
+}
+
+/// Same forward-compatibility check via `task_list_item`, confirming the
+/// list path also carries new fields without breaking legacy consumers.
+#[test]
+fn forward_compatible_list_consumer_ignores_new_reconciliation_fields() {
+    #[derive(serde::Deserialize)]
+    struct LegacyListItemCi {
+        head_sha: String,
+    }
+
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    task.ci_mirror_head_sha = Some("m1".into());
+    task.ci_github_head_sha = Some("g1".into());
+    task.ci_heads_diverged = Some(true);
+    task.ci_head_observation_error = Some("err".into());
+
+    let list_item = task_to_list_item(&task, None, 0);
+    let serialized = serde_json::to_value(&list_item).unwrap();
+    let ci_value = &serialized["ci"];
+
+    let legacy: LegacyListItemCi =
+        serde_json::from_value(ci_value.clone()).expect("legacy list consumer must parse");
+
+    assert_eq!(legacy.head_sha, "deadbeefcafebabe00000000000000000000ffff");
+    assert_eq!(ci_value["heads_diverged"], true);
+}

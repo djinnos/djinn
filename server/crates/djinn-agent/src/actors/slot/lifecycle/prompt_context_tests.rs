@@ -1278,3 +1278,100 @@ async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
         ],
     );
 }
+
+// ─── Prompt-context assembly instrumentation tests ────────────────────
+// These tests invoke the real `assemble_prompt_context` path via
+// `assemble_for_role` and assert that the telemetry metrics
+// `djinn_prompt_context_latency_seconds` and
+// `djinn_prompt_context_child_span_latency_seconds` are emitted with
+// the expected span labels.  This catches regressions where the
+// instrumentation in `prompt_context.rs` is removed or broken — unlike
+// standalone `tokio::join!` timing tests or telemetry-facade-only tests.
+
+mod prompt_context_instrumentation_tests {
+    use super::super::test_support::{assemble_for_role, create_project_epic_task};
+    use crate::roles::WorkerRole;
+    use djinn_core::events::EventBus;
+    use djinn_db::Database;
+    use std::sync::{Mutex, MutexGuard};
+
+    static TELEMETRY_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn telemetry_guard() -> MutexGuard<'static, ()> {
+        TELEMETRY_MUTEX
+            .lock()
+            .expect("telemetry test mutex poisoned")
+    }
+
+    /// Invoke the real `assemble_prompt_context` path and assert that
+    /// the total latency histogram `djinn_prompt_context_latency_seconds`
+    /// is recorded, and that child-span latency histograms are emitted
+    /// with the expected bounded `span` labels.  Preserves existing
+    /// boundary output/error semantics: the returned `PromptContext`
+    /// should have a non-empty `system_prompt` and valid fields.
+    #[tokio::test]
+    async fn assemble_prompt_context_emits_total_and_child_span_metrics() {
+        // Initialize telemetry under the guard, then drop before async work
+        // to avoid holding a std::sync::Mutex across await points.
+        {
+            let _guard = telemetry_guard();
+            djinn_telemetry::init().expect("telemetry init");
+        }
+
+        let db = Database::ephemeral().await.expect("create ephemeral db");
+        let events = EventBus::noop();
+        let task = create_project_epic_task(&db, &events, "Instr Epic", "Instr Task").await;
+        let role = WorkerRole;
+
+        // Invoke the real assembly path — this exercises the full
+        // phase-0/1/2/3 pipeline including concurrent children.
+        let ctx = assemble_for_role(db, &task, &role, None, "", None, &[], &[]).await;
+
+        // Re-acquire guard for metric assertions (no await after this).
+        let _guard = telemetry_guard();
+
+        // ── Boundary-output semantics preserved ──
+        assert!(
+            !ctx.system_prompt.is_empty(),
+            "system_prompt should be non-empty after assembly"
+        );
+        assert!(
+            !ctx.base_system_prompt.is_empty(),
+            "base_system_prompt should be non-empty after assembly"
+        );
+
+        // ── Total latency metric emitted ──
+        let rendered = djinn_telemetry::render().expect("render metrics");
+        assert!(
+            rendered.contains("djinn_prompt_context_latency_seconds"),
+            "total latency histogram missing from rendered metrics:\n{rendered}",
+        );
+
+        // ── Child-span latency metric emitted with span labels ──
+        assert!(
+            rendered.contains("djinn_prompt_context_child_span_latency_seconds"),
+            "child-span latency histogram missing from rendered metrics:\n{rendered}",
+        );
+        // All six child spans should be recorded by the assembly path.
+        for span in &["activity_db", "epic_context"] {
+            assert!(
+                rendered.contains(&format!("span=\"{span}\"")),
+                "missing {span} span label in child-span metrics:\n{rendered}",
+            );
+        }
+        // Phase-2 spans are also recorded (knowledge_context, attempt_history,
+        // code_graph, reviewer_diff).  At minimum the phase-2 spans that
+        // don't require external services should fire even in test.
+        for span in &[
+            "knowledge_context",
+            "attempt_history",
+            "code_graph",
+            "reviewer_diff",
+        ] {
+            assert!(
+                rendered.contains(&format!("span=\"{span}\"")),
+                "missing {span} span label in child-span metrics:\n{rendered}",
+            );
+        }
+    }
+}

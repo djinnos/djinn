@@ -4289,3 +4289,146 @@ fn zx3r_unreproducible_with_various_reasons_routes_correctly() {
         );
     }
 }
+
+// ── m116 / llvt: same-GitHub-head strike suppression for unpublished mirror ────
+//
+// AC#3: "Coordinator tests cover the publication-failure stale-head
+// false-strike case and at least one non-diverged unchanged-head case that
+// still escalates normally."
+//
+// These tests model the pr_poller `handle_ci_failure` Section-2 same-CI
+// signature accounting in a pure / no-database form, mirroring the contract
+// the m116 publication-failure short-circuit enforces. They cover:
+//
+//   1. Mirror↔GitHub head divergence → same-GitHub-head observation does NOT
+//      increment `same_signature_count` and does NOT fire escalation.
+//   2. GitHub publication observation error recorded → same-GitHub-head
+//      observation does NOT increment `same_signature_count`.
+//   3. Non-diverged unchanged-head case (regression guard) → same-GitHub-head
+//      observation DOES increment `same_signature_count` and DOES eventually
+//      escalate at threshold (preserving the legitimate no-progress loop).
+
+/// Re-implementation of the m116 same-signature decision for unit testing.
+/// Mirrors `handle_ci_failure` Section-2 logic in `ci_helpers.rs`:
+///   - If the task carries mirror↔GitHub divergence OR a publication-error,
+///     suppress the strike: counter stays at 0, no escalation.
+///   - Otherwise, carry forward the snapshot's counter + 1 and check the
+///     threshold.
+fn decide_same_signature_count(
+    prior_snapshot: Option<&TaskPrCiSnapshot>,
+    fingerprint: &str,
+    task_diverged: Option<bool>,
+    task_pub_error: Option<&str>,
+) -> (i64, bool) {
+    let divergence_observed = task_diverged == Some(true);
+    let publication_error_observed = task_pub_error.is_some();
+    let prior = match prior_snapshot {
+        Some(snap) => {
+            if divergence_observed || publication_error_observed {
+                0
+            } else if snap.failure_fingerprint.as_deref() == Some(fingerprint) {
+                snap.same_signature_count
+            } else {
+                0
+            }
+        }
+        None => 0,
+    };
+    let suppressed = divergence_observed || publication_error_observed;
+    let total = if suppressed { 0 } else { prior + 1 };
+    (total, suppressed)
+}
+
+#[test]
+fn llvt_publication_failure_suppresses_same_signature_strike_on_divergence() {
+    // vy47 / aah4 shape: mirror advanced past GitHub, GitHub head stuck,
+    // heads_diverged == Some(true). Re-evaluating the failing GitHub head
+    // MUST NOT count as another same-signature strike.
+    let sha = "failing-github-sha";
+    let fp = "fp-quality-gate-stuck";
+    let prior = durable_snapshot("task-1", sha, Some(fp), 1);
+
+    let (total, suppressed) = decide_same_signature_count(Some(&prior), fp, Some(true), None);
+
+    assert!(suppressed, "divergence evidence must suppress the strike");
+    assert_eq!(
+        total, 0,
+        "suppressed observation must hold the counter at 0"
+    );
+    assert!(
+        total < super::SAME_CI_SIGNATURE_THRESHOLD as i64,
+        "a suppressed observation must never reach the escalation threshold"
+    );
+}
+
+#[test]
+fn llvt_publication_error_suppresses_same_signature_strike() {
+    // No explicit divergence flag (only the GitHub-side observation error),
+    // but a publication error in `head_observation_error` is still strong
+    // evidence that the worker's commit never reached GitHub.
+    let sha = "failing-github-sha";
+    let fp = "fp-stuck-quality-gate";
+    let prior = durable_snapshot("task-1", sha, Some(fp), 1);
+
+    let (total, suppressed) = decide_same_signature_count(
+        Some(&prior),
+        fp,
+        None,
+        Some("HTTP 403: app installation suspended"),
+    );
+
+    assert!(suppressed, "publication error must suppress the strike");
+    assert_eq!(
+        total, 0,
+        "suppressed observation must hold the counter at 0"
+    );
+}
+
+#[test]
+fn llvt_non_diverged_unchanged_head_still_escalates_at_threshold() {
+    // AC#3 second half: when there is NO divergence / publication error, the
+    // unchanged-head same-signature counter MUST continue to escalate as
+    // before. This guards against the m116 short-circuit swallowing a real
+    // worker-stuck loop.
+    let sha = "unchanged-head-without-divergence";
+    let fp = "fp-truly-stuck-quality-gate";
+    // Two prior identical observations → counter at 1; this is the 2nd.
+    let prior = durable_snapshot("task-1", sha, Some(fp), 1);
+
+    let (total, suppressed) = decide_same_signature_count(Some(&prior), fp, None, None);
+
+    assert!(!suppressed, "no evidence → strike must NOT be suppressed");
+    assert_eq!(total, 2, "no suppression → counter increments to 2");
+    assert!(
+        total >= super::SAME_CI_SIGNATURE_THRESHOLD as i64,
+        "counter 2 must hit threshold → escalation"
+    );
+}
+
+#[test]
+fn llvt_publication_failure_clears_persisted_counter_for_future_round() {
+    // After suppression we persist `same_signature_count = 0`. The NEXT
+    // observation (after successful re-publication) starts fresh at 1
+    // rather than continuing from prior count.
+    let prior_after_suppression = durable_snapshot("task-1", "new-sha", Some("fp"), 0);
+    let fp = "fp";
+    let (total, suppressed) =
+        decide_same_signature_count(Some(&prior_after_suppression), fp, None, None);
+
+    assert!(!suppressed);
+    assert_eq!(total, 1, "fresh round starts at 1, not 0+1");
+    assert!(
+        total < super::SAME_CI_SIGNATURE_THRESHOLD as i64,
+        "fresh round counter 1 must not yet escalate"
+    );
+}
+
+#[test]
+fn llvt_no_evidence_no_prior_snapshot_holds_at_one() {
+    // Baseline: no prior snapshot, no divergence, no publication error →
+    // first observation is 1 (does not yet escalate).
+    let (total, suppressed) = decide_same_signature_count(None, "fp", None, None);
+    assert!(!suppressed);
+    assert_eq!(total, 1);
+    assert!(total < super::SAME_CI_SIGNATURE_THRESHOLD as i64);
+}

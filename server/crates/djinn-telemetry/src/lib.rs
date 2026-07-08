@@ -84,6 +84,11 @@ const PROMPT_CONTEXT_LATENCY_SECONDS: &str = "djinn_prompt_context_latency_secon
 const PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS: &str =
     "djinn_prompt_context_child_span_latency_seconds";
 
+// ─── Rollout-validation counters (proposal uk2d AC17) ────────────────────
+const INFRA_EXEMPT_TOTAL: &str = "djinn_infra_exempt_total";
+const FALLBACK_RESCUE_TOTAL: &str = "djinn_fallback_rescue_total";
+const REASONING_KILL_TOTAL: &str = "djinn_reasoning_kill_total";
+
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
 /// Install the process-global Prometheus recorder.
@@ -723,6 +728,47 @@ fn register_metrics() {
         PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS,
         "Wall-clock time for an individual prompt-context child-span phase. Partitioned by bounded span label."
     );
+    // ─── Rollout-validation counters (proposal uk2d AC17) ────────────
+    metrics::describe_counter!(
+        INFRA_EXEMPT_TOTAL,
+        "Infra-exempt attempt outcomes. outcome=(park|quality_strike|total). is_infra distinguishes infra-exempt from quality-strike-classified attempts."
+    );
+    for outcome in infra_delta::OUTCOMES {
+        metrics::counter!(
+            INFRA_EXEMPT_TOTAL,
+            "outcome" => outcome,
+            "is_infra" => "true"
+        )
+        .absolute(0);
+        metrics::counter!(
+            INFRA_EXEMPT_TOTAL,
+            "outcome" => outcome,
+            "is_infra" => "false"
+        )
+        .absolute(0);
+    }
+    metrics::describe_counter!(
+        FALLBACK_RESCUE_TOTAL,
+        "Failover-chain fallback rescue events. Emitted when a later candidate accepts the dispatch after an earlier candidate failed."
+    );
+    metrics::counter!(FALLBACK_RESCUE_TOTAL).absolute(0);
+    metrics::describe_counter!(
+        REASONING_KILL_TOTAL,
+        "Reasoning-model session outcomes classified by model context, failure class, and outcome (killed/rescued/typed_failure)."
+    );
+    for fc in reasoning_kill::FAILURE_CLASSES {
+        for mc in reasoning_kill::MODEL_CONTEXTS {
+            for oc in reasoning_kill::OUTCOMES {
+                metrics::counter!(
+                    REASONING_KILL_TOTAL,
+                    "model_context" => mc,
+                    "failure_class" => fc,
+                    "outcome" => oc
+                )
+                .absolute(0);
+            }
+        }
+    }
 }
 
 pub mod dispatch {
@@ -1042,6 +1088,141 @@ pub mod prompt_context_metrics {
             "span" => span_name,
         )
         .record(duration);
+    }
+}
+
+pub mod infra_delta {
+    //! Infra-exempt attempt observability.
+    //!
+    //! Tracks outcomes where infra-classified failures (`timed_out`,
+    //! `spawn_failed`, `crashed`) are excluded from quality-strike and park
+    //! escalation counters. The `is_infra` label distinguishes infra-exempt
+    //! attempts from quality-strike-classified attempts within the same
+    //! outcome bucket, enabling delta computation on dashboards.
+    //!
+    //! Bounded labels:
+    //! - `outcome` — one of `OUTCOME_PARK`, `OUTCOME_QUALITY_STRIKE`,
+    //!   `OUTCOME_TOTAL`
+    //! - `is_infra` — `"true"` for infra-exempt, `"false"` for quality-strike
+
+    pub const OUTCOME_PARK: &str = "park";
+    pub const OUTCOME_QUALITY_STRIKE: &str = "quality_strike";
+    pub const OUTCOME_TOTAL: &str = "total";
+
+    pub(crate) const OUTCOMES: [&str; 3] = [OUTCOME_PARK, OUTCOME_QUALITY_STRIKE, OUTCOME_TOTAL];
+
+    /// Increment the infra-exempt counter for the given outcome and infra
+    /// classification.
+    ///
+    /// `outcome` MUST be one of the `OUTCOME_*` constants above.
+    /// `is_infra` is `true` when the attempt was infra-classified (exempt from
+    /// quality-strike counting), `false` when it was classified as a
+    /// quality-strike-class outcome.
+    pub fn increment(outcome: &'static str, is_infra: bool) {
+        metrics::counter!(
+            super::INFRA_EXEMPT_TOTAL,
+            "outcome" => outcome,
+            "is_infra" => if is_infra { "true" } else { "false" },
+        )
+        .increment(1);
+    }
+}
+
+pub mod fallback_rescue {
+    //! Fallback-rescue rate observability.
+    //!
+    //! Emitted when a failover chain's later candidate accepts the dispatch
+    //! after one or more earlier candidates failed. Preserves existing
+    //! guarantees: rescued sessions are not suspended or quality-struck.
+    //!
+    //! Bounded labels: none (single counter, no labels needed).
+
+    /// Increment the fallback-rescue counter.
+    ///
+    /// Called on the success path of `try_dispatch_to_pool` when the accepted
+    /// candidate is not the first in the chain (i.e. `candidate_index > 0`),
+    /// indicating that the dispatch was rescued by a later candidate after
+    /// earlier candidates failed.
+    pub fn increment_rescue() {
+        metrics::counter!(super::FALLBACK_RESCUE_TOTAL).increment(1);
+    }
+}
+
+pub mod reasoning_kill {
+    //! Reasoning-model false-positive kill observability.
+    //!
+    //! Classifies reasoning-model session outcomes by model context, failure
+    //! class, and outcome so operators can track whether reasoning models are
+    //! being disproportionately killed by stall timeouts (especially the
+    //! first-call-hang detection, which targets backend latency rather than
+    //! genuine hangs), rescued by fallback candidates, or experiencing typed
+    //! failures.
+    //!
+    //! Bounded labels:
+    //! - `model_context` — `"reasoning"` or `"non_reasoning"`
+    //! - `failure_class` — `"first_call_hang"` or `"idle_stall"`
+    //! - `outcome` — `"killed"`, `"rescued"`, or `"typed_failure"`
+
+    pub const MODEL_CONTEXT_REASONING: &str = "reasoning";
+    pub const MODEL_CONTEXT_NON_REASONING: &str = "non_reasoning";
+
+    pub const FAILURE_CLASS_FIRST_CALL_HANG: &str = "first_call_hang";
+    pub const FAILURE_CLASS_IDLE_STALL: &str = "idle_stall";
+
+    pub const OUTCOME_KILLED: &str = "killed";
+    pub const OUTCOME_RESCUED: &str = "rescued";
+    pub const OUTCOME_TYPED_FAILURE: &str = "typed_failure";
+
+    pub(crate) const MODEL_CONTEXTS: [&str; 2] =
+        [MODEL_CONTEXT_REASONING, MODEL_CONTEXT_NON_REASONING];
+    pub(crate) const FAILURE_CLASSES: [&str; 2] =
+        [FAILURE_CLASS_FIRST_CALL_HANG, FAILURE_CLASS_IDLE_STALL];
+    pub(crate) const OUTCOMES: [&str; 3] = [OUTCOME_KILLED, OUTCOME_RESCUED, OUTCOME_TYPED_FAILURE];
+
+    /// Heuristic check whether a `model_id` string refers to a known
+    /// reasoning-capable model.
+    ///
+    /// Checks the model name portion (after the provider prefix) for
+    /// substrings matching known reasoning model families. This is a
+    /// conservative heuristic — it errs on the side of `"non_reasoning"`
+    /// when uncertain so false-positive kill counts remain accurate.
+    ///
+    /// Known reasoning families (from the provider catalog):
+    /// - `mimo` (MiMo-V2.5-Pro, MiMo-V2.5)
+    /// - `glm` (GLM-5)
+    /// - `thinking` suffix (kimi-k2-thinking)
+    /// - `o1` / `o3` prefixes (OpenAI reasoning models)
+    pub fn is_reasoning_model(model_id: &str) -> bool {
+        let name = model_id.rsplit('/').next().unwrap_or(model_id);
+        let lower = name.to_lowercase();
+        lower.starts_with("o1")
+            || lower.starts_with("o3")
+            || lower.starts_with("mimo")
+            || lower.starts_with("glm")
+            || lower.contains("thinking")
+    }
+
+    /// Emit a reasoning-model outcome observation with all three bounded
+    /// labels: model context, failure class, and outcome.
+    ///
+    /// `model_context` MUST be one of `MODEL_CONTEXT_REASONING` or
+    /// `MODEL_CONTEXT_NON_REASONING`.
+    /// `failure_class` MUST be one of `FAILURE_CLASS_FIRST_CALL_HANG` or
+    /// `FAILURE_CLASS_IDLE_STALL`.
+    /// `outcome` MUST be one of `OUTCOME_KILLED`, `OUTCOME_RESCUED`, or
+    /// `OUTCOME_TYPED_FAILURE`.
+    pub fn increment(
+        model_context: &'static str,
+        failure_class: &'static str,
+        outcome: &'static str,
+    ) {
+        metrics::counter!(
+            super::REASONING_KILL_TOTAL,
+            "model_context" => model_context,
+            "failure_class" => failure_class,
+            "outcome" => outcome,
+        )
+        .increment(1);
     }
 }
 
@@ -2137,6 +2318,248 @@ mod tests {
                 rendered.contains(&format!("span=\"{span}\"")),
                 "missing span label {span} in rendered output:\n{rendered}",
             );
+        }
+    }
+
+    // ── Rollout-validation counter tests (proposal uk2d AC17) ─────────
+
+    #[test]
+    fn infra_exempt_registered_labels_render_at_zero_on_init() {
+        let _guard = test_guard();
+        init().unwrap();
+        let rendered = render().unwrap();
+        for outcome in infra_delta::OUTCOMES {
+            for is_infra in ["true", "false"] {
+                rendered_sample(
+                    &rendered,
+                    INFRA_EXEMPT_TOTAL,
+                    &[("outcome", outcome), ("is_infra", is_infra)],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn infra_exempt_counter_increments_and_renders() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        infra_delta::increment(infra_delta::OUTCOME_TOTAL, true);
+        infra_delta::increment(infra_delta::OUTCOME_TOTAL, true);
+        infra_delta::increment(infra_delta::OUTCOME_QUALITY_STRIKE, false);
+
+        let rendered = render().unwrap();
+        assert!(
+            labeled_sample_value(
+                &rendered,
+                INFRA_EXEMPT_TOTAL,
+                &[("outcome", "total"), ("is_infra", "true")]
+            ) >= 2.0,
+            "infra_exempt total/true should be >= 2"
+        );
+        assert!(
+            labeled_sample_value(
+                &rendered,
+                INFRA_EXEMPT_TOTAL,
+                &[("outcome", "quality_strike"), ("is_infra", "false")]
+            ) >= 1.0,
+            "infra_exempt quality_strike/false should be >= 1"
+        );
+    }
+
+    #[test]
+    fn fallback_rescue_counter_increments_and_renders() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        fallback_rescue::increment_rescue();
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains(FALLBACK_RESCUE_TOTAL),
+            "missing {FALLBACK_RESCUE_TOTAL} in rendered output:\n{rendered}"
+        );
+        assert!(
+            unlabelled_sample_value(&rendered, FALLBACK_RESCUE_TOTAL) >= 1.0,
+            "fallback rescue should increment by 1"
+        );
+    }
+
+    #[test]
+    fn reasoning_kill_registered_labels_render_at_zero_on_init() {
+        let _guard = test_guard();
+        init().unwrap();
+        let rendered = render().unwrap();
+        for fc in reasoning_kill::FAILURE_CLASSES {
+            for mc in reasoning_kill::MODEL_CONTEXTS {
+                for oc in reasoning_kill::OUTCOMES {
+                    rendered_sample(
+                        &rendered,
+                        REASONING_KILL_TOTAL,
+                        &[
+                            ("model_context", mc),
+                            ("failure_class", fc),
+                            ("outcome", oc),
+                        ],
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reasoning_kill_counter_increments_and_renders() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        reasoning_kill::increment(
+            reasoning_kill::MODEL_CONTEXT_REASONING,
+            reasoning_kill::FAILURE_CLASS_FIRST_CALL_HANG,
+            reasoning_kill::OUTCOME_KILLED,
+        );
+        reasoning_kill::increment(
+            reasoning_kill::MODEL_CONTEXT_NON_REASONING,
+            reasoning_kill::FAILURE_CLASS_IDLE_STALL,
+            reasoning_kill::OUTCOME_RESCUED,
+        );
+        reasoning_kill::increment(
+            reasoning_kill::MODEL_CONTEXT_REASONING,
+            reasoning_kill::FAILURE_CLASS_IDLE_STALL,
+            reasoning_kill::OUTCOME_TYPED_FAILURE,
+        );
+
+        let rendered = render().unwrap();
+        assert!(
+            labeled_sample_value(
+                &rendered,
+                REASONING_KILL_TOTAL,
+                &[
+                    ("model_context", "reasoning"),
+                    ("failure_class", "first_call_hang"),
+                    ("outcome", "killed"),
+                ]
+            ) >= 1.0,
+            "reasoning kill reasoning/first_call_hang/killed should be >= 1"
+        );
+        assert!(
+            labeled_sample_value(
+                &rendered,
+                REASONING_KILL_TOTAL,
+                &[
+                    ("model_context", "non_reasoning"),
+                    ("failure_class", "idle_stall"),
+                    ("outcome", "rescued"),
+                ]
+            ) >= 1.0,
+            "reasoning kill non_reasoning/idle_stall/rescued should be >= 1"
+        );
+        assert!(
+            labeled_sample_value(
+                &rendered,
+                REASONING_KILL_TOTAL,
+                &[
+                    ("model_context", "reasoning"),
+                    ("failure_class", "idle_stall"),
+                    ("outcome", "typed_failure"),
+                ]
+            ) >= 1.0,
+            "reasoning kill reasoning/idle_stall/typed_failure should be >= 1"
+        );
+    }
+
+    #[test]
+    fn reasoning_kill_is_reasoning_model_heuristic() {
+        // Known reasoning model patterns.
+        assert!(reasoning_kill::is_reasoning_model("openai/o1-mini"));
+        assert!(reasoning_kill::is_reasoning_model("openai/o1-preview"));
+        assert!(reasoning_kill::is_reasoning_model("openai/o3-mini"));
+        assert!(reasoning_kill::is_reasoning_model(
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro"
+        ));
+        assert!(reasoning_kill::is_reasoning_model("zai/GLM-5"));
+        assert!(reasoning_kill::is_reasoning_model(
+            "moonshotai/kimi-k2-thinking"
+        ));
+        assert!(reasoning_kill::is_reasoning_model(
+            "custom/some-thinking-model"
+        ));
+
+        // Non-reasoning models.
+        assert!(!reasoning_kill::is_reasoning_model("openai/gpt-4o"));
+        assert!(!reasoning_kill::is_reasoning_model(
+            "anthropic/claude-3.5-sonnet"
+        ));
+        assert!(!reasoning_kill::is_reasoning_model("openai/gpt-4-turbo"));
+
+        // Bare model id (no provider prefix).
+        assert!(reasoning_kill::is_reasoning_model("o1-mini"));
+        assert!(!reasoning_kill::is_reasoning_model("gpt-4o"));
+    }
+
+    #[test]
+    fn reasoning_kill_outcomes_render_as_distinct_samples() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        // Emit one of each outcome for the same model_context/failure_class.
+        reasoning_kill::increment(
+            reasoning_kill::MODEL_CONTEXT_REASONING,
+            reasoning_kill::FAILURE_CLASS_FIRST_CALL_HANG,
+            reasoning_kill::OUTCOME_KILLED,
+        );
+        reasoning_kill::increment(
+            reasoning_kill::MODEL_CONTEXT_REASONING,
+            reasoning_kill::FAILURE_CLASS_FIRST_CALL_HANG,
+            reasoning_kill::OUTCOME_RESCUED,
+        );
+        reasoning_kill::increment(
+            reasoning_kill::MODEL_CONTEXT_REASONING,
+            reasoning_kill::FAILURE_CLASS_FIRST_CALL_HANG,
+            reasoning_kill::OUTCOME_TYPED_FAILURE,
+        );
+
+        let rendered = render().unwrap();
+        for oc in reasoning_kill::OUTCOMES {
+            let val = labeled_sample_value(
+                &rendered,
+                REASONING_KILL_TOTAL,
+                &[
+                    ("model_context", "reasoning"),
+                    ("failure_class", "first_call_hang"),
+                    ("outcome", oc),
+                ],
+            );
+            assert!(val >= 1.0, "reasoning kill outcome={oc} should be >= 1");
+        }
+    }
+
+    #[test]
+    fn rollout_counters_do_not_contain_high_cardinality_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        infra_delta::increment(infra_delta::OUTCOME_TOTAL, true);
+        fallback_rescue::increment_rescue();
+        reasoning_kill::increment(
+            reasoning_kill::MODEL_CONTEXT_REASONING,
+            reasoning_kill::FAILURE_CLASS_FIRST_CALL_HANG,
+            reasoning_kill::OUTCOME_KILLED,
+        );
+
+        let rendered = render().unwrap();
+        for forbidden in ["task_id=", "session_id=", "attempt_id=", "session_idx="] {
+            for line in rendered.lines() {
+                if !line.starts_with(INFRA_EXEMPT_TOTAL)
+                    && !line.starts_with(FALLBACK_RESCUE_TOTAL)
+                    && !line.starts_with(REASONING_KILL_TOTAL)
+                {
+                    continue;
+                }
+                assert!(
+                    !line.contains(forbidden),
+                    "rollout-validation metric must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
         }
     }
 }
