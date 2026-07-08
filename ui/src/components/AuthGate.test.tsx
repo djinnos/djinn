@@ -69,7 +69,6 @@ describe("AuthGate", () => {
 
   it("renders the operator runbook screen when App credentials are missing", async () => {
     vi.mocked(fetchSetupStatus).mockResolvedValue(baseSetupStatus());
-
     render(
       <AuthGate>
         <div>signed-in app</div>
