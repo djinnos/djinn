@@ -90,7 +90,9 @@ use djinn_core::events::EventBus;
 use djinn_db::{Database, DatabaseConnectConfig, PostgresDatabaseConfig};
 use djinn_graph::graph_parity::{GraphArtifactBlobParityError, assert_graph_artifact_blob_parity};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
-use djinn_runtime::{ResolvedCredentials, RoleKind, TaskRunSpec, WorkerEvent};
+use djinn_runtime::{
+    ResolvedCredentials, RoleKind, TaskRunOutcome, TaskRunReport, TaskRunSpec, WorkerEvent,
+};
 use djinn_supervisor::{RpcServices, SupervisorServices, TaskRunSupervisor};
 use djinn_workspace::{MirrorManager, Workspace};
 use tokio::signal::unix::{SignalKind, signal};
@@ -1383,14 +1385,53 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //     is emitted per started command; if readiness fails the runner is
     //     never reached and no event is recorded (the explicit readiness
     //     error path wins).
-    let (pre_task_inputs, pretask_result) = lifecycle::execute_task_run_startup_boundary(
+    let boundary_result = lifecycle::execute_task_run_startup_boundary(
         workspace.path(),
         &cancel,
         Some(&spec.task_id),
         &pretask_activity_sink,
     )
-    .await
-    .context("pre-task startup boundary")?;
+    .await;
+
+    // 4c. Classify blocking pre-task and service readiness failures as
+    //     environmental non-attempts.  When the startup boundary fails,
+    //     no `TaskRunSupervisor::run` is invoked — no agent session or
+    //     work attempt is created, and no quality/arbiter/park penalties
+    //     are applied.  The worker emits a `TerminalReport` with an
+    //     `EnvironmentalNonAttempt` outcome and exits cleanly so the host
+    //     can classify the run accordingly.
+    let (pre_task_inputs, pretask_result) = match boundary_result {
+        Ok(ok) => ok,
+        Err(e) => {
+            let reason = classify_environmental_failure(&e);
+            warn!(
+                error = %e,
+                classification = %reason,
+                "pre-task startup boundary failed; emitting environmental non-attempt report"
+            );
+            let report = TaskRunReport {
+                task_run_id: spec.task_run_id.clone(),
+                outcome: TaskRunOutcome::EnvironmentalNonAttempt {
+                    reason: reason.to_string(),
+                },
+                stages_completed: Vec::new(),
+            };
+            if let Err(emit_err) = rpc.emit_event(WorkerEvent::TerminalReport(report)).await {
+                warn!(
+                    error = %emit_err,
+                    "failed to emit EnvironmentalNonAttempt TerminalReport; \
+                     launcher will fall back to Job-status polling"
+                );
+            }
+            // Shut down RPC cleanly before exiting.
+            drop(rpc);
+            let _ = background.writer.await;
+            cancel.cancel();
+            let _ = background.reader.await;
+            drop(workspace);
+            return Ok(());
+        }
+    };
     info!(
         pre_task_count = pre_task_inputs.environment_config.lifecycle.pre_task.len(),
         injected_services = pre_task_inputs.service_metadata.injected.len(),
@@ -1501,6 +1542,34 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
 
     drop(workspace);
     Ok(())
+}
+
+/// Classify an [`anyhow::Error`] from [`lifecycle::execute_task_run_startup_boundary`]
+/// into a machine-readable environmental non-attempt reason string.
+///
+/// The classification is used in the `EnvironmentalNonAttempt::reason` field
+/// of the terminal report so the host can distinguish pre-task failures from
+/// service readiness failures without parsing the error message.
+fn classify_environmental_failure(err: &anyhow::Error) -> &'static str {
+    let msg = format!("{err:#}");
+    // Service readiness failures come from `check_service_readiness` inside
+    // the startup boundary.  The readiness stub returns a generic error; real
+    // implementations surface TCP/port probe failures.  Check the message
+    // for readiness-related keywords.
+    if msg.contains("readiness") || msg.contains("service") || msg.contains("sidecar") {
+        return "service_readiness_failed";
+    }
+    // Blocking pre-task command failures come from `run_pre_task_commands`
+    // returning `PreTaskCommandsResult::Blocked`, which the startup boundary
+    // converts into an anyhow error containing "blocking command failed".
+    if msg.contains("timed_out=true") || msg.contains("timed out") {
+        return "pre_task_timed_out";
+    }
+    if msg.contains("cancelled=true") {
+        return "pre_task_cancelled";
+    }
+    // Default: generic pre-task failure (non-zero exit code, spawn error, etc.)
+    "pre_task_failed"
 }
 
 /// Commit author/committer identity for the wind-down checkpoint. Owned
@@ -3229,6 +3298,51 @@ warning: something
         assert!(
             logs.contains("cargo warm: step succeeded"),
             "status path should still log success: {logs}"
+        );
+    }
+
+    // ---- c9l4: classify_environmental_failure tests --------------------
+
+    #[test]
+    fn classify_environmental_failure_pre_task_failed() {
+        let err = anyhow::anyhow!(
+            "pre-task blocking command 'setup' failed (exit=Some(1), timed_out=false, cancelled=false)"
+        );
+        assert_eq!(classify_environmental_failure(&err), "pre_task_failed");
+    }
+
+    #[test]
+    fn classify_environmental_failure_pre_task_timed_out() {
+        let err = anyhow::anyhow!(
+            "pre-task blocking command 'build' failed (exit=None, timed_out=true, cancelled=false)"
+        );
+        assert_eq!(classify_environmental_failure(&err), "pre_task_timed_out");
+    }
+
+    #[test]
+    fn classify_environmental_failure_pre_task_cancelled() {
+        let err = anyhow::anyhow!(
+            "pre-task blocking command 'check' failed (exit=None, timed_out=false, cancelled=true)"
+        );
+        assert_eq!(classify_environmental_failure(&err), "pre_task_cancelled");
+    }
+
+    #[test]
+    fn classify_environmental_failure_service_readiness() {
+        let err =
+            anyhow::anyhow!("service readiness check failed: postgres not accepting connections");
+        assert_eq!(
+            classify_environmental_failure(&err),
+            "service_readiness_failed"
+        );
+    }
+
+    #[test]
+    fn classify_environmental_failure_sidecar_error() {
+        let err = anyhow::anyhow!("sidecar probe failed on port 5432");
+        assert_eq!(
+            classify_environmental_failure(&err),
+            "service_readiness_failed"
         );
     }
 }

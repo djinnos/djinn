@@ -2670,6 +2670,10 @@ impl TaskRunSupervisor {
             TaskRunOutcome::WorkerSubmitted => TaskRunStatus::Completed,
             TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,
             TaskRunOutcome::Parked { .. } => TaskRunStatus::Completed,
+            // Environmental non-attempt: no session was created. Map to
+            // Completed so the task_run row is terminal without triggering
+            // failure accounting.
+            TaskRunOutcome::EnvironmentalNonAttempt { .. } => TaskRunStatus::Completed,
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::LoopGuardTripped { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
