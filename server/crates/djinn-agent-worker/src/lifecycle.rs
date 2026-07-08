@@ -4105,4 +4105,320 @@ EOF
             }
         }
     }
+
+    // ---- rolling-deploy and additive pre-task activity compatibility ----
+    //
+    // Compatibility regressions for proposal 4hx2 AC10:
+    //
+    // * Old/absent pre-task configuration remains a no-op where supported
+    //   (rolling-deploy scenario: hgd0 mount absent, legacy mount absent).
+    // * `task_run_pretask_ran` activity payloads survive JSON round-trip
+    //   (persistence/listing compatibility).
+    // * Bounded/redacted output handling is preserved when the additive
+    //   event is surfaced or serialized.
+    //
+    // These tests are self-contained; they do not require live Kubernetes,
+    // production rollout, or external operator proof.
+
+    /// Rolling-deploy compatibility: when both the hgd0 task-run mount and
+    /// the legacy ConfigMap mount are absent (the pre-P5 / pre-reseed
+    /// project scenario), `load_task_run_environment_config_from_paths`
+    /// returns `EnvironmentConfig::empty()` — the startup boundary proceeds
+    /// as a no-op and does not block session dispatch.
+    ///
+    /// This is the exact state a project is in during rolling-deploy before
+    /// the config-mounting side (hgd0) has been rolled out: the worker
+    /// binary runs the new code, but the config files don't exist yet.
+    #[tokio::test]
+    async fn config_fallback_uses_empty_when_both_mounts_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hgd0 = tmp.path().join("nonexistent_hgd0.json");
+        let legacy = tmp.path().join("nonexistent_legacy.json");
+
+        let cfg = load_task_run_environment_config_from_paths(&hgd0, &legacy)
+            .await
+            .expect("must not error when both mounts are absent");
+
+        assert_eq!(
+            cfg,
+            EnvironmentConfig::empty(),
+            "absent mounts must yield EnvironmentConfig::empty()"
+        );
+        assert!(
+            cfg.lifecycle.pre_task.is_empty(),
+            "empty config must have no pre_task commands"
+        );
+
+        // The empty config also produces a no-op when run through the
+        // runner — zero commands, zero activity events, AllSucceeded.
+        let cancel = CancellationToken::new();
+        let sink = RecordingActivitySink::new();
+        let result = run_pre_task_commands(&cfg, tmp.path(), &cancel, Some("t-deploy"), &sink)
+            .await
+            .expect("empty config must not error");
+        assert!(result.all_succeeded());
+        assert!(result.all_results().is_empty());
+        assert!(sink.is_empty());
+    }
+
+    /// Rolling-deploy compatibility: a legacy ConfigMap mount with no
+    /// `lifecycle` key (the common case for existing projects that haven't
+    /// declared pre-task hooks) loads as empty.  When the hgd0 mount is
+    /// absent, the loader falls through to legacy and the startup boundary
+    /// is still a no-op.
+    #[tokio::test]
+    async fn config_fallback_legacy_without_lifecycle_key_is_noop() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let legacy = tmp.path().join("environment.json");
+        // A config that exists but has no `lifecycle` key — serde default
+        // for LifecycleHooks is an empty pre_task list.
+        std::fs::write(
+            &legacy,
+            r#"{
+                "schema_version": 1,
+                "source": "auto-detected",
+                "env": {"RUST_LOG": "info"}
+            }"#,
+        )
+        .unwrap();
+
+        let hgd0 = tmp.path().join("nonexistent_hgd0.json");
+
+        let cfg = load_task_run_environment_config_from_paths(&hgd0, &legacy)
+            .await
+            .expect("must load from legacy mount");
+
+        assert!(
+            cfg.lifecycle.pre_task.is_empty(),
+            "legacy config without lifecycle key must have empty pre_task"
+        );
+
+        // Still a no-op when run through the runner.
+        let cancel = CancellationToken::new();
+        let sink = RecordingActivitySink::new();
+        let result = run_pre_task_commands(&cfg, tmp.path(), &cancel, Some("t-legacy"), &sink)
+            .await
+            .expect("ok");
+        assert!(result.all_succeeded());
+        assert!(sink.is_empty());
+    }
+
+    /// Additive `task_run_pretask_ran` payloads survive JSON round-trip.
+    ///
+    /// This proves that a consumer persisting the payload as a JSON string
+    /// (the `activity_log.payload` column) and later deserializing it back
+    /// to `serde_json::Value` will see the same stable field set.  The
+    /// test exercises the full runner path — not a hand-built payload —
+    /// so it covers redaction, truncation markers, and conditional
+    /// `failure_class` presence.
+    #[tokio::test]
+    async fn pretask_payload_round_trips_through_json_serialization() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = EnvironmentConfig {
+            lifecycle: djinn_stack::environment::LifecycleHooks {
+                pre_task: vec![
+                    PreTaskCommand {
+                        name: Some("round-trip-ok".into()),
+                        command: "echo round-trip-ok".into(),
+                        timeout_seconds: 10,
+                        failure_policy: PreTaskFailurePolicy::Blocking,
+                    },
+                    PreTaskCommand {
+                        name: Some("round-trip-fail".into()),
+                        command: "exit 99".into(),
+                        timeout_seconds: 10,
+                        failure_policy: PreTaskFailurePolicy::Blocking,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..EnvironmentConfig::empty()
+        };
+        let cancel = CancellationToken::new();
+        let sink = RecordingActivitySink::new();
+        let _result = run_pre_task_commands(&cfg, tmp.path(), &cancel, Some("t-roundtrip"), &sink)
+            .await
+            .expect("ok");
+
+        assert_eq!(sink.len(), 2, "two started commands, two events");
+
+        for (i, original_payload) in sink.payloads().iter().enumerate() {
+            // Simulate persistence: serialize to JSON string (like the
+            // activity_log.payload column).
+            let serialized =
+                serde_json::to_string(original_payload).expect("payload must serialize to JSON");
+
+            // Simulate listing/deserialization: parse the string back.
+            let deserialized: serde_json::Value =
+                serde_json::from_str(&serialized).expect("JSON string must deserialize back");
+
+            // All stable fields survive the round trip.
+            let required = [
+                "name",
+                "index",
+                "command",
+                "failure_policy",
+                "started_at",
+                "duration_ms",
+                "exit_code",
+                "timed_out",
+                "cancelled",
+                "blocked",
+                "output_tail",
+                "output_truncated",
+            ];
+            for k in &required {
+                assert!(
+                    deserialized.get(k).is_some(),
+                    "field '{k}' must survive round trip for event {i}"
+                );
+            }
+
+            // The values must match the originals.
+            assert_eq!(
+                deserialized, *original_payload,
+                "round-tripped payload {i} must match original"
+            );
+        }
+
+        // The successful command has no failure_class; the blocked one does.
+        let ok_payload = &sink.payloads()[0];
+        assert!(
+            !ok_payload
+                .as_object()
+                .unwrap()
+                .contains_key("failure_class"),
+            "success: no failure_class"
+        );
+        let fail_payload = &sink.payloads()[1];
+        assert_eq!(
+            fail_payload.get("failure_class").and_then(|v| v.as_str()),
+            Some(ENVIRONMENTAL_FAILURE_CLASS),
+            "blocking failure: failure_class must be environmental"
+        );
+
+        // Verify the failure_class also survives round trip.
+        let fail_serialized = serde_json::to_string(fail_payload).unwrap();
+        let fail_deser: serde_json::Value = serde_json::from_str(&fail_serialized).unwrap();
+        assert_eq!(
+            fail_deser.get("failure_class").and_then(|v| v.as_str()),
+            Some(ENVIRONMENTAL_FAILURE_CLASS),
+            "failure_class must survive JSON round trip"
+        );
+    }
+
+    /// Bounded/redacted output: the activity payload's `output_tail` stays
+    /// within the OUTPUT_MAX_BYTES bound and preserves `[REDACTED]` markers
+    /// even after JSON serialization round-trip.
+    ///
+    /// This covers the AC that "compatibility coverage asserts
+    /// bounded/redacted output handling is preserved when the additive event
+    /// is surfaced or serialized."
+    ///
+    /// Redaction happens BEFORE truncation, so a secret-only output that
+    /// gets fully redacted can shrink below the truncation threshold.
+    /// This test uses large NON-secret filler (~24 KiB) to guarantee
+    /// truncation, then appends a secret value to exercise redaction
+    /// in the same payload.
+    #[tokio::test]
+    async fn pretask_activity_output_tail_bounded_with_redaction_after_serialization() {
+        let secret_value = "sk-compat-regression-long-secret-key-1234567890";
+        let _guard = TestEnvGuard::set("COMPAT_REGRESSION_SECRET", secret_value);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // ~24 KiB of non-secret filler (each line ~80 chars, 300 lines)
+        // stays above OUTPUT_MAX_BYTES even after the secret portion is
+        // redacted. A single echo of the secret at the end adds a
+        // redactable segment.
+        let cfg = EnvironmentConfig {
+            env: [(
+                "COMPAT_REGRESSION_SECRET".to_owned(),
+                secret_value.to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            lifecycle: djinn_stack::environment::LifecycleHooks {
+                pre_task: vec![PreTaskCommand {
+                    name: Some("large-secret-output".into()),
+                    command: concat!(
+                        // ~24 KiB of filler that does NOT contain the secret.
+                        "for i in $(seq 1 300); do ",
+                        "printf 'Line %04d: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; ",
+                        "done; ",
+                        // A secret-containing echo to exercise redaction.
+                        "echo credential=${COMPAT_REGRESSION_SECRET}"
+                    )
+                    .to_string(),
+                    timeout_seconds: 30,
+                    failure_policy: PreTaskFailurePolicy::Blocking,
+                }],
+                ..Default::default()
+            },
+            ..EnvironmentConfig::empty()
+        };
+
+        let cancel = CancellationToken::new();
+        let sink = RecordingActivitySink::new();
+        let result = run_pre_task_commands(&cfg, tmp.path(), &cancel, Some("t-bounded"), &sink)
+            .await
+            .expect("ok");
+        assert!(result.all_succeeded());
+
+        let payload = &sink.payloads()[0];
+
+        // 1. output_tail must be a string (not null).
+        let tail = payload["output_tail"]
+            .as_str()
+            .expect("output_tail is string");
+
+        // 2. The secret value must NOT appear in the payload.
+        assert!(
+            !tail.contains(secret_value),
+            "output_tail must be redacted, got: {}",
+            &tail[..tail.len().min(200)]
+        );
+
+        // 3. The [REDACTED] marker must be present (secrets were found and redacted).
+        assert!(
+            tail.contains("[REDACTED]"),
+            "output_tail must contain [REDACTED] marker"
+        );
+
+        // 4. output_truncated must be true (large non-secret filler output).
+        assert_eq!(
+            payload["output_truncated"].as_bool(),
+            Some(true),
+            "large output must be truncated"
+        );
+
+        // 5. The tail must be bounded (OUTPUT_MAX_BYTES + truncation marker).
+        assert!(
+            tail.len() <= OUTPUT_MAX_BYTES + 200,
+            "output_tail must be bounded, got {} bytes",
+            tail.len()
+        );
+
+        // 6. Serialize → deserialize and verify redaction + bounds survive.
+        let serialized = serde_json::to_string(payload).expect("serialize");
+        let deserialized: serde_json::Value =
+            serde_json::from_str(&serialized).expect("deserialize");
+
+        let round_tripped_tail = deserialized["output_tail"]
+            .as_str()
+            .expect("output_tail survives round trip");
+        assert!(
+            !round_tripped_tail.contains(secret_value),
+            "redaction must survive JSON round trip"
+        );
+        assert!(
+            round_tripped_tail.contains("[REDACTED]"),
+            "redaction marker must survive JSON round trip"
+        );
+        assert_eq!(
+            deserialized["output_truncated"].as_bool(),
+            Some(true),
+            "truncated flag must survive JSON round trip"
+        );
+    }
 }
