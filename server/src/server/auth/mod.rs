@@ -86,6 +86,18 @@ pub(crate) const SETUP_SESSION_COOKIE: &str = "djinn_setup_session";
 const SETUP_SESSION_PATH: &str = "/auth/github";
 /// Setup session TTL: 15 minutes.
 const SETUP_SESSION_TTL_SECS: i64 = 60 * 15;
+/// Query parameter name for the install-continuation nonce appended to the
+/// GitHub install URL after manifest credential persistence.
+const INSTALL_CONTINUATION_PARAM: &str = "djinn_continuation";
+/// Cookie name for the install-continuation nonce. This cookie carries the
+/// nonce through the cross-domain GitHub install round-trip (manifest
+/// callback → GitHub install page → `/auth/github/callback` →
+/// `/auth/github/app-setup-callback`) because GitHub does not echo custom
+/// query parameters on its redirects.
+const INSTALL_CONTINUATION_COOKIE: &str = "djinn_install_continuation";
+/// TTL for the install-continuation cookie. Matches the realistic window for
+/// the user to complete the GitHub install after credentials are persisted.
+const INSTALL_CONTINUATION_TTL_SECS: i64 = 60 * 10; // 10 minutes
 
 /// Read a GitHub App OAuth client id/secret from the environment.
 ///
@@ -266,6 +278,41 @@ fn clear_setup_cookie(headers: &mut HeaderMap) {
         "{name}=; Path={path}; HttpOnly; SameSite=Lax; Max-Age=0; \
          Expires=Thu, 01 Jan 1970 00:00:00 GMT{secure}",
         name = SETUP_SESSION_COOKIE,
+        path = SETUP_SESSION_PATH,
+    );
+    if let Ok(hv) = HeaderValue::from_str(&cookie) {
+        headers.append(header::SET_COOKIE, hv);
+    }
+}
+
+/// Set the install-continuation cookie, which carries the manifest-flow
+/// nonce through the cross-domain GitHub install round-trip.
+///
+/// Cookie properties:
+/// - HttpOnly, SameSite=Lax
+/// - Path-scoped to `/auth/github` (covers both `callback` and `app-setup-callback`)
+/// - Secure when `DJINN_PUBLIC_URL` is HTTPS
+/// - Expires after 10 minutes
+fn set_install_continuation_cookie(headers: &mut HeaderMap, value: &str) {
+    let secure = if cookie_secure() { "; Secure" } else { "" };
+    let cookie = format!(
+        "{name}={value}; Path={path}; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}",
+        name = INSTALL_CONTINUATION_COOKIE,
+        path = SETUP_SESSION_PATH,
+        max_age = INSTALL_CONTINUATION_TTL_SECS,
+    );
+    if let Ok(hv) = HeaderValue::from_str(&cookie) {
+        headers.append(header::SET_COOKIE, hv);
+    }
+}
+
+/// Clear the install-continuation cookie.
+fn clear_install_continuation_cookie(headers: &mut HeaderMap) {
+    let secure = if cookie_secure() { "; Secure" } else { "" };
+    let cookie = format!(
+        "{name}=; Path={path}; HttpOnly; SameSite=Lax; Max-Age=0; \
+         Expires=Thu, 01 Jan 1970 00:00:00 GMT{secure}",
+        name = INSTALL_CONTINUATION_COOKIE,
         path = SETUP_SESSION_PATH,
     );
     if let Ok(hv) = HeaderValue::from_str(&cookie) {
@@ -526,10 +573,25 @@ async fn github_callback(
         && q.setup_action.as_deref() == Some("install")
     {
         let mut resp_headers = HeaderMap::new();
+        // The install-continuation cookie (set by the manifest callback)
+        // travels with the browser through GitHub's cross-domain redirect.
+        // Forward its value as a query param so `app_setup_callback` can
+        // validate the continuation nonce. GitHub does not echo custom query
+        // params on its install redirect, so the cookie is the transport.
+        let continuation_qs = extract_cookie(&headers, INSTALL_CONTINUATION_COOKIE)
+            .map(|c| {
+                format!(
+                    "&{p}={v}",
+                    p = INSTALL_CONTINUATION_PARAM,
+                    v = urlencode(&c)
+                )
+            })
+            .unwrap_or_default();
         let target = format!(
-            "{}/auth/github/app-setup-callback?installation_id={}&setup_action=install",
+            "{}/auth/github/app-setup-callback?installation_id={}&setup_action=install{cont}",
             public_url().trim_end_matches('/'),
             urlencode(installation_id),
+            cont = continuation_qs,
         );
         resp_headers.insert(
             header::LOCATION,
@@ -946,6 +1008,15 @@ pub(super) fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> 
     None
 }
 
+/// Copy all `Set-Cookie` headers from `src` into `dest`'s response headers.
+/// Used when a handler builds a redirect response and then needs to append
+/// extra cookie-clearing directives from a separate `HeaderMap`.
+fn merge_set_cookie(dest: &mut Response, src: &HeaderMap) {
+    for hv in src.get_all(header::SET_COOKIE) {
+        dest.headers_mut().append(header::SET_COOKIE, hv.clone());
+    }
+}
+
 pub(super) fn random_token_b64() -> String {
     let mut bytes = [0u8; 32];
     ring::rand::SystemRandom::new()
@@ -1018,11 +1089,18 @@ pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Query parameters for `GET /auth/github/app-setup-callback` — GitHub
 /// appends `?installation_id=<N>&setup_action=install` after the user
 /// completes (or requests) an installation via the App's install page.
+///
+/// When the request originates from the manifest-continuation flow (i.e.
+/// after credential persistence), an additional `djinn_continuation` param
+/// is present and must match the pending continuation nonce.
 #[derive(Deserialize)]
 struct AppSetupQuery {
     installation_id: Option<String>,
     #[serde(default)]
     setup_action: Option<String>,
+    /// Install-continuation nonce appended by the manifest callback redirect.
+    #[serde(default, rename = "djinn_continuation")]
+    continuation_state: Option<String>,
 }
 
 /// `GET /auth/github/app-setup-callback` — invoked by GitHub after the user
@@ -1038,6 +1116,7 @@ struct AppSetupQuery {
 async fn app_setup_callback(
     State(state): State<AppState>,
     Query(q): Query<AppSetupQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let installation_id: u64 = match q.installation_id.as_deref().and_then(|s| s.parse().ok()) {
         Some(id) if id > 0 => id,
@@ -1053,6 +1132,41 @@ async fn app_setup_callback(
     // any post-install hit with a valid installation_id should complete the
     // binding — but we log it for auditability.
     let action = q.setup_action.as_deref().unwrap_or("");
+
+    // Validate install-continuation state when a manifest flow just completed.
+    // A pending nonce means this callback must carry the matching continuation
+    // nonce. Non-manifest flows (pre-configured credentials) have no pending
+    // nonce, so they pass through unconditionally.
+    //
+    // The nonce can arrive via:
+    //   1. The `djinn_continuation` query param — set by `github_callback`
+    //      when it bridges the install redirect to this endpoint (the nonce
+    //      was carried through the GitHub round-trip in a cookie).
+    //   2. The `djinn_install_continuation` cookie directly — for direct
+    //      hits to this endpoint (e.g. GitHub's `setup_url` config).
+    let continuation_cookie = extract_cookie(&headers, INSTALL_CONTINUATION_COOKIE);
+    let continuation_candidate = q
+        .continuation_state
+        .as_deref()
+        .or(continuation_cookie.as_deref());
+    if !state
+        .validate_and_consume_install_continuation(continuation_candidate)
+        .await
+    {
+        tracing::warn!(
+            installation_id,
+            "app_setup_callback: install-continuation state mismatch or missing"
+        );
+        // Clear the cookie on failure to prevent retry confusion.
+        let mut resp_headers = HeaderMap::new();
+        clear_install_continuation_cookie(&mut resp_headers);
+        return (
+            StatusCode::FORBIDDEN,
+            resp_headers,
+            "install-continuation state mismatch — restart the setup flow",
+        )
+            .into_response();
+    }
 
     let cfg = match state.app_config().await {
         Some(c) => c,
@@ -1123,7 +1237,11 @@ async fn app_setup_callback(
             action,
             "app_setup_callback: re-entry for already-bound org, redirecting home",
         );
-        return redirect_to_web();
+        let mut resp = redirect_to_web();
+        let mut extra = HeaderMap::new();
+        clear_install_continuation_cookie(&mut extra);
+        merge_set_cookie(&mut resp, &extra);
+        return resp;
     }
 
     if let Err(e) = org_repo
@@ -1154,7 +1272,11 @@ async fn app_setup_callback(
         action,
         "app_setup_callback: org_config bound",
     );
-    redirect_to_web()
+    let mut resp = redirect_to_web();
+    let mut extra = HeaderMap::new();
+    clear_install_continuation_cookie(&mut extra);
+    merge_set_cookie(&mut resp, &extra);
+    resp
 }
 
 /// Common post-success redirect — send the browser to the web client root.
@@ -1422,15 +1544,40 @@ async fn app_manifest_callback(
 
     state.clear_setup_session_token().await;
 
-    // Build the install URL for the newly created App.
-    let install_url = cfg
+    // Generate an install-continuation nonce and store it so that
+    // `/auth/github/app-setup-callback` can validate the redirect came from
+    // this manifest flow (not a direct/unsolicited hit).
+    let continuation_nonce = random_token_b64();
+    state
+        .set_pending_install_continuation(continuation_nonce.clone())
+        .await;
+
+    // Build the install URL for the newly created App, appending the
+    // continuation nonce as a query parameter.
+    let base_install_url = cfg
         .install_url()
         .unwrap_or_else(|| format!("{}/", web_url().trim_end_matches('/')));
+    let install_url = if base_install_url.contains('?') {
+        format!(
+            "{base_install_url}&{param}={nonce}",
+            param = INSTALL_CONTINUATION_PARAM,
+            nonce = urlencode(&continuation_nonce),
+        )
+    } else {
+        format!(
+            "{base_install_url}?{param}={nonce}",
+            param = INSTALL_CONTINUATION_PARAM,
+            nonce = urlencode(&continuation_nonce),
+        )
+    };
 
     // Clear all setup cookies/state: manifest CSRF + setup session.
+    // Simultaneously set the install-continuation cookie so the nonce
+    // survives the cross-domain GitHub install round-trip.
     let mut resp_headers = HeaderMap::new();
     clear_cookie(&mut resp_headers, MANIFEST_STATE_COOKIE);
     clear_setup_cookie(&mut resp_headers);
+    set_install_continuation_cookie(&mut resp_headers, &continuation_nonce);
     resp_headers.insert(
         header::LOCATION,
         HeaderValue::from_str(&install_url).unwrap_or_else(|_| HeaderValue::from_static("/")),
@@ -2518,6 +2665,11 @@ mod tests {
             location.contains("github.com/apps/djinn-test/installations/new"),
             "must redirect to the new App install URL, got: {location}"
         );
+        // Install-continuation nonce must be present in the redirect.
+        assert!(
+            location.contains(INSTALL_CONTINUATION_PARAM),
+            "install URL must contain continuation param, got: {location}"
+        );
         // No setup token or session nonce leaks into the redirect.
         assert!(
             !location.contains("setup_token"),
@@ -2590,5 +2742,1646 @@ mod tests {
 
         // Clean up the override.
         *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    // ─── Install-continuation flow tests (AC1) ───────────────────────────
+
+    /// `/auth/github/callback` with `installation_id` and `setup_action=install`
+    /// redirects to `/auth/github/app-setup-callback` preserving the
+    /// installation params. This is the install-continuation entry point that
+    /// GitHub uses when `request_oauth_on_install: true` in the manifest.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_forwards_install_to_app_setup_callback() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let headers = HeaderMap::new();
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: None,
+                state: None,
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FOUND,
+            "must redirect to app-setup-callback"
+        );
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            location.contains("/auth/github/app-setup-callback"),
+            "must redirect to app-setup-callback, got: {location}"
+        );
+        assert!(
+            location.contains("installation_id=42"),
+            "must preserve installation_id, got: {location}"
+        );
+        assert!(
+            location.contains("setup_action=install"),
+            "must preserve setup_action, got: {location}"
+        );
+    }
+
+    /// The install-redirect from `/auth/github/callback` does not contain
+    /// any OAuth state, boot tokens, or session tokens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_redirect_no_token_leak() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: Some("leaked-code".into()),
+                state: Some("leaked-state".into()),
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !location.contains("code="),
+            "OAuth code must not leak: {location}"
+        );
+        assert!(
+            !location.contains("state="),
+            "OAuth state must not leak: {location}"
+        );
+        assert!(
+            !location.contains("setup_token"),
+            "setup_token must not leak: {location}"
+        );
+    }
+
+    /// When `installation_id` is present but `setup_action` is not `install`,
+    /// the callback falls through to the normal OAuth flow (not the install
+    /// redirect). This preserves the existing callback behavior for
+    /// `setup_action=update` or other values.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_non_install_action_falls_through_to_oauth() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: None,
+                state: None,
+                installation_id: Some("42".into()),
+                setup_action: Some("update".into()),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        // Without code/state, it should return BAD_REQUEST (falling through
+        // to the normal OAuth validation), not a redirect to app-setup-callback.
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "non-install setup_action should fall through to OAuth validation"
+        );
+    }
+
+    // ─── Regression: production auth behavior (AC4) ──────────────────────
+
+    /// With `DJINN_ENABLE_SELF_SETUP` unset/false, ALL setup routes return
+    /// 404 and `/auth/config` does not advertise setup availability.
+    /// This is the production default — no setup affordances leak.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn self_setup_disabled_all_setup_routes_hidden_and_config_clean() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(false)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        // Config must not advertise self-setup.
+        let cfg_resp = config(State(state.clone())).await;
+        assert!(
+            !cfg_resp.0.self_setup_available,
+            "self_setup_available must be false when gate is disabled"
+        );
+
+        // create-app returns 404.
+        let resp = create_app(
+            State(state.clone()),
+            Query(CreateAppQuery { setup_token: None }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // manifest-callback returns 404.
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: None,
+                state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// With configured Secret/env credentials (app_config set) and the
+    /// self-setup gate enabled, setup routes still return 404 because usable
+    /// credentials take precedence. This is the "production configured" path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configured_credentials_hide_setup_routes_and_config_reports_configured() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // Config must report configured=true and self_setup_available=false.
+        let cfg_resp = config(State(state.clone())).await;
+        assert!(cfg_resp.0.configured, "must report configured=true");
+        assert!(
+            !cfg_resp.0.self_setup_available,
+            "must not advertise self-setup when credentials exist"
+        );
+        assert!(
+            cfg_resp.0.missing.is_empty(),
+            "no missing env vars when credentials are loaded"
+        );
+
+        // Setup routes return 404 even with gate enabled.
+        let resp = create_app(
+            State(state.clone()),
+            Query(CreateAppQuery { setup_token: None }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let resp = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: None,
+                state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `/auth/github/start` with configured credentials produces a 302
+    /// redirect to GitHub's OAuth authorize page with the expected params.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_start_produces_oauth_redirect_with_credentials() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.test-client-id".into(),
+            client_secret: "secret".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let resp = github_start(
+            State(state),
+            Query(StartQuery {
+                redirect: Some("/tasks".into()),
+                install: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            location.starts_with("https://github.com/login/oauth/authorize"),
+            "must redirect to GitHub OAuth, got: {location}"
+        );
+        assert!(
+            location.contains("client_id=Iv1.test-client-id"),
+            "must include client_id, got: {location}"
+        );
+        assert!(
+            location.contains("redirect_uri="),
+            "must include redirect_uri, got: {location}"
+        );
+        assert!(
+            location.contains("state="),
+            "must include CSRF state, got: {location}"
+        );
+
+        // OAuth state cookie must be set.
+        let set_cookies: Vec<_> = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap_or("").to_string())
+            .collect();
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.starts_with(OAUTH_STATE_COOKIE)),
+            "OAuth state cookie must be set: {set_cookies:?}"
+        );
+    }
+
+    /// `/auth/github/start` without configured credentials returns 503.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_start_returns_503_without_credentials() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let resp = github_start(
+            State(state),
+            Query(StartQuery {
+                redirect: None,
+                install: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// `app-setup-callback` rejects missing or invalid installation_id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_rejects_missing_or_invalid_installation_id() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        // Missing installation_id.
+        let resp = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: None,
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Empty installation_id.
+        let resp = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: Some(String::new()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Non-numeric installation_id.
+        let resp = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: Some("not-a-number".into()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Zero installation_id.
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("0".into()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `app-setup-callback` returns CONFLICT when no credentials are
+    /// configured. This is the case when GitHub redirects here but the
+    /// deployment hasn't set up the App yet.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_returns_conflict_without_credentials() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "must return 409 when credentials are missing"
+        );
+    }
+
+    // ─── Install-continuation state validation (AC1/AC4) ────────────────
+
+    /// When a pending install-continuation nonce exists and the callback
+    /// carries the matching `continuation_state` param, the callback proceeds
+    /// normally and the nonce is consumed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_valid_continuation_state_succeeds() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // Set a pending continuation nonce.
+        let nonce = "test-continuation-nonce-abc".to_string();
+        state
+            .set_pending_install_continuation_for_tests(Some(nonce.clone()))
+            .await;
+
+        // The callback carries the matching continuation_state — but will
+        // still fail because fetch_installation_for_setup requires a real
+        // GitHub App JWT. We just verify the continuation validation passes
+        // (status != FORBIDDEN).
+        let resp = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+                continuation_state: Some(nonce.clone()),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        // Should NOT be FORBIDDEN — continuation passed.
+        // It will fail at the JWT/installation step (BAD_GATEWAY or similar),
+        // which proves the continuation check didn't block it.
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "valid continuation must not be rejected"
+        );
+
+        // The nonce should now be consumed (single-use).
+        assert!(
+            state.validate_and_consume_install_continuation(None).await,
+            "after consumption, no continuation is pending, so None should pass"
+        );
+    }
+
+    /// When a pending continuation nonce exists but the callback does NOT
+    /// carry a `continuation_state` param, the callback is rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_missing_continuation_state_rejected() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // Set a pending continuation nonce.
+        state
+            .set_pending_install_continuation_for_tests(Some("expected-nonce".into()))
+            .await;
+
+        // Callback without continuation_state — should be rejected.
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "missing continuation_state must be rejected when one is pending"
+        );
+    }
+
+    /// When a pending continuation nonce exists but the callback carries a
+    /// wrong `continuation_state`, the callback is rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_mismatched_continuation_state_rejected() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // Set a pending continuation nonce.
+        state
+            .set_pending_install_continuation_for_tests(Some("correct-nonce".into()))
+            .await;
+
+        // Callback with a different continuation_state — should be rejected.
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+                continuation_state: Some("wrong-nonce".into()),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "mismatched continuation_state must be rejected"
+        );
+    }
+
+    /// When NO pending continuation nonce exists (non-manifest flow), the
+    /// callback proceeds without requiring a continuation_state. This
+    /// preserves the existing behavior for pre-configured credentials.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_no_pending_continuation_allows_request() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // No pending continuation — don't set one.
+        // Callback without continuation_state should NOT be rejected with
+        // FORBIDDEN (it may fail at the JWT step, which is fine).
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "no pending continuation must not produce FORBIDDEN"
+        );
+    }
+
+    /// The continuation nonce is included in the manifest callback's install
+    /// URL redirect and can be used to validate the subsequent
+    /// app-setup-callback request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_redirect_contains_valid_continuation_for_setup_callback() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        state.set_test_bypass_persist(true).await;
+        let csrf = "csrf-continuation-roundtrip".to_string();
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 42,
+            slug: "djinn-test".into(),
+            client_id: "Iv1.test-client".into(),
+            client_secret: "test-secret".into(),
+            webhook_secret: Some("test-webhook-secret".into()),
+            pem: "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----".into(),
+        }));
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("valid-code".into()),
+                state: Some(csrf),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Extract the continuation nonce from the URL.
+        let continuation_nonce = location
+            .split(&format!("{INSTALL_CONTINUATION_PARAM}="))
+            .nth(1)
+            .expect("continuation param must be present")
+            .split('&')
+            .next()
+            .unwrap();
+        assert!(
+            !continuation_nonce.is_empty(),
+            "continuation nonce must not be empty"
+        );
+
+        // Now simulate the app-setup-callback with the extracted nonce.
+        // It should NOT be rejected with FORBIDDEN (the nonce matches).
+        let resp = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+                continuation_state: Some(continuation_nonce.to_string()),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "matching continuation nonce must not be rejected"
+        );
+
+        // Replay: the nonce was consumed, so a second call without one
+        // should now pass (no pending continuation).
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "after nonce consumed, no continuation required"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    // ─── Manifest continuation through the /auth/github/callback bridge ──────
+    //
+    // These tests verify the end-to-end manifest continuation flow:
+    //   1. `app_manifest_callback` persists credentials and sets a continuation
+    //      nonce both in the install URL and in the `djinn_install_continuation`
+    //      cookie.
+    //   2. GitHub redirects to `/auth/github/callback?installation_id=...&setup_action=install`
+    //      (dropping any custom query params). The browser sends the cookie.
+    //   3. `github_callback` reads the cookie, appends it as `djinn_continuation`
+    //      to the `app-setup-callback` redirect URL.
+    //   4. `app_setup_callback` validates the continuation nonce.
+
+    /// Helper: extract the continuation cookie value from a response's
+    /// `Set-Cookie` headers.
+    fn extract_set_cookie_value(resp: &Response, cookie_name: &str) -> Option<String> {
+        for hv in resp.headers().get_all(header::SET_COOKIE) {
+            let Ok(s) = hv.to_str() else { continue };
+            if s.starts_with(&format!("{cookie_name}=")) {
+                // Value is between "name=" and the first ";"
+                return Some(
+                    s[cookie_name.len() + 1..]
+                        .split(';')
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                );
+            }
+        }
+        None
+    }
+
+    /// The manifest callback sets the `djinn_install_continuation` cookie so the
+    /// nonce survives the cross-domain GitHub install round-trip.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_sets_continuation_cookie() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        state.set_test_bypass_persist(true).await;
+        let csrf = "csrf-cookie-test".to_string();
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 42,
+            slug: "djinn-test".into(),
+            client_id: "Iv1.test-client".into(),
+            client_secret: "test-secret".into(),
+            webhook_secret: Some("test-webhook-secret".into()),
+            pem: "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----".into(),
+        }));
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("valid-code".into()),
+                state: Some(csrf),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::FOUND);
+
+        // The continuation cookie must be present in Set-Cookie.
+        let cookie_val = extract_set_cookie_value(&resp, INSTALL_CONTINUATION_COOKIE)
+            .expect("install-continuation cookie must be set");
+        assert!(!cookie_val.is_empty(), "cookie value must not be empty");
+
+        // The cookie value must match the nonce in the install URL.
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let url_nonce = location
+            .split(&format!("{INSTALL_CONTINUATION_PARAM}="))
+            .nth(1)
+            .and_then(|s| s.split('&').next())
+            .unwrap();
+        assert_eq!(
+            cookie_val, url_nonce,
+            "cookie value must match the URL nonce"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    /// Full bridge: manifest success → `/auth/github/callback` (with
+    /// continuation cookie) → redirect to `app-setup-callback` carries the
+    /// continuation param → `app_setup_callback` validates it.
+    ///
+    /// This is the core regression test for AC1/AC4: the continuation state
+    /// must survive through the real callback bridge.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_continuation_through_callback_bridge_valid() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        state.set_test_bypass_persist(true).await;
+        let csrf = "csrf-bridge-valid".to_string();
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 42,
+            slug: "djinn-test".into(),
+            client_id: "Iv1.test-client".into(),
+            client_secret: "test-secret".into(),
+            webhook_secret: Some("test-webhook-secret".into()),
+            pem: "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----".into(),
+        }));
+
+        // Step 1: Manifest callback — persist credentials, get install URL
+        // with continuation nonce, and the continuation cookie.
+        let mut manifest_headers = headers_with_session(&session);
+        manifest_headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        let manifest_resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("valid-code".into()),
+                state: Some(csrf),
+            }),
+            manifest_headers,
+        )
+        .await;
+        assert_eq!(manifest_resp.status(), StatusCode::FOUND);
+
+        // Extract the continuation cookie value from the manifest response.
+        let continuation_cookie_val =
+            extract_set_cookie_value(&manifest_resp, INSTALL_CONTINUATION_COOKIE)
+                .expect("continuation cookie must be set by manifest callback");
+
+        // Step 2: Simulate GitHub's redirect to /auth/github/callback after
+        // the install. GitHub drops custom query params, but the browser sends
+        // the continuation cookie.
+        let mut callback_headers = HeaderMap::new();
+        callback_headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!(
+                "{INSTALL_CONTINUATION_COOKIE}={continuation_cookie_val}"
+            ))
+            .unwrap(),
+        );
+
+        let callback_resp = github_callback(
+            State(state.clone()),
+            Query(CallbackQuery {
+                code: None,
+                state: None,
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+            }),
+            callback_headers,
+        )
+        .await;
+
+        // Must redirect to app-setup-callback with the continuation param.
+        assert_eq!(callback_resp.status(), StatusCode::FOUND);
+        let callback_location = callback_resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            callback_location.contains("/auth/github/app-setup-callback"),
+            "must redirect to app-setup-callback, got: {callback_location}"
+        );
+        assert!(
+            callback_location.contains(&format!(
+                "{INSTALL_CONTINUATION_PARAM}={continuation_cookie_val}"
+            )),
+            "redirect must carry the continuation nonce, got: {callback_location}"
+        );
+
+        // Step 3: Simulate app-setup-callback with the continuation param
+        // from the redirect URL. The nonce matches, so it must NOT be
+        // rejected with FORBIDDEN.
+        let resp = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+                continuation_state: Some(continuation_cookie_val),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "valid continuation through the callback bridge must not be rejected"
+        );
+        // The nonce is consumed after this.
+        assert!(
+            state.validate_and_consume_install_continuation(None).await,
+            "nonce must be consumed after successful validation"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    /// Bridge with MISSING continuation: GitHub redirects to
+    /// `/auth/github/callback` without the continuation cookie (e.g. the
+    /// browser blocked it). The redirect to `app-setup-callback` will NOT
+    /// carry `djinn_continuation`, and `app_setup_callback` must reject it
+    /// with FORBIDDEN because a pending nonce exists.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_continuation_through_callback_bridge_missing_rejected() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        state.set_test_bypass_persist(true).await;
+        let csrf = "csrf-bridge-missing".to_string();
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 42,
+            slug: "djinn-test".into(),
+            client_id: "Iv1.test-client".into(),
+            client_secret: "test-secret".into(),
+            webhook_secret: Some("test-webhook-secret".into()),
+            pem: "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----".into(),
+        }));
+
+        // Step 1: Manifest callback — persist credentials, set continuation.
+        let mut manifest_headers = headers_with_session(&session);
+        manifest_headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        let manifest_resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("valid-code".into()),
+                state: Some(csrf),
+            }),
+            manifest_headers,
+        )
+        .await;
+        assert_eq!(manifest_resp.status(), StatusCode::FOUND);
+
+        // Step 2: GitHub callback WITHOUT the continuation cookie (simulating
+        // a browser that dropped/blocked it).
+        let callback_resp = github_callback(
+            State(state.clone()),
+            Query(CallbackQuery {
+                code: None,
+                state: None,
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+            }),
+            HeaderMap::new(), // no continuation cookie
+        )
+        .await;
+
+        assert_eq!(callback_resp.status(), StatusCode::FOUND);
+        let callback_location = callback_resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+
+        // The redirect must NOT carry the continuation param.
+        assert!(
+            !callback_location.contains(INSTALL_CONTINUATION_PARAM),
+            "redirect must not carry continuation when cookie is absent, got: {callback_location}"
+        );
+
+        // Step 3: app-setup-callback without continuation — must be FORBIDDEN.
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "missing continuation through the callback bridge must be rejected"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    /// Bridge with MISMATCHED continuation: the cookie carries a different
+    /// nonce than what was stored. `app-setup-callback` must reject it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_continuation_through_callback_bridge_mismatched_rejected() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        state.set_test_bypass_persist(true).await;
+        let csrf = "csrf-bridge-mismatch".to_string();
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 42,
+            slug: "djinn-test".into(),
+            client_id: "Iv1.test-client".into(),
+            client_secret: "test-secret".into(),
+            webhook_secret: Some("test-webhook-secret".into()),
+            pem: "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----".into(),
+        }));
+
+        // Step 1: Manifest callback — persist credentials, set continuation.
+        let mut manifest_headers = headers_with_session(&session);
+        manifest_headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        let manifest_resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("valid-code".into()),
+                state: Some(csrf),
+            }),
+            manifest_headers,
+        )
+        .await;
+        assert_eq!(manifest_resp.status(), StatusCode::FOUND);
+
+        // Step 2: GitHub callback with a WRONG continuation cookie value.
+        let mut callback_headers = HeaderMap::new();
+        callback_headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{INSTALL_CONTINUATION_COOKIE}=wrong-nonce-value"))
+                .unwrap(),
+        );
+
+        let callback_resp = github_callback(
+            State(state.clone()),
+            Query(CallbackQuery {
+                code: None,
+                state: None,
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+            }),
+            callback_headers,
+        )
+        .await;
+
+        assert_eq!(callback_resp.status(), StatusCode::FOUND);
+        let callback_location = callback_resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Extract the (wrong) continuation from the redirect URL.
+        let wrong_nonce = callback_location
+            .split(&format!("{INSTALL_CONTINUATION_PARAM}="))
+            .nth(1)
+            .and_then(|s| s.split('&').next())
+            .unwrap_or("wrong-nonce-value");
+
+        // Step 3: app-setup-callback with the wrong continuation — must be FORBIDDEN.
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+                continuation_state: Some(wrong_nonce.to_string()),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "mismatched continuation through the callback bridge must be rejected"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    /// The `github_callback` install redirect carries the continuation cookie
+    /// value as a query param when the cookie is present.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_install_redirect_carries_continuation_from_cookie() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!(
+                "{INSTALL_CONTINUATION_COOKIE}=test-nonce-from-cookie"
+            ))
+            .unwrap(),
+        );
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: None,
+                state: None,
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            location.contains(&format!(
+                "{INSTALL_CONTINUATION_PARAM}=test-nonce-from-cookie"
+            )),
+            "redirect must carry continuation from cookie, got: {location}"
+        );
+    }
+
+    /// The `github_callback` install redirect does NOT carry a continuation
+    /// param when no continuation cookie is present (non-manifest flow).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_install_redirect_no_continuation_without_cookie() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: None,
+                state: None,
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !location.contains(INSTALL_CONTINUATION_PARAM),
+            "redirect must not carry continuation without cookie, got: {location}"
+        );
+    }
+
+    /// `/auth/github/callback` without the OAuth state cookie returns 400.
+    /// This is a regression guard ensuring the CSRF state check is not
+    /// bypassed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_rejects_missing_state_cookie() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: Some("some-code".into()),
+                state: Some("some-state".into()),
+                installation_id: None,
+                setup_action: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `/auth/github/callback` with mismatched state returns 400.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_rejects_state_mismatch() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{}=cookie-state", OAUTH_STATE_COOKIE)).unwrap(),
+        );
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: Some("code".into()),
+                state: Some("different-state".into()),
+                installation_id: None,
+                setup_action: None,
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `/auth/github/callback` with missing code or state returns 400.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_rejects_missing_code_or_state() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        // Missing code.
+        let resp = github_callback(
+            State(state.clone()),
+            Query(CallbackQuery {
+                code: None,
+                state: Some("state".into()),
+                installation_id: None,
+                setup_action: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Missing state.
+        let resp = github_callback(
+            State(state.clone()),
+            Query(CallbackQuery {
+                code: Some("code".into()),
+                state: None,
+                installation_id: None,
+                setup_action: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Empty code.
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: Some(String::new()),
+                state: Some("state".into()),
+                installation_id: None,
+                setup_action: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ─── No-token-leak assertions (AC5) ──────────────────────────────────
+
+    /// OAuth start redirect URL contains only the expected params — no
+    /// boot token, setup session, or credential material.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oauth_start_redirect_no_token_leak() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.test-client-id".into(),
+            client_secret: "super-secret-value".into(),
+            pem: "SENSITIVE-PEM".into(),
+            webhook_secret: "webhook-secret".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // Inject a boot token and setup session — neither should appear.
+        let (raw_token, bt) = boot_token::BootToken::generate();
+        state.set_boot_token_for_tests(Some(bt)).await;
+
+        let resp = github_start(
+            State(state),
+            Query(StartQuery {
+                redirect: None,
+                install: None,
+            }),
+        )
+        .await;
+
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !location.contains("setup_token"),
+            "setup_token must not appear: {location}"
+        );
+        assert!(
+            !location.contains(&raw_token),
+            "raw boot token must not appear: {location}"
+        );
+        assert!(
+            !location.contains("super-secret-value"),
+            "client_secret must not appear: {location}"
+        );
+        assert!(
+            !location.contains("SENSITIVE-PEM"),
+            "private key must not appear: {location}"
+        );
+    }
+
+    /// After successful manifest callback, the install URL redirect does
+    /// not contain any credential material or setup tokens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_install_redirect_no_token_leak() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        state.set_test_bypass_persist(true).await;
+        let csrf = "csrf-no-leak-test".to_string();
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 42,
+            slug: "djinn-test".into(),
+            client_id: "Iv1.test-client".into(),
+            client_secret: "leaked-secret".into(),
+            webhook_secret: Some("leaked-webhook".into()),
+            pem: "SENSITIVE-PEM-KEY".into(),
+        }));
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        let resp = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: Some("manifest-code".into()),
+                state: Some(csrf),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        // Must be a clean GitHub install URL.
+        assert!(
+            location.contains("github.com/apps/"),
+            "must redirect to GitHub, got: {location}"
+        );
+        // Install-continuation nonce must be present (it's a public nonce,
+        // not a secret — same class as CSRF state).
+        assert!(
+            location.contains(INSTALL_CONTINUATION_PARAM),
+            "install URL must contain continuation param, got: {location}"
+        );
+        // No credential or token leaks.
+        assert!(
+            !location.contains("leaked-secret"),
+            "client_secret must not leak: {location}"
+        );
+        assert!(
+            !location.contains("leaked-webhook"),
+            "webhook_secret must not leak: {location}"
+        );
+        assert!(
+            !location.contains("SENSITIVE-PEM"),
+            "PEM must not leak: {location}"
+        );
+        assert!(
+            !location.contains("setup_token"),
+            "setup_token must not leak: {location}"
+        );
+        assert!(
+            !location.contains("manifest-code"),
+            "manifest code must not leak: {location}"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    /// The CSRF state value in the OAuth start redirect is a public nonce,
+    /// not a secret. Verify it is base64-encoded random bytes (same format
+    /// as our random tokens) and does not contain raw credential content.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oauth_state_is_public_csrf_nonce_not_secret() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "secret".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let resp = github_start(
+            State(state),
+            Query(StartQuery {
+                redirect: None,
+                install: None,
+            }),
+        )
+        .await;
+
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+
+        // Extract the state param.
+        let state_param = location
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+        // Must be URL-safe base64 (our random_token_b64 format).
+        assert!(
+            !state_param.contains('+') && !state_param.contains('/') && !state_param.contains('='),
+            "state must be URL-safe base64: {state_param}"
+        );
+        assert_eq!(state_param.len(), 43, "32 bytes → 43 base64 chars");
+    }
+
+    // ─── Config reporting after persistence (AC3) ────────────────────────
+
+    /// After successful manifest callback with credential persistence,
+    /// `/auth/config` reports `configured=true`, `self_setup_available=false`,
+    /// and no missing env vars (credentials came from manifest, not env).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn config_reports_configured_and_no_setup_after_manifest_persistence() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        state.set_test_bypass_persist(true).await;
+        let csrf = "csrf-config-test".to_string();
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 42,
+            slug: "djinn-test".into(),
+            client_id: "Iv1.test-client".into(),
+            client_secret: "test-secret".into(),
+            webhook_secret: None,
+            pem: "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----".into(),
+        }));
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        // Run the manifest callback.
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("code".into()),
+                state: Some(csrf),
+            }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FOUND);
+
+        // Now check /auth/config.
+        let cfg_resp = config(State(state)).await;
+        assert!(
+            cfg_resp.0.configured,
+            "config must report configured=true after persistence"
+        );
+        assert!(
+            !cfg_resp.0.self_setup_available,
+            "self_setup_available must be false after credentials persist"
+        );
+        // Credentials came from manifest, not env — so env vars are "missing"
+        // but that's fine because the persisted creds are loaded.
+        // Actually, with test bypass, the config is loaded directly into
+        // app_config. The missing list is populated only when
+        // active.is_none(), so it should be empty.
+        assert!(
+            cfg_resp.0.missing.is_empty(),
+            "no missing vars when credentials are loaded"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    // ─── Retry from create-app after exchange failure (AC2) ──────────────
+
+    /// Full retry flow: manifest exchange fails → setup session preserved →
+    /// user retries from create-app → new manifest form rendered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_retry_flow_after_exchange_failure() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        let csrf = "retry-csrf".to_string();
+
+        // 1. Exchange fails.
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Err("GitHub says no".into()));
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("bad-code".into()),
+                state: Some(csrf),
+            }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+
+        // 2. Setup session is still valid — user can hit create-app again.
+        let headers = headers_with_session(&session);
+        let resp = create_app(
+            State(state.clone()),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "create-app must succeed after exchange failure"
+        );
+
+        // Verify the response is HTML (the manifest form).
+        let body = resp.into_body();
+        let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(
+            html.contains("<form"),
+            "must render the manifest form for retry"
+        );
+        assert!(
+            html.contains("github.com/settings/apps/new"),
+            "form must target GitHub's app creation page"
+        );
+
+        // 3. After credentials are loaded, retry is no longer possible.
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let headers = headers_with_session(&session);
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "setup routes must be hidden after credentials are loaded"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    // ─── Manifest form shape (AC1) ───────────────────────────────────────
+
+    /// The create-app manifest form renders the expected auto-submit HTML
+    /// with the manifest JSON and CSRF state embedded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_app_renders_manifest_form_with_correct_target() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+
+        let headers = headers_with_session(&session);
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/html"), "must be HTML, got: {ct}");
+
+        // Manifest state cookie must be set for CSRF protection.
+        let set_cookies: Vec<_> = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap_or("").to_string())
+            .collect();
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.starts_with(MANIFEST_STATE_COOKIE)),
+            "manifest CSRF cookie must be set: {set_cookies:?}"
+        );
+
+        let body = resp.into_body();
+        let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+        let html = String::from_utf8_lossy(&bytes);
+
+        // Form must target GitHub's app creation endpoint.
+        assert!(
+            html.contains("action=\"https://github.com/settings/apps/new"),
+            "form must target GitHub: {html}"
+        );
+        // Must contain a `state` param in the action URL (CSRF).
+        assert!(
+            html.contains("state="),
+            "form action must include CSRF state: {html}"
+        );
+        // Must contain the manifest JSON hidden input.
+        assert!(
+            html.contains("name=\"manifest\""),
+            "form must have manifest input: {html}"
+        );
+        // Auto-submit script must be present.
+        assert!(html.contains(".submit()"), "form must auto-submit: {html}");
     }
 }

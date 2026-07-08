@@ -205,6 +205,14 @@ struct Inner {
     /// `None` means no exchange has occurred or the session was cleared after
     /// credential persistence.
     pub(crate) setup_session_token: tokio::sync::RwLock<Option<String>>,
+    /// Pending install-continuation nonce generated after manifest credential
+    /// persistence. When present, `/auth/github/app-setup-callback` requires
+    /// the caller to include a matching `continuation_state` query parameter.
+    /// Consumed (set to `None`) on successful validation. This ties the
+    /// post-manifest install redirect to the app-setup-callback endpoint so
+    /// an unsolicited direct hit on `/auth/github/app-setup-callback` is
+    /// rejected when a manifest flow just completed.
+    pub(crate) pending_install_continuation: tokio::sync::RwLock<Option<String>>,
     /// Test-only flag: when `true`, `persist_and_reload_app_config` skips the
     /// real database persistence and just hot-swaps the in-memory config.
     /// This allows the full callback flow to be tested without a Postgres
@@ -314,6 +322,7 @@ impl AppState {
                 app_config: tokio::sync::RwLock::new(None),
                 boot_token: tokio::sync::RwLock::new(None),
                 setup_session_token: tokio::sync::RwLock::new(None),
+                pending_install_continuation: tokio::sync::RwLock::new(None),
                 #[cfg(test)]
                 test_bypass_persist: tokio::sync::RwLock::new(false),
                 mirror,
@@ -610,6 +619,47 @@ impl AppState {
     /// terminal setup step completes.
     pub(crate) async fn clear_setup_session_token(&self) {
         *self.inner.setup_session_token.write().await = None;
+    }
+
+    /// Store a pending install-continuation nonce after manifest credential
+    /// persistence. The nonce is embedded in the install URL and validated
+    /// when GitHub redirects back to `/auth/github/app-setup-callback`.
+    pub(crate) async fn set_pending_install_continuation(&self, nonce: String) {
+        *self.inner.pending_install_continuation.write().await = Some(nonce);
+    }
+
+    /// Validate and consume a pending install-continuation nonce.
+    ///
+    /// Returns `true` when no continuation is pending (non-manifest flow) or
+    /// when the candidate matches the pending nonce. Returns `false` when a
+    /// continuation is pending but the candidate is missing or mismatched.
+    /// On a successful match the pending nonce is cleared (single-use).
+    pub(crate) async fn validate_and_consume_install_continuation(
+        &self,
+        candidate: Option<&str>,
+    ) -> bool {
+        let guard = self.inner.pending_install_continuation.read().await;
+        match guard.as_ref() {
+            None => true, // No continuation pending — non-manifest flow, allow.
+            Some(expected) => {
+                let Some(cand) = candidate else {
+                    return false; // Continuation required but not provided.
+                };
+                if !crate::server::auth::constant_time_eq(cand.as_bytes(), expected.as_bytes()) {
+                    return false; // Mismatch.
+                }
+                // Match — consume the nonce so it cannot be replayed.
+                drop(guard);
+                *self.inner.pending_install_continuation.write().await = None;
+                true
+            }
+        }
+    }
+
+    /// Inject a pending install-continuation nonce for testing.
+    #[cfg(test)]
+    pub(crate) async fn set_pending_install_continuation_for_tests(&self, nonce: Option<String>) {
+        *self.inner.pending_install_continuation.write().await = nonce;
     }
 
     /// Exchange a raw boot token for a setup session.
