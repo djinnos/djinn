@@ -609,21 +609,21 @@ mod tests {
         let decision = evaluate(&input, &[evaluator]);
 
         assert_eq!(decision.findings.len(), 3);
-        // Migration < CI workflow (alphabetical by rule_id)
+        // CI workflow < Migration (alphabetical by rule_id string)
         assert_eq!(
             decision.findings[0].rule_id,
-            TripwireRuleId::MigrationChange
+            TripwireRuleId::CIWorkflowChange
         );
-        assert_eq!(decision.findings[0].evidence.start_line, Some(1));
         assert_eq!(
             decision.findings[1].rule_id,
             TripwireRuleId::MigrationChange
         );
-        assert_eq!(decision.findings[1].evidence.start_line, Some(10));
+        assert_eq!(decision.findings[1].evidence.start_line, Some(1));
         assert_eq!(
             decision.findings[2].rule_id,
-            TripwireRuleId::CIWorkflowChange
+            TripwireRuleId::MigrationChange
         );
+        assert_eq!(decision.findings[2].evidence.start_line, Some(10));
     }
 
     /// Running the engine twice with the same input must produce
