@@ -128,10 +128,13 @@ kubectl debug node/<node> -it --image=busybox -- sh -c \
 
 1. Open `https://<your-host>` and **sign in with GitHub** — the **first user to
    sign in becomes the admin**.
-2. No GitHub App yet? The sign-in screen offers **"Create Djinn GitHub App"** —
-   a one-click manifest flow that creates the App, stores its credentials in
-   Djinn's encrypted vault, and sends you to the install page to grant repo
-   access. ([Details / manual path](../GITHUB_APP_SETUP.md).)
+2. **GitHub App setup:** If self-setup is enabled (`env.enableSelfSetup: true`),
+   the server prints a **one-time setup URL** in its boot log on first startup.
+   Open that URL in your browser to create the App via GitHub's manifest flow,
+   install it on your repos, and land on the task board — all in two clicks.
+   For production deployments (self-setup disabled), provide credentials via
+   `secrets.githubApp.*` in your Helm values or an `existingSecret` before
+   deploying. ([Details](../GITHUB_APP_SETUP.md).)
 3. Connect a model under **Settings → Models** (unless you bootstrapped keys
    via values), add a project from GitHub, and write your first proposal.
 4. Point your editor at the MCP endpoint:

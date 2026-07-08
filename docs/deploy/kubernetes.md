@@ -164,8 +164,10 @@ kubectl logs deploy/djinn-server -n djinn | head -50   # migrations applied, RPC
 ```
 
 Then open `https://djinn.example.com` — the first GitHub sign-in becomes the
-admin. Wire the GitHub App from the sign-in screen (one-click manifest flow)
-or [manually](../GITHUB_APP_SETUP.md).
+admin. If self-setup is enabled (`env.enableSelfSetup: true`), the server boot
+log prints a one-time manifest setup URL to create the GitHub App. For
+production (self-setup disabled), provide credentials via `secrets.githubApp.*`
+in Helm values — see [GitHub App setup](../GITHUB_APP_SETUP.md).
 
 ## GKE / AKS mapping
 
