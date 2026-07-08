@@ -37,7 +37,7 @@ pub struct ParsedAgentOutput {
     /// Set when the reply loop exits via finalize-tool detection (ADR-036).
     pub finalize_payload: Option<serde_json::Value>,
     /// Name of the finalize tool that was actually called (e.g. `"submit_work"`,
-    /// `"request_lead"`). Set alongside `finalize_payload`.
+    /// `"request_planner"`). Set alongside `finalize_payload`.
     pub finalize_tool_name: Option<String>,
     /// Text-only handoff captured after a budget-triggered wind-down directive.
     /// This is intentionally separate from normal assistant text so settlement

@@ -53,11 +53,6 @@ pub(super) enum CoordinatorMessage {
     RecordLiveMetrics {
         reply: tokio::sync::oneshot::Sender<()>,
     },
-    /// Increment the Lead escalation count for a task; reply with new count.
-    IncrementEscalationCount {
-        task_id: String,
-        reply: tokio::sync::oneshot::Sender<u32>,
-    },
     /// Return a read-only debug snapshot of coordinator dispatch state.
     DebugSnapshot {
         reply: tokio::sync::oneshot::Sender<CoordinatorDebugSnapshot>,

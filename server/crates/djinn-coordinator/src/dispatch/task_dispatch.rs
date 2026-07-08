@@ -736,12 +736,7 @@ impl CoordinatorActor {
         let cooldown_until = update
             .cooldown_until
             .unwrap_or_else(|| existing.as_ref().and_then(|r| r.cooldown_until.clone()));
-        let escalation_count = existing
-            .as_ref()
-            .map(|r| r.escalation_count)
-            .unwrap_or_else(|| {
-                i64::from(self.escalation_counts.get(task_id).copied().unwrap_or(0))
-            });
+        let escalation_count = existing.as_ref().map(|r| r.escalation_count).unwrap_or(0);
         let (last_dispatched_at, last_dispatched_role) = match update.last_dispatched {
             Some(Some((at, role))) => (Some(at), Some(role)),
             Some(None) => (None, None),
@@ -820,52 +815,6 @@ impl CoordinatorActor {
         self.inflight_dispatches.remove(task_id);
         self.clear_durable_dispatch_backoff_state(task_id, None, reason)
             .await;
-    }
-
-    pub(crate) async fn increment_durable_escalation_count(
-        &self,
-        task_id: &str,
-    ) -> djinn_db::Result<u32> {
-        let repo = DispatchStateRepository::new(self.db.clone());
-        let existing = repo.get(task_id).await?;
-        let existing_count = existing
-            .as_ref()
-            .map(|r| r.escalation_count.max(0).min(u32::MAX as i64) as u32)
-            .unwrap_or(0)
-            .max(self.escalation_counts.get(task_id).copied().unwrap_or(0));
-        let next_count = existing_count.saturating_add(1);
-
-        repo.upsert(DispatchStateUpsert {
-            task_id,
-            failure_streak: existing
-                .as_ref()
-                .map(|r| r.failure_streak)
-                .unwrap_or_else(|| {
-                    i64::from(
-                        self.dispatch_failure_streak
-                            .get(task_id)
-                            .copied()
-                            .unwrap_or(0),
-                    )
-                }),
-            cooldown_until: existing.as_ref().and_then(|r| r.cooldown_until.as_deref()),
-            escalation_count: i64::from(next_count),
-            last_dispatched_at: existing
-                .as_ref()
-                .and_then(|r| r.last_dispatched_at.as_deref()),
-            last_dispatched_role: existing
-                .as_ref()
-                .and_then(|r| r.last_dispatched_role.as_deref()),
-            inflight_creator_user_id: existing
-                .as_ref()
-                .and_then(|r| r.inflight_creator_user_id.as_deref()),
-            inflight_model_id: existing
-                .as_ref()
-                .and_then(|r| r.inflight_model_id.as_deref()),
-        })
-        .await?;
-
-        Ok(next_count)
     }
 
     /// Cross-model ("Thorough") review steering for a reviewer dispatch.
@@ -2928,7 +2877,6 @@ mod inflight_ledger_tests {
             rpc_registry: None,
             prune_tick_counter: 0,
             throughput_events: HashMap::new(),
-            escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),
             review_stuck_sha_first_seen: HashMap::new(),
@@ -3990,7 +3938,6 @@ mod failover_chain_tests {
             rpc_registry: None,
             prune_tick_counter: 0,
             throughput_events: HashMap::new(),
-            escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),
             review_stuck_sha_first_seen: HashMap::new(),

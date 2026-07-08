@@ -21,7 +21,6 @@ const BREAKER_TRIPS_TOTAL: &str = "djinn_breaker_trips_total";
 const BREAKER_STATE: &str = "djinn_breaker_state";
 const ZOMBIE_REAPS_TOTAL: &str = "djinn_zombie_reaps_total";
 const ZOMBIE_REAP_KINDS: [&str; 3] = ["startup", "periodic", "stall"];
-const LEAD_ESCALATIONS_TOTAL: &str = "djinn_lead_escalations_total";
 const TASK_REOPENS_TOTAL: &str = "djinn_task_reopens_total";
 const TASKS_PARKED_TOTAL: &str = "djinn_tasks_parked_total";
 const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
@@ -120,13 +119,6 @@ pub mod zombie {
     /// Increment the zombie-reap counter for one of the stable kind labels.
     pub fn increment_reap(kind: &'static str) {
         metrics::counter!(super::ZOMBIE_REAPS_TOTAL, "kind" => kind).increment(1);
-    }
-}
-
-pub mod lead {
-    /// Increment the Lead-escalation counter. Synchronous and non-async by design.
-    pub fn increment_escalation() {
-        metrics::counter!(super::LEAD_ESCALATIONS_TOTAL).increment(1);
     }
 }
 
@@ -552,11 +544,6 @@ fn register_metrics() {
     for kind in ZOMBIE_REAP_KINDS {
         metrics::counter!(ZOMBIE_REAPS_TOTAL, "kind" => kind).absolute(0);
     }
-    metrics::describe_counter!(
-        LEAD_ESCALATIONS_TOTAL,
-        "Lead escalation requests recorded by the coordinator."
-    );
-    metrics::counter!(LEAD_ESCALATIONS_TOTAL).absolute(0);
     metrics::describe_counter!(TASK_REOPENS_TOTAL, "Tasks reopened for another work cycle.");
     metrics::counter!(TASK_REOPENS_TOTAL).absolute(0);
     metrics::describe_counter!(
@@ -1393,7 +1380,6 @@ mod tests {
         assert_sync_unit(pr_poller::increment_merge_failure);
         assert_sync_unit(breaker::increment_trip);
         assert_sync_unit(|| zombie::increment_reap(zombie::KIND_STALL));
-        assert_sync_unit(lead::increment_escalation);
         assert_sync_unit(|| doctor::set_findings("sample.shared_resolver", 1));
         assert_sync_unit(|| doctor::set_run_duration_seconds("sample.shared_resolver", 0.25));
         assert_sync_unit(|| {
@@ -1657,21 +1643,19 @@ mod tests {
     }
 
     #[test]
-    fn zombie_and_lead_counters_render() {
+    fn zombie_and_jit_counters_render() {
         let _guard = test_guard();
         init().unwrap();
 
         zombie::increment_reap(zombie::KIND_STARTUP);
         zombie::increment_reap(zombie::KIND_PERIODIC);
         zombie::increment_reap(zombie::KIND_STALL);
-        lead::increment_escalation();
         jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_INJECTED);
 
         let rendered = render().unwrap();
         for kind in ZOMBIE_REAP_KINDS {
             assert!(rendered.contains(&format!("djinn_zombie_reaps_total{{kind=\"{kind}\"}}")));
         }
-        assert!(rendered.contains("djinn_lead_escalations_total"));
         assert!(rendered.contains("djinn_jit_pitfall_hints_total{outcome=\"injected\"}"));
     }
 
