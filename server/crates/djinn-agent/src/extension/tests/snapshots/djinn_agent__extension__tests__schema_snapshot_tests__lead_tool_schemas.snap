@@ -1,3 +1,7 @@
+---
+source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+expression: tool_schemas_lead()
+---
 [
   {
     "name": "task_show",

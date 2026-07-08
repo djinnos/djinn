@@ -343,3 +343,8 @@ fn worker_tool_schemas() {
 fn planner_tool_schemas() {
     insta::assert_json_snapshot!(tool_schemas_planner());
 }
+
+#[test]
+fn lead_tool_schemas() {
+    insta::assert_json_snapshot!(tool_schemas_lead());
+}
