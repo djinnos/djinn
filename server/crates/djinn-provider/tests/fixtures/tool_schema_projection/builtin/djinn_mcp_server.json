@@ -21415,6 +21415,34 @@
                 "null"
               ],
               "format": "int64"
+            },
+            "mirror_head_sha": {
+              "description": "Head SHA of the internal mirror branch, when known.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "github_head_sha": {
+              "description": "Head SHA of the GitHub PR branch, when known.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "heads_diverged": {
+              "description": "`true` only when both heads are known and differ; `false` only when\nboth are known and equal; absent/null-compatible when either side is\nunknown.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "head_observation_error": {
+              "description": "Concise error string from the most recent publication/observation\nfailure, when one is recorded.  Absent when no error is known.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
