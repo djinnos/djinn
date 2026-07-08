@@ -27,18 +27,6 @@ use djinn_db::{
 use djinn_provider::catalog::health::HealthTracker;
 use djinn_slot::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotPoolHandle};
 
-fn rendered_counter_value(metric: &str) -> f64 {
-    djinn_telemetry::init().unwrap();
-    let rendered = djinn_telemetry::render().unwrap();
-    rendered
-        .lines()
-        .find_map(|line| {
-            let value = line.strip_prefix(metric)?.trim();
-            value.parse::<f64>().ok()
-        })
-        .unwrap_or(0.0)
-}
-
 #[derive(Clone)]
 struct RecordingRuntimeOps {
     calls: Arc<Mutex<Vec<String>>>,
