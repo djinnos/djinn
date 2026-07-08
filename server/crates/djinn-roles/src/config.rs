@@ -30,7 +30,7 @@ pub struct RoleConfig {
     pub initial_message: &'static str,
     /// Tool names the agent can call to signal completion for this role.
     /// The first entry is the primary finalize tool; additional entries are
-    /// alternate exit paths (e.g. `request_lead` for workers).
+    /// alternate exit paths (e.g. `request_planner` for workers/reviewers).
     pub finalize_tool_names: &'static [&'static str],
     /// Mode selector: given the task + render context, return the single
     /// mode-specific prompt section to inject at `{{role_mode_section}}`.
@@ -70,7 +70,7 @@ pub const WORKER_CONFIG: RoleConfig = RoleConfig {
     display_name: "Developer",
     dispatch_role: "worker",
     initial_message: prompts::DEV_TEMPLATE,
-    finalize_tool_names: &["submit_work", "request_lead"],
+    finalize_tool_names: &["submit_work", "request_planner"],
     mode_section: Some(worker_mode_section),
 };
 
@@ -79,7 +79,7 @@ pub const REVIEWER_CONFIG: RoleConfig = RoleConfig {
     display_name: "Reviewer",
     dispatch_role: "reviewer",
     initial_message: prompts::REVIEWER_TEMPLATE,
-    finalize_tool_names: &["submit_review", "request_lead"],
+    finalize_tool_names: &["submit_review", "request_planner"],
     mode_section: None,
 };
 
