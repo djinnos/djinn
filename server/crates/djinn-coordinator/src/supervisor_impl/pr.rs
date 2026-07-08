@@ -1052,14 +1052,14 @@ pub(super) struct UnchangedHeadContext<'a> {
 /// 1. A durable remediation baseline is present.
 /// 2. The freshly-pushed head SHA equals the remediation baseline (i.e.
 ///    either GitHub didn't move or no progress was made locally).
-/// 3. `Task::ci_mirror_head_sha` (latest attempt evidence) is known and
-///    differs from the pushed head / remediation baseline — the mirror
-///    produced something the durable snapshot hasn't captured yet.
-/// 4. `Task::ci_github_head_sha` (latest attempt evidence) is known and
-///    matches the remediation baseline — GitHub's PR branch head hasn't
-///    advanced alongside the mirror, OR
-///    `Task::ci_head_observation_error` is set, indicating the publication
-///    failed.
+/// 3. At least one publication-failure / divergence signal is present:
+///    a. `Task::ci_head_observation_error` is set (publication/observation
+///    failure — sufficient on its own even when GitHub head is unknown),
+///    b. `Task::ci_heads_diverged` is `Some(true)`, or
+///    c. `Task::ci_github_head_sha` matches the remediation baseline while
+///    the mirror head does not (GitHub lagging).
+/// 4. At least one active-worker signal is present: the mirror head advanced
+///    past the baseline, or a publication error was recorded.
 ///
 /// The reason text explicitly points operators at the divergence /
 /// publication failure so they don't chase a false "unchanged-head strike".
@@ -1096,7 +1096,14 @@ pub(super) fn unpublished_mirror_publication_reason(
     // one "the worker was active" signal. Otherwise the predicate is
     // indistinguishable from a legitimate no-progress case and we leave the
     // unchanged-head rejection in place.
-    let divergent = explicit_divergence || github_lagging;
+    //
+    // `has_pub_error` qualifies as BOTH a divergence signal and an active
+    // signal: an observation/publication failure means we cannot confirm
+    // GitHub matches the baseline (divergence) and the error itself proves
+    // the worker attempted to publish (active).  This ensures
+    // `head_observation_error=Some(...)` alone (with unknown GitHub head)
+    // is sufficient to suppress the unchanged-head rejection.
+    let divergent = explicit_divergence || github_lagging || has_pub_error;
     let active_signal = mirror_advanced || has_pub_error;
     if !divergent || !active_signal {
         return None;

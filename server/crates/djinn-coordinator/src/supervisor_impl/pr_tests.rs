@@ -461,10 +461,10 @@ fn pub_failure_returns_none_without_active_worker_signal() {
 
 #[test]
 fn pub_failure_returns_none_without_divergent_signal() {
-    // Mirror advanced, but no divergence flag AND github head is unknown.
-    // Without at least one divergent signal (heads_diverged, github_lagging,
-    // or pub_error), the predicate must remain conservative and let the
-    // unchanged-head rejection fire.
+    // Mirror advanced, but no divergence flag, no github head, AND no
+    // publication error. Without at least one divergent signal
+    // (heads_diverged, github_lagging, or pub_error), the predicate must
+    // remain conservative and let the unchanged-head rejection fire.
     let baseline = "baseline-sha";
     let ctx = pub_failure_ctx(
         baseline,
@@ -513,5 +513,83 @@ fn pub_failure_combines_mirror_advanced_with_publication_error() {
     assert!(
         !reason.contains("no new commit was produced"),
         "reason must NOT borrow the no-commit-strike text: {reason}"
+    );
+}
+
+#[test]
+fn pub_failure_suppresses_with_observation_error_unknown_github_head_mirror_advanced() {
+    // The reviewer-requested regression case: head_observation_error=Some(...)
+    // with github_head_sha=None and heads_diverged=None, but the mirror head
+    // advanced. Before the fix this returned None (falling through to the
+    // misleading unchanged-head rejection) because divergent required
+    // explicit_divergence || github_lagging, both of which were false/unknown.
+    //
+    // Now has_pub_error itself qualifies as a divergent signal, so this must
+    // suppress the unchanged-head rejection.
+    let baseline = "baseline-sha";
+    let mirror_new = "mirror-advanced-sha";
+    let ctx = pub_failure_ctx(
+        baseline,
+        Some(baseline),
+        Some(mirror_new),
+        None, // github_head_sha unknown — no PR branch observed
+        None, // heads_diverged unknown
+        Some("HTTP 403: app installation token revoked"),
+        Some(55),
+        "llvt",
+    );
+
+    let reason = unpublished_mirror_publication_reason(&ctx).expect(
+        "observation error + mirror advanced + unknown GitHub head → must suppress unchanged-head",
+    );
+
+    assert!(
+        reason.contains("publication") || reason.contains("403") || reason.contains("revoked"),
+        "reason must surface the publication/observation error: {reason}"
+    );
+    assert!(
+        !reason.contains("no new commit was produced"),
+        "reason must NOT borrow the no-commit-strike text: {reason}"
+    );
+    assert!(
+        reason.contains("NOT") || reason.to_lowercase().contains("suppress"),
+        "reason must make clear the unchanged-head strike is suppressed: {reason}"
+    );
+}
+
+#[test]
+fn pub_failure_suppresses_with_observation_error_unknown_github_head_mirror_unknown() {
+    // Strongest minimal case: head_observation_error=Some(...) is the ONLY
+    // signal — github_head_sha=None, heads_diverged=None, mirror_head_sha
+    // is also None (no attempt recorded the mirror head yet). Before the fix
+    // this returned None; now the publication error alone is sufficient.
+    let baseline = "baseline-sha";
+    let ctx = pub_failure_ctx(
+        baseline,
+        Some(baseline),
+        None, // mirror_head_sha unknown
+        None, // github_head_sha unknown
+        None, // heads_diverged unknown
+        Some("GitHub API rate limit exceeded; observation failed"),
+        Some(77),
+        "itmo",
+    );
+
+    let reason = unpublished_mirror_publication_reason(&ctx)
+        .expect("observation error alone (all other heads unknown) → must suppress unchanged-head");
+
+    assert!(
+        reason.contains("rate limit")
+            || reason.contains("publication")
+            || reason.contains("observation"),
+        "reason must surface the publication/observation error: {reason}"
+    );
+    assert!(
+        !reason.contains("no new commit was produced"),
+        "reason must NOT borrow the no-commit-strike text: {reason}"
+    );
+    assert!(
+        reason.contains("NOT") || reason.to_lowercase().contains("suppress"),
+        "reason must make clear the unchanged-head strike is suppressed: {reason}"
     );
 }
