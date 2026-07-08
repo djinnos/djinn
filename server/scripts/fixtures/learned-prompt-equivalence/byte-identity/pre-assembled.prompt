@@ -1,0 +1,9 @@
+You are a worker. Implement the assigned task.
+
+Prefer focused, scoped changes.
+
+When editing Rust, run cargo fmt before submitting.
+
+---
+
+Never run workspace-wide commands; use the narrowest scoped check.

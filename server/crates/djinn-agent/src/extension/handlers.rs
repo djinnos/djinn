@@ -74,7 +74,7 @@ pub(crate) use workspace::{
 };
 
 // Re-export task_epic functions used by the local fallback dispatch.
-pub(crate) use task_epic::{call_request_lead, call_request_planner};
+pub(crate) use task_epic::call_request_planner;
 // Re-export task_admin functions used by the local fallback dispatch.
 use task_admin::{call_task_delete_branch, call_task_transition};
 
@@ -87,6 +87,11 @@ pub(super) use task_epic::{
     call_epic_show, call_epic_tasks, call_epic_update, call_proposal_ac_amend,
     call_proposal_ac_set, call_proposal_reconcile_obsolete_epic,
 };
+// Deprecated compatibility handler: retained for drain-window tests only.
+// Production dispatch no longer advertises or routes request_lead for
+// workers/reviewers (epic 10qg).
+#[cfg(test)]
+pub(super) use task_epic::call_request_lead;
 
 // ─── hfhw cutover note ──────────────────────────────────────────────────
 //
@@ -100,7 +105,7 @@ pub(super) use task_epic::{
 //
 // 2. This local fallback handles ONLY tools that require djinn-agent
 //    internals (workspace mutation, code_graph, skill_read, destructive
-//    task admin, request_lead / request_planner, dynamic MCP registry).
+//    task admin, request_planner, dynamic MCP registry).
 //
 // Duplicated production handlers for tools in group (1) have been removed
 // from this fallback dispatch.  The handler modules (`memory_agent`,
@@ -181,8 +186,7 @@ where
     if allowed_schemas.is_some()
         && !matches!(
             call.name.as_str(),
-            "request_lead"
-                | "request_planner"
+            "request_planner"
                 | "task_transition"
                 | "task_delete_branch"
                 | "task_kill_session"
@@ -208,7 +212,6 @@ where
         // ── Agent-local task admin tools ─────────────────────────────────
         // These require djinn-agent internals (task_merge, knowledge_promotion)
         // and are NOT handled by djinn-mcp-extension.
-        "request_lead" => call_request_lead(state, &call.arguments).await,
         "request_planner" => call_request_planner(state, &call.arguments).await,
         "task_transition" => {
             call_task_transition(state, &call.arguments, &worktree_project_path).await

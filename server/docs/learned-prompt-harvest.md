@@ -131,6 +131,21 @@ inventory.
 > evidence block into the table below. A worker environment must not point this
 > helper at production or staging to populate the artifact (see §1.1).
 
+### 3.3 Reconstructing the active learned overlay from the export
+
+The runtime derives each agent's `learned_prompt` from
+`string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)` over
+rows with `action IN ('keep','confirmed')` (see §1 and
+`server/crates/djinn-db/src/repositories/agent.rs`). When an operator
+reconstructs the learned overlay text for a given `(project_id, agent_id)`
+from the §3 export — for example to build a pre-cutover assembled prompt for
+the §6.1 comparison — the active amendments for that agent **must** be joined
+in `created_at ASC` order using the literal separator `\n\n---\n\n`. Any
+deviation (different separator, wrong order, dropped rows, extra whitespace)
+produces a false non-match and invalidates the §6 evidence. The prompt-
+equivalence helper (`server/scripts/learned-prompt-equivalence.sh`, see §6.1)
+documents and relies on this exact reconstruction.
+
 ## 4. Row count, checksum & export reference
 
 | Field | Value | Supplied by |
@@ -258,6 +273,29 @@ destructive removal and **after** the move, with the following rules.
   semantic rationale, or to `convert to memory note` / `discard` with a
   documented drift).
 
+**Comparison helper:** Sibling task `nywc` ships
+`server/scripts/learned-prompt-equivalence.sh`, which compares a captured
+pre-cutover and post-cutover assembled-prompt file and emits the evidence
+block below. It is the preferred way to produce §6.1 evidence:
+
+```sh
+server/scripts/learned-prompt-equivalence.sh \
+    --pre  pre-<project_id>-<agent_id>.prompt \
+    --post post-<project_id>-<agent_id>.prompt \
+    --mode byte-identity \
+    --label "<project_id>/<agent_id>" \
+    --disposition "fold into project/role system_prompt_extensions"
+```
+
+The helper does not connect to any database or render prompts. The operator
+captures the pre and post assembled prompts (see "Pre-cutover capture" and
+"Post-cutover capture" above) and passes the two files. It computes SHA-256
+checksums, byte/char counts, the first differing byte offset, and emits a
+PASS/FAIL verdict in `byte-identity` mode. Run `--selftest` to validate the
+helper against bundled fixtures that reproduce the runtime assembly
+semantics. A worker environment must not capture prompts from production or
+staging to populate the artifact (§1.1 / §7).
+
 **Evidence fields (per preserved row):**
 
 | Field | Value |
@@ -300,6 +338,30 @@ chooses to rewrite the wording for prompt-voice consistency, the original
 amendment text must still be preserved verbatim in the §3 export and quoted
 in this section so reviewers can compare the pre- and post-cutover wording.
 
+**Semantic-rationale template (copy per row):**
+
+| Field | Value |
+|---|---|
+| `(project_id, agent_id)` | `TBD` |
+| `created_at` (of the amendment) | `TBD` (from §3 export) |
+| Disposition | `fold into base prompt` |
+| **What** it adds (1–2 sentences) | `TBD` — summarize the new behavioral instruction. |
+| **Why** it belongs in the base prompt | `TBD` — general improvement / defect correction applying to all projects using this role, not a project-local refinement. |
+| **Where** placed (file path, section, line range) | `TBD` — e.g. `server/crates/djinn-roles/src/prompts/worker.md` §3. |
+| **How** it reads in context (quote) | `TBD` — quote the surrounding paragraph. |
+| **Original amendment text (verbatim from §3 export)** | `TBD` |
+| **Risk of behavioral drift** | `TBD` — e.g. "same instruction, now applies to all projects using the worker role" (acceptable) vs. "rewording changes model interpretation in cases Y" (unacceptable → re-classify). |
+| Pre-cutover assembled-prompt SHA-256 | `TBD` (informational; byte identity not required) |
+| Post-cutover assembled-prompt SHA-256 | `TBD` (informational) |
+| Comparison helper output | `TBD` (paste `--mode semantic` output from `learned-prompt-equivalence.sh`; verdict should be `semantic-rationale-required`) |
+| Reviewer who accepted the rationale | `TBD` |
+
+> **Comparison helper.** Run
+> `server/scripts/learned-prompt-equivalence.sh --pre <pre> --post <post>
+> --mode semantic` to capture the byte diff for informational purposes. The
+> verdict will be `semantic-rationale-required` (not PASS/FAIL), confirming
+> that this row needs the template above rather than byte equivalence.
+
 ### 6.3 Memory notes and discards
 
 For every row with disposition `convert to memory note` or `discard`, record:
@@ -310,6 +372,13 @@ For every row with disposition `convert to memory note` or `discard`, record:
 - The rationale: why the text is preserved as a memory note rather than a
   prompt extension, or why it is discarded (stale, duplicate, contradictory,
   off-policy, low-value, etc.).
+
+For these rows the assembled prompt is intentionally changed (the amendment
+text is removed). Byte identity is not applicable. Run
+`server/scripts/learned-prompt-equivalence.sh --pre <pre> --post <post>
+--mode removed` to capture the byte diff for informational purposes; the
+verdict will be `removed`, confirming the text was intentionally taken out
+of the assembled prompt.
 
 ## 7. Reviewer sign-off (gates destructive migration)
 
@@ -381,3 +450,44 @@ counter-sign this section. Downstream destructive work (sibling epics `3x0w`,
   (`server/scripts/learned-prompt-inventory.sql` canonical query +
   `server/scripts/learned-prompt-inventory.sh` safe-by-default export/checksum
   wrapper; preferred tooling for §3 / §4).
+- Sibling task `nywc` — prompt-equivalence capture and comparison helper
+  (`server/scripts/learned-prompt-equivalence.sh` byte-identity / semantic /
+  removed comparison of captured pre/post assembled prompts, with bundled
+  fixtures under `server/scripts/fixtures/learned-prompt-equivalence/`;
+  preferred tooling for §6.1 byte-equivalence evidence and §6.2 / §6.3
+  informational byte diff).
+- Sibling task `8gph` — harvest contract validation
+  (`scripts/test-learned-prompt-harvest-contract.sh`; see §9).
+
+## 9. Contract validation (pre-removal gate check)
+
+Before relying on this artifact to gate destructive removal work (epics `3x0w`,
+`3sle`, `8m3c`), run the contract validation script to confirm the artifact,
+inventory query, and prompt-equivalence helper are intact:
+
+```sh
+sh scripts/test-learned-prompt-harvest-contract.sh
+```
+
+This script performs a read-only, network-free validation that checks:
+
+1. **Harvest artifact structure** — `server/docs/learned-prompt-harvest.md`
+   contains the required sections: environment/timestamp (§2), row count /
+   checksum / export reference (§4), disposition table (§5), prompt-equivalence
+   evidence including byte-equivalence (§6/§6.1), and reviewer sign-off (§7).
+2. **Active inventory query** — `server/scripts/learned-prompt-inventory.sql`
+   and the runbook (§3) both contain the exact fragments
+   `JOIN learned_prompt_history`, `action IN ('keep','confirmed')`, and
+   `ORDER BY a.project_id, a.id, lph.created_at ASC`.
+3. **Prompt-equivalence helper** — `server/scripts/learned-prompt-equivalence.sh`
+   passes its built-in `--selftest` (byte-identity PASS, semantic-drift
+   semantic-rationale-required, removed removed), and the byte-identity
+   fixture pair is confirmed byte-identical by a direct `cmp`.
+
+Exit code 0 means the harvest contract is valid. A non-zero exit means one or
+more required artifacts are missing, structurally incomplete, or the
+prompt-equivalence helper's byte-identity comparison path has regenerated.
+**Do not proceed with destructive removal if this validation fails.**
+
+This validation is scoped to the additive evidence artifacts from this epic
+only. It does not test runtime code, database migrations, or API surfaces.

@@ -19,5 +19,6 @@ expression: names
   "output_view",
   "output_grep",
   "memory_build_context",
+  "request_planner",
   "submit_review"
 ]

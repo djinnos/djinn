@@ -475,7 +475,6 @@ mod tests {
             rpc_registry: None,
             prune_tick_counter: 0,
             throughput_events: std::collections::HashMap::new(),
-            escalation_counts: std::collections::HashMap::new(),
             pr_status_cache: std::collections::HashMap::new(),
             pr_draft_first_seen: std::collections::HashMap::new(),
             review_stuck_sha_first_seen: std::collections::HashMap::new(),

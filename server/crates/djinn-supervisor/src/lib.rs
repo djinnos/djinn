@@ -3904,7 +3904,7 @@ mod tests {
         );
     }
 
-    /// Final no-redispatch regression: a Planner `request_lead` /
+    /// Final no-redispatch regression: a Planner escalation /
     /// `StageOutcome::Escalate` on a planning-type task must be parked
     /// as a terminal close, not reported as `TaskRunOutcome::Escalated`.
     ///
@@ -4342,9 +4342,9 @@ mod tests {
     /// Non-planner roles (Worker / Reviewer) keep the legacy
     /// `TaskRunOutcome::Escalated` outcome and fire NO transition
     /// call — the supervisor backstop is intentionally narrow to the
-    /// Planner planning leg, and the Worker/Reviewer `request_lead`
-    /// escalation paths must NOT start parking tasks. This is the
-    /// AC: "Worker/Reviewer `request_lead` escalation behavior
+    /// Planner planning leg, and the Worker/Reviewer escalation
+    /// paths must NOT start parking tasks. This is the
+    /// AC: "Worker/Reviewer escalation behavior
     /// remains unchanged by tests or code inspection."
     #[tokio::test]
     async fn planner_escalate_non_planner_escalation_is_unchanged() {
@@ -4397,8 +4397,8 @@ mod tests {
         }
     }
 
-    /// Negative no-hijack coverage: Worker/Reviewer `request_lead`
-    /// escalation on a normal implementation task is still the legacy
+    /// Negative no-hijack coverage: Worker/Reviewer escalation
+    /// on a normal implementation task is still the legacy
     /// `Escalated` outcome and must not fire the Planner-only close
     /// transition. This guards the common non-planning path separately
     /// from `planner_escalate_non_planner_escalation_is_unchanged`, which
@@ -4409,7 +4409,7 @@ mod tests {
             let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
             let calls_for_closure = std::sync::Arc::clone(&calls);
 
-            let original_reason = format!("{role:?} request_lead needs lead guidance");
+            let original_reason = format!("{role:?} escalation needs lead guidance");
             let outcome = apply_planner_escalate_route(
                 role,
                 "task",
@@ -4437,21 +4437,21 @@ mod tests {
             match outcome {
                 TaskRunOutcome::Escalated { reason } => assert_eq!(
                     reason, original_reason,
-                    "{role:?} request_lead on a normal task must preserve the escalation reason"
+                    "{role:?} escalation on a normal task must preserve the escalation reason"
                 ),
                 other => panic!(
-                    "{role:?} request_lead on a normal task must remain TaskRunOutcome::Escalated, got {other:?}"
+                    "{role:?} escalation on a normal task must remain TaskRunOutcome::Escalated, got {other:?}"
                 ),
             }
 
             let calls = calls.lock().expect("calls mutex poisoned");
             assert!(
                 calls.iter().all(|call| call.action != "close"),
-                "{role:?} request_lead on a normal task must not fire close, got {calls:?}"
+                "{role:?} escalation on a normal task must not fire close, got {calls:?}"
             );
             assert!(
                 calls.is_empty(),
-                "{role:?} request_lead on a normal task should fire no transition_task calls, got {calls:?}"
+                "{role:?} escalation on a normal task should fire no transition_task calls, got {calls:?}"
             );
         }
     }
