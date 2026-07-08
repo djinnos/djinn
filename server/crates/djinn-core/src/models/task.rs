@@ -1040,9 +1040,11 @@ pub fn compute_transition(
         TransitionAction::ParkForRemediation => {
             // Park (hold) the source on its remediation blocker by landing it at
             // `open`. Legal from every pre-terminal in-flight state a CI-loop
-            // park can observe; a no-op when the task is already `open`. Unlike
-            // `PrCiFailed` / `Reopen` it does NOT bump `reopen_count` — this is a
-            // hold pending remediation, not another rework round.
+            // park can observe, plus the Lead/arbiter hold states when bounded
+            // arbiter accounting auto-parks; a no-op when the task is already
+            // `open`. Unlike `PrCiFailed` / `Reopen` it does NOT bump
+            // `reopen_count` — this is a hold pending remediation, not another
+            // rework round.
             if !matches!(
                 from,
                 TaskStatus::PrDraft
@@ -1051,10 +1053,12 @@ pub fn compute_transition(
                     | TaskStatus::Open
                     | TaskStatus::NeedsTaskReview
                     | TaskStatus::InTaskReview
+                    | TaskStatus::NeedsLeadIntervention
+                    | TaskStatus::InLeadIntervention
                     | TaskStatus::Approved
             ) {
                 return bad(
-                    "park_for_remediation is only valid from pr_draft, pr_review, in_progress, open, needs_task_review, in_task_review, or approved",
+                    "park_for_remediation is only valid from pr_draft, pr_review, in_progress, open, needs_task_review, in_task_review, needs_lead_intervention, in_lead_intervention, or approved",
                 );
             }
             TransitionApply::simple(TaskStatus::Open)
@@ -1273,7 +1277,9 @@ mod tests {
                 | TaskStatus::Open
                 | TaskStatus::NeedsTaskReview
                 | TaskStatus::InTaskReview
-                | TaskStatus::Approved,
+                | TaskStatus::Approved
+                | TaskStatus::NeedsLeadIntervention
+                | TaskStatus::InLeadIntervention,
             ) => Some(TaskStatus::Open),
             (TransitionAction::PreApprovalVerifyRejected, TaskStatus::Approved) => {
                 Some(TaskStatus::Open)

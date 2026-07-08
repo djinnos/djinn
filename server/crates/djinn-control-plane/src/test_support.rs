@@ -94,6 +94,13 @@ impl CoordinatorOps for StubCoordinator {
     ) -> std::result::Result<(), String> {
         Err("stub: CoordinatorOps::resolve_refinement_review not implemented".into())
     }
+    async fn record_supervisor_rework_reopen(
+        &self,
+        _task_id: &str,
+        _action: &djinn_core::models::TransitionAction,
+        _reason: Option<&str>,
+    ) {
+    }
 }
 
 /// SlotPoolOps stub. Queries return empties; mutations (kill_session) error.
