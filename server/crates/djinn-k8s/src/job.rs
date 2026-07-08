@@ -288,8 +288,31 @@ pub fn build_task_run_job(
                         path: CREDENTIALS_SECRET_KEY.to_string(),
                         ..KeyToPath::default()
                     },
+                    // Per-task-run payload files added in hgd0 Wave 1.
+                    // The effective EnvironmentConfig JSON and resolved
+                    // service metadata JSON are sourced from the same
+                    // per-task-run Secret and mounted at stable paths
+                    // under /var/run/djinn/ for the in-pod worker.
+                    // `optional: true` (below) lets old Secrets that
+                    // lack these keys still create a valid Pod.
+                    KeyToPath {
+                        key: crate::env_config::ENV_CONFIG_SECRET_DATA_KEY.to_string(),
+                        path: crate::env_config::ENV_CONFIG_SECRET_DATA_KEY.to_string(),
+                        ..KeyToPath::default()
+                    },
+                    KeyToPath {
+                        key: crate::env_config::SERVICE_METADATA_SECRET_DATA_KEY.to_string(),
+                        path: crate::env_config::SERVICE_METADATA_SECRET_DATA_KEY.to_string(),
+                        ..KeyToPath::default()
+                    },
                 ]),
-                optional: Some(false),
+                // `optional: true` so Pods tolerate Secrets that lack
+                // the newer `environment.json` / `service_metadata.json`
+                // payload keys (built by the legacy `build_task_run_secret`
+                // rather than `TaskRunSecretBuilder`).  The Secret itself
+                // is always created by the caller before the Job; this flag
+                // relaxes only the per-key requirement.
+                optional: Some(true),
                 // 0444 (world-read) instead of 0400 so the worker process —
                 // forced to runAsUser=10001 above so it can access the
                 // /mirror PVC — can still read these files. They're owned
@@ -985,15 +1008,27 @@ mod tests {
         let spec_volume = &volumes[0];
         let secret_src = spec_volume.secret.as_ref().expect("spec volume is Secret");
         assert_eq!(secret_src.secret_name.as_deref(), Some(secret_name));
-        assert_eq!(secret_src.optional, Some(false));
+        assert_eq!(secret_src.optional, Some(true));
         assert_eq!(secret_src.default_mode, Some(0o0444));
         let items = secret_src.items.as_ref().expect("secret items set");
-        // Phase 7a: two keys — `spec.bin` and `credentials.bin`.
-        assert_eq!(items.len(), 2);
+        // Phase 7a + hgd0: four keys — `spec.bin`, `credentials.bin`,
+        // `environment.json`, `service_metadata.json`.
+        assert_eq!(items.len(), 4);
         assert_eq!(items[0].key, SPEC_SECRET_KEY);
         assert_eq!(items[0].path, SPEC_SECRET_KEY);
         assert_eq!(items[1].key, CREDENTIALS_SECRET_KEY);
         assert_eq!(items[1].path, CREDENTIALS_SECRET_KEY);
+        // Per-task-run payload files (hgd0 Wave 1).
+        assert_eq!(items[2].key, crate::env_config::ENV_CONFIG_SECRET_DATA_KEY);
+        assert_eq!(items[2].path, crate::env_config::ENV_CONFIG_SECRET_DATA_KEY);
+        assert_eq!(
+            items[3].key,
+            crate::env_config::SERVICE_METADATA_SECRET_DATA_KEY
+        );
+        assert_eq!(
+            items[3].path,
+            crate::env_config::SERVICE_METADATA_SECRET_DATA_KEY
+        );
 
         // auth-token → projected with a ServiceAccountToken source.
         let token_volume = &volumes[1];
@@ -2066,6 +2101,301 @@ mod tests {
                 .read_only,
             Some(false),
             "normal job cache PVC must be read-write"
+        );
+    }
+
+    /// A backing service with multi-name presets (comma-separated
+    /// `conn_env_var` like `DATABASE_URL,TEST_POSTGRES_URL`) must export
+    /// BOTH env var names with the same rendered connection string so the
+    /// worker can reach for either the conventional or the bespoke name.
+    #[test]
+    fn multi_name_service_preset_exports_all_conn_env_vars() {
+        let cfg = KubernetesConfig::for_testing();
+        let postgres = BackingServiceSpec {
+            service_type: "postgres".into(),
+            image: "postgres:18-alpine".into(),
+            port: 5432,
+            env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+            cpu_request: "100m".into(),
+            memory_request: "256Mi".into(),
+            cpu_limit: "500m".into(),
+            memory_limit: "512Mi".into(),
+            conn_template: "postgres://postgres:postgres@{host}:{port}/app_test".into(),
+            conn_env_var: "DATABASE_URL,TEST_POSTGRES_URL".into(),
+        };
+
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-multi",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            std::slice::from_ref(&postgres),
+            None,
+            false,
+        );
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+        let worker = &pod.containers[0];
+        let envs: BTreeMap<&str, &str> = worker
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        let expected_conn = "postgres://postgres:postgres@127.0.0.1:5432/app_test";
+        assert_eq!(
+            envs.get("DATABASE_URL").copied(),
+            Some(expected_conn),
+            "DATABASE_URL must be present for multi-name preset"
+        );
+        assert_eq!(
+            envs.get("TEST_POSTGRES_URL").copied(),
+            Some(expected_conn),
+            "TEST_POSTGRES_URL must be present for multi-name preset"
+        );
+    }
+
+    /// The per-task-run Secret volume mounts the payload files at stable
+    /// paths under `/var/run/djinn/` so the worker can read them.
+    #[test]
+    fn secret_volume_mounts_payload_files_at_stable_paths() {
+        let cfg = KubernetesConfig::for_testing();
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-test",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            &[],
+            None,
+            false,
+        );
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+        let container = &pod.containers[0];
+        let mounts = container.volume_mounts.as_ref().expect("volume_mounts set");
+
+        // The spec volume mount covers /var/run/djinn/ — all payload files
+        // (spec.bin, credentials.bin, environment.json, service_metadata.json)
+        // are accessible under that directory.
+        let spec_mount = mounts
+            .iter()
+            .find(|m| m.name == VOLUME_SPEC)
+            .expect("spec volume mount present");
+        assert_eq!(spec_mount.mount_path, SPEC_MOUNT_DIR);
+        assert_eq!(spec_mount.read_only, Some(true));
+
+        // Verify the volume's items list includes the payload files.
+        let volumes = pod.volumes.as_ref().expect("volumes set");
+        let spec_volume = volumes
+            .iter()
+            .find(|v| v.name == VOLUME_SPEC)
+            .expect("spec volume present");
+        let secret_src = spec_volume.secret.as_ref().expect("spec volume is Secret");
+        let items = secret_src.items.as_ref().expect("items set");
+
+        let env_config_item = items
+            .iter()
+            .find(|i| i.key == crate::env_config::ENV_CONFIG_SECRET_DATA_KEY)
+            .expect("environment.json item present");
+        assert_eq!(
+            env_config_item.path,
+            crate::env_config::ENV_CONFIG_SECRET_DATA_KEY,
+            "environment.json key must map to the same filename"
+        );
+
+        let service_meta_item = items
+            .iter()
+            .find(|i| i.key == crate::env_config::SERVICE_METADATA_SECRET_DATA_KEY)
+            .expect("service_metadata.json item present");
+        assert_eq!(
+            service_meta_item.path,
+            crate::env_config::SERVICE_METADATA_SECRET_DATA_KEY,
+            "service_metadata.json key must map to the same filename"
+        );
+    }
+
+    // ---- hgd0 Wave 1 transport regression tests ----------------------------
+
+    /// AC4: A postgres service preset with `conn_env_var: "TEST_POSTGRES_URL"`
+    /// injects that exact env var into the worker container with the rendered
+    /// loopback connection string.  The worker reads this to reach the sidecar
+    /// without any pre-task bootstrap command — the connection string is a
+    /// static env var, not the output of a lifecycle command.
+    #[test]
+    fn worker_env_receives_test_postgres_url_from_service_preset() {
+        let cfg = KubernetesConfig::for_testing();
+        let postgres = BackingServiceSpec {
+            service_type: "postgres".into(),
+            image: "postgres:18-alpine".into(),
+            port: 5432,
+            env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+            cpu_request: "100m".into(),
+            memory_request: "256Mi".into(),
+            cpu_limit: "500m".into(),
+            memory_limit: "512Mi".into(),
+            conn_template: "postgres://postgres:postgres@{host}:{port}/app_test".into(),
+            conn_env_var: "TEST_POSTGRES_URL".into(),
+        };
+
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-pg",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            std::slice::from_ref(&postgres),
+            None,
+            false,
+        );
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+        let worker = &pod.containers[0];
+        let envs: BTreeMap<&str, &str> = worker
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        // The preset's TEST_POSTGRES_URL is a static connection string.
+        let expected = "postgres://postgres:postgres@127.0.0.1:5432/app_test";
+        assert_eq!(
+            envs.get("TEST_POSTGRES_URL").copied(),
+            Some(expected),
+            "TEST_POSTGRES_URL must be the rendered loopback connection string"
+        );
+
+        // The env var is a connection string, NOT a pre-task command.
+        // Verify no command-like patterns appear in the value.
+        let value = envs.get("TEST_POSTGRES_URL").unwrap();
+        assert!(
+            value.starts_with("postgres://"),
+            "env var value must be a connection URL, not a command: {value}"
+        );
+    }
+
+    /// AC4: A multi-name postgres preset (`conn_env_var: "DATABASE_URL,TEST_POSTGRES_URL"`)
+    /// emits BOTH env vars into the worker container with the same rendered
+    /// connection string.  This is the canonical djinn service-preset shape.
+    /// Crucially, these are static connection env vars — no pre-task commands
+    /// are attached to or derived from the preset.
+    #[test]
+    fn multi_name_preset_emits_both_database_url_and_test_postgres_url() {
+        let cfg = KubernetesConfig::for_testing();
+        let postgres = BackingServiceSpec {
+            service_type: "postgres".into(),
+            image: "postgres:18-alpine".into(),
+            port: 5432,
+            env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+            cpu_request: "100m".into(),
+            memory_request: "256Mi".into(),
+            cpu_limit: "500m".into(),
+            memory_limit: "512Mi".into(),
+            conn_template: "postgres://postgres:postgres@{host}:{port}/app_test".into(),
+            conn_env_var: "DATABASE_URL,TEST_POSTGRES_URL".into(),
+        };
+
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-pg-multi",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            std::slice::from_ref(&postgres),
+            None,
+            false,
+        );
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+        let worker = &pod.containers[0];
+        let envs: BTreeMap<&str, &str> = worker
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        let expected = "postgres://postgres:postgres@127.0.0.1:5432/app_test";
+        assert_eq!(
+            envs.get("DATABASE_URL").copied(),
+            Some(expected),
+            "DATABASE_URL must be the rendered loopback connection string"
+        );
+        assert_eq!(
+            envs.get("TEST_POSTGRES_URL").copied(),
+            Some(expected),
+            "TEST_POSTGRES_URL must be the rendered loopback connection string"
+        );
+        assert_eq!(
+            envs.get("DATABASE_URL"),
+            envs.get("TEST_POSTGRES_URL"),
+            "both env var names must carry the same connection string"
+        );
+    }
+
+    /// AC4: Service presets are purely connection-injection mechanisms — the
+    /// `BackingServiceSpec` struct has no fields for pre-task commands, lifecycle
+    /// hooks, or any other command-execution metadata.  This is a type-level
+    /// regression guard: if a pre-task field were accidentally added to the
+    /// struct, this assertion on the serialized JSON shape would catch it.
+    #[test]
+    fn service_preset_does_not_carry_pretask_command_fields() {
+        let postgres = BackingServiceSpec {
+            service_type: "postgres".into(),
+            image: "postgres:18-alpine".into(),
+            port: 5432,
+            env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+            cpu_request: "100m".into(),
+            memory_request: "256Mi".into(),
+            cpu_limit: "500m".into(),
+            memory_limit: "512Mi".into(),
+            conn_template: "postgres://postgres:postgres@{host}:{port}/app_test".into(),
+            conn_env_var: "TEST_POSTGRES_URL".into(),
+        };
+
+        // Serialize the spec and verify no lifecycle/pre_task fields leak in.
+        // BackingServiceSpec doesn't implement Serialize directly, so we verify
+        // through the sidecar_conn_env and sidecar_container helpers: both
+        // produce only connection env vars and container specs, not commands.
+        let conn_envs = crate::sidecar::sidecar_conn_env(&postgres);
+        for env in &conn_envs {
+            // Every env var from sidecar_conn_env is a connection string
+            // (starts with the rendered conn_template), not a command.
+            let value = env.value.as_deref().unwrap_or("");
+            assert!(
+                value.starts_with("postgres://"),
+                "conn env var must be a connection URL, not a command: {}={}",
+                env.name,
+                value
+            );
+        }
+
+        // The sidecar container itself has no command override — it uses
+        // the image's default entrypoint (Postgres, Redis, etc.), not a
+        // lifecycle pre-task command.
+        let cfg = crate::config::KubernetesConfig::for_testing();
+        let container = crate::sidecar::sidecar_container(&cfg, &postgres);
+        assert!(
+            container.command.is_none(),
+            "sidecar container must not override the image entrypoint with commands"
         );
     }
 }

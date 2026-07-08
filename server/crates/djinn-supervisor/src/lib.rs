@@ -43,7 +43,6 @@ use tracing::{debug, info, warn};
 
 pub mod services;
 
-pub use services::SupervisorServices;
 pub use services::rpc::{
     ConnectTcpError, RpcBackgroundTasks, RpcServices, StubRpcServices, UnimplementedRpcServices,
 };
@@ -56,6 +55,7 @@ pub use services::wire::{
     AuthHelloMsg, AuthResultMsg, Frame, FramePayload, SerializableCreateTaskRunParams,
     ServiceRpcRequest, ServiceRpcResponse,
 };
+pub use services::{BranchPublicationResult, SupervisorServices};
 
 // Re-export runtime spec types at the crate root so the thin
 // `djinn_agent::supervisor` shim preserves every existing import path.
@@ -1678,6 +1678,52 @@ impl TaskRunSupervisor {
                                  submit_task_review to prevent phantom submission"
                             );
                         }
+                        // ── GitHub publication for existing open PRs ─────────
+                        //
+                        // If the mirror push succeeded and this task already has
+                        // an open PR (`task.pr_url` is set), push the same task
+                        // branch/head to GitHub so Actions evaluates the latest
+                        // commit instead of a stale PR head. This is a freshness
+                        // optimization only — it does NOT gate submit_task_review.
+                        // On failure, the stale-head remediation loop will catch
+                        // the divergence. Gated on Worker role (matching the
+                        // submit_task_review gate below); ArchitectDone tasks
+                        // typically don't have open PRs.
+                        if push_succeeded && role_kind == RoleKind::Worker && task.pr_url.is_some()
+                        {
+                            match self.services.publish_branch_to_github(&spec, &task).await {
+                                result if result.success => {
+                                    tracing::info!(
+                                        task_id = %task.short_id,
+                                        task_run_id = %run_id,
+                                        branch = %spec.task_branch,
+                                        github_head = ?result.pushed_sha,
+                                        "supervisor: published WorkerDone mirror commit to GitHub open-PR branch"
+                                    );
+                                }
+                                pub_failure => {
+                                    // Record structured publication-failure
+                                    // evidence. The task still proceeds to
+                                    // review — mirror push already succeeded and
+                                    // the internal review gates approval/merge.
+                                    // The GitHub stale-head remediation loop
+                                    // will catch the divergence.
+                                    tracing::warn!(
+                                        target: "djinn_supervisor::github_publication_failure",
+                                        task_id = %task.short_id,
+                                        task_run_id = %run_id,
+                                        branch = %spec.task_branch,
+                                        mirror_head = %pub_failure.mirror_head,
+                                        github_head = %pub_failure.attempted_github_head,
+                                        pr_branch_existed = pub_failure.pr_branch_existed,
+                                        error_class = ?pub_failure.error_class,
+                                        error = ?pub_failure.error_message,
+                                        "supervisor: GitHub publication failed after mirror push succeeded — \
+                                         GitHub Actions may evaluate a stale PR head"
+                                    );
+                                }
+                            }
+                        }
                         // Worker finished cleanly → submit_task_review
                         // (in_progress → needs_task_review). The run ends after
                         // this stage (the worker-only sequence has no reviewer
@@ -2724,6 +2770,8 @@ mod tests {
     use async_trait::async_trait;
     use djinn_core::models::Task;
     use djinn_workspace::Workspace;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
     use tokio_util::sync::CancellationToken;
 
     /// Compile-time assertion: `SupervisorServices` is object-safe.
@@ -6674,6 +6722,756 @@ mod tests {
         assert!(
             !captured.contains("no legitimate changes"),
             "clean tree must NOT log as junk-only, got:\n{captured}"
+        );
+    }
+
+    // ── GitHub publication regression tests (ia4y) ──────────────────────────
+    //
+    // Tests covering the four GitHub publication scenarios in the WorkerDone
+    // path: no-open-PR, open-PR success, mirror-push failure, GitHub-push
+    // failure, plus a junk-free alignment assertion.
+
+    /// Services mock that extends the `CommitPathServices` pattern with
+    /// `publish_branch_to_github` call tracking and a configurable
+    /// publication result.
+    struct GitHubPublicationTestServices {
+        cancel: CancellationToken,
+        task: Task,
+        transition_calls: std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
+        submit_task_review_called: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        /// Closure called inside `execute_stage` with the workspace path.
+        write_fn: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync>,
+        /// Tracks how many times `publish_branch_to_github` was called.
+        publish_call_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// Configurable result returned by `publish_branch_to_github`.
+        publish_result: BranchPublicationResult,
+        updated_statuses: std::sync::Arc<std::sync::Mutex<Vec<TaskRunStatus>>>,
+    }
+
+    #[async_trait]
+    impl SupervisorServices for GitHubPublicationTestServices {
+        fn cancel(&self) -> &CancellationToken {
+            &self.cancel
+        }
+
+        async fn load_task(&self, task_id: String) -> Result<Task, String> {
+            assert_eq!(task_id, self.task.id);
+            Ok(self.task.clone())
+        }
+
+        async fn execute_stage(
+            &self,
+            _task: &Task,
+            workspace: &Workspace,
+            role_kind: RoleKind,
+            _task_run_id: &str,
+            _spec: &TaskRunSpec,
+        ) -> Result<StageOutcome, StageError> {
+            assert_eq!(role_kind, RoleKind::Worker);
+            (self.write_fn)(workspace.path());
+            Ok(StageOutcome::WorkerDone)
+        }
+
+        async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
+            TaskRunOutcome::WorkerSubmitted
+        }
+
+        async fn create_task_run(
+            &self,
+            _params: services::SerializableCreateTaskRunParams,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn update_task_run_status(
+            &self,
+            _run_id: String,
+            status: TaskRunStatus,
+        ) -> Result<(), String> {
+            self.updated_statuses
+                .lock()
+                .expect("updated statuses mutex poisoned")
+                .push(status);
+            Ok(())
+        }
+
+        async fn get_model_context_window(&self, _model_id: String) -> Result<i64, String> {
+            Ok(128_000)
+        }
+
+        async fn get_provider_base_url(
+            &self,
+            _catalog_provider_id: String,
+        ) -> Result<String, String> {
+            Ok("http://localhost".into())
+        }
+
+        async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+
+        async fn create_session(
+            &self,
+            _params: services::SerializableCreateSessionParams,
+        ) -> Result<djinn_core::models::SessionRecord, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn publish_session_message(
+            &self,
+            _session_id: String,
+            _task_id: String,
+            _agent_type: String,
+            _message: serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn get_environment_config(
+            &self,
+            _project_id: String,
+        ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn invoke_llm(
+            &self,
+            _model_id: String,
+            _conversation: djinn_provider::message::Conversation,
+            _tools: Vec<serde_json::Value>,
+            _tool_choice: Option<djinn_provider::provider::ToolChoice>,
+        ) -> Result<djinn_provider::provider::LlmResponse, String> {
+            unimplemented!("not exercised")
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn update_session_status(
+            &self,
+            _session_id: String,
+            _status: djinn_core::models::SessionStatus,
+            _tokens_in: i64,
+            _tokens_out: i64,
+            _cache_read: i64,
+            _cache_write: i64,
+            _parked_reason: Option<String>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn tool_github_search(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_github_fetch_file(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_ci_job_log(
+            &self,
+            _session_task_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn emit_djinn_event(
+            &self,
+            _event: services::SerializableDjinnEvent,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn transition_task(
+            &self,
+            task_id: String,
+            action: String,
+            reason: Option<String>,
+        ) -> Result<(), String> {
+            if action == "submit_task_review" {
+                self.submit_task_review_called
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.transition_calls
+                .lock()
+                .expect("transition_calls mutex poisoned")
+                .push(TransitionCall {
+                    task_id,
+                    action,
+                    reason,
+                });
+            Ok(())
+        }
+
+        async fn run_arbiter_preapproval_gate(
+            &self,
+            _task: &Task,
+        ) -> Result<ArbiterGateResult, String> {
+            Ok(ArbiterGateResult::Pass)
+        }
+
+        async fn record_arbiter_decision(
+            &self,
+            _task_id: String,
+            _decision: String,
+            _evidence_json: String,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn start_monitored_reopen(
+            &self,
+            _task_id: String,
+            _directive: String,
+            _verification_command: String,
+            _exclude_models: Vec<String>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn publish_branch_to_github(
+            &self,
+            _spec: &TaskRunSpec,
+            _task: &Task,
+        ) -> BranchPublicationResult {
+            self.publish_call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.publish_result.clone()
+        }
+    }
+
+    fn gh_pub_spec(
+        task_id: &str,
+        project_id: &str,
+        run_id: &str,
+        task_branch: &str,
+    ) -> TaskRunSpec {
+        TaskRunSpec {
+            task_run_id: run_id.into(),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: task_branch.into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        }
+    }
+
+    /// Test 1: No-open-PR WorkerDone.
+    ///
+    /// When `task.pr_url` is `None`, `publish_branch_to_github` must NOT be
+    /// called. The task must proceed to `submit_task_review` normally.
+    #[tokio::test]
+    async fn no_open_pr_worker_done_does_not_publish_to_github() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "proj-no-pr";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let write_fn: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync> =
+            std::sync::Arc::new(|ws_path: &std::path::Path| {
+                std::fs::write(ws_path.join("real.rs"), "fn main() {}\n").expect("write real.rs");
+            });
+
+        let publish_call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transition_calls: Arc<Mutex<Vec<TransitionCall>>> = Arc::new(Mutex::new(Vec::new()));
+        let submit_task_review_called = Arc::new(AtomicBool::new(false));
+
+        let task = fixture_task("task-no-pr", project_id);
+        assert!(
+            task.pr_url.is_none(),
+            "fixture must start with pr_url = None"
+        );
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(GitHubPublicationTestServices {
+            cancel: CancellationToken::new(),
+            task,
+            transition_calls: transition_calls.clone(),
+            submit_task_review_called: submit_task_review_called.clone(),
+            write_fn,
+            publish_call_count: publish_call_count.clone(),
+            publish_result: BranchPublicationResult {
+                success: true,
+                pushed_sha: None,
+                mirror_head: String::new(),
+                attempted_github_head: String::new(),
+                pr_branch_existed: false,
+                error_class: None,
+                error_message: None,
+            },
+            updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = gh_pub_spec("task-no-pr", project_id, "run-no-pr", "djinn/no-pr");
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::WorkerSubmitted),
+            "no-open-PR run must produce WorkerSubmitted, got {:?}",
+            report.outcome
+        );
+        assert_eq!(
+            publish_call_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "publish_branch_to_github must NOT be called when pr_url is None"
+        );
+        assert!(
+            submit_task_review_called.load(std::sync::atomic::Ordering::SeqCst),
+            "submit_task_review must be called for a successful WorkerDone"
+        );
+    }
+
+    /// Test 2: Open-PR success.
+    ///
+    /// When `task.pr_url` is `Some(...)` and `publish_branch_to_github`
+    /// returns success, the mock must be called exactly once and the task
+    /// must transition to `submit_task_review`.
+    #[tokio::test]
+    async fn open_pr_success_publishes_to_github_and_transitions() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "proj-gh-success";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let write_fn: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync> =
+            std::sync::Arc::new(|ws_path: &std::path::Path| {
+                std::fs::write(ws_path.join("real.rs"), "fn main() {}\n").expect("write real.rs");
+            });
+
+        let publish_call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transition_calls: Arc<Mutex<Vec<TransitionCall>>> = Arc::new(Mutex::new(Vec::new()));
+        let submit_task_review_called = Arc::new(AtomicBool::new(false));
+
+        let mut task = fixture_task("task-gh-success", project_id);
+        task.pr_url = Some("https://github.com/test/repo/pull/42".into());
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(GitHubPublicationTestServices {
+            cancel: CancellationToken::new(),
+            task,
+            transition_calls: transition_calls.clone(),
+            submit_task_review_called: submit_task_review_called.clone(),
+            write_fn,
+            publish_call_count: publish_call_count.clone(),
+            publish_result: BranchPublicationResult {
+                success: true,
+                pushed_sha: Some("abc123mirrorhead".into()),
+                mirror_head: "abc123mirrorhead".into(),
+                attempted_github_head: "abc123mirrorhead".into(),
+                pr_branch_existed: true,
+                error_class: None,
+                error_message: None,
+            },
+            updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = gh_pub_spec(
+            "task-gh-success",
+            project_id,
+            "run-gh-success",
+            "djinn/gh-success",
+        );
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(true)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::WorkerSubmitted),
+            "open-PR success run must produce WorkerSubmitted, got {:?}",
+            report.outcome
+        );
+        assert_eq!(
+            publish_call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "publish_branch_to_github must be called exactly once for open-PR tasks"
+        );
+        assert!(
+            submit_task_review_called.load(std::sync::atomic::Ordering::SeqCst),
+            "submit_task_review must be called after successful GitHub publication"
+        );
+
+        let captured = logs.take();
+        assert!(
+            captured.contains("published WorkerDone mirror commit to GitHub open-PR branch"),
+            "expected success log line, got:\n{captured}"
+        );
+    }
+
+    /// Test 3: Mirror-push failure (no GitHub attempt).
+    ///
+    /// When `push_to_origin` fails on all retries, `publish_branch_to_github`
+    /// must NOT be called and the run must fail (task stays in_progress).
+    #[tokio::test]
+    async fn mirror_push_failure_skips_github_publish_and_fails_run() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "proj-gh-mirror-fail";
+        let task_id = "task-gh-mirror-fail";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        // Create an ephemeral workspace and write a file so the auto-commit
+        // produces a real diff that needs pushing.
+        let ws = mirror
+            .clone_ephemeral(project_id, "main")
+            .await
+            .expect("clone ephemeral workspace");
+        let tb = "djinn/gh-mirror-fail";
+        run_git(ws.path(), &["checkout", "-b", tb]);
+        tokio::fs::write(ws.path().join("work.txt"), "real worker output")
+            .await
+            .expect("write fixture file");
+        drop(ws);
+
+        // Install a pre-receive hook that always rejects so push_to_origin fails.
+        let mirror_path = mirror.mirror_path(project_id);
+        let hooks_dir = mirror_path.join("hooks");
+        tokio::fs::create_dir_all(&hooks_dir)
+            .await
+            .expect("create hooks dir");
+        let hook_path = hooks_dir.join("pre-receive");
+        tokio::fs::write(&hook_path, "#!/bin/sh\nexit 1\n")
+            .await
+            .expect("write pre-receive hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))
+                .await
+                .expect("chmod pre-receive hook");
+        }
+
+        let publish_call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transition_calls: Arc<Mutex<Vec<TransitionCall>>> = Arc::new(Mutex::new(Vec::new()));
+        let submit_task_review_called = Arc::new(AtomicBool::new(false));
+
+        let mut task = fixture_task(task_id, project_id);
+        task.pr_url = Some("https://github.com/test/repo/pull/99".into());
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(GitHubPublicationTestServices {
+            cancel: CancellationToken::new(),
+            task,
+            transition_calls: transition_calls.clone(),
+            submit_task_review_called: submit_task_review_called.clone(),
+            write_fn: std::sync::Arc::new(|_ws_path: &std::path::Path| {
+                // Workspace already has content from the pre-clone above.
+            }),
+            publish_call_count: publish_call_count.clone(),
+            publish_result: BranchPublicationResult {
+                success: true,
+                pushed_sha: Some("should-not-be-reached".into()),
+                mirror_head: String::new(),
+                attempted_github_head: String::new(),
+                pr_branch_existed: false,
+                error_class: None,
+                error_message: None,
+            },
+            updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = gh_pub_spec(task_id, project_id, "run-gh-mirror-fail", tb);
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Failed { .. }),
+            "mirror-push failure must produce TaskRunOutcome::Failed, got {:?}",
+            report.outcome
+        );
+        assert_eq!(
+            publish_call_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "publish_branch_to_github must NOT be called when mirror push failed"
+        );
+        assert!(
+            !submit_task_review_called.load(std::sync::atomic::Ordering::SeqCst),
+            "submit_task_review must NOT be called when push_to_origin failed — task stays in_progress"
+        );
+        assert_eq!(
+            report.stages_completed,
+            vec![RoleKind::Worker],
+            "worker stage itself completed (it was the push that failed)"
+        );
+    }
+
+    /// Test 4: GitHub-push failure.
+    ///
+    /// When `publish_branch_to_github` returns a failure result, the task
+    /// MUST still proceed to `submit_task_review` (GitHub push failure does
+    /// NOT block the task lifecycle). Structured publication-failure evidence
+    /// must be present in the logs.
+    #[tokio::test]
+    async fn github_push_failure_still_transitions_to_submit_task_review() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "proj-gh-fail";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let write_fn: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync> =
+            std::sync::Arc::new(|ws_path: &std::path::Path| {
+                std::fs::write(ws_path.join("real.rs"), "fn main() {}\n").expect("write real.rs");
+            });
+
+        let publish_call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transition_calls: Arc<Mutex<Vec<TransitionCall>>> = Arc::new(Mutex::new(Vec::new()));
+        let submit_task_review_called = Arc::new(AtomicBool::new(false));
+
+        let mut task = fixture_task("task-gh-fail", project_id);
+        task.pr_url = Some("https://github.com/test/repo/pull/77".into());
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(GitHubPublicationTestServices {
+            cancel: CancellationToken::new(),
+            task,
+            transition_calls: transition_calls.clone(),
+            submit_task_review_called: submit_task_review_called.clone(),
+            write_fn,
+            publish_call_count: publish_call_count.clone(),
+            publish_result: BranchPublicationResult {
+                success: false,
+                pushed_sha: None,
+                mirror_head: "abc123mirrorhead".into(),
+                attempted_github_head: "def456attempted".into(),
+                pr_branch_existed: true,
+                error_class: Some("push_rejected".into()),
+                error_message: Some("remote: error: GH006: Protected branch update failed".into()),
+            },
+            updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = gh_pub_spec("task-gh-fail", project_id, "run-gh-fail", "djinn/gh-fail");
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(true)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // The run MUST complete as WorkerSubmitted — GitHub push failure
+        // does NOT block the task lifecycle.
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::WorkerSubmitted),
+            "GitHub push failure must NOT block task lifecycle — expected WorkerSubmitted, got {:?}",
+            report.outcome
+        );
+        assert_eq!(
+            publish_call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "publish_branch_to_github must be called exactly once"
+        );
+        assert!(
+            submit_task_review_called.load(std::sync::atomic::Ordering::SeqCst),
+            "submit_task_review MUST still be called — GitHub push failure does not block"
+        );
+
+        // Verify structured publication-failure evidence fields.
+        let captured = logs.take();
+        assert!(
+            captured.contains("djinn_supervisor::github_publication_failure"),
+            "expected structured publication-failure tracing target, got:\n{captured}"
+        );
+        assert!(
+            captured.contains("mirror_head=abc123mirrorhead"),
+            "publication-failure must carry mirror_head, got:\n{captured}"
+        );
+        assert!(
+            captured.contains("github_head=def456attempted"),
+            "publication-failure must carry attempted_github_head, got:\n{captured}"
+        );
+        assert!(
+            captured.contains("pr_branch_existed=true"),
+            "publication-failure must carry pr_branch_existed, got:\n{captured}"
+        );
+        assert!(
+            captured.contains("error_class=Some(\"push_rejected\")"),
+            "publication-failure must carry error_class, got:\n{captured}"
+        );
+    }
+
+    /// Test 5: Junk-free alignment.
+    ///
+    /// Drive a WorkerDone with both legitimate source edits and scratch files
+    /// (`patch.txt`, `test2.txt`). Verify the committed mirror branch is
+    /// junk-free — only the legitimate file appears in the pushed commit.
+    #[tokio::test]
+    async fn worker_done_pushed_mirror_branch_is_junk_free() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "proj-junk-free";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let write_fn: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync> =
+            std::sync::Arc::new(|ws_path: &std::path::Path| {
+                // Legitimate source file
+                std::fs::write(ws_path.join("src_main.rs"), "fn main() {}\n")
+                    .expect("write src_main.rs");
+                // Scratch / junk files that must be filtered
+                std::fs::write(ws_path.join("patch.txt"), "scratch diff\n")
+                    .expect("write patch.txt");
+                std::fs::write(ws_path.join("test2.txt"), "scratch output\n")
+                    .expect("write test2.txt");
+            });
+
+        let publish_call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transition_calls: Arc<Mutex<Vec<TransitionCall>>> = Arc::new(Mutex::new(Vec::new()));
+        let submit_task_review_called = Arc::new(AtomicBool::new(false));
+
+        let task = fixture_task("task-junk-free", project_id);
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(GitHubPublicationTestServices {
+            cancel: CancellationToken::new(),
+            task,
+            transition_calls: transition_calls.clone(),
+            submit_task_review_called: submit_task_review_called.clone(),
+            write_fn,
+            publish_call_count: publish_call_count.clone(),
+            publish_result: BranchPublicationResult {
+                success: true,
+                pushed_sha: None,
+                mirror_head: String::new(),
+                attempted_github_head: String::new(),
+                pr_branch_existed: false,
+                error_class: None,
+                error_message: None,
+            },
+            updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = gh_pub_spec(
+            "task-junk-free",
+            project_id,
+            "run-junk-free",
+            "djinn/junk-free",
+        );
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::WorkerSubmitted),
+            "junk-free run must produce WorkerSubmitted, got {:?}",
+            report.outcome
+        );
+
+        // Verify the mirror's task branch is junk-free: only the legitimate
+        // file should appear in the commit. The mirror is a bare repo, so
+        // use `git show --name-only <branch>` to inspect.
+        let mirror_path = mirror.mirror_path(project_id);
+        let git_dir_arg = mirror_path.to_string_lossy().to_string();
+
+        // List files changed in the latest commit on the task branch.
+        let output = std::process::Command::new("git")
+            .args([
+                "--git-dir",
+                &git_dir_arg,
+                "show",
+                "--name-only",
+                "--pretty=format:",
+                "djinn/junk-free",
+            ])
+            .output()
+            .expect("git show must run");
+        assert!(
+            output.status.success(),
+            "git show failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let changed_files = String::from_utf8_lossy(&output.stdout);
+        let changed_files: Vec<&str> = changed_files
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        // The committed files must contain the legitimate file.
+        assert!(
+            changed_files.iter().any(|f| *f == "src_main.rs"),
+            "committed branch must contain the legitimate file src_main.rs, got: {changed_files:?}"
+        );
+
+        // The committed files must NOT contain any scratch files.
+        assert!(
+            !changed_files.iter().any(|f| *f == "patch.txt"),
+            "committed branch must NOT contain scratch file patch.txt, got: {changed_files:?}"
+        );
+        assert!(
+            !changed_files.iter().any(|f| *f == "test2.txt"),
+            "committed branch must NOT contain scratch file test2.txt, got: {changed_files:?}"
         );
     }
 }

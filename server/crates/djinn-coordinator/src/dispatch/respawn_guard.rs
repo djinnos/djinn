@@ -6,10 +6,34 @@
 //! 1. **Open-PR adoption**: when the task already has an open PR
 //!    (`task.pr_url`), adopt it and record an `adopted_pr` audit row.  This
 //!    prevents spawning a duplicate worker when a PR is already in review.
-//!    Adoption is **bypassed** when the task's required-CI gate is failing
-//!    (`ci_status == "failing"`): the PrCiFailed remediation flow reopens the
-//!    task precisely so a worker can be dispatched to fix the failing PR, so
-//!    the guard must fall through to step 2 instead of adopting.
+//!    Adoption is **worker-role only** (vd4w's intent was "before spawning a
+//!    duplicate WORKER"): reviewer / planner / arbiter / lead dispatches skip
+//!    straight to step 2 (task 4tl2 — a needs_task_review reviewer was starved
+//!    because its dispatch adopted the open PR and never ran).  Adoption is
+//!    also **bypassed** when the PR needs rework — any reopen-for-PR-rework flow
+//!    (PrCiFailed, PrConflict, PrChangesRequested, merge-queue dequeue,
+//!    task_review_reject*, lead_approve_conflict) returns the task to a
+//!    dispatchable state precisely so a worker can be dispatched to fix the PR,
+//!    so the guard must fall through to step 2 instead of adopting.  Rework is
+//!    detected **primarily** by the latest-attempt marker: every rework reopen
+//!    now durably records a `reopened` attempt (terminalizing the in-flight
+//!    attempt, or inserting a marker row when none was live), so a `reopened`
+//!    newest attempt is the single authoritative "needs rework" signal.  The
+//!    task-row `PrReworkSignal`s below are retained as defense-in-depth:
+//!    - [`PrReworkSignal::FailingCi`]: `task.ci_status == "failing"` (the
+//!      promoted required-CI gate is red on the PR head — PrCiFailed flow).
+//!    - [`PrReworkSignal::MergeConflict`]: `task.merge_conflict_metadata` is
+//!      populated (PrConflict / task_review_reject_conflict /
+//!      lead_approve_conflict set it; `submit_task_review`, `close`,
+//!      `force_close`, and `user_override` clear it, so a populated value
+//!      always describes the *current* unresolved conflict).
+//!    - Latest-attempt fallback: when neither task-row signal is present but
+//!      the newest non-guard `task_attempts` row for this task+role is
+//!      terminal with outcome `reopened`, the task was reopened for PR rework
+//!      by a path that leaves no task-row column (PrChangesRequested, a
+//!      merge-queue dequeue whose PR-head checks are green because the full
+//!      suite only runs on `merge_group`).  The window is self-closing: the
+//!      very next dispatch inserts a newer `pending` attempt row.
 //! 2. **Non-terminal attempt**: when a `pending` or `submitted` attempt already
 //!    exists for the task+role, defer dispatch and record a `deferred` audit
 //!    row.
@@ -28,12 +52,75 @@
 //! proceed.
 
 use djinn_core::models::CiStatus;
-use djinn_core::models::task_attempt::{GuardDecision, GuardReason};
+use djinn_core::models::task_attempt::{GuardDecision, GuardReason, TaskAttemptOutcome};
 use djinn_db::{
     GuardAdoptedPrTaskAttemptParams, GuardDeferTaskAttemptParams, TaskAttemptRepository,
 };
 
 use super::attempt_lifecycle::make_dispatch_key;
+
+/// The role whose dispatches carry PR-write intent.  Open-PR adoption applies
+/// ONLY to worker dispatches: vd4w's intent was "before spawning a duplicate
+/// WORKER".  Reviewer / planner / arbiter / lead dispatches for a task that
+/// happens to have an open PR must fall through to the step-2 in-flight dedup
+/// instead of being adopted (which starved needs_task_review reviewer
+/// dispatches — task 4tl2).  Mirrors the `role == "worker"` literal used at the
+/// dispatch call sites in `task_dispatch.rs`.
+const WORKER_ROLE: &str = "worker";
+
+// ─── PR-rework signal ───────────────────────────────────────────────────────
+
+/// Durable "this PR needs a worker" signal derived from the task row at the
+/// dispatch call site (which holds the full task row — no extra DB reads).
+///
+/// When present, open-PR adoption is bypassed so the rework worker the reopen
+/// flow asked for can actually dispatch (step-2 pending/submitted dedup still
+/// prevents duplicates).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrReworkSignal {
+    /// The promoted required-CI gate is failing on the PR head
+    /// (`task.ci_status == "failing"` — PrCiFailed remediation flow).
+    FailingCi,
+    /// The task carries populated `merge_conflict_metadata` (PrConflict /
+    /// task_review_reject_conflict / lead_approve_conflict reopen flows).
+    /// The column is cleared on `submit_task_review` / `close` /
+    /// `force_close` / `user_override`, so a populated value describes the
+    /// current unresolved conflict, not a stale one.
+    MergeConflict,
+}
+
+impl PrReworkSignal {
+    /// Derive the rework signal from the task-row facts available at the
+    /// dispatch call site.
+    ///
+    /// Precedence: a failing required-CI gate wins over conflict metadata
+    /// (either one alone already bypasses adoption; the ordering only affects
+    /// which signal is named in tracing).  Empty/whitespace conflict metadata
+    /// is treated as absent.
+    pub fn from_task_row(ci_status: &str, merge_conflict_metadata: Option<&str>) -> Option<Self> {
+        if ci_status == CiStatus::Failing.as_str() {
+            return Some(Self::FailingCi);
+        }
+        if merge_conflict_metadata.is_some_and(|m| !m.trim().is_empty()) {
+            return Some(Self::MergeConflict);
+        }
+        None
+    }
+
+    /// Stable snake_case name for tracing/audit output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FailingCi => "failing_ci",
+            Self::MergeConflict => "merge_conflict",
+        }
+    }
+}
+
+impl std::fmt::Display for PrReworkSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 // ─── Public decision type ───────────────────────────────────────────────────
 
@@ -59,19 +146,25 @@ pub enum RespawnGuardDecision {
 /// 1. **Open-PR adoption** — when `pr_url` is `Some`, an existing open PR is
 ///    detected.  Returns [`RespawnGuardDecision::Adopted`] so the caller can
 ///    record an `adopted_pr` audit row and skip dispatch.  Adoption is
-///    **bypassed** when `ci_status` is `failing` (a required check is red on
-///    the PR head): the PrCiFailed remediation flow reopened the task so a
-///    worker can fix the failing PR, and adopting here would starve that
-///    remediation forever.  The guard falls through to step 2 instead, so a
-///    remediation worker dispatches exactly once.
+///    **bypassed** when the PR needs rework: any reopen-for-PR-rework flow
+///    (PrCiFailed, PrConflict, PrChangesRequested, merge-queue dequeue)
+///    reopened the task so a worker can fix the PR, and adopting here would
+///    starve that rework forever.  The guard falls through to step 2 instead,
+///    so a rework worker dispatches exactly once.  Rework is detected via:
+///    - `rework_signal` (built by the caller from the task row with
+///      [`PrReworkSignal::from_task_row`]): failing required CI or an
+///      unresolved merge conflict; or
+///    - the latest-attempt fallback for paths that leave no task-row column
+///      (PrChangesRequested, merge-queue dequeues whose PR-head checks are
+///      green): the newest non-guard attempt row for this task+role is
+///      terminal with outcome `reopened`.
 /// 2. **Non-terminal attempt** — consults
 ///    [`TaskAttemptRepository::latest_pending_or_submitted`] for the task/role
 ///    pair.  If a non-terminal attempt already exists the dispatch is deferred
 ///    with [`GuardReason::RespawnGuard`].
 ///
-/// `ci_status` is the task's promoted required-CI gate state (the wire string
-/// of [`CiStatus`], e.g. `task.ci_status`).  `None` or any non-`failing` value
-/// (green / pending / unknown) preserves the adoption behavior.
+/// A healthy open PR (CI green/pending/unknown, no conflict metadata, no
+/// reopened-latest attempt) preserves the adoption behavior.
 ///
 /// Returns [`RespawnGuardDecision::Allow`] when neither guard fires.
 ///
@@ -82,25 +175,41 @@ pub async fn run_respawn_guard(
     task_id: &str,
     role: &str,
     pr_url: Option<&str>,
-    ci_status: Option<&str>,
+    rework_signal: Option<PrReworkSignal>,
 ) -> RespawnGuardDecision {
     // 1. Open-PR adoption: when the task already has an open PR, adopt it
     //    and skip dispatch.  This prevents spawning a duplicate worker when
-    //    a PR is already in review — unless required CI is failing on the PR
-    //    head, in which case the task was reopened for remediation and a
-    //    worker MUST be dispatched to fix the PR (step 2 still prevents
-    //    duplicate remediation workers).
+    //    a PR is already in review — unless the PR needs rework, in which
+    //    case the task was reopened so a worker MUST be dispatched to fix
+    //    the PR (step 2 still prevents duplicate rework workers).
+    //
+    //    Adoption is WORKER-ROLE ONLY.  vd4w's intent was "before spawning a
+    //    duplicate WORKER"; a reviewer / planner / arbiter / lead dispatch for
+    //    a task that carries an open PR must NOT be adopted (that starved
+    //    needs_task_review reviewer dispatches — task 4tl2).  Non-worker roles
+    //    skip straight to the step-2 pending/submitted dedup below.
     if let Some(url) = pr_url
         && !url.is_empty()
+        && role == WORKER_ROLE
     {
-        if ci_status == Some(CiStatus::Failing.as_str()) {
+        if let Some(signal) = rework_signal {
             tracing::info!(
                 task_id = %task_id,
                 role = %role,
                 pr_url = %url,
-                ci_status = %CiStatus::Failing,
-                "respawn_guard: open PR has failing required CI — bypassing adoption so a \
-                 remediation worker can dispatch"
+                rework_signal = %signal,
+                "respawn_guard: open PR needs rework — bypassing adoption so a \
+                 rework worker can dispatch"
+            );
+        } else if latest_attempt_is_reopened(db, task_id, role).await {
+            tracing::info!(
+                task_id = %task_id,
+                role = %role,
+                pr_url = %url,
+                rework_signal = "latest_attempt_reopened",
+                "respawn_guard: open PR needs rework (latest attempt terminalized as \
+                 reopened; e.g. changes requested or merge-queue dequeue) — bypassing \
+                 adoption so a rework worker can dispatch"
             );
         } else {
             tracing::info!(
@@ -141,6 +250,49 @@ pub async fn run_respawn_guard(
                 "respawn_guard: attempt-history lookup failed (fail-open); allowing dispatch"
             );
             RespawnGuardDecision::Allow
+        }
+    }
+}
+
+/// Latest-attempt rework fallback: `true` when the newest non-guard
+/// `task_attempts` row for this task+role is terminal with outcome
+/// `reopened`.
+///
+/// The PR poller terminalizes the in-flight worker attempt as `reopened`
+/// for every reopen-for-PR-rework transition (PrCiFailed,
+/// PrChangesRequested, PrConflict, task_review_reject*, merge-queue
+/// dequeue via PrCiFailed) *before* applying the board transition, so a
+/// `reopened`-latest attempt means "reopened for rework, no new attempt
+/// dispatched yet".  Guard-only audit rows (`deferred`, `adopted_pr`) are
+/// skipped: prior guard ticks must not mask the rework signal.
+///
+/// The bypass window is self-closing (no permanent adoption bypass): the
+/// moment a rework worker dispatches, `record_dispatch_start` inserts a
+/// newer `pending` row, which becomes the latest attempt and step 2 defers
+/// any further dispatch; on submit/merge it advances to
+/// `submitted`/`completed`, restoring adoption for the then-healthy PR.
+///
+/// Fail-closed on DB errors: a lookup failure preserves the pre-existing
+/// adoption behavior rather than spawning a possibly-duplicate worker.
+async fn latest_attempt_is_reopened(db: &djinn_db::Database, task_id: &str, role: &str) -> bool {
+    let repo = TaskAttemptRepository::new(db.clone());
+    match repo.list_for_task(task_id).await {
+        Ok(attempts) => attempts
+            .iter()
+            .filter(|a| a.role == role)
+            .find(|a| {
+                a.outcome != TaskAttemptOutcome::Deferred.as_str()
+                    && a.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
+            })
+            .is_some_and(|latest| latest.outcome == TaskAttemptOutcome::Reopened.as_str()),
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                role = %role,
+                error = %e,
+                "respawn_guard: latest-attempt rework lookup failed; preserving adoption"
+            );
+            false
         }
     }
 }
@@ -257,570 +409,5 @@ pub async fn record_adopted_pr_attempt(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use djinn_core::events::EventBus;
-    use djinn_db::{Database, EpicRepository, TaskAttemptRepository, TaskRepository};
-
-    fn test_db() -> Database {
-        Database::open_in_memory().unwrap()
-    }
-
-    /// Create a minimal task row for FK satisfaction.
-    async fn create_task(db: &Database) -> djinn_core::models::Task {
-        let event_bus = EventBus::noop();
-        let epic_repo = EpicRepository::new(db.clone(), event_bus.clone());
-        let epic = epic_repo
-            .create("Epic", "", "", "", "", None)
-            .await
-            .unwrap();
-        let task_repo = TaskRepository::new(db.clone(), event_bus);
-        task_repo
-            .create(&epic.id, "Test task", "", "", "task", 0, "", None)
-            .await
-            .unwrap()
-    }
-
-    // ─── run_respawn_guard tests ─────────────────────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_allows_when_no_prior_attempts() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
-        assert_eq!(decision, RespawnGuardDecision::Allow);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_defers_when_pending_attempt_exists() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Insert a pending attempt (simulating a dispatch-start that landed).
-        let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-        super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
-            .await
-            .expect("record_dispatch_start should succeed");
-
-        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
-        assert_eq!(
-            decision,
-            RespawnGuardDecision::Defer(GuardReason::RespawnGuard)
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_defers_when_submitted_attempt_exists() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Insert a pending attempt, then advance it to submitted.
-        let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-        super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
-            .await
-            .expect("record_dispatch_start should succeed");
-
-        super::super::attempt_lifecycle::advance_to_submitted(
-            &db,
-            super::super::attempt_lifecycle::SubmitAdvancementParams {
-                task_id: &task.id,
-                role: "worker",
-                submit_ref: Some("ref-1"),
-                checkpoint_ref: None,
-                mirror_head_sha: None,
-                github_head_sha: None,
-                summary: Some("submitted"),
-                summary_json: None,
-            },
-        )
-        .await;
-
-        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
-        assert_eq!(
-            decision,
-            RespawnGuardDecision::Defer(GuardReason::RespawnGuard)
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_allows_after_terminal_attempt() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Create and terminally close an attempt.
-        let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-        super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
-            .await
-            .expect("record_dispatch_start should succeed");
-
-        super::super::attempt_lifecycle::advance_latest_to_terminal(
-            &db,
-            super::super::attempt_lifecycle::TerminalAdvancementParams {
-                task_id: &task.id,
-                role: "worker",
-                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Completed,
-                pr_url: None,
-                submit_ref: None,
-                checkpoint_ref: None,
-                mirror_head_sha: None,
-                github_head_sha: None,
-                summary: Some("done"),
-                summary_json: None,
-                log_tail: None,
-            },
-        )
-        .await;
-
-        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
-        assert_eq!(decision, RespawnGuardDecision::Allow);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_allows_for_different_role() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Insert a pending attempt for "reviewer".
-        let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "reviewer");
-        super::super::attempt_lifecycle::record_dispatch_start(
-            &db, &task.id, "reviewer", None, &dk,
-        )
-        .await
-        .expect("record_dispatch_start should succeed");
-
-        // Guard for "worker" role should allow (different role).
-        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
-        assert_eq!(decision, RespawnGuardDecision::Allow);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_ignores_deferred_attempts() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Insert a deferred guard-only row (previous guard deferral).
-        record_guard_deferred_attempt(
-            &db,
-            &task.id,
-            "worker",
-            GuardReason::RespawnGuard,
-            Some("previous deferral"),
-        )
-        .await
-        .expect("guard deferred row should insert");
-
-        // The guard should allow because `deferred` is not in
-        // ('pending', 'submitted').
-        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
-        assert_eq!(decision, RespawnGuardDecision::Allow);
-    }
-
-    // ─── record_guard_deferred_attempt tests ─────────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_deferred_creates_audit_row() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        let attempt_id = record_guard_deferred_attempt(
-            &db,
-            &task.id,
-            "worker",
-            GuardReason::RespawnGuard,
-            Some("duplicate spawn blocked"),
-        )
-        .await
-        .expect("should return attempt id");
-
-        let repo = TaskAttemptRepository::new(db);
-        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
-        assert_eq!(attempt.task_id, task.id);
-        assert_eq!(attempt.role, "worker");
-        assert_eq!(attempt.outcome, "deferred");
-        assert_eq!(
-            attempt.guard_decision_enum().unwrap(),
-            Some(GuardDecision::Defer)
-        );
-        assert_eq!(
-            attempt.guard_reason.as_deref(),
-            Some(GuardReason::RespawnGuard.as_str())
-        );
-        assert_eq!(attempt.summary.as_deref(), Some("duplicate spawn blocked"));
-        // Session_id must be NULL for guard-only rows.
-        assert!(attempt.session_id.is_none());
-        // Terminal_at must be set (deferred is terminal).
-        assert!(attempt.terminal_at.is_some());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_deferred_with_capacity_reason() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        let attempt_id = record_guard_deferred_attempt(
-            &db,
-            &task.id,
-            "worker",
-            GuardReason::Capacity,
-            Some("user at per-model cap"),
-        )
-        .await
-        .expect("should return attempt id");
-
-        let repo = TaskAttemptRepository::new(db);
-        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
-        assert_eq!(attempt.outcome, "deferred");
-        assert_eq!(
-            attempt.guard_reason.as_deref(),
-            Some(GuardReason::Capacity.as_str())
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_deferred_idempotent_on_same_dispatch_key() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Both calls use different dispatch keys (make_dispatch_key generates
-        // unique keys), so two rows are created. Idempotency is on the
-        // dispatch_key column, and each guard deferral gets its own key.
-        let id1 = record_guard_deferred_attempt(
-            &db,
-            &task.id,
-            "worker",
-            GuardReason::RespawnGuard,
-            Some("first deferral"),
-        )
-        .await;
-        let id2 = record_guard_deferred_attempt(
-            &db,
-            &task.id,
-            "worker",
-            GuardReason::RespawnGuard,
-            Some("second deferral"),
-        )
-        .await;
-
-        // Both should succeed (different dispatch keys).
-        assert!(id1.is_some());
-        assert!(id2.is_some());
-        assert_ne!(id1, id2);
-
-        let repo = TaskAttemptRepository::new(db);
-        let all = repo.list_for_task(&task.id).await.unwrap();
-        assert_eq!(all.len(), 2);
-        // All should be deferred.
-        for attempt in &all {
-            assert_eq!(attempt.outcome, "deferred");
-        }
-    }
-
-    // ─── Guard ordering / no-counter side effects ────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_does_not_create_pending_or_submitted_rows() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Record a guard deferral.
-        record_guard_deferred_attempt(
-            &db,
-            &task.id,
-            "worker",
-            GuardReason::RespawnGuard,
-            Some("test"),
-        )
-        .await;
-
-        // Verify the deferred row is NOT visible as pending/submitted to the
-        // guard — only pending/submitted rows should block dispatch.
-        let repo = TaskAttemptRepository::new(db.clone());
-        let in_flight = repo
-            .latest_pending_or_submitted(&task.id, Some("worker"))
-            .await
-            .unwrap();
-        assert!(
-            in_flight.is_none(),
-            "deferred rows must not be visible as pending/submitted"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_ordering_pending_before_submitted() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Create a pending attempt.
-        let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-        super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
-            .await
-            .unwrap();
-
-        // Guard must defer (pending exists).
-        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
-        assert_eq!(
-            decision,
-            RespawnGuardDecision::Defer(GuardReason::RespawnGuard)
-        );
-    }
-
-    // ─── Open-PR adoption guard tests ───────────────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_adopts_when_pr_url_present() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        let decision = run_respawn_guard(
-            &db,
-            &task.id,
-            "worker",
-            Some("https://github.example/owner/repo/pull/42"),
-            None,
-        )
-        .await;
-        assert_eq!(
-            decision,
-            RespawnGuardDecision::Adopted {
-                pr_url: "https://github.example/owner/repo/pull/42".to_owned(),
-            }
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_ignores_empty_pr_url() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // An empty pr_url should not trigger adoption.
-        let decision = run_respawn_guard(&db, &task.id, "worker", Some(""), None).await;
-        assert_eq!(decision, RespawnGuardDecision::Allow);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_pr_adoption_takes_precedence_over_pending_attempt() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Insert a pending attempt.
-        let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-        super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
-            .await
-            .expect("record_dispatch_start should succeed");
-
-        // Even with a pending attempt, if pr_url is set, the guard adopts.
-        let decision = run_respawn_guard(
-            &db,
-            &task.id,
-            "worker",
-            Some("https://github.example/owner/repo/pull/42"),
-            None,
-        )
-        .await;
-        assert_eq!(
-            decision,
-            RespawnGuardDecision::Adopted {
-                pr_url: "https://github.example/owner/repo/pull/42".to_owned(),
-            }
-        );
-    }
-
-    // ─── CI-remediation adoption bypass tests ───────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_does_not_adopt_when_ci_gate_failing() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Open PR + failing required CI (PrCiFailed remediation reopen): the
-        // guard must NOT adopt.  With no pending attempt it must Allow so a
-        // remediation worker dispatches.
-        let decision = run_respawn_guard(
-            &db,
-            &task.id,
-            "worker",
-            Some("https://github.example/owner/repo/pull/42"),
-            Some(CiStatus::Failing.as_str()),
-        )
-        .await;
-        assert_eq!(decision, RespawnGuardDecision::Allow);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_defers_when_ci_gate_failing_and_pending_attempt_exists() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // A remediation worker is already in flight (pending attempt).
-        let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-        super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
-            .await
-            .expect("record_dispatch_start should succeed");
-
-        // Open PR + failing required CI: adoption is bypassed, but step 2
-        // still defers so no duplicate remediation worker is dispatched.
-        let decision = run_respawn_guard(
-            &db,
-            &task.id,
-            "worker",
-            Some("https://github.example/owner/repo/pull/42"),
-            Some(CiStatus::Failing.as_str()),
-        )
-        .await;
-        assert_eq!(
-            decision,
-            RespawnGuardDecision::Defer(GuardReason::RespawnGuard)
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_adopts_when_ci_gate_green_pending_or_absent() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Any non-failing CI gate state preserves the adoption behavior: the
-        // PR is merely awaiting review/merge, so no duplicate worker spawns.
-        for ci_status in [
-            Some(CiStatus::Passing.as_str()),
-            Some(CiStatus::Pending.as_str()),
-            Some(CiStatus::Unknown.as_str()),
-            None,
-        ] {
-            let decision = run_respawn_guard(
-                &db,
-                &task.id,
-                "worker",
-                Some("https://github.example/owner/repo/pull/42"),
-                ci_status,
-            )
-            .await;
-            assert_eq!(
-                decision,
-                RespawnGuardDecision::Adopted {
-                    pr_url: "https://github.example/owner/repo/pull/42".to_owned(),
-                },
-                "ci_status={ci_status:?} must still adopt"
-            );
-        }
-    }
-
-    // ─── record_adopted_pr_attempt tests ────────────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn adopted_pr_creates_audit_row() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        let attempt_id = record_adopted_pr_attempt(
-            &db,
-            &task.id,
-            "worker",
-            "https://github.example/owner/repo/pull/42",
-            Some("adopted existing PR"),
-        )
-        .await
-        .expect("should return attempt id");
-
-        let repo = TaskAttemptRepository::new(db);
-        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
-        assert_eq!(attempt.task_id, task.id);
-        assert_eq!(attempt.role, "worker");
-        assert_eq!(attempt.outcome, "adopted_pr");
-        assert_eq!(
-            attempt.guard_decision_enum().unwrap(),
-            Some(GuardDecision::Allow)
-        );
-        assert_eq!(
-            attempt.guard_reason.as_deref(),
-            Some(GuardReason::OpenPrAdoption.as_str())
-        );
-        assert_eq!(
-            attempt.pr_url.as_deref(),
-            Some("https://github.example/owner/repo/pull/42")
-        );
-        assert_eq!(attempt.summary.as_deref(), Some("adopted existing PR"));
-        // Session_id must be NULL for guard-only rows.
-        assert!(attempt.session_id.is_none());
-        // Terminal_at must be set (adopted_pr is terminal).
-        assert!(attempt.terminal_at.is_some());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn adopted_pr_idempotent_on_same_task_role() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Both calls use the same deterministic dispatch key, so the second
-        // call should be a no-op (ON CONFLICT DO NOTHING).
-        let id1 = record_adopted_pr_attempt(
-            &db,
-            &task.id,
-            "worker",
-            "https://github.example/owner/repo/pull/42",
-            Some("first adoption"),
-        )
-        .await;
-        let id2 = record_adopted_pr_attempt(
-            &db,
-            &task.id,
-            "worker",
-            "https://github.example/owner/repo/pull/42",
-            Some("second adoption"),
-        )
-        .await;
-
-        // Both should return the same id (idempotent).
-        assert!(id1.is_some());
-        assert!(id2.is_some());
-        assert_eq!(id1, id2);
-
-        let repo = TaskAttemptRepository::new(db);
-        let all = repo.list_for_task(&task.id).await.unwrap();
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].outcome, "adopted_pr");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn adopted_pr_row_is_not_pending_or_submitted() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Record an adopted-PR row.
-        record_adopted_pr_attempt(
-            &db,
-            &task.id,
-            "worker",
-            "https://github.example/owner/repo/pull/42",
-            Some("test"),
-        )
-        .await
-        .expect("should succeed");
-
-        // The adopted_pr row must NOT be visible as pending/submitted to the
-        // guard — only pending/submitted rows should block dispatch.
-        let repo = TaskAttemptRepository::new(db.clone());
-        let in_flight = repo
-            .latest_pending_or_submitted(&task.id, Some("worker"))
-            .await
-            .unwrap();
-        assert!(
-            in_flight.is_none(),
-            "adopted_pr rows must not be visible as pending/submitted"
-        );
-    }
-
-    // ─── 422 backstop regression: existing behavior preserved ───────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_allows_when_no_pr_url_and_no_pending() {
-        let db = test_db();
-        let task = create_task(&db).await;
-
-        // Simulates the case where the 422 backstop in supervisor_pr_open
-        // would handle a race: the task has no pr_url yet and no pending
-        // attempt, so the guard allows and the spawn path proceeds.
-        let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
-        assert_eq!(decision, RespawnGuardDecision::Allow);
-    }
-}
+#[path = "respawn_guard_tests.rs"]
+mod tests;

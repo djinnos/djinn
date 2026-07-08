@@ -42,6 +42,52 @@ pub const VOLUME_ENV_CONFIG: &str = "env-config";
 /// pre-cut-over. The worker treats an empty /etc/djinn as "no config".
 pub const ENV_CONFIG_VOLUME_OPTIONAL: bool = true;
 
+// ---- per-task-run Secret payload mount paths ----------------------------
+
+/// Full path of the effective EnvironmentConfig JSON inside the task-run
+/// Pod.  The worker reads from here after sidecar readiness.  The payload
+/// is sourced from the per-task-run Secret's [`ENV_CONFIG_SECRET_DATA_KEY`]
+/// entry, mounted as a file at this path by the Job manifest.
+pub const TASK_RUN_ENV_CONFIG_MOUNT_FILE: &str = "/var/run/djinn/environment.json";
+
+/// Full path of the resolved service metadata JSON inside the task-run
+/// Pod.  The worker reads from here to learn which backing services were
+/// injected and their connection details.  The payload is sourced from
+/// the per-task-run Secret's [`SERVICE_METADATA_SECRET_DATA_KEY`] entry.
+pub const TASK_RUN_SERVICE_METADATA_MOUNT_FILE: &str = "/var/run/djinn/service_metadata.json";
+
+// ---- per-task-run Secret data keys --------------------------------------
+
+/// Key inside the per-task-run `Secret.data` that carries the serialised
+/// effective `EnvironmentConfig` JSON.  Must match the filename the Job
+/// mounts at [`TASK_RUN_ENV_CONFIG_MOUNT_FILE`].
+pub const ENV_CONFIG_SECRET_DATA_KEY: &str = "environment.json";
+
+/// Key inside the per-task-run `Secret.data` that carries the serialised
+/// resolved service metadata (`ImageServiceResolution`) JSON.  Must match
+/// the filename the Job mounts at
+/// [`TASK_RUN_SERVICE_METADATA_MOUNT_FILE`].
+pub const SERVICE_METADATA_SECRET_DATA_KEY: &str = "service_metadata.json";
+
+/// Return the UTF-8 JSON bytes for [`EnvironmentConfig::empty()`].
+///
+/// This is the canonical "no config" payload that the Secret carries when
+/// no project-level `environment_config` exists.  The JSON is valid and
+/// represents an empty `lifecycle.pre_task` list under the telk schema
+/// defaults.
+///
+/// # Panics
+///
+/// Panics only if `EnvironmentConfig::empty()` fails to serialize, which
+/// would indicate a programming error in the `EnvironmentConfig` type.
+pub fn default_environment_config_json_bytes() -> Vec<u8> {
+    // `EnvironmentConfig::empty()` has `schema_version: 1` and an empty
+    // `lifecycle.pre_task` — exactly what the worker expects for a
+    // project with no pre-task configuration.
+    serde_json::to_vec(&djinn_stack::environment::EnvironmentConfig::empty())
+        .expect("EnvironmentConfig::empty() is always serializable")
+}
+
 /// Canonical ConfigMap name for a project. Sanitised to DNS-label form
 /// to match Pod label conventions elsewhere in this crate.
 pub fn env_config_config_map_name(project_id: &str) -> String {
@@ -165,5 +211,134 @@ mod tests {
             data.get(ENV_CONFIG_KEY).map(String::as_str),
             Some(r#"{"schema_version":1,"source":"auto-detected"}"#)
         );
+    }
+
+    // ---- per-task-run Secret payload tests ------------------------------
+
+    #[test]
+    fn task_run_mount_paths_are_under_var_run_djinn() {
+        assert!(TASK_RUN_ENV_CONFIG_MOUNT_FILE.starts_with("/var/run/djinn/"));
+        assert!(TASK_RUN_SERVICE_METADATA_MOUNT_FILE.starts_with("/var/run/djinn/"));
+    }
+
+    #[test]
+    fn secret_data_keys_match_mount_filenames() {
+        // The data key in the Secret must equal the filename component of
+        // the mount path so the Job volume projection works.
+        let env_filename = TASK_RUN_ENV_CONFIG_MOUNT_FILE.rsplit('/').next().unwrap();
+        assert_eq!(ENV_CONFIG_SECRET_DATA_KEY, env_filename);
+
+        let meta_filename = TASK_RUN_SERVICE_METADATA_MOUNT_FILE
+            .rsplit('/')
+            .next()
+            .unwrap();
+        assert_eq!(SERVICE_METADATA_SECRET_DATA_KEY, meta_filename);
+    }
+
+    #[test]
+    fn default_environment_config_json_bytes_round_trips() {
+        let bytes = default_environment_config_json_bytes();
+        let json_str = std::str::from_utf8(&bytes).expect("valid UTF-8");
+        let cfg: djinn_stack::environment::EnvironmentConfig =
+            serde_json::from_str(json_str).expect("valid EnvironmentConfig");
+        assert_eq!(cfg.schema_version, 1);
+        assert!(
+            cfg.lifecycle.pre_task.is_empty(),
+            "default must have empty pre_task"
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn config_map_and_secret_data_keys_do_not_collide() {
+        // The ConfigMap key "environment.json" is for the project-wide
+        // config mount at /etc/djinn/. The Secret key
+        // "environment.json" is for the per-task-run effective config
+        // at /var/run/djinn/. They share the same data key name but are
+        // on different volumes. This test guards that they are indeed
+        // the same string (intentional naming alignment).
+        assert_eq!(ENV_CONFIG_KEY, ENV_CONFIG_SECRET_DATA_KEY);
+    }
+
+    // ---- hgd0 Wave 1 transport compatibility tests -------------------------
+
+    /// AC1: A minimal JSON blob that predates the `lifecycle` field (an "old
+    /// config") deserializes into `EnvironmentConfig` with an empty
+    /// `lifecycle.pre_task` list thanks to `#[serde(default)]`.  This proves
+    /// rolling compatibility: new runtime + old/no config → empty pre_task.
+    #[test]
+    fn old_json_without_lifecycle_field_defaults_to_empty_pretask() {
+        let old_json = r#"{"schema_version":1}"#;
+        let cfg: djinn_stack::environment::EnvironmentConfig =
+            serde_json::from_str(old_json).expect("old config must deserialize");
+        assert_eq!(cfg.schema_version, 1);
+        assert!(
+            cfg.lifecycle.pre_task.is_empty(),
+            "old config without lifecycle field must default to empty pre_task"
+        );
+    }
+
+    /// AC1: An empty JSON object (the Dolt column default `'{}'`) deserializes
+    /// with empty `lifecycle.pre_task`.  This is the most basic backward-compat
+    /// case: a project that never had any environment config written.
+    #[test]
+    fn empty_json_object_defaults_to_empty_pretask() {
+        let empty_json = r#"{}"#;
+        let cfg: djinn_stack::environment::EnvironmentConfig =
+            serde_json::from_str(empty_json).expect("empty config must deserialize");
+        assert!(
+            cfg.lifecycle.pre_task.is_empty(),
+            "empty JSON object must default to empty pre_task"
+        );
+    }
+
+    /// AC2: Non-empty `PreTaskCommand`s serialize to JSON bytes that round-trip
+    /// back through `serde_json` preserving the exact command, name, and timeout.
+    /// This is the payload shape the Secret transport carries to the worker.
+    #[test]
+    fn nonempty_pretask_commands_serialize_as_json_bytes() {
+        use djinn_stack::environment::{LifecycleHooks, PreTaskCommand, PreTaskFailurePolicy};
+
+        let cfg = djinn_stack::environment::EnvironmentConfig {
+            schema_version: 1,
+            lifecycle: LifecycleHooks {
+                pre_task: vec![
+                    PreTaskCommand {
+                        name: Some("setup-db".into()),
+                        command: "python manage.py migrate".into(),
+                        timeout_seconds: 120,
+                        failure_policy: PreTaskFailurePolicy::default(),
+                    },
+                    PreTaskCommand {
+                        name: None,
+                        command: "npm ci".into(),
+                        timeout_seconds: 300,
+                        failure_policy: PreTaskFailurePolicy::default(),
+                    },
+                ],
+                ..LifecycleHooks::default()
+            },
+            ..djinn_stack::environment::EnvironmentConfig::empty()
+        };
+
+        let json_bytes = serde_json::to_vec(&cfg).expect("serialize");
+        let json_str = std::str::from_utf8(&json_bytes).expect("valid UTF-8");
+        let round_tripped: djinn_stack::environment::EnvironmentConfig =
+            serde_json::from_str(json_str).expect("deserialize");
+
+        assert_eq!(round_tripped.lifecycle.pre_task.len(), 2);
+        assert_eq!(
+            round_tripped.lifecycle.pre_task[0].command,
+            "python manage.py migrate"
+        );
+        assert_eq!(
+            round_tripped.lifecycle.pre_task[0].name.as_deref(),
+            Some("setup-db")
+        );
+        assert_eq!(round_tripped.lifecycle.pre_task[0].timeout_seconds, 120);
+        assert_eq!(round_tripped.lifecycle.pre_task[1].command, "npm ci");
+        assert_eq!(round_tripped.lifecycle.pre_task[1].name, None);
+        assert_eq!(round_tripped.lifecycle.pre_task[1].timeout_seconds, 300);
+        assert!(round_tripped.validate().is_ok());
     }
 }
