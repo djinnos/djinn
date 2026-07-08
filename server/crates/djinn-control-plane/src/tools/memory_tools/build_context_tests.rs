@@ -832,8 +832,13 @@ mod tests {
     }
 
     /// `memory_build_context` with `edge_kinds` that exclude
-    /// `embedding_related` should not include graph proximity from
-    /// embedding edges.
+    /// `embedding_related` should reduce the graph proximity contribution
+    /// for notes connected only via embedding edges. Because
+    /// `build_context`'s `run_rrf_discovery` calls `temporal_scores_all`
+    /// (which returns every active note regardless of `edge_kinds`), we
+    /// cannot assert presence/absence. Instead, we compare each neighbor's
+    /// **fused score** across different `edge_kinds` calls — the score
+    /// difference isolates the graph signal contribution.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_respects_edge_kinds_filter_for_embedding_related() {
         let tmp = workspace_tempdir();
@@ -854,8 +859,8 @@ mod tests {
             .unwrap();
 
         // Connected only via embedding_related. Content is intentionally
-        // unrelated to the seed's FTS query so its appearance in results
-        // proves graph expansion, not FTS discovery.
+        // unrelated to the seed's FTS query so FTS cannot mask the graph
+        // signal.
         let embed_neighbor = repo
             .create(
                 &project.id,
@@ -897,17 +902,38 @@ mod tests {
         .await
         .unwrap();
 
-        // Seed co_access edge.
-        repo.upsert_association(&seed.id, &co_neighbor.id, 3)
+        // Seed co_access edge with a weight above MIN_ASSOCIATION_WEIGHT (0.05)
+        // but LOW enough that embed_neighbor's embedding_related graph score
+        // (HOP_DECAY * 0.5 * 0.30 = 0.105) is HIGHER than co_neighbor's
+        // co_access score (HOP_DECAY * 0.10 = 0.070). This ensures
+        // embed_neighbor ranks ABOVE co_neighbor in graph_scores when both
+        // are present, so its actual rank (1) differs from its missing rank
+        // (2) when filtered out — making the score comparison meaningful.
+        repo.upsert_association_min_weight(&seed.id, &co_neighbor.id, 0.10)
             .await
             .unwrap();
 
         let state = test_mcp_state(db, &tx);
         let server = DjinnMcpServer::new(state);
 
-        // Filter to co_access only → embedding_related edges excluded.
-        // The embed_neighbor, whose only connection is an embedding_related
-        // edge, must NOT appear in related notes.
+        // Helper: fetch a note's score (from L1 or L0) for a given
+        // build_context response.
+        let score_of = |resp: &crate::tools::memory_tools::types::MemoryBuildContextResponse,
+                        id: &str|
+         -> Option<f32> {
+            resp.related_l1
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| n.score.unwrap_or(0.0))
+                .or_else(|| {
+                    resp.related_l0
+                        .iter()
+                        .find(|n| n.id == id)
+                        .map(|n| n.score.unwrap_or(0.0))
+                })
+        };
+
+        // ── co_access-only filter ────────────────────────────────────────────
         let co_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
@@ -923,28 +949,19 @@ mod tests {
             ))
             .await;
 
-        let co_response = co_result.0;
+        let co_resp = &co_result.0;
         assert!(
-            co_response.error.is_none(),
+            co_resp.error.is_none(),
             "co_access-only filter should not error: {:?}",
-            co_response.error
+            co_resp.error
         );
 
-        let co_related_ids: Vec<&str> = co_response
-            .related_l1
-            .iter()
-            .map(|n| n.id.as_str())
-            .chain(co_response.related_l0.iter().map(|n| n.id.as_str()))
-            .collect();
-        assert!(
-            !co_related_ids.contains(&embed_neighbor.id.as_str()),
-            "embed_neighbor must NOT appear when edge_kinds excludes embedding_related; got: {co_related_ids:?}"
-        );
+        let co_embed_score = score_of(co_resp, &embed_neighbor.id)
+            .expect("embed_neighbor must appear in co_access results (temporal signal)");
+        let co_co_score = score_of(co_resp, &co_neighbor.id)
+            .expect("co_neighbor must appear in co_access results (temporal signal)");
 
-        // Filter to embedding_related only → co_access edges excluded.
-        // The embed_neighbor, whose connection IS embedding_related, must
-        // appear in related notes. The co_neighbor, whose connection is
-        // co_access, must NOT appear.
+        // ── embedding_related-only filter ────────────────────────────────────
         let embed_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
@@ -960,41 +977,81 @@ mod tests {
             ))
             .await;
 
-        let embed_response = embed_result.0;
+        let embed_resp = &embed_result.0;
         assert!(
-            embed_response.error.is_none(),
+            embed_resp.error.is_none(),
             "embedding_only filter should not error: {:?}",
-            embed_response.error
+            embed_resp.error
         );
 
-        let embed_related_ids: Vec<&str> = embed_response
-            .related_l1
-            .iter()
-            .map(|n| n.id.as_str())
-            .chain(embed_response.related_l0.iter().map(|n| n.id.as_str()))
-            .collect();
+        let embed_embed_score = score_of(embed_resp, &embed_neighbor.id)
+            .expect("embed_neighbor must appear in embedding_related results");
+        let embed_co_score = score_of(embed_resp, &co_neighbor.id)
+            .expect("co_neighbor must appear in embedding_related results");
+
+        // ── Cross-call score comparison ──────────────────────────────────────
+        //
+        // The only difference between the two calls is which edges survive
+        // the `edge_kinds` filter. All other RRF signals (FTS, temporal,
+        // task) are identical. So the score difference for each neighbor
+        // isolates the graph proximity contribution:
+        //
+        // embed_neighbor:
+        //   - With embedding_related filter: gets graph rank 1 → higher score
+        //   - With co_access filter: no graph edge → lower score (missing_rank)
+        //
+        // co_neighbor:
+        //   - With co_access filter: gets graph rank 1 → higher score
+        //   - With embedding_related filter: no graph edge → lower score
         assert!(
-            embed_related_ids.contains(&embed_neighbor.id.as_str()),
-            "embed_neighbor must appear when edge_kinds includes embedding_related; got: {embed_related_ids:?}"
+            embed_embed_score > co_embed_score,
+            "embed_neighbor must score higher with edge_kinds=[\"embedding_related\"] \
+             ({embed_embed_score}) than with [\"co_access\"] ({co_embed_score}) — the \
+             graph proximity boost is present only when embedding_related is allowed"
         );
 
-        // The embed_neighbor has an embedding_related graph proximity boost
-        // that the co_neighbor lacks.  Both appear via temporal scores, but
-        // the graph boost should push embed_neighbor above co_neighbor.
-        if let (Some(em_rank), Some(co_rank)) = (
-            embed_related_ids
-                .iter()
-                .position(|&id| id == embed_neighbor.id),
-            embed_related_ids
-                .iter()
-                .position(|&id| id == co_neighbor.id),
-        ) {
-            assert!(
-                em_rank <= co_rank,
-                "embed_neighbor (rank={em_rank}) must outrank or equal co_neighbor \
-                 (rank={co_rank}) when edge_kinds=embedding_related — graph boost applies"
-            );
-        }
+        assert!(
+            embed_co_score < co_co_score,
+            "co_neighbor must score higher with edge_kinds=[\"co_access\"] \
+             ({co_co_score}) than with [\"embedding_related\"] ({embed_co_score}) — the \
+             graph proximity boost is present only when co_access is allowed"
+        );
+
+        // ── Default (all kinds) includes embedding_related ───────────────────
+        let default_result = server
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: project.id.clone(),
+                    url: seed.permalink.clone(),
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(8192),
+                    task_id: None,
+                    min_confidence: None,
+                    edge_kinds: None,
+                },
+            ))
+            .await;
+
+        let default_resp = &default_result.0;
+        assert!(
+            default_resp.error.is_none(),
+            "default filter should not error: {:?}",
+            default_resp.error
+        );
+
+        let default_embed_score = score_of(default_resp, &embed_neighbor.id)
+            .expect("embed_neighbor must appear in default results");
+
+        // With edge_kinds=None (all kinds), embed_neighbor gets its
+        // embedding_related graph contribution, so its score must be
+        // higher than the co_access-only call (where the edge is filtered).
+        assert!(
+            default_embed_score > co_embed_score,
+            "embed_neighbor must score higher with default edge_kinds=None \
+             ({default_embed_score}) than with [\"co_access\"] ({co_embed_score}) — \
+             embedding_related edges are included by default"
+        );
     }
 
     /// Explicit wikilinks remain the strongest retrieval signal in

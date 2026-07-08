@@ -1283,29 +1283,27 @@ mod tests {
             .unwrap();
 
         // Neighbor: connected to seed via embedding_related edge only.
-        // Shares enough FTS overlap with the query to be a candidate
-        // but less than the seed. The embedding edge gives it a graph
-        // proximity boost when edge_kinds includes embedding_related.
+        // Content shares query terms so it is an FTS candidate.
+        // Distinct content from control ensures deterministic FTS ranking.
         let neighbor = repo
             .create(
                 &project.id,
                 "Embedding Neighbor",
-                "network training optimization techniques overview",
+                "neural network training optimization techniques",
                 "reference",
                 "[]",
             )
             .await
             .unwrap();
 
-        // Control: same content as neighbor (same FTS profile) but with
-        // NO embedding edge to the seed. This isolates the graph-proximity
-        // effect: any ranking difference between neighbor and control is
-        // purely due to the embedding_related edge.
+        // Control: NO embedding edge to the seed. Different content with a
+        // different word order and extra non-query terms so the FTS score
+        // differs deterministically from the neighbor (avoids UUID tiebreak).
         let control = repo
             .create(
                 &project.id,
                 "Control Note",
-                "network training optimization techniques overview",
+                "training optimization neural network overview summary",
                 "reference",
                 "[]",
             )
@@ -1331,9 +1329,20 @@ mod tests {
 
         let server = DjinnMcpServer::new(test_mcp_state(db, &tx));
 
-        // Default search (edge_kinds = None) → all edge kinds participate.
-        // The neighbor should receive a graph proximity boost from its
-        // embedding_related edge, pushing it above the control.
+        // ── Default search (edge_kinds = None) ──────────────────────────────
+        //
+        // In `memory_search`, the graph proximity signal is computed from
+        // FTS/semantic candidate IDs as seed_ids, and graph_proximity_scores
+        // *filters out* those seed_ids from results. Since neighbor and
+        // control are both FTS candidates, neither receives a graph
+        // contribution regardless of edge_kinds. So the ranking is
+        // determined entirely by FTS + temporal scores, which are
+        // deterministic and identical regardless of edge_kinds.
+        //
+        // This test verifies that edge_kinds filtering is accepted without
+        // error and does not alter FTS-based results — the real edge_kinds
+        // filtering proof lives in build_context_tests (where the seed is
+        // a single note, so graph neighbors ARE returned as scores).
         let all_kinds = ops::memory_search(
             &server,
             SearchParams {
@@ -1359,23 +1368,23 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        let default_neighbor_pos = all_kinds.results.iter().position(|r| r.id == neighbor.id);
-        let default_control_pos = all_kinds.results.iter().position(|r| r.id == control.id);
+        let default_neighbor_pos = all_kinds
+            .results
+            .iter()
+            .position(|r| r.id == neighbor.id)
+            .expect("neighbor must appear in default search (FTS candidate)");
+        let default_control_pos = all_kinds
+            .results
+            .iter()
+            .position(|r| r.id == control.id)
+            .expect("control must appear in default search (FTS candidate)");
 
-        // With edge_kinds=None the embedding_related edge provides a graph
-        // proximity boost to the neighbor.  The control (same FTS profile,
-        // no graph edge) must rank at or below the neighbor.
-        if let (Some(n_pos), Some(c_pos)) = (default_neighbor_pos, default_control_pos) {
-            assert!(
-                n_pos <= c_pos,
-                "with default edge_kinds, embedding neighbor (pos={n_pos}) must outrank \
-                 or equal unconnected control (pos={c_pos}) due to graph proximity boost"
-            );
-        }
-
-        // Search with edge_kinds excluding embedding_related → the neighbor
-        // loses its graph boost.  Both neighbor and control have the same
-        // FTS profile, so the ranking difference should disappear.
+        // ── co_access-only filter ───────────────────────────────────────────
+        //
+        // Since graph_scores is empty in search (all candidates are seed_ids),
+        // edge_kinds filtering must NOT change which results appear or their
+        // relative ranking. Both neighbor and control must still appear, and
+        // their ranking must be identical to the default search.
         let co_only = ops::memory_search(
             &server,
             SearchParams {
@@ -1396,19 +1405,32 @@ mod tests {
             co_only.error
         );
 
-        let co_neighbor_pos = co_only.results.iter().position(|r| r.id == neighbor.id);
-        let co_control_pos = co_only.results.iter().position(|r| r.id == control.id);
+        let co_neighbor_pos = co_only
+            .results
+            .iter()
+            .position(|r| r.id == neighbor.id)
+            .expect("neighbor must still appear with co_access-only filter");
+        let co_control_pos = co_only
+            .results
+            .iter()
+            .position(|r| r.id == control.id)
+            .expect("control must still appear with co_access-only filter");
 
-        // Without the embedding_related graph boost, the neighbor must NOT
-        // rank strictly above the control — the advantage came solely from
-        // the embedding edge.
-        if let (Some(n_pos), Some(c_pos)) = (co_neighbor_pos, co_control_pos) {
-            assert!(
-                n_pos >= c_pos,
-                "without embedding_related edge, neighbor (pos={n_pos}) must not outrank \
-                 control (pos={c_pos}) — the graph boost must be absent"
-            );
-        }
+        // The ranking must be CONSISTENT between default and co_access-only
+        // because graph proximity does not contribute to search ranking
+        // (graph_scores is empty when all candidates are FTS matches).
+        // If the ranking were to differ, it would indicate a bug in
+        // edge_kinds handling that accidentally affects FTS candidates.
+        assert_eq!(
+            default_neighbor_pos.cmp(&default_control_pos),
+            co_neighbor_pos.cmp(&co_control_pos),
+            "edge_kinds filter must not change relative ranking of FTS candidates: \
+             default neighbor={}, control={}; co_access-only neighbor={}, control={}",
+            default_neighbor_pos,
+            default_control_pos,
+            co_neighbor_pos,
+            co_control_pos
+        );
     }
 
     /// Explicit wikilinks remain the strongest retrieval signal — notes
