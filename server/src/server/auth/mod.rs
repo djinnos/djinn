@@ -59,7 +59,6 @@ use axum::{
     routing::{get, post},
 };
 use base64::Engine;
-use reqwest::Client;
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +66,7 @@ use crate::server::AppState;
 use djinn_db::{
     CreateUserAuthSession, NewOrgConfig, OrgConfigRepository, SessionAuthRepository, UserRepository,
 };
+use djinn_provider::github_app::ManifestConversion;
 use djinn_provider::github_app::jwt::mint_app_jwt_anyhow;
 use djinn_provider::github_server::{AppInstallation, GitHubServerClient};
 use djinn_provider::oauth::github_app_user::{self, GithubUserTokens};
@@ -1497,20 +1497,6 @@ fn html_attr_escape(s: &str) -> String {
     out
 }
 
-/// Manifest conversion response from `POST /app-manifests/{code}/conversions`.
-#[derive(Deserialize, Clone)]
-struct ManifestConversion {
-    id: u64,
-    slug: String,
-    #[serde(default)]
-    client_id: String,
-    #[serde(default)]
-    client_secret: String,
-    #[serde(default)]
-    webhook_secret: Option<String>,
-    pem: String,
-}
-
 /// Exchange a manifest code for App credentials via the GitHub API.
 ///
 /// In test builds, the result can be overridden via `EXCHANGE_MANIFEST_RESULT_OVERRIDE`.
@@ -1522,23 +1508,9 @@ async fn exchange_manifest_code(code: &str) -> Result<ManifestConversion, String
         return override_result;
     }
 
-    let url = format!("https://api.github.com/app-manifests/{code}/conversions");
-    let client = Client::new();
-    let resp = client
-        .post(&url)
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "djinn-server")
-        .send()
+    djinn_provider::github_app::exchange_manifest_code(code)
         .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("manifest conversion HTTP {status}: {body}"));
-    }
-    resp.json::<ManifestConversion>()
-        .await
-        .map_err(|e| format!("manifest conversion decode: {e}"))
+        .map_err(|e| e.to_string())
 }
 
 /// Test-only override for `exchange_manifest_code`. When set to `Some(...)`,
