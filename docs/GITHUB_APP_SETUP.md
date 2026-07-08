@@ -159,9 +159,10 @@ secrets:
       -----END RSA PRIVATE KEY-----
 ```
 
-The chart renders a Kubernetes Secret named `<release>-github-app` and mounts
-it on the server Deployment. The server reads the credentials from the
-corresponding `GITHUB_APP_*` environment variables.
+The chart renders a Kubernetes Secret named `<release>-github-app` with keys
+`app-id`, `client-id`, `client-secret`, and `private-key.pem`. The Deployment
+template maps these to `GITHUB_APP_*` env vars and mounts the private key
+file — the server reads them from there automatically.
 
 ### Option B: Pre-existing Secret
 
@@ -174,19 +175,26 @@ secrets:
     existingSecret: "my-github-app-secret"
 ```
 
-The Secret must expose these keys:
+The Secret must expose these keys (matching the chart-managed Secret's layout):
 
-| Key | Value |
-|-----|-------|
-| `GITHUB_APP_ID` | Numeric App ID (e.g. `123456`) |
-| `GITHUB_APP_SLUG` | App's public slug (e.g. `my-djinn-bot`) |
-| `GITHUB_APP_CLIENT_ID` | OAuth client ID (e.g. `Iv1.xxxxxxxxxxxx`) |
-| `GITHUB_APP_CLIENT_SECRET` | OAuth client secret |
-| `GITHUB_APP_PRIVATE_KEY` | PEM-encoded RSA private key |
+| Key | Value | How the chart uses it |
+|-----|-------|----------------------|
+| `app-id` | Numeric App ID (e.g. `123456`) | Mapped to `GITHUB_APP_ID` env var |
+| `client-id` | OAuth client ID (e.g. `Iv1.xxxxxxxxxxxx`) | Mapped to `GITHUB_APP_CLIENT_ID` env var |
+| `client-secret` | OAuth client secret | Mapped to `GITHUB_APP_CLIENT_SECRET` env var |
+| `private-key.pem` | PEM-encoded RSA private key | Mounted at `GITHUB_APP_PRIVATE_KEY_PATH` (`/var/run/secrets/djinn/github-app/private-key.pem`) |
 
-> **Note:** The slug is used for constructing the install URL
-> (`https://github.com/apps/<slug>`). All other fields are required for
-> authentication and API access.
+> **Important:** The Secret keys use **lowercase kebab-case** (`app-id`, not
+> `GITHUB_APP_ID`). The Deployment template reads these keys and exposes
+> them to the server container as `GITHUB_APP_*` environment variables.
+> The private key is mounted as a file, not read from an env var.
+>
+> If you need to provide credentials via direct environment variables
+> instead of the chart's Secret mechanism (e.g. using `extraEnv` or
+> `extraEnvFrom`), set `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`,
+> `GITHUB_APP_CLIENT_SECRET`, and `GITHUB_APP_PRIVATE_KEY_PATH` directly.
+> Keep this separate from `secrets.githubApp.existingSecret`, which only
+> supports the key names listed above.
 
 ### First install
 
@@ -243,8 +251,9 @@ state.
 
 ### Invalid or incomplete Secret
 
-If the mounted Kubernetes Secret contains `GITHUB_APP_*` variables but the
-values are invalid or incomplete (e.g. malformed PEM, missing client secret):
+If the mounted Kubernetes Secret exposes the chart's `app-id` / `client-id` /
+`client-secret` keys (mapped to `GITHUB_APP_*` env vars) but the values are
+invalid or incomplete (e.g. malformed PEM, missing client secret):
 
 - The server treats this as **fatal** — it will not start accepting requests
   that depend on GitHub App credentials.
@@ -351,8 +360,8 @@ Complete this checklist after deploying with a Helm-managed Secret:
 - [ ] `env.enableSelfSetup` is `false` (default) — setup routes are
       not exposed
 - [ ] The `djinn-github-app` Secret (or `existingSecret`) contains all
-      required keys (`GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`,
-      `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY`)
+      required keys (`app-id`, `client-id`, `client-secret`,
+      `private-key.pem`)
 - [ ] Server starts without errors related to GitHub App configuration
 - [ ] `/setup/status` reports `appCredentialsConfigured: true` and
       `credentialSource: "secret"`
