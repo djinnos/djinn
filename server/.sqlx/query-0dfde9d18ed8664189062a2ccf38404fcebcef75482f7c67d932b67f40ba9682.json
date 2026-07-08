@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,\n                outcome AS \"outcome!\", guard_decision, guard_reason, summary, summary_json::text,\n                log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,\n                created_at AS \"created_at!\", updated_at AS \"updated_at!\", submitted_at, terminal_at\n             FROM task_attempts WHERE id = $1",
+  "query": "SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,\n                    outcome AS \"outcome!\", guard_decision, guard_reason, summary, summary_json::text,\n                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,\n                    created_at AS \"created_at!\", updated_at AS \"updated_at!\", submitted_at, terminal_at\n                 FROM task_attempts\n                 WHERE task_id = $1 AND role = $2 AND outcome = 'submitted'\n                 ORDER BY created_at DESC\n                 LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -90,27 +90,33 @@
       },
       {
         "ordinal": 17,
-        "name": "created_at!",
+        "name": "github_publication_error",
         "type_info": "Varchar"
       },
       {
         "ordinal": 18,
-        "name": "updated_at!",
+        "name": "created_at!",
         "type_info": "Varchar"
       },
       {
         "ordinal": 19,
-        "name": "submitted_at",
+        "name": "updated_at!",
         "type_info": "Varchar"
       },
       {
         "ordinal": 20,
+        "name": "submitted_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 21,
         "name": "terminal_at",
         "type_info": "Varchar"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Text"
       ]
     },
@@ -132,11 +138,12 @@
       true,
       true,
       true,
+      true,
       false,
       false,
       true,
       true
     ]
   },
-  "hash": "b1e8d15747794e12e3c317349ada6a7249afecd4b7de886591e97065e5625931"
+  "hash": "0dfde9d18ed8664189062a2ccf38404fcebcef75482f7c67d932b67f40ba9682"
 }

@@ -46,6 +46,9 @@ mod tests {
     };
 
     use crate::database::Database;
+    use crate::repositories::task_attempt::{
+        CreateTaskAttemptParams, FillTaskAttemptParams, TaskAttemptRepository,
+    };
 
     use super::*;
 
@@ -1138,6 +1141,258 @@ mod tests {
         assert!(mapped.ci_failure_fingerprint.is_none());
     }
 
+    // ── CI head reconciliation tests (m116) ─────────────────────────────
+
+    /// Helper: create a task attempt row with optional head SHAs and
+    /// publication error for CI head reconciliation testing.
+    async fn seed_task_attempt(
+        db: &Database,
+        task_id: &str,
+        mirror_head_sha: Option<&str>,
+        github_head_sha: Option<&str>,
+        github_publication_error: Option<&str>,
+    ) {
+        let repo = TaskAttemptRepository::new(db.clone());
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id,
+                role: "worker",
+                dispatch_key: &format!("dk-{}", uuid::Uuid::now_v7()),
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        repo.fill_nullable_fields(FillTaskAttemptParams {
+            id: &attempt.id,
+            checkpoint_ref: None,
+            submit_ref: None,
+            pr_url: None,
+            mirror_head_sha,
+            github_head_sha,
+            github_publication_error,
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_head_reconciliation_defaults_to_none_without_attempts() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        let fetched = repo.get(&task.id).await.unwrap().unwrap();
+        assert!(fetched.ci_mirror_head_sha.is_none());
+        assert!(fetched.ci_github_head_sha.is_none());
+        assert!(fetched.ci_heads_diverged.is_none());
+        assert!(fetched.ci_head_observation_error.is_none());
+        // Existing ci_head_sha must be untouched
+        assert!(fetched.ci_head_sha.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_head_reconciliation_known_equal_heads() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        seed_task_attempt(
+            &db,
+            &task.id,
+            Some("abc123mirror"),
+            Some("abc123mirror"),
+            None,
+        )
+        .await;
+
+        let fetched = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(fetched.ci_mirror_head_sha.as_deref(), Some("abc123mirror"));
+        assert_eq!(fetched.ci_github_head_sha.as_deref(), Some("abc123mirror"));
+        assert_eq!(fetched.ci_heads_diverged, Some(false));
+        assert!(fetched.ci_head_observation_error.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_head_reconciliation_known_diverged_heads() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        seed_task_attempt(
+            &db,
+            &task.id,
+            Some("mirror-sha-abc"),
+            Some("github-sha-xyz"),
+            None,
+        )
+        .await;
+
+        let fetched = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            fetched.ci_mirror_head_sha.as_deref(),
+            Some("mirror-sha-abc")
+        );
+        assert_eq!(
+            fetched.ci_github_head_sha.as_deref(),
+            Some("github-sha-xyz")
+        );
+        assert_eq!(fetched.ci_heads_diverged, Some(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_head_reconciliation_unknown_mirror_head() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        // Only GitHub head is known; mirror is unknown.
+        seed_task_attempt(&db, &task.id, None, Some("github-only-sha"), None).await;
+
+        let fetched = repo.get(&task.id).await.unwrap().unwrap();
+        assert!(fetched.ci_mirror_head_sha.is_none());
+        assert_eq!(
+            fetched.ci_github_head_sha.as_deref(),
+            Some("github-only-sha")
+        );
+        // Both heads must be known for heads_diverged to be non-None.
+        assert!(fetched.ci_heads_diverged.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_head_reconciliation_unknown_github_no_pr() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        // Only mirror head is known; GitHub is unknown (no PR branch).
+        seed_task_attempt(&db, &task.id, Some("mirror-only-sha"), None, None).await;
+
+        let fetched = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            fetched.ci_mirror_head_sha.as_deref(),
+            Some("mirror-only-sha")
+        );
+        assert!(fetched.ci_github_head_sha.is_none());
+        assert!(fetched.ci_heads_diverged.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_head_reconciliation_observation_error() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        // Mirror head known, GitHub publication failed — error recorded.
+        seed_task_attempt(
+            &db,
+            &task.id,
+            Some("mirror-head-sha"),
+            Some("stale-github-head"),
+            Some("push_rejected: GH006 Protected branch update failed"),
+        )
+        .await;
+
+        let fetched = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            fetched.ci_mirror_head_sha.as_deref(),
+            Some("mirror-head-sha")
+        );
+        assert_eq!(
+            fetched.ci_github_head_sha.as_deref(),
+            Some("stale-github-head")
+        );
+        assert_eq!(fetched.ci_heads_diverged, Some(true));
+        assert_eq!(
+            fetched.ci_head_observation_error.as_deref(),
+            Some("push_rejected: GH006 Protected branch update failed")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_head_reconciliation_latest_attempt_wins() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        // Older attempt: equal heads.
+        seed_task_attempt(&db, &task.id, Some("old-mirror"), Some("old-mirror"), None).await;
+
+        // Slight delay so the second attempt has a later created_at.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Newer attempt: diverged heads.
+        seed_task_attempt(&db, &task.id, Some("new-mirror"), Some("new-github"), None).await;
+
+        let fetched = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(fetched.ci_mirror_head_sha.as_deref(), Some("new-mirror"));
+        assert_eq!(fetched.ci_github_head_sha.as_deref(), Some("new-github"));
+        assert_eq!(fetched.ci_heads_diverged, Some(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_head_reconciliation_populated_on_list_reads() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        seed_task_attempt(
+            &db,
+            &task.id,
+            Some("mirror-list"),
+            Some("github-list"),
+            None,
+        )
+        .await;
+
+        // Verify list_by_project also surfaces the new fields.
+        let listed = repo
+            .list_by_project(&project.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == task.id)
+            .unwrap();
+        assert_eq!(listed.ci_mirror_head_sha.as_deref(), Some("mirror-list"));
+        assert_eq!(listed.ci_github_head_sha.as_deref(), Some("github-list"));
+        assert_eq!(listed.ci_heads_diverged, Some(true));
+
+        // Verify resolve also surfaces the new fields.
+        let resolved = repo.resolve(&task.short_id).await.unwrap().unwrap();
+        assert_eq!(resolved.ci_mirror_head_sha.as_deref(), Some("mirror-list"));
+        assert_eq!(resolved.ci_github_head_sha.as_deref(), Some("github-list"));
+        assert_eq!(resolved.ci_heads_diverged, Some(true));
+    }
+
     // ── ReopenClass / quality ledger tests ─────────────────────────────────
 
     /// Helper: walk a task through the full review-reject path
@@ -2054,6 +2309,10 @@ macro_rules! task_select_where_id {
                 (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
                 COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
                 (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
+                    (SELECT ta.mirror_head_sha FROM task_attempts ta WHERE ta.task_id = tasks.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_mirror_head_sha,
+                    (SELECT ta.github_head_sha FROM task_attempts ta WHERE ta.task_id = tasks.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_github_head_sha,
+                    (SELECT CASE WHEN ta.mirror_head_sha IS NOT NULL AND ta.github_head_sha IS NOT NULL THEN ta.mirror_head_sha != ta.github_head_sha END FROM task_attempts ta WHERE ta.task_id = tasks.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_heads_diverged,
+                    (SELECT ta.github_publication_error FROM task_attempts ta WHERE ta.task_id = tasks.id AND ta.github_publication_error IS NOT NULL ORDER BY ta.created_at DESC LIMIT 1) AS ci_head_observation_error,
                 CAST(0 AS BIGINT) AS unresolved_blocker_count
              FROM tasks WHERE id = $1"#,
         )

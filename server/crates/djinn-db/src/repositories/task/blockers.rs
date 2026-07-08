@@ -273,7 +273,11 @@ impl TaskRepository {
                     (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
                     (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
                     COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
-                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
+                    (SELECT ta.mirror_head_sha FROM task_attempts ta WHERE ta.task_id = t.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_mirror_head_sha,
+                    (SELECT ta.github_head_sha FROM task_attempts ta WHERE ta.task_id = t.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_github_head_sha,
+                    (SELECT CASE WHEN ta.mirror_head_sha IS NOT NULL AND ta.github_head_sha IS NOT NULL THEN ta.mirror_head_sha != ta.github_head_sha END FROM task_attempts ta WHERE ta.task_id = t.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_heads_diverged,
+                    (SELECT ta.github_publication_error FROM task_attempts ta WHERE ta.task_id = t.id AND ta.github_publication_error IS NOT NULL ORDER BY ta.created_at DESC LIMIT 1) AS ci_head_observation_error
              FROM blockers b
              JOIN tasks t ON t.id = b.task_id
              WHERE b.blocking_task_id = $1

@@ -51,6 +51,10 @@ fn test_task(
         ci_last_seen_at: Some("2026-07-04T22:09:00Z".to_string()),
         ci_same_signature_count: 2,
         ci_last_remediation_base_sha: None,
+        ci_mirror_head_sha: None,
+        ci_github_head_sha: None,
+        ci_heads_diverged: None,
+        ci_head_observation_error: None,
         unresolved_blocker_count: 0,
     }
 }
