@@ -19,7 +19,7 @@ use super::test_support::{
 
 async fn lead_prompt_context(db: Database, task: &Task) -> PromptContext {
     let role = LeadRole;
-    assemble_for_role(db, task, &role, None, "", None, &[], &[]).await
+    assemble_for_role(db, task, &role, None, "", &[], &[]).await
 }
 
 /// Create a terminal worker attempt for `task_id` with the given outcome and summary.
