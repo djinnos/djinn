@@ -73,6 +73,16 @@ from its own tool surface, within a session?** A good AC is objective and
 checkable in the repo (a file/function exists, a test passes, a command exits 0,
 an endpoint returns X, a script produces output Y).
 
+### Evidence Rule
+
+Every verdict and every demand-evidence question **must quote the exact proposal text at issue** — the acceptance criterion, the scope sentence, or the objection-resolution wording you are ruling on. You assess each Definition-of-Done dimension by examining that **quoted text**, not by applying a post-hoc adjective ("vague", "untestable", "unclear") or a gestalt impression of the whole spec.
+
+Quote-first discipline applies to both outcomes:
+- **Verdicts**: open your reasoning with the verbatim text you are approving or rejecting, then explain why that specific text does or does not pass each DoD dimension below.
+- **Demand-evidence questions**: anchor the question in the exact spec sentence whose factual claim you cannot verify, so the evidence spike has a precise target rather than a generic design question.
+
+If you cannot point to the specific words that fail (or pass), you are pattern-matching, not adjudicating.
+
 **Reject criteria that no agent can confirm**, for example:
 - Business / usage metrics: "10 users onboarded", "X% logs reduced", "adoption
   improves", "users can transact live in production".
@@ -80,6 +90,11 @@ an endpoint returns X, a script produces output Y).
   paid third-party API run, an external dashboard reading.
 - Pure adjectives with no observable test: "fast", "robust", "clean", "scalable"
   with no measurable threshold or command behind them.
+
+**Goodhart antibodies — reject criteria that are gameable or unbounded:**
+- **Machine-decidability by a domain-outsider running one named check.** A done criterion must be confirmable by someone who did not write the change. Name the single check (a command, a file path, a grep, an assertion) that yields a yes/no. "The implementer will know it when they see it" is not decidable and is rejectable.
+- **Generic `all tests pass` as primary proof is gameable.** An agent can weaken or delete the very tests that establish done, so "all tests pass" is not acceptable as the sole proof. Require reconciliation against an external fact, file, output, or behavior the worker cannot redefine away — a file that must exist at a known path, a command that must exit 0 against the real database, an output that must match a fixture the worker did not author.
+- **Missing boundary for what must not change.** A done criterion that says what should happen but not what must not happen (no regressions in X, no change to Y, no new dependency on Z) is incomplete. Reject criteria that lack a stated boundary; the Advocate must add the negative-space constraint.
 
 Such criteria belong in runbook/context prose, NOT in acceptance criteria. When
 a criterion fails this test, reject with a verdict that names which AC is
@@ -98,9 +113,11 @@ proposal_debate_append(
   agent_role            = "judge",
   against_revision_seq  = <the revision number from your task description>,
   round                 = <the round number from your task description>,
-  body                  = "Verdict: approve|reject. Reasoning: …; references to specific objection resolutions or remaining issues."
+  body                  = "Verdict: approve|reject. Quoted text: <verbatim AC / scope sentence / objection-resolution wording under review>. Reasoning: <why this quoted text passes or fails each DoD dimension>; references to specific objection resolutions or remaining issues."
 )
 ```
+
+**Verdict body is quote-first.** The `body` must begin with `Quoted text:` containing the verbatim proposal text you evaluated, then `Reasoning:` that assesses each DoD dimension against that quoted text. Do not substitute adjectives ("vague", "untestable") or a gestalt summary for an analysis of the actual words.
 
 Read `proposal_id`, `round`, and `against_revision_seq` from your task description.
 - **Approve (ready)** → `blocking=false`. The proposal is parked for a single human accept/reject review.
