@@ -456,3 +456,38 @@ counter-sign this section. Downstream destructive work (sibling epics `3x0w`,
   fixtures under `server/scripts/fixtures/learned-prompt-equivalence/`;
   preferred tooling for §6.1 byte-equivalence evidence and §6.2 / §6.3
   informational byte diff).
+- Sibling task `8gph` — harvest contract validation
+  (`scripts/test-learned-prompt-harvest-contract.sh`; see §9).
+
+## 9. Contract validation (pre-removal gate check)
+
+Before relying on this artifact to gate destructive removal work (epics `3x0w`,
+`3sle`, `8m3c`), run the contract validation script to confirm the artifact,
+inventory query, and prompt-equivalence helper are intact:
+
+```sh
+sh scripts/test-learned-prompt-harvest-contract.sh
+```
+
+This script performs a read-only, network-free validation that checks:
+
+1. **Harvest artifact structure** — `server/docs/learned-prompt-harvest.md`
+   contains the required sections: environment/timestamp (§2), row count /
+   checksum / export reference (§4), disposition table (§5), prompt-equivalence
+   evidence including byte-equivalence (§6/§6.1), and reviewer sign-off (§7).
+2. **Active inventory query** — `server/scripts/learned-prompt-inventory.sql`
+   and the runbook (§3) both contain the exact fragments
+   `JOIN learned_prompt_history`, `action IN ('keep','confirmed')`, and
+   `ORDER BY a.project_id, a.id, lph.created_at ASC`.
+3. **Prompt-equivalence helper** — `server/scripts/learned-prompt-equivalence.sh`
+   passes its built-in `--selftest` (byte-identity PASS, semantic-drift
+   semantic-rationale-required, removed removed), and the byte-identity
+   fixture pair is confirmed byte-identical by a direct `cmp`.
+
+Exit code 0 means the harvest contract is valid. A non-zero exit means one or
+more required artifacts are missing, structurally incomplete, or the
+prompt-equivalence helper's byte-identity comparison path has regenerated.
+**Do not proceed with destructive removal if this validation fails.**
+
+This validation is scoped to the additive evidence artifacts from this epic
+only. It does not test runtime code, database migrations, or API surfaces.
