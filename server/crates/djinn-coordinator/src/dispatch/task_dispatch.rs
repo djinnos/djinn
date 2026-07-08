@@ -1058,6 +1058,12 @@ impl CoordinatorActor {
                         model_name,
                     );
                     djinn_telemetry::failover::record_latency(failover_chain_start.elapsed());
+                    // Emit fallback-rescue observability when the accepted
+                    // candidate is not the first in the chain (earlier
+                    // candidates failed and this one rescued the dispatch).
+                    if candidate_index > 0 {
+                        djinn_telemetry::fallback_rescue::increment_rescue();
+                    }
                     // Successful fallback: discard chain-scoped observations.
                     // The earlier candidate's failure counts stay recorded in
                     // `HealthTracker` (for diagnostics) but no breaker trip

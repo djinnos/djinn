@@ -891,6 +891,24 @@ impl CoordinatorActor {
             } else {
                 "idle_stall"
             };
+
+            // Emit reasoning-kill observability: classify stall kills by
+            // reasoning-model context and failure class so operators can track
+            // false-positive kill rates for reasoning models (whose first-turn
+            // latency is naturally higher).
+            let model_context =
+                if djinn_telemetry::reasoning_kill::is_reasoning_model(&session.model_id) {
+                    djinn_telemetry::reasoning_kill::MODEL_CONTEXT_REASONING
+                } else {
+                    djinn_telemetry::reasoning_kill::MODEL_CONTEXT_NON_REASONING
+                };
+            let failure_class = if never_active {
+                djinn_telemetry::reasoning_kill::FAILURE_CLASS_FIRST_CALL_HANG
+            } else {
+                djinn_telemetry::reasoning_kill::FAILURE_CLASS_IDLE_STALL
+            };
+            djinn_telemetry::reasoning_kill::increment_kill(model_context, failure_class);
+
             self.terminalize_recovery_attempt(
                 task_id,
                 &session.agent_type,
