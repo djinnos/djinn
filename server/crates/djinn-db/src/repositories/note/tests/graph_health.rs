@@ -18,10 +18,14 @@ use crate::repositories::test_support::{event_bus_for, make_project};
 /// Three notes: Hub is linked-to by Source via wikilink; Orphan has no
 /// inbound edges; Isolated has no edges at all (not even outbound).
 ///
+/// Source has an outbound wikilink (authored edge) but no inbound → still an
+/// authored orphan.  Because outbound wikilinks are authored edges (not
+/// machine-minted), Source is NOT counted as a machine-connected orphan.
+///
 /// Expected health after setup:
-/// - authored_orphan_count = 2 (Orphan + Isolated — neither has inbound wikilinks)
+/// - authored_orphan_count = 2 (Source + Isolated — neither has inbound wikilinks)
 /// - isolated_count = 1 (Isolated only)
-/// - machine_connected_orphan_count = 1 (Orphan has outbound wikilink)
+/// - machine_connected_orphan_count = 0 (no non-authored retrieval edges exist)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authored_orphan_vs_isolation_basic() {
     let tmp = crate::database::test_tempdir().unwrap();
@@ -72,11 +76,12 @@ async fn authored_orphan_vs_isolation_basic() {
         "only Isolated has no edges at all"
     );
 
-    // machine_connected_orphan: authored orphans that are NOT isolated.
-    // Source has outbound wikilink → connected → not isolated.
+    // machine_connected_orphan: authored orphans connected by *non-authored*
+    // retrieval edges (co_access, threshold-qualified embedding_related).
+    // Source's outbound wikilink is an authored edge — it does NOT qualify.
     assert_eq!(
-        health.machine_connected_orphan_count, 1,
-        "Source is an authored orphan rescued by its outbound wikilink"
+        health.machine_connected_orphan_count, 0,
+        "Source's outbound wikilink is an authored edge, not machine-minted"
     );
 
     // isolated_pct: 1 isolated out of 3 non-singleton notes.
@@ -311,4 +316,85 @@ async fn below_threshold_embedding_does_not_reduce_isolation() {
         health.machine_connected_orphan_count, 0,
         "WeakNote is not machine-connected because its only edge is below threshold"
     );
+}
+
+/// Archived and deprecated non-singleton notes must be excluded from
+/// authored-orphan, isolation, and non-singleton counts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archived_and_deprecated_notes_excluded_from_isolation_metrics() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    // Active note with no edges → authored orphan + isolated.
+    repo.create(
+        &project.id,
+        "ActiveIsolated",
+        "no edges at all",
+        "pattern",
+        "[]",
+    )
+    .await
+    .unwrap();
+
+    // Archived note with no edges → must NOT inflate counts.
+    repo.create_with_status(
+        &project.id,
+        "ArchivedOrphan",
+        "archived and alone",
+        "pattern",
+        Some("archived"),
+        "[]",
+    )
+    .await
+    .unwrap();
+
+    // Deprecated note with no edges → must NOT inflate counts.
+    repo.create_with_status(
+        &project.id,
+        "DeprecatedOrphan",
+        "deprecated and alone",
+        "research",
+        Some("deprecated"),
+        "[]",
+    )
+    .await
+    .unwrap();
+
+    let health = repo.health(&project.id).await.unwrap();
+
+    // Only ActiveIsolated is counted (active, non-singleton, no edges).
+    assert_eq!(
+        health.authored_orphan_count, 1,
+        "archived/deprecated notes excluded from authored_orphan_count"
+    );
+    assert_eq!(health.orphan_note_count, health.authored_orphan_count);
+
+    assert_eq!(
+        health.isolated_count, 1,
+        "archived/deprecated notes excluded from isolated_count"
+    );
+    assert_eq!(
+        health.machine_connected_orphan_count, 0,
+        "no machine-connected orphans"
+    );
+
+    // non-singleton denominator also excludes archived/deprecated.
+    // 1 active non-singleton note → isolated_pct = 100%.
+    assert!(
+        (health.isolated_pct - 100.0).abs() < 1e-9,
+        "isolated_pct should be 100.0 (1/1 active non-singleton), got {}",
+        health.isolated_pct
+    );
+
+    // orphans() should also exclude archived/deprecated.
+    let orphans = repo.orphans(&project.id, None).await.unwrap();
+    assert_eq!(
+        orphans.len(),
+        1,
+        "orphans() excludes archived/deprecated notes"
+    );
+    assert_eq!(orphans[0].title, "ActiveIsolated");
 }

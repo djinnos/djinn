@@ -253,6 +253,7 @@ impl NoteRepository {
             r#"SELECT n.id, n.permalink, n.title, n.note_type, n.folder
              FROM notes n
              WHERE n.project_id = $1
+               AND n.status = 'active'
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
                AND ($2::text IS NULL OR n.folder = $2)
                AND NOT EXISTS (
@@ -308,9 +309,11 @@ impl NoteRepository {
         // A note is an authored orphan when it has no inbound wikilinks AND
         // no inbound explicit `authored` association edge.  Machine-minted
         // edges (embedding_related, co_access, etc.) do not hide debt.
+        // Only active notes are counted.
         let authored_orphan_count: i64 = sqlx::query_scalar(
             r#"SELECT COUNT(*) FROM notes n
              WHERE n.project_id = $1
+               AND n.status = 'active'
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
@@ -332,11 +335,12 @@ impl NoteRepository {
         // A note is graph-isolated when it has *no* retrieval-effective edges
         // in any direction: no resolved wikilinks, no authored/manual
         // associations, no co-access, and no threshold-qualified
-        // `embedding_related` edges.
+        // `embedding_related` edges.  Only active notes are counted.
         let threshold = EMBEDDING_ASSOCIATION_THRESHOLD;
         let isolated_count: i64 = sqlx::query_scalar(
             r#"SELECT COUNT(*) FROM notes n
              WHERE n.project_id = $1
+               AND n.status = 'active'
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
                -- No inbound resolved wikilink
                AND NOT EXISTS (
@@ -368,9 +372,11 @@ impl NoteRepository {
         .await?;
 
         // Non-singleton note count for percentage computation.
+        // Only active notes are counted.
         let non_singleton_count: i64 = sqlx::query_scalar(
             r#"SELECT COUNT(*) FROM notes n
              WHERE n.project_id = $1
+               AND n.status = 'active'
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')"#,
         )
         .bind(project_id)
@@ -383,11 +389,44 @@ impl NoteRepository {
             0.0
         };
 
-        // Machine-connected orphans: authored orphans that are NOT isolated.
-        // Since every isolated note is necessarily an authored orphan (no
-        // edges at all ⇒ no inbound authored edges), this is simply the
-        // difference.
-        let machine_connected_orphan_count = authored_orphan_count - isolated_count;
+        // Machine-connected orphans: authored orphans that have at least one
+        // *non-authored* retrieval edge connecting them (e.g. co_access,
+        // threshold-qualified embedding_related).  Outbound authored wikilinks
+        // do NOT count — they are authored edges, not machine-minted.
+        let machine_connected_orphan_count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM notes n
+             WHERE n.project_id = $1
+               AND n.status = 'active'
+               AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
+               -- Authored-orphan predicate
+               AND NOT EXISTS (
+                   SELECT 1 FROM note_links l WHERE l.target_id = n.id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM note_associations na
+                   WHERE (na.note_a_id = n.id OR na.note_b_id = n.id)
+                     AND na.kind = 'authored'
+               )
+               -- Has at least one non-authored retrieval edge
+               AND (
+                   EXISTS (
+                       SELECT 1 FROM note_associations na
+                       WHERE (na.note_a_id = n.id OR na.note_b_id = n.id)
+                         AND na.kind <> 'embedding_related'
+                         AND na.kind <> 'authored'
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM note_associations na
+                       WHERE (na.note_a_id = n.id OR na.note_b_id = n.id)
+                         AND na.kind = 'embedding_related'
+                         AND (na.confidence IS NULL OR na.confidence >= $2)
+                   )
+               )"#,
+        )
+        .bind(project_id)
+        .bind(threshold)
+        .fetch_one(self.db.pool())
+        .await?;
 
         let stale_rows = sqlx::query!(
             r#"SELECT folder, COUNT(*) AS "count!: i64" FROM notes
