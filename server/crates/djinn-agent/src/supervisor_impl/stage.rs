@@ -2430,4 +2430,85 @@ mod tests {
             other => panic!("expected Failed for unexpected tool, got {other:?}"),
         }
     }
+
+    // ── Grep-style structural guards (10qg) ────────────────────────────────
+    // These tests use include_str! to read source files at compile time and
+    // assert structural invariants about the codebase, catching regressions
+    // that would otherwise require a manual code search.
+
+    /// The old `[LEAD_REQUEST]` comment convention must not appear in the
+    /// production `call_request_lead` handler body.  The deprecated handler
+    // uses `deprecated_request_lead` typed activity instead.
+    #[test]
+    fn deprecated_request_lead_handler_does_not_use_lead_request_comment_convention() {
+        // Read the task_epic handler source at compile time.
+        let src = include_str!("../extension/handlers/task_epic.rs");
+
+        // The `call_request_lead` function must exist (it's the drain compat path).
+        assert!(
+            src.contains("async fn call_request_lead"),
+            "task_epic.rs must contain the call_request_lead handler"
+        );
+
+        // The function must NOT contain a [LEAD_REQUEST] comment in its body.
+        // Find the function and check its body.
+        let fn_start = src
+            .find("async fn call_request_lead")
+            .expect("call_request_lead must exist");
+        // Find the next function definition (or end of file) to bound the search.
+        let after_fn = &src[fn_start..];
+        let fn_body_end = after_fn[28..]
+            .find("\npub")
+            .or_else(|| after_fn[28..].find("\nasync fn"))
+            .map(|p| p + 28)
+            .unwrap_or(after_fn.len());
+        let fn_body = &after_fn[..fn_body_end];
+
+        assert!(
+            !fn_body.contains("[LEAD_REQUEST]"),
+            "call_request_lead must NOT use the [LEAD_REQUEST] comment convention"
+        );
+        assert!(
+            fn_body.contains("deprecated_request_lead"),
+            "call_request_lead must log a deprecated_request_lead typed activity"
+        );
+        assert!(
+            fn_body.contains("dispatch_planner_escalation"),
+            "call_request_lead must route through dispatch_planner_escalation"
+        );
+        // Must NOT transition to needs_lead_intervention.
+        // Strip `//` comment lines before searching so that explanatory
+        // comments (e.g. "no needs_lead_intervention transition") don't
+        // produce false positives — only actual code usage triggers failure.
+        let code_only: String = fn_body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect();
+        assert!(
+            !code_only.contains("needs_lead_intervention"),
+            "call_request_lead must NOT transition task to needs_lead_intervention"
+        );
+    }
+
+    /// The worker/reviewer `worker_stage_outcome` and `reviewer_stage_outcome`
+    /// must treat `request_lead` as `Escalate` (planner path), never as a
+    /// path that produces `needs_lead_intervention`.
+    #[test]
+    fn stage_outcome_request_lead_routes_to_escalate_not_needs_lead_intervention() {
+        // Worker: request_lead → Escalate (not Failed, not any lead status)
+        let worker_outcome =
+            worker_stage_outcome("request_lead", Some(&serde_json::json!({"reason": "test"})));
+        assert!(
+            matches!(worker_outcome, StageOutcome::Escalate { .. }),
+            "worker request_lead must produce Escalate, got: {worker_outcome:?}"
+        );
+
+        // Reviewer: request_lead → Escalate (not Failed, not any lead status)
+        let reviewer_outcome =
+            reviewer_stage_outcome("request_lead", Some(&serde_json::json!({"reason": "test"})));
+        assert!(
+            matches!(reviewer_outcome, StageOutcome::Escalate { .. }),
+            "reviewer request_lead must produce Escalate, got: {reviewer_outcome:?}"
+        );
+    }
 }
