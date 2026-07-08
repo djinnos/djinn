@@ -83,6 +83,14 @@ export interface AuthConfig {
    */
   missing: string[];
   setupDocUrl: string;
+  /**
+   * Whether the self-setup manifest flow is available for the operator to
+   * create a new GitHub App without manually providing credentials. Only
+   * `true` when `DJINN_ENABLE_SELF_SETUP=true` AND no usable credentials
+   * exist yet. Defaults to `false` for older servers that don't send
+   * `self_setup_available`.
+   */
+  selfSetupAvailable: boolean;
 }
 
 /**
@@ -101,13 +109,40 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
     configured: boolean;
     missing: string[];
     setup_doc_url: string;
+    self_setup_available?: boolean;
   };
   return {
     configured: body.configured,
     missing: body.missing,
     setupDocUrl: body.setup_doc_url,
+    // Default to `false` so older servers (pre-self-setup) don't advertise
+    // a setup flow that doesn't exist.
+    selfSetupAvailable: body.self_setup_available ?? false,
   };
 }
+
+/**
+ * Source from which the server resolved the active GitHub App credentials.
+ * Mirrors the server's `CredentialSourceState` when usable, or `null` when
+ * the credentials are not in a usable state (unconfigured / invalid / etc.).
+ *
+ * - `"secret"` — valid credentials loaded from env / Kubernetes Secret.
+ * - `"persisted"` — valid credentials loaded from the encrypted store.
+ * - `null` — no usable credentials (unconfigured, invalid Secret, etc.).
+ */
+export type CredentialSource = "secret" | "persisted" | null;
+
+/**
+ * High-level setup lifecycle state the server can report alongside the
+ * credential-source fields. Mirrors the server's credential resolution
+ * outcome.
+ */
+export type SetupState =
+  | "unconfigured"
+  | "valid"
+  | "invalid_secret"
+  | "unrecoverable"
+  | null;
 
 export interface SetupStatus {
   /**
@@ -131,6 +166,102 @@ export interface SetupStatus {
    * the App-setup callback writes `org_config`.
    */
   orgLogin: string | null;
+
+  // ─── Credential-source & recovery fields (vpr6 foundation) ───────────────
+  //
+  // These fields are optional on the server response and may be absent on
+  // older builds. They surface the credential-source state machine so
+  // AuthGate can distinguish "invalid Secret (fatal)" and "undecryptable
+  // persisted credentials (recovery needed)" from the plain unconfigured
+  // state. All default to safe/no-op values for backwards compatibility.
+
+  /**
+   * Which source produced the usable GitHub App credentials, if any.
+   * `"secret"` for env/Secret, `"persisted"` for the encrypted store,
+   * `null` when no usable credentials exist or the server doesn't report
+   * this field.
+   */
+  credentialSource: CredentialSource;
+  /**
+   * Normalized setup/credential state derived from the server's
+   * `credential_source` / `setup_state` fields. `"unconfigured"` when no
+   * credentials exist, `"valid"` when usable, `"invalid_secret"` for a
+   * fatal Secret error, `"unrecoverable"` for undecryptable persisted
+   * credentials. `null` when the server doesn't report this field (older
+   * builds).
+   */
+  setupState: SetupState;
+  /**
+   * Human-readable error message from the server when the credential
+   * state is fatal or needs recovery. `null` when there's no error.
+   */
+  setupError: string | null;
+  /**
+   * Whether a failed setup can be retried. When `false`, the operator
+   * must take manual action (fix env vars, re-provision). Defaults to
+   * `false`.
+   */
+  setupRetryable: boolean;
+  /**
+   * Whether the persisted credentials are present but undecryptable (e.g.
+   * wrong encryption key, corrupt data). This is a recovery-required
+   * state — the operator must re-provision. Defaults to `false`.
+   */
+  credentialsUnrecoverable: boolean;
+}
+
+/**
+ * Normalize the server's `credential_source` field into a typed
+ * `CredentialSource`. Returns `null` for unknown / missing values so the
+ * UI never crashes on an unexpected server response.
+ */
+function normalizeCredentialSource(raw: unknown): CredentialSource {
+  if (raw === "secret") return "secret";
+  if (raw === "persisted") return "persisted";
+  return null;
+}
+
+/**
+ * Normalize the server's `setup_state` field into a typed `SetupState`.
+ * Accepts both the explicit `setup_state` string and an inferred value
+ * from `credential_source` / `credentials_unrecoverable` when the server
+ * only sends those. Returns `null` when no state information is present.
+ */
+function normalizeSetupState(
+  setupStateRaw: unknown,
+  credentialSourceRaw: unknown,
+  credentialsUnrecoverable: boolean,
+): SetupState {
+  if (typeof setupStateRaw === "string" && setupStateRaw) {
+    switch (setupStateRaw) {
+      case "unconfigured":
+        return "unconfigured";
+      case "valid":
+      case "valid_secret":
+      case "valid_persisted":
+        return "valid";
+      case "invalid_secret":
+      case "invalid":
+      case "fatal":
+        return "invalid_secret";
+      case "unrecoverable":
+      case "undecryptable":
+      case "credentials_unrecoverable":
+        return "unrecoverable";
+      default:
+        // Unknown but non-empty state string — fall through to inference.
+        break;
+    }
+  }
+
+  // Infer from the credential source / unrecoverable flag when the server
+  // doesn't send an explicit `setup_state`.
+  if (credentialsUnrecoverable) return "unrecoverable";
+  const src = normalizeCredentialSource(credentialSourceRaw);
+  if (src !== null) return "valid";
+  // If we have no credential source and no explicit state, return null so
+  // the UI treats it as "no information" (preserves legacy behavior).
+  return null;
 }
 
 /**
@@ -150,13 +281,29 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
     needs_app_install: boolean;
     app_credentials_configured?: boolean;
     org_login?: string | null;
+    credential_source?: string;
+    setup_state?: string;
+    setup_error?: string | null;
+    setup_retryable?: boolean;
+    credentials_unrecoverable?: boolean;
   };
+  const credentialsUnrecoverable = body.credentials_unrecoverable ?? false;
+  const credentialSource = normalizeCredentialSource(body.credential_source);
   return {
     needsAppInstall: body.needs_app_install,
     // Default to `false` so an older server (pre-this-PR) is treated as
     // "operator must fix" — the UI's existing static screen still works.
     appCredentialsConfigured: body.app_credentials_configured ?? false,
     orgLogin: body.org_login ?? null,
+    credentialSource,
+    setupState: normalizeSetupState(
+      body.setup_state,
+      body.credential_source,
+      credentialsUnrecoverable,
+    ),
+    setupError: body.setup_error ?? null,
+    setupRetryable: body.setup_retryable ?? false,
+    credentialsUnrecoverable,
   };
 }
 
