@@ -183,9 +183,11 @@ When left empty the chart generates one on first install and preserves it
 across upgrades — back the Secret up. Rotating or losing it makes every stored
 credential undecryptable.
 
-The GitHub App can also be created *after* deploy via the sign-in screen's
-one-click manifest flow (credentials land in the encrypted vault, no Helm
-values involved) — see [GitHub App setup](../GITHUB_APP_SETUP.md).
+The GitHub App can also be created *after* deploy via the manifest bootstrap
+flow when self-setup is enabled — the server prints a one-time setup URL to its
+boot log (credentials land in the encrypted vault, no Helm values involved).
+For production deployments, provide credentials via `secrets.githubApp.*` in
+your Helm values. See [GitHub App setup](../GITHUB_APP_SETUP.md).
 
 ## LLM providers
 
