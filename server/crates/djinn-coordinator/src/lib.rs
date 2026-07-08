@@ -113,6 +113,7 @@ pub mod resource_monitor;
 pub mod roles;
 pub mod supervisor_impl;
 pub mod task_merge;
+pub(crate) mod tripwires;
 pub(crate) mod truncate;
 
 // ─── Coordinator actor tree (was actors::coordinator in djinn-agent) ──────
