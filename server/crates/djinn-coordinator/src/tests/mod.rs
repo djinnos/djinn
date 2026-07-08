@@ -27,18 +27,6 @@ use djinn_db::{
 use djinn_provider::catalog::health::HealthTracker;
 use djinn_slot::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotPoolHandle};
 
-fn rendered_counter_value(metric: &str) -> f64 {
-    djinn_telemetry::init().unwrap();
-    let rendered = djinn_telemetry::render().unwrap();
-    rendered
-        .lines()
-        .find_map(|line| {
-            let value = line.strip_prefix(metric)?.trim();
-            value.parse::<f64>().ok()
-        })
-        .unwrap_or(0.0)
-}
-
 #[derive(Clone)]
 struct RecordingRuntimeOps {
     calls: Arc<Mutex<Vec<String>>>,
@@ -475,7 +463,6 @@ fn coordinator_actor_for_tests(
         rpc_registry: None,
         prune_tick_counter: 0,
         throughput_events: HashMap::new(),
-        escalation_counts: HashMap::new(),
         pr_status_cache: HashMap::new(),
         pr_draft_first_seen: HashMap::new(),
         review_stuck_sha_first_seen: HashMap::new(),
@@ -615,7 +602,6 @@ async fn rehydration_loads_active_cooldown_and_durable_counters() {
     assert_eq!(summary.cooldowns, 1);
     assert_eq!(summary.expired_cooldowns, 0);
     assert_eq!(actor.dispatch_failure_streak["task-active"], 3);
-    assert_eq!(actor.escalation_counts["task-active"], 2);
     assert_eq!(actor.last_dispatched["task-active"].role, "reviewer");
     assert_eq!(
         actor.inflight_dispatches["task-active"],
@@ -754,51 +740,6 @@ async fn restart_rehydrated_failure_streak_continues_to_terminal_close_threshold
         "failure streak N must survive restart so the next same-role failure reaches MAX_DISPATCH_FAILURES"
     );
     assert!(!actor.dispatch_failure_streak.contains_key(&task.id));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn restart_rehydrated_escalation_count_increments_from_persisted_n() {
-    let db = test_helpers::create_test_db();
-    let (tx, _rx) = broadcast::channel(256);
-    let (task, _project_path) =
-        create_simple_task(&db, &tx, "task", "escalation restart task").await;
-    let state_repo = djinn_db::DispatchStateRepository::new(db.clone());
-    state_repo
-        .upsert(djinn_db::DispatchStateUpsert {
-            task_id: &task.id,
-            failure_streak: 0,
-            cooldown_until: None,
-            escalation_count: 7,
-            last_dispatched_at: None,
-            last_dispatched_role: None,
-            inflight_creator_user_id: None,
-            inflight_model_id: None,
-        })
-        .await
-        .unwrap();
-
-    let mut actor = coordinator_actor_for_tests(&db, &tx);
-    actor.rehydrate_durable_dispatch_state().await;
-    assert_eq!(actor.escalation_counts[&task.id], 7);
-
-    let before_metric = rendered_counter_value("djinn_lead_escalations_total");
-    djinn_telemetry::lead::increment_escalation();
-    assert!(rendered_counter_value("djinn_lead_escalations_total") - before_metric >= 1.0);
-
-    let next = actor
-        .increment_durable_escalation_count(&task.id)
-        .await
-        .unwrap();
-    assert_eq!(next, 8);
-    assert_eq!(
-        state_repo
-            .get(&task.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .escalation_count,
-        8
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
