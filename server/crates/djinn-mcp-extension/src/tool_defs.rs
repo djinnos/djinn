@@ -66,24 +66,6 @@ pub fn tool_request_planner() -> RmcpTool {
     )
 }
 
-pub fn tool_role_amend_prompt() -> RmcpTool {
-    RmcpTool::new(
-        "agent_amend_prompt".to_string(),
-        "Planner-owned, evidence-based amendment path for machine-managed learned_prompt updates; not a general prompt editor. Use only after agent-effectiveness evidence (agent_metrics, repeated reviewer/lead feedback, or repeated task failures) shows a stable specialist-agent pattern; this is audited in learned_prompt_history and is not a substitute for human/project system_prompt_extensions. Only specialist worker/reviewer agents are eligible; default roles and non-worker/reviewer roles must not be amended. Append concise observed-pattern + behavioral-correction text; provide metrics_snapshot when available so the evaluator can compare before/after outcomes."
-            .to_string(),
-        object!({
-            "type": "object",
-            "required": ["agent_id", "amendment"],
-            "properties": {
-                "project": {"type": "string", "description": "Absolute project path"},
-                "agent_id": {"type": "string", "description": "Specialist worker/reviewer agent UUID or name to amend; defaults and non-worker/reviewer roles are rejected"},
-                "amendment": {"type": "string", "description": "Concise observed-pattern and behavioral-correction text to append to the machine-managed learned_prompt"},
-                "metrics_snapshot": {"type": "string", "description": "Optional JSON string of current agent_metrics or equivalent evidence for the audit history record; Planner should provide it when available"}
-            }
-        }),
-    )
-}
-
 pub fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
@@ -622,7 +604,6 @@ pub fn tool_schemas_planner() -> Vec<serde_json::Value> {
         serialize_tool(tool_task_archive_activity(), destructive()),
         serialize_tool(tool_task_reset_counters(), idempotent_destructive()),
         serialize_tool(tool_task_kill_session(), destructive()),
-        serialize_tool(tool_role_amend_prompt(), destructive()),
         serialize_tool(crate::finalize_tools::tool_submit_grooming(), mutation()),
     ] {
         tool_values.push(value);
@@ -631,7 +612,7 @@ pub fn tool_schemas_planner() -> Vec<serde_json::Value> {
 }
 
 /// Tool schemas for Architect: read-only tools, task/epic management, submit_work,
-/// and agent effectiveness tools (role_metrics, memory_build_context, role_amend_prompt).
+/// and agent effectiveness tools (role_metrics, memory_build_context).
 /// Does not include write/edit/apply_patch. The Architect diagnoses and directs but does not write code.
 pub fn tool_schemas_architect() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
@@ -715,9 +696,7 @@ pub fn tool_schemas_architect() -> Vec<serde_json::Value> {
         serialize_tool(tool_task_archive_activity(), destructive()),
         serialize_tool(tool_task_reset_counters(), idempotent_destructive()),
         serialize_tool(tool_task_kill_session(), destructive()),
-        // Per ADR-051 §1, `role_amend_prompt` has moved to the Planner —
-        // agent-effectiveness amendment is a Planner action, not a consultant
-        // action. Architect keeps `role_metrics` (read) and `role_create`
+        // Architect keeps `role_metrics` (read) and `role_create`
         // (structural proposal) but cannot mutate existing learned_prompts.
         serialize_tool(crate::finalize_tools::tool_submit_work(), mutation()),
     ] {

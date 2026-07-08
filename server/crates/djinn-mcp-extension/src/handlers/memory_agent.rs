@@ -345,51 +345,6 @@ pub(crate) async fn call_agent_metrics(
     }))
 }
 
-pub(crate) async fn call_agent_amend_prompt(
-    ctx: &dyn ExtensionContext,
-    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
-    project_path: &str,
-) -> Result<serde_json::Value, String> {
-    let p: AgentAmendPromptParams = parse_args(arguments)?;
-    let project_id = project_id_for_path(ctx, project_path).await?;
-
-    let repo = AgentRepository::new(ctx.db(), ctx.event_bus());
-
-    // Resolve role by UUID or name.
-    let role = {
-        let by_id = repo.get(&p.agent_id).await.map_err(|e| e.to_string())?;
-        match by_id {
-            Some(r) if r.project_id == project_id => Some(r),
-            _ => repo
-                .get_by_name_for_project(&project_id, &p.agent_id)
-                .await
-                .map_err(|e| e.to_string())?,
-        }
-    };
-
-    let role = role.ok_or_else(|| format!("agent not found: {}", p.agent_id))?;
-
-    if !matches!(role.base_role.as_str(), "worker" | "reviewer") || role.is_default {
-        return Err(format!(
-            "cannot amend learned_prompt for agent '{}' (base_role '{}', is_default {}); only specialist worker/reviewer agents are eligible; use system_prompt_extensions or create a specialist instead",
-            role.name, role.base_role, role.is_default
-        ));
-    }
-
-    let updated = repo
-        .append_learned_prompt(&role.id, &p.amendment, p.metrics_snapshot.as_deref())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(serde_json::json!({
-        "agent_id": updated.id,
-        "agent_name": updated.name,
-        "learned_prompt": updated.learned_prompt,
-        "updated_at": updated.updated_at,
-        "amendment_appended": true,
-    }))
-}
-
 pub(crate) async fn call_agent_create(
     ctx: &dyn ExtensionContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,

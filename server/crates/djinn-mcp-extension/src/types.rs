@@ -304,13 +304,6 @@ pub struct MemoryOrphansLocalParams {
 }
 
 #[derive(Deserialize)]
-pub struct AgentAmendPromptParams {
-    pub agent_id: String,
-    pub amendment: String,
-    pub metrics_snapshot: Option<String>,
-}
-
-#[derive(Deserialize)]
 pub struct ShellParams {
     pub command: String,
     pub timeout_ms: Option<u64>,

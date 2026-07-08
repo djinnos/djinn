@@ -66,8 +66,6 @@ pub(crate) use ci::call_ci_job_log;
 pub(crate) use code_intel::{call_code_graph, call_github_fetch_file, call_github_search};
 #[cfg(test)]
 pub(super) use code_intel::{call_code_graph_inner, call_lsp, should_pre_resolve_chat_key};
-#[cfg(test)]
-pub(super) use memory_agent::call_agent_amend_prompt;
 pub(crate) use task_admin::call_task_kill_session;
 pub(crate) use workspace::{
     call_apply_patch, call_code_search, call_edit, call_read, call_shell, call_write,

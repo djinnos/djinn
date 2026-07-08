@@ -112,9 +112,7 @@ pub struct AgentModel {
     pub skills: Vec<AnyJson>,
     pub is_default: bool,
     /// Machine-managed prompt learning state. Derived from active
-    /// learned_prompt_history amendments. Read-only in public surfaces;
-    /// mutations flow through agent_amend_prompt (Planner) and the
-    /// evaluator/confirmation loop.
+    /// learned_prompt_history amendments. Read-only in public surfaces.
     pub learned_prompt: Option<String>,
     pub created_at: String,
     pub updated_at: String,

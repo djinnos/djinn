@@ -53,7 +53,6 @@ fn evidence_spike_excludes_escalation_and_agent_mutation_tools() {
         "role_create",
         "role_metrics",
         "agent_metrics",
-        "agent_amend_prompt",
         "agent_create",
     ];
     for tool in &denied {
@@ -507,7 +506,6 @@ fn evidence_spike_profile_matches_demand_evidence_contract_requirements() {
         "proposal_block_patch",
         "proposal_debate_append",
         "agent_create",
-        "agent_amend_prompt",
         "request_lead",
         "request_planner",
     ];
