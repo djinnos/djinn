@@ -464,6 +464,15 @@ impl CoordinatorActor {
             if let Some(session_id) = value.get("session_id").and_then(serde_json::Value::as_str) {
                 extra.insert("session_id".to_string(), serde_json::json!(session_id));
             }
+            if let Some(summary) = value
+                .get("last_durable_progress_summary")
+                .and_then(serde_json::Value::as_str)
+            {
+                extra.insert(
+                    "last_durable_progress_summary".to_string(),
+                    serde_json::json!(summary),
+                );
+            }
             Some(crate::CheckpointLifecycleMetadata {
                 checkpoint_id: None,
                 commit_sha: Some(commit_sha),

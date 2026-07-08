@@ -5983,7 +5983,10 @@ async fn orphaned_submitted_no_pr_reaper_finalizes_stale_rows_only() {
 
     // A reaped to `reopened` with terminal_at stamped.
     let a = attempt_repo.get(&attempt_a).await.unwrap().unwrap();
-    assert_eq!(a.outcome, "reopened", "no-PR submitted orphan must be reaped");
+    assert_eq!(
+        a.outcome, "reopened",
+        "no-PR submitted orphan must be reaped"
+    );
     assert!(a.terminal_at.is_some(), "terminal_at must be stamped");
 
     // B (has PR) and C (fresh) untouched.
