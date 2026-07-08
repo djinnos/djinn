@@ -1,3 +1,5 @@
+// djinn:allow-oversize — prompt-context assembly + instrumentation regression
+// tests; each test exercises a real `assemble_prompt_context` path.
 use super::*;
 
 use djinn_core::events::EventBus;
