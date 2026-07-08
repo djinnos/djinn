@@ -1,27 +1,40 @@
 //! Regression and performance tests for the embedding association
 //! refresh/prune algorithm (`embedding_associations.rs`).
 //!
-//! Covers threshold filtering, top-k cap, weight formula, provenance
-//! metadata round-trip, prune-on-archive, prune-on-model/dim mismatch,
-//! prune-below-threshold, prune-top-k-overflow, idempotence, and bounded
-//! complexity.
+//! Covers threshold filtering, top-k cap with tie-breaking, weight formula,
+//! provenance metadata round-trip, prune-on-archive, prune-on-model/dim
+//! mismatch, prune-below-threshold, prune-top-k-overflow, idempotence, and
+//! bounded complexity.
 //!
 //! Uses a [`MockNoteVectorStore`] to inject controlled cosine similarities
 //! into the `query_embedding_candidates` path so the full
 //! `refresh_embedding_associations` algorithm can be tested end-to-end
 //! against the in-memory Postgres.
 //!
-//! Test-only: Instant::now is used for timing assertions in the bounded
-//! complexity test.
+//! # Mock dispatch design
+//!
+//! The algorithm calls `query_embedding_candidates(note_id, ...)`, which:
+//! 1. Reads the raw embedding vector from `note_embeddings` (blob → f32).
+//! 2. Passes it to `query_similar_embeddings` on the vector store.
+//! 3. The mock needs to know which note the query is for.
+//!
+//! We encode each note's FNV-1a hash as `f32::from_bits(hash)` in `v[0]`.
+//! **No normalization is applied** — the blob round-trip (`to_le_bytes` →
+//! `from_le_bytes` → `to_bits`) is an exact identity for any `u32`, so the
+//! mock recovers the original hash from `query_embedding[0].to_bits()` and
+//! looks up the note_id in a shared `Arc<Mutex<HashMap>>` map (not
+//! `thread_local!`), which is safe across the multi-thread Tokio runtime.
+//!
+//! Test-only: `Instant::now` is used for timing assertions.
 #![allow(clippy::disallowed_methods)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use djinn_core::events::DjinnEventEnvelope;
 use tokio::sync::broadcast;
 
-use super::*;
 use crate::database::Database;
 use crate::repositories::note::embedding_associations::{
     EMBEDDING_ASSOCIATION_ALGORITHM_VERSION, EMBEDDING_ASSOCIATION_CANDIDATE_POOL,
@@ -39,27 +52,35 @@ use crate::repositories::test_support::{event_bus_for, make_project};
 // ── Mock vector store ──────────────────────────────────────────────────
 
 /// A `NoteVectorStore` implementation that returns pre-configured
-/// `NoteEmbeddingMatch` results keyed by the first element of the
-/// query embedding (packed as a note-id string via a side-channel).
+/// `NoteEmbeddingMatch` results keyed by the query note's identity.
 ///
-/// In practice, [`NoteRepository::query_embedding_candidates`] reads
-/// the query note's vector from `note_embeddings`, passes it to
-/// `query_similar_embeddings`, and converts the raw distance to cosine
-/// similarity based on the backend.  We set `backend = Qdrant` so the
-/// conversion is `similarity = -distance`.
+/// Dispatch works via an embedding-hash → note-id map stored in shared
+/// `Arc<Mutex<>>` state (thread-safe across the multi-thread Tokio runtime).
+/// The query embedding's `v[0]` is `f32::from_bits(fnv1a_hash(note_id))`
+/// (no normalization), so the mock recovers the hash via
+/// `query_embedding[0].to_bits()` and looks up the note_id.
 struct MockNoteVectorStore {
-    /// `note_id` → list of (candidate_note_id, raw_distance).
-    /// `query_similar_embeddings` ignores the actual query vector; it
-    /// looks up the vector-store matches by a note-id key that we
-    /// pack into the first float of the query embedding.
+    /// `note_id` → list of `NoteEmbeddingMatch` to return.
     matches: std::sync::Mutex<HashMap<String, Vec<NoteEmbeddingMatch>>>,
+    /// `fnv1a_hash(note_id) as u32` → note_id, for dispatch recovery.
+    hash_to_note_id: std::sync::Mutex<HashMap<u32, String>>,
 }
 
 impl MockNoteVectorStore {
     fn new() -> Self {
         Self {
             matches: std::sync::Mutex::new(HashMap::new()),
+            hash_to_note_id: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Register the embedding-hash → note-id mapping so the mock can
+    /// recover the query note's identity from the raw embedding vector.
+    fn register_embedding(&self, hash: u32, note_id: String) {
+        self.hash_to_note_id
+            .lock()
+            .unwrap()
+            .insert(hash, note_id);
     }
 
     /// Configure the mock to return `candidates` when
@@ -97,7 +118,7 @@ impl NoteVectorStore for MockNoteVectorStore {
         &self,
         repo: &NoteRepository,
         input: UpsertNoteEmbedding<'_>,
-    ) -> crate::error::DbResult<NoteEmbeddingRecord> {
+    ) -> crate::error::DbResult<super::super::embeddings::NoteEmbeddingRecord> {
         // Delegate to the same metadata insert that Noop uses.
         super::super::embeddings::NoopNoteVectorStore
             .upsert_embedding(repo, input)
@@ -121,9 +142,15 @@ impl NoteVectorStore for MockNoteVectorStore {
         _query: EmbeddingQueryContext<'_>,
         limit: usize,
     ) -> crate::error::DbResult<Vec<NoteEmbeddingMatch>> {
-        // The note_id is encoded as the first float of the embedding.
-        // (We use `f32::to_bits()` in the test helper below.)
-        let note_id = note_id_from_embedding(query_embedding);
+        // Recover the query note_id from the first float's bit pattern.
+        let bits = query_embedding[0].to_bits();
+        let note_id = self
+            .hash_to_note_id
+            .lock()
+            .unwrap()
+            .get(&bits)
+            .cloned()
+            .unwrap_or_default();
         let guard = self.matches.lock().unwrap();
         Ok(guard
             .get(&note_id)
@@ -137,28 +164,8 @@ impl NoteVectorStore for MockNoteVectorStore {
 
 // ── Test helpers ───────────────────────────────────────────────────────
 
-/// Encode a note-id into the first element of a dummy embedding vector.
-/// The mock store reverses this to dispatch to the right candidate set.
-fn embedding_for_note(note_id: &str) -> Vec<f32> {
-    // Use a hash of the note_id as the first float element so we can
-    // recover it in `note_id_from_embedding`.  The rest of the vector
-    // is unit-scaled so the actual vector is valid for the DB.
-    let hash = note_id_hash(note_id);
-    let mut v = vec![0.0f32; 384];
-    v[0] = f32::from_bits(hash);
-    // Normalize to unit length (cosine similarity is scale-invariant
-    // but we need a valid vector for the blob conversion).
-    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for x in &mut v {
-            *x /= norm;
-        }
-    }
-    v
-}
-
+/// FNV-1a hash (32-bit) of a note_id string.
 fn note_id_hash(note_id: &str) -> u32 {
-    // Simple FNV-1a hash (32-bit) – deterministic and cheap.
     let mut h: u32 = 0x811c_9dc5;
     for b in note_id.as_bytes() {
         h ^= *b as u32;
@@ -167,48 +174,23 @@ fn note_id_hash(note_id: &str) -> u32 {
     h
 }
 
-fn note_id_from_embedding(embedding: &[f32]) -> String {
-    // Reverse: the first element's bit pattern was set by
-    // `embedding_for_note`.  We recover the hash and then look it up
-    // in a pre-built reverse map.
-    //
-    // However, this is fragile.  Instead we use a simpler scheme:
-    // store the note-id's first 4 bytes in the first 4 floats as
-    // their byte values (normalized out).
-    //
-    // **Simpler approach**: embed the hash as a u32 in `v[0]` and
-    // recover it.  Then we look up via a thread-local reverse map.
-    // But `query_similar_embeddings` doesn't have access to the
-    // note_id in a clean way...
-    //
-    // Actually, re-reading `query_embedding_candidates`: the
-    // `query_embedding` is the raw vector from `note_embeddings`.
-    // We *could* encode the note_id as the first N bytes, but that's
-    // fragile.
-    //
-    // **Best approach**: override `query_similar_embeddings` to
-    // accept `note_id` as a parameter.  But the trait doesn't have
-    // it.  So we encode the note_id in the vector itself.
-    //
-    // We'll use a thread-local lookup table:
-    // `note_id_from_embedding` recovers the hash from `v[0]` and
-    // uses EMBEDDING_NOTE_ID_MAP to find the original note_id.
-    let bits = embedding[0].to_bits();
-    EMBEDDING_NOTE_ID_MAP.with(|map| {
-        let map = map.borrow();
-        map.get(&bits).cloned().unwrap_or_default()
-    })
-}
-
-use std::cell::RefCell;
-
-thread_local! {
-    static EMBEDDING_NOTE_ID_MAP: RefCell<HashMap<u32, String>> = RefCell::new(HashMap::new());
-}
-
-/// Create a note with a controlled embedding vector.
+/// Encode a note-id into the first element of a dummy embedding vector.
 ///
-/// Returns `(note_id, embedding)`.
+/// **Critical:** no normalization is applied. The blob round-trip
+/// (`to_le_bytes` → `from_le_bytes` → `to_bits`) is an exact identity
+/// for any `u32`, so the mock recovers `fnv1a_hash(note_id)` from
+/// `v[0].to_bits()`. Normalization would corrupt the bit pattern.
+fn embedding_for_note(note_id: &str) -> Vec<f32> {
+    let hash = note_id_hash(note_id);
+    let mut v = vec![0.0f32; 384];
+    v[0] = f32::from_bits(hash);
+    v
+}
+
+/// Create a note with embedding data in the DB.
+///
+/// Does NOT register in the mock's dispatch map — use
+/// [`make_note_with_mock_embedding`] for refresh tests.
 async fn make_note_with_embedding(
     db: &Database,
     repo: &NoteRepository,
@@ -224,18 +206,40 @@ async fn make_note_with_embedding(
     let note_id = &note.id;
 
     let embedding = embedding_for_note(note_id);
-
-    // Register the hash → note_id mapping for the mock store.
-    let hash = note_id_hash(note_id);
-    EMBEDDING_NOTE_ID_MAP.with(|map| {
-        map.borrow_mut().insert(hash, note_id.clone());
-    });
-
-    // Insert embedding metadata directly.
     let content_hash = format!("hash-{note_id}");
     insert_embedding_data(db, note_id, &embedding, &content_hash, model, dim).await;
 
     note_id.clone()
+}
+
+/// Create a note with embedding data AND register the embedding-hash →
+/// note-id mapping in the mock's dispatch map.
+///
+/// Used by refresh tests that need the mock vector store to return
+/// controlled candidates for this note.
+async fn make_note_with_mock_embedding(
+    db: &Database,
+    repo: &NoteRepository,
+    mock: &MockNoteVectorStore,
+    project_id: &str,
+    title: &str,
+    model: &str,
+    dim: i32,
+) -> String {
+    let note = repo
+        .create(project_id, title, "content", "reference", "[]")
+        .await
+        .unwrap();
+    let note_id = note.id.clone();
+
+    let embedding = embedding_for_note(&note_id);
+    let hash = note_id_hash(&note_id);
+    mock.register_embedding(hash, note_id.clone());
+
+    let content_hash = format!("hash-{note_id}");
+    insert_embedding_data(db, &note_id, &embedding, &content_hash, model, dim).await;
+
+    note_id
 }
 
 /// Directly insert a note embedding into the database tables.
@@ -363,19 +367,41 @@ async fn refresh_threshold_filtering() {
 
     let repo = make_repo_with_mock(&db, mock.clone(), &tx);
 
-    let note_a =
-        make_note_with_embedding(&db, &repo, &project.id, "Note A", "test-model", 384).await;
-    let note_b =
-        make_note_with_embedding(&db, &repo, &project.id, "Note B", "test-model", 384).await;
-    let note_c =
-        make_note_with_embedding(&db, &repo, &project.id, "Note C", "test-model", 384).await;
+    let note_a = make_note_with_mock_embedding(
+        &db,
+        &repo,
+        &mock,
+        &project.id,
+        "Note A",
+        "test-model",
+        384,
+    )
+    .await;
+    let note_b = make_note_with_mock_embedding(
+        &db,
+        &repo,
+        &mock,
+        &project.id,
+        "Note B",
+        "test-model",
+        384,
+    )
+    .await;
+    let note_c = make_note_with_mock_embedding(
+        &db,
+        &repo,
+        &mock,
+        &project.id,
+        "Note C",
+        "test-model",
+        384,
+    )
+    .await;
 
     // note_a → note_b: above threshold (0.85)
     // note_a → note_c: below threshold (0.70)
     mock.set_candidates(&note_a, vec![(&note_b, 0.85), (&note_c, 0.70)]);
-    // note_b needs candidates too (can be empty for this test)
     mock.set_candidates(&note_b, vec![(&note_a, 0.85)]);
-    // note_c needs candidates too
     mock.set_candidates(&note_c, vec![]);
 
     let stats = repo
@@ -384,84 +410,25 @@ async fn refresh_threshold_filtering() {
         .unwrap();
 
     // note_a should have exactly 1 edge (note_b above threshold).
-    assert_eq!(count_embedding_edges(&db, &note_a).await, 1);
-    // note_b should also have 1 edge (the note_a ↔ note_b edge).
-    assert_eq!(count_embedding_edges(&db, &note_b).await, 1);
-    // note_c should have 0 edges (note_a → note_c was below threshold).
-    assert_eq!(count_embedding_edges(&db, &note_c).await, 0);
-    // Stats: 2 edges upserted (note_a→note_b and note_b→note_a; but
-    // canonical pair means it's the same row counted once per refresh).
-    // Actually, note_a generates 1 edge, note_b generates 1 edge
-    // (but it's the same canonical pair, so max-merge keeps 1 row).
-    // note_c generates 0.
     assert_eq!(
-        stats.edges_upserted, 2,
-        "stats should count each upsert call"
+        count_embedding_edges(&db, &note_a).await,
+        1,
+        "note_a should have 1 edge (only note_b passes threshold)"
     );
-    assert_eq!(stats.notes_scanned, 3);
-}
-
-// 2. Top-k cap — exactly 8 (or fewer) edges per note.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn refresh_top_k_cap() {
-    let db = Database::open_in_memory().unwrap();
-    let (_tmp, project, mock, tx) = setup_refresh_test(&db).await;
-
-    let repo = make_repo_with_mock(&db, mock.clone(), &tx);
-
-    let note_a =
-        make_note_with_embedding(&db, &repo, &project.id, "Hub Note", "test-model", 384).await;
-
-    // Create 12 candidate notes, all above threshold.
-    let mut candidate_ids = Vec::new();
-    for i in 0..12 {
-        let nid = make_note_with_embedding(
-            &db,
-            &repo,
-            &project.id,
-            &format!("Candidate {i}"),
-            "test-model",
-            384,
-        )
-        .await;
-        candidate_ids.push(nid);
-    }
-
-    // Assign descending similarities so we can verify the top 8 survive.
-    // Cosine values: 0.99, 0.98, ..., 0.88
-    let candidates: Vec<(&str, f64)> = candidate_ids
-        .iter()
-        .enumerate()
-        .map(|(i, nid)| (nid.as_str(), 0.99 - i as f64 * 0.01))
-        .collect();
-    mock.set_candidates(&note_a, candidates);
-
-    // Set empty candidates for all candidate notes so their refresh
-    // doesn't create extra edges.
-    for nid in &candidate_ids {
-        mock.set_candidates(nid, vec![]);
-    }
-
-    let stats = repo
-        .refresh_embedding_associations(&project.id)
-        .await
-        .unwrap();
-
-    // Note: the top-K enforcement CTE runs after each note's upserts.
-    // It ranks ALL embedding_related edges touching the note and
-    // deletes rows ranked beyond K for either endpoint.
-    //
-    // The CTE enforces K on both note_a_id and note_b_id partitions.
-    // For note_a (hub), it keeps at most 8 edges where note_a is
-    // either note_a_id or note_b_id.
-    let edge_count = count_embedding_edges(&db, &note_a).await;
-    assert!(
-        edge_count <= EMBEDDING_ASSOCIATION_TOP_K as i64,
-        "expected <= {} edges for hub note, got {edge_count}",
-        EMBEDDING_ASSOCIATION_TOP_K,
+    // note_b should also have 1 edge (the note_a ↔ note_b edge).
+    assert_eq!(
+        count_embedding_edges(&db, &note_b).await,
+        1,
+        "note_b should have 1 edge"
+    );
+    // note_c should have 0 edges (note_a → note_c was below threshold).
+    assert_eq!(
+        count_embedding_edges(&db, &note_c).await,
+        0,
+        "note_c should have 0 edges (below-threshold candidate excluded)"
     );
 
-    // Verify the retained edges are the top-8 by cosine similarity.
+    // Verify the single retained edge has confidence 0.85.
     let rows = repo
         .list_provenance_associations_for_note(
             &note_a,
@@ -472,31 +439,201 @@ async fn refresh_top_k_cap() {
         )
         .await
         .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        (rows[0].confidence.unwrap() - 0.85).abs() < 1e-6,
+        "retained edge confidence should be 0.85"
+    );
 
-    // The retained edges should be the ones with highest confidence.
-    let mut confidences: Vec<f64> = rows.iter().map(|r| r.confidence.unwrap_or(0.0)).collect();
-    confidences.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    // candidates_evaluated counts ALL candidates before threshold
+    // filtering: note_a had 2, note_b had 1, note_c had 0 → 3.
+    assert_eq!(stats.candidates_evaluated, 3);
+    assert_eq!(stats.notes_scanned, 3);
+}
 
-    // Top confidence should be 0.99 (the highest we assigned).
-    if !confidences.is_empty() {
+// 2. Top-k cap — exactly 8 edges per note, with tie-breaking by note_id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refresh_top_k_cap() {
+    let db = Database::open_in_memory().unwrap();
+    let (_tmp, project, mock, tx) = setup_refresh_test(&db).await;
+
+    let repo = make_repo_with_mock(&db, mock.clone(), &tx);
+
+    let hub = make_note_with_mock_embedding(
+        &db,
+        &repo,
+        &mock,
+        &project.id,
+        "Hub Note",
+        "test-model",
+        384,
+    )
+    .await;
+
+    // Create 15 candidate notes:
+    //   5 at cosine 0.95 (tier 1)
+    //   5 at cosine 0.90 (tier 2)
+    //   5 at cosine 0.85 (tier 3)
+    //
+    // After refresh, the top-8 by (cosine DESC, note_id ASC) should be:
+    //   all 5 from tier 1 + first 3 from tier 2 (by note_id ASC)
+    //   none from tier 3
+
+    let mut tier1_ids = Vec::new();
+    let mut tier2_ids = Vec::new();
+    let mut tier3_ids = Vec::new();
+
+    for i in 0..5 {
+        let nid = make_note_with_mock_embedding(
+            &db,
+            &repo,
+            &mock,
+            &project.id,
+            &format!("Tier1-{i}"),
+            "test-model",
+            384,
+        )
+        .await;
+        tier1_ids.push(nid);
+    }
+    for i in 0..5 {
+        let nid = make_note_with_mock_embedding(
+            &db,
+            &repo,
+            &mock,
+            &project.id,
+            &format!("Tier2-{i}"),
+            "test-model",
+            384,
+        )
+        .await;
+        tier2_ids.push(nid);
+    }
+    for i in 0..5 {
+        let nid = make_note_with_mock_embedding(
+            &db,
+            &repo,
+            &mock,
+            &project.id,
+            &format!("Tier3-{i}"),
+            "test-model",
+            384,
+        )
+        .await;
+        tier3_ids.push(nid);
+    }
+
+    // Configure mock: hub gets all 15 candidates with their cosine values.
+    let mut candidates: Vec<(&str, f64)> = Vec::new();
+    for nid in &tier1_ids {
+        candidates.push((nid.as_str(), 0.95));
+    }
+    for nid in &tier2_ids {
+        candidates.push((nid.as_str(), 0.90));
+    }
+    for nid in &tier3_ids {
+        candidates.push((nid.as_str(), 0.85));
+    }
+    mock.set_candidates(&hub, candidates);
+
+    // Empty candidates for all candidate notes.
+    for nid in tier1_ids.iter().chain(tier2_ids.iter()).chain(tier3_ids.iter())
+    {
+        mock.set_candidates(nid, vec![]);
+    }
+
+    let _stats = repo
+        .refresh_embedding_associations(&project.id)
+        .await
+        .unwrap();
+
+    // Assert EXACTLY 8 edges for the hub.
+    let edge_count = count_embedding_edges(&db, &hub).await;
+    assert_eq!(
+        edge_count,
+        EMBEDDING_ASSOCIATION_TOP_K as i64,
+        "hub should have exactly {} edges, got {edge_count}",
+        EMBEDDING_ASSOCIATION_TOP_K,
+    );
+
+    // Read back the retained edges.
+    let rows = repo
+        .list_provenance_associations_for_note(
+            &hub,
+            Some(NoteAssociationKind::EmbeddingRelated),
+            Some(&NoteAssociationSource::EmbeddingSimilarity),
+            0.0,
+            100,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows.len(),
+        EMBEDDING_ASSOCIATION_TOP_K,
+        "list_provenance should return exactly {} rows",
+        EMBEDDING_ASSOCIATION_TOP_K,
+    );
+
+    // Collect the retained candidate note_ids.
+    let retained_ids: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            if r.note_a_id == hub {
+                r.note_b_id.clone()
+            } else {
+                r.note_a_id.clone()
+            }
+        })
+        .collect();
+
+    // All 5 tier-1 candidates must be retained.
+    for nid in &tier1_ids {
         assert!(
-            (confidences[0] - 0.99).abs() < 1e-6,
-            "top confidence should be 0.99, got {}",
-            confidences[0]
+            retained_ids.contains(nid),
+            "tier-1 candidate {nid} must be retained"
         );
     }
 
-    // All retained confidences should be >= the first excluded one.
-    // The 9th candidate (index 8) had cosine = 0.91. So all retained
-    // confidences should be >= 0.91.
-    for c in &confidences {
+    // None of tier-3 should be retained.
+    for nid in &tier3_ids {
         assert!(
-            *c >= 0.91 - 1e-6,
-            "retained confidence {c} should be >= 0.91 (the 9th candidate's cosine)"
+            !retained_ids.contains(nid),
+            "tier-3 candidate {nid} must NOT be retained"
         );
     }
 
-    assert!(stats.notes_scanned >= 1);
+    // Exactly 3 from tier-2 must be retained, and they must be the 3
+    // with the lowest note_ids (tie-breaking by note_id ASC).
+    let mut sorted_tier2 = tier2_ids.clone();
+    sorted_tier2.sort();
+    let expected_tier2_retained: Vec<&String> = sorted_tier2.iter().take(3).collect();
+
+    let retained_tier2: Vec<&String> = tier2_ids
+        .iter()
+        .filter(|nid| retained_ids.contains(nid))
+        .collect();
+    assert_eq!(
+        retained_tier2.len(),
+        3,
+        "exactly 3 tier-2 candidates should be retained"
+    );
+    for nid in &expected_tier2_retained {
+        assert!(
+            retained_tier2.contains(nid),
+            "tier-2 candidate {} should be retained (lowest note_id)",
+            nid
+        );
+    }
+
+    // Verify all retained edges have the expected confidences.
+    for row in &rows {
+        let conf = row.confidence.unwrap();
+        assert!(
+            conf >= 0.90 - 1e-6,
+            "retained confidence {conf} should be >= 0.90"
+        );
+    }
 }
 
 // 3. Weight formula correctness.
@@ -508,15 +645,24 @@ async fn refresh_weight_formula_correctness() {
     let repo = make_repo_with_mock(&db, mock.clone(), &tx);
 
     // Create a hub note and 4 candidates with specific cosine values.
-    let hub =
-        make_note_with_embedding(&db, &repo, &project.id, "Weight Hub", "test-model", 384).await;
+    let hub = make_note_with_mock_embedding(
+        &db,
+        &repo,
+        &mock,
+        &project.id,
+        "Weight Hub",
+        "test-model",
+        384,
+    )
+    .await;
 
     let cosine_values = [0.78, 0.80, 0.90, 1.00];
     let mut candidate_ids = Vec::new();
-    for (i, &cosine) in cosine_values.iter().enumerate() {
-        let nid = make_note_with_embedding(
+    for &cosine in &cosine_values {
+        let nid = make_note_with_mock_embedding(
             &db,
             &repo,
+            &mock,
             &project.id,
             &format!("Weight Candidate {cosine:.2}"),
             "test-model",
@@ -524,7 +670,6 @@ async fn refresh_weight_formula_correctness() {
         )
         .await;
         candidate_ids.push((nid, cosine));
-        let _ = i;
     }
 
     let candidates: Vec<(&str, f64)> = candidate_ids
@@ -574,24 +719,54 @@ async fn refresh_weight_formula_correctness() {
     let row_078 = rows
         .iter()
         .find(|r| (r.confidence.unwrap() - 0.78).abs() < 1e-6);
-    if let Some(row) = row_078 {
-        assert!(
-            (row.weight - 0.05).abs() < 1e-6,
-            "cosine=0.78 should yield weight=0.05, got {}",
-            row.weight
-        );
-    }
+    assert!(
+        row_078.is_some(),
+        "must have an edge with confidence 0.78"
+    );
+    let row_078 = row_078.unwrap();
+    assert!(
+        (row_078.weight - 0.05).abs() < 1e-6,
+        "cosine=0.78 should yield weight=0.05, got {}",
+        row_078.weight
+    );
+
+    let row_080 = rows
+        .iter()
+        .find(|r| (r.confidence.unwrap() - 0.80).abs() < 1e-6);
+    assert!(row_080.is_some(), "must have an edge with confidence 0.80");
+    let row_080 = row_080.unwrap();
+    let expected_080 = expected_weight(0.80);
+    assert!(
+        (row_080.weight - expected_080).abs() < 1e-6,
+        "cosine=0.80 should yield weight={expected_080:.6}, got {}",
+        row_080.weight
+    );
+
+    let row_090 = rows
+        .iter()
+        .find(|r| (r.confidence.unwrap() - 0.90).abs() < 1e-6);
+    assert!(row_090.is_some(), "must have an edge with confidence 0.90");
+    let row_090 = row_090.unwrap();
+    let expected_090 = expected_weight(0.90);
+    assert!(
+        (row_090.weight - expected_090).abs() < 1e-6,
+        "cosine=0.90 should yield weight={expected_090:.6}, got {}",
+        row_090.weight
+    );
 
     let row_100 = rows
         .iter()
         .find(|r| (r.confidence.unwrap() - 1.00).abs() < 1e-6);
-    if let Some(row) = row_100 {
-        assert!(
-            (row.weight - 0.35).abs() < 1e-6,
-            "cosine=1.00 should yield weight=0.35, got {}",
-            row.weight
-        );
-    }
+    assert!(
+        row_100.is_some(),
+        "must have an edge with confidence 1.00"
+    );
+    let row_100 = row_100.unwrap();
+    assert!(
+        (row_100.weight - 0.35).abs() < 1e-6,
+        "cosine=1.00 should yield weight=0.35, got {}",
+        row_100.weight
+    );
 }
 
 // 4. Provenance metadata round-trip.
@@ -602,10 +777,26 @@ async fn refresh_provenance_metadata_round_trip() {
 
     let repo = make_repo_with_mock(&db, mock.clone(), &tx);
 
-    let note_a =
-        make_note_with_embedding(&db, &repo, &project.id, "Prov A", "my-embedding-v2", 768).await;
-    let note_b =
-        make_note_with_embedding(&db, &repo, &project.id, "Prov B", "my-embedding-v2", 768).await;
+    let note_a = make_note_with_mock_embedding(
+        &db,
+        &repo,
+        &mock,
+        &project.id,
+        "Prov A",
+        "my-embedding-v2",
+        768,
+    )
+    .await;
+    let note_b = make_note_with_mock_embedding(
+        &db,
+        &repo,
+        &mock,
+        &project.id,
+        "Prov B",
+        "my-embedding-v2",
+        768,
+    )
+    .await;
 
     mock.set_candidates(&note_a, vec![(&note_b, 0.92)]);
     mock.set_candidates(&note_b, vec![(&note_a, 0.92)]);
@@ -917,9 +1108,10 @@ async fn prune_top_k_overflow() {
     );
 
     let remaining = count_embedding_edges(&db, &hub).await;
-    assert!(
-        remaining <= EMBEDDING_ASSOCIATION_TOP_K as i64,
-        "expected <= {} edges after overflow prune, got {remaining}",
+    assert_eq!(
+        remaining,
+        EMBEDDING_ASSOCIATION_TOP_K as i64,
+        "expected exactly {} edges after overflow prune, got {remaining}",
         EMBEDDING_ASSOCIATION_TOP_K,
     );
 
@@ -946,7 +1138,8 @@ async fn prune_top_k_overflow() {
 }
 
 // 9. Idempotence — re-running refresh on unchanged notes doesn't
-// duplicate rows or churn weights.
+// duplicate rows, churn weights, or change provenance metadata. Only
+// `last_refreshed_at` updates.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refresh_idempotence() {
     let db = Database::open_in_memory().unwrap();
@@ -954,20 +1147,34 @@ async fn refresh_idempotence() {
 
     let repo = make_repo_with_mock(&db, mock.clone(), &tx);
 
-    let note_a =
-        make_note_with_embedding(&db, &repo, &project.id, "Idem A", "test-model", 384).await;
-    let note_b =
-        make_note_with_embedding(&db, &repo, &project.id, "Idem B", "test-model", 384).await;
+    let note_a = make_note_with_mock_embedding(
+        &db,
+        &repo,
+        &mock,
+        &project.id,
+        "Idem A",
+        "test-model",
+        384,
+    )
+    .await;
+    let note_b = make_note_with_mock_embedding(
+        &db,
+        &repo,
+        &mock,
+        &project.id,
+        "Idem B",
+        "test-model",
+        384,
+    )
+    .await;
 
     mock.set_candidates(&note_a, vec![(&note_b, 0.90)]);
     mock.set_candidates(&note_b, vec![(&note_a, 0.90)]);
 
     // First refresh.
-    let stats1 = repo
-        .refresh_embedding_associations(&project.id)
+    repo.refresh_embedding_associations(&project.id)
         .await
         .unwrap();
-    assert_eq!(stats1.edges_upserted, 2);
 
     let rows_after_1 = repo
         .list_provenance_associations_for_note(
@@ -980,20 +1187,24 @@ async fn refresh_idempotence() {
         .await
         .unwrap();
     assert_eq!(rows_after_1.len(), 1);
-    let weight_after_1 = rows_after_1[0].weight;
-    let refreshed_at_1 = rows_after_1[0].last_refreshed_at.clone();
+    let row1 = &rows_after_1[0];
+    let weight_after_1 = row1.weight;
+    let confidence_after_1 = row1.confidence;
+    let algo_after_1 = row1.algorithm_version.clone();
+    let model_after_1 = row1.embedding_model.clone();
+    let dim_after_1 = row1.embedding_dim;
+    let refreshed_at_1 = row1.last_refreshed_at.clone();
+    assert!(refreshed_at_1.is_some(), "last_refreshed_at after 1st run");
+
+    // Sleep to ensure the millisecond timestamp changes.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Second refresh — unchanged notes.
-    let stats2 = repo
-        .refresh_embedding_associations(&project.id)
+    repo.refresh_embedding_associations(&project.id)
         .await
         .unwrap();
-    assert_eq!(
-        stats2.edges_upserted, 2,
-        "second refresh still calls upsert for each eligible note"
-    );
 
-    // Still exactly 1 row.
+    // Still exactly 1 row — no duplicate.
     let rows_after_2 = repo
         .list_provenance_associations_for_note(
             &note_a,
@@ -1010,20 +1221,49 @@ async fn refresh_idempotence() {
         "idempotent refresh must not create duplicate rows"
     );
 
-    // Weight unchanged (cosine is the same, no max-merge change).
+    let row2 = &rows_after_2[0];
+
+    // Weight unchanged (same cosine, GREATEST is a no-op).
     assert!(
-        (rows_after_2[0].weight - weight_after_1).abs() < 1e-12,
+        (row2.weight - weight_after_1).abs() < 1e-12,
         "weight must not churn: expected {weight_after_1}, got {}",
-        rows_after_2[0].weight
+        row2.weight
     );
 
-    // last_refreshed_at updated (or same if within the same second).
-    // The important thing is it's still populated.
+    // Confidence unchanged.
+    assert_eq!(
+        row2.confidence, confidence_after_1,
+        "confidence must not change on idempotent refresh"
+    );
+
+    // algorithm_version unchanged.
+    assert_eq!(
+        row2.algorithm_version, algo_after_1,
+        "algorithm_version must not change on idempotent refresh"
+    );
+
+    // embedding_model unchanged.
+    assert_eq!(
+        row2.embedding_model, model_after_1,
+        "embedding_model must not change on idempotent refresh"
+    );
+
+    // embedding_dim unchanged.
+    assert_eq!(
+        row2.embedding_dim, dim_after_1,
+        "embedding_dim must not change on idempotent refresh"
+    );
+
+    // last_refreshed_at must be updated (different from the first run).
+    let refreshed_at_2 = row2.last_refreshed_at.clone();
     assert!(
-        rows_after_2[0].last_refreshed_at.is_some(),
+        refreshed_at_2.is_some(),
         "last_refreshed_at must remain populated"
     );
-    let _ = refreshed_at_1; // suppress unused warning
+    assert_ne!(
+        refreshed_at_2, refreshed_at_1,
+        "last_refreshed_at must be updated on second refresh (proves only this field changes)"
+    );
 }
 
 // 10. Bounded complexity — 700 notes, O(n) not O(n²).
@@ -1037,9 +1277,10 @@ async fn refresh_bounded_complexity_700_notes() {
     // Create 700 notes with embeddings.
     let mut note_ids = Vec::with_capacity(700);
     for i in 0..700 {
-        let nid = make_note_with_embedding(
+        let nid = make_note_with_mock_embedding(
             &db,
             &repo,
+            &mock,
             &project.id,
             &format!("Bench Note {i:04}"),
             "bench-model",
@@ -1079,6 +1320,15 @@ async fn refresh_bounded_complexity_700_notes() {
         stats.candidates_evaluated <= max_candidates,
         "candidates_evaluated ({}) must be <= {max_candidates} (700 * {})",
         stats.candidates_evaluated,
+        EMBEDDING_ASSOCIATION_CANDIDATE_POOL,
+    );
+
+    // AC: candidates_evaluated should be exactly 700 * 50 — proving each
+    // note triggers exactly one bounded query of 50 candidates.
+    assert_eq!(
+        stats.candidates_evaluated,
+        700 * EMBEDDING_ASSOCIATION_CANDIDATE_POOL,
+        "each of 700 notes should evaluate exactly {} candidates",
         EMBEDDING_ASSOCIATION_CANDIDATE_POOL,
     );
 
