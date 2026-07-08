@@ -2785,4 +2785,141 @@ mod tests {
             "no pre-task activity events should be emitted when no commands run"
         );
     }
+
+    // ---- c9l4: environmental non-attempt classification tests ----------
+
+    #[tokio::test]
+    async fn blocking_pre_task_failure_returns_blocked_not_error() {
+        // A blocking pre-task command that exits nonzero returns
+        // `PreTaskCommandsResult::Blocked` (not an error). The caller
+        // (execute_task_run_startup_boundary) converts this into an Err
+        // so the worker classifies it as an environmental non-attempt.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = EnvironmentConfig {
+            lifecycle: djinn_stack::environment::LifecycleHooks {
+                pre_task: vec![PreTaskCommand {
+                    name: Some("failing-blocker".into()),
+                    command: "exit 1".into(),
+                    timeout_seconds: 10,
+                    failure_policy: PreTaskFailurePolicy::Blocking,
+                }],
+                ..Default::default()
+            },
+            ..EnvironmentConfig::empty()
+        };
+        let cancel = CancellationToken::new();
+        let sink = RecordingActivitySink::new();
+        let result = run_pre_task_commands(&cfg, tmp.path(), &cancel, Some("t-block"), &sink)
+            .await
+            .expect("runner should not error on nonzero exit");
+        assert!(result.is_blocked(), "blocking failure must yield Blocked");
+        // Activity was emitted for the started (and failed) command.
+        assert_eq!(sink.len(), 1, "one activity event for the started command");
+        let payload = &sink.payloads()[0];
+        assert_eq!(payload["blocked"], true);
+        assert_eq!(payload["failure_class"], "environmental");
+    }
+
+    #[tokio::test]
+    async fn best_effort_failure_emits_activity_and_continues() {
+        // A best-effort command that fails does NOT block subsequent
+        // commands. Activity is emitted for the failed command and
+        // the result is BestEffortFailure (not Blocked).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stamp = tmp.path().join("best-effort-ran");
+        let cfg = EnvironmentConfig {
+            lifecycle: djinn_stack::environment::LifecycleHooks {
+                pre_task: vec![
+                    PreTaskCommand {
+                        name: Some("failing-best-effort".into()),
+                        command: "exit 42".into(),
+                        timeout_seconds: 10,
+                        failure_policy: PreTaskFailurePolicy::BestEffort,
+                    },
+                    PreTaskCommand {
+                        name: Some("next-cmd".into()),
+                        command: format!("touch {}", stamp.display()),
+                        timeout_seconds: 10,
+                        failure_policy: PreTaskFailurePolicy::Blocking,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..EnvironmentConfig::empty()
+        };
+        let cancel = CancellationToken::new();
+        let sink = RecordingActivitySink::new();
+        let result = run_pre_task_commands(&cfg, tmp.path(), &cancel, Some("t-be"), &sink)
+            .await
+            .expect("runner should not error on best-effort failure");
+        assert!(
+            !result.is_blocked(),
+            "best-effort failure must not block the sequence"
+        );
+        assert!(
+            stamp.exists(),
+            "subsequent command must have run after best-effort failure"
+        );
+        // Activity emitted for both commands.
+        assert_eq!(sink.len(), 2, "two activity events (failed + success)");
+        let failed_payload = &sink.payloads()[0];
+        assert_eq!(failed_payload["name"], "failing-best-effort");
+        assert_eq!(failed_payload["blocked"], false);
+        assert!(
+            !failed_payload
+                .as_object()
+                .unwrap()
+                .contains_key("failure_class"),
+            "best-effort failure must not carry failure_class"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocking_pre_task_failure_does_not_emit_success_for_non_attempt() {
+        // When a blocking pre-task fails, the runner returns Blocked.
+        // The startup boundary converts this to Err, preventing the
+        // supervisor from being created. This test pins the contract
+        // that the Blocked result carries the blocker info and that
+        // activity events were only emitted for actually-started commands.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = EnvironmentConfig {
+            lifecycle: djinn_stack::environment::LifecycleHooks {
+                pre_task: vec![
+                    PreTaskCommand {
+                        name: Some("ok-first".into()),
+                        command: "true".into(),
+                        timeout_seconds: 10,
+                        failure_policy: PreTaskFailurePolicy::Blocking,
+                    },
+                    PreTaskCommand {
+                        name: Some("blocking-fail".into()),
+                        command: "false".into(),
+                        timeout_seconds: 10,
+                        failure_policy: PreTaskFailurePolicy::Blocking,
+                    },
+                    PreTaskCommand {
+                        name: Some("never-runs".into()),
+                        command: "echo should-not-execute".into(),
+                        timeout_seconds: 10,
+                        failure_policy: PreTaskFailurePolicy::Blocking,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..EnvironmentConfig::empty()
+        };
+        let cancel = CancellationToken::new();
+        let sink = RecordingActivitySink::new();
+        let result = run_pre_task_commands(&cfg, tmp.path(), &cancel, Some("t-no-sess"), &sink)
+            .await
+            .expect("ok");
+        assert!(result.is_blocked());
+        // Only 2 events: the success and the blocker. The third command
+        // was never started so no misleading success event was emitted.
+        assert_eq!(sink.len(), 2, "only started commands have activity events");
+        let blocker_payload = &sink.payloads()[1];
+        assert_eq!(blocker_payload["name"], "blocking-fail");
+        assert_eq!(blocker_payload["blocked"], true);
+        assert_eq!(blocker_payload["failure_class"], "environmental");
+    }
 }

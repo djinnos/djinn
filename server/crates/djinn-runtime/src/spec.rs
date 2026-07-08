@@ -1,3 +1,4 @@
+// djinn:allow-oversize — runtime spec types over size-guard threshold; split when touched substantively.
 //! Wire-capable task-run spec + outcome types.
 //!
 //! These types were previously `djinn_agent::supervisor::{spec, flow}`; Phase
@@ -565,6 +566,22 @@ pub enum TaskRunOutcome {
         tokens_in: i64,
         tokens_out: i64,
     },
+    /// A blocking pre-task command failed, timed out, or was cancelled, or a
+    /// required service readiness check failed before any agent session or work
+    /// attempt was created.  The run is classified as an environmental
+    /// non-attempt: no `TaskRunSupervisor::run` was invoked, no agent
+    /// session/work attempt exists, and no quality strike, arbiter penalty, or
+    /// park-rung penalty should be applied.
+    ///
+    /// `stages_completed` is always empty for this outcome.
+    ///
+    /// Added LAST to preserve bincode discriminants of all existing
+    /// terminal-report variants.
+    EnvironmentalNonAttempt {
+        /// Machine-readable reason: `pre_task_failed`, `pre_task_timed_out`,
+        /// `pre_task_cancelled`, or `service_readiness_failed`.
+        reason: String,
+    },
 }
 
 /// Return value of `TaskRunSupervisor::run`.
@@ -1113,5 +1130,46 @@ mod tests {
             bincode::serialize(&loop_guard_outcome(LoopGuardKind::IdenticalToolFailure))
                 .expect("serialize new variant");
         assert_eq!(&new_bytes[..4], &6u32.to_le_bytes());
+    }
+
+    #[test]
+    fn environmental_non_attempt_bincode_roundtrip() {
+        let report = TaskRunReport {
+            task_run_id: "run-env".to_string(),
+            outcome: TaskRunOutcome::EnvironmentalNonAttempt {
+                reason: "pre_task_failed".to_string(),
+            },
+            stages_completed: Vec::new(),
+        };
+        let bytes = bincode::serialize(&report).expect("serialize");
+        let back: TaskRunReport = bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(back.task_run_id, "run-env");
+        assert!(back.stages_completed.is_empty());
+        match back.outcome {
+            TaskRunOutcome::EnvironmentalNonAttempt { reason } => {
+                assert_eq!(reason, "pre_task_failed");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn environmental_non_attempt_discriminant_is_appended_after_parked() {
+        // Parked is discriminant 7; EnvironmentalNonAttempt must be 8.
+        let parked = TaskRunOutcome::Parked {
+            reason: "budget".into(),
+            wind_down_ignored: false,
+            session_id: "s".into(),
+            tokens_in: 0,
+            tokens_out: 0,
+        };
+        let parked_bytes = bincode::serialize(&parked).expect("serialize parked");
+        assert_eq!(&parked_bytes[..4], &7u32.to_le_bytes());
+
+        let env = TaskRunOutcome::EnvironmentalNonAttempt {
+            reason: "pre_task_failed".into(),
+        };
+        let env_bytes = bincode::serialize(&env).expect("serialize env");
+        assert_eq!(&env_bytes[..4], &8u32.to_le_bytes());
     }
 }
