@@ -81,6 +81,10 @@ impl std::fmt::Display for CandidateAttemptOutcome {
 /// that did NOT succeed.  Called during failover-chain traversal when a
 /// candidate is skipped (breaker/capacity) or fails (dispatch error), so each
 /// tried candidate is visible for observability.
+///
+/// `session_id` is included as a structured tracing field (not a Prometheus
+/// label) because it is high-cardinality.  Pass `None` when no session context
+/// is available on the dispatch path.
 pub(crate) fn emit_failover_candidate_attempt(
     task_id: &str,
     role: &str,
@@ -88,6 +92,7 @@ pub(crate) fn emit_failover_candidate_attempt(
     candidate_index: usize,
     total_candidates: usize,
     attempt_outcome: &CandidateAttemptOutcome,
+    session_id: Option<&str>,
 ) {
     let (provider_id, model_id) = parse_provider_model(candidate_model);
     tracing::warn!(
@@ -98,6 +103,7 @@ pub(crate) fn emit_failover_candidate_attempt(
         provider_id,
         model_id,
         outcome = %attempt_outcome,
+        session_id,
         "failover_candidate_attempt"
     );
 }
@@ -105,6 +111,10 @@ pub(crate) fn emit_failover_candidate_attempt(
 /// Emit a structured `info`-level log when a failover candidate succeeds.
 /// Called during failover-chain traversal when the first candidate that
 /// accepts the dispatch is found.
+///
+/// `session_id` is included as a structured tracing field (not a Prometheus
+/// label) because it is high-cardinality.  Pass `None` when no session context
+/// is available on the dispatch path.
 pub(crate) fn emit_failover_candidate_accepted(
     task_id: &str,
     role: &str,
@@ -112,6 +122,7 @@ pub(crate) fn emit_failover_candidate_accepted(
     candidate_index: usize,
     total_candidates: usize,
     skipped_count: usize,
+    session_id: Option<&str>,
 ) {
     let (provider_id, model_id) = parse_provider_model(candidate_model);
     tracing::info!(
@@ -122,7 +133,37 @@ pub(crate) fn emit_failover_candidate_accepted(
         skipped_count,
         provider_id,
         model_id,
+        session_id,
         "failover_candidate_accepted"
+    );
+}
+
+/// Emit a structured `warn`-level log when all failover candidates have been
+/// tried and none accepted the dispatch (the chain is exhausted).
+///
+/// `last_candidate_model` is the model id of the final tried candidate.
+/// `total_candidates` and `observed_failures` provide chain-level context.
+/// `session_id` is a high-cardinality structured tracing field (not a metric
+/// label); pass `None` when no session context is available.
+pub(crate) fn emit_failover_chain_exhausted(
+    task_id: &str,
+    role: &str,
+    last_candidate_model: &str,
+    total_candidates: usize,
+    observed_failures: usize,
+    session_id: Option<&str>,
+) {
+    let (provider_id, model_id) = parse_provider_model(last_candidate_model);
+    tracing::warn!(
+        task_id,
+        role,
+        total_candidates,
+        observed_failures,
+        provider_id,
+        model_id,
+        chain_exhausted = true,
+        session_id,
+        "failover_chain_exhausted"
     );
 }
 
@@ -223,6 +264,7 @@ mod tests {
             0,
             3,
             &CandidateAttemptOutcome::BreakerOpen,
+            None,
         );
         emit_failover_candidate_attempt(
             "t2",
@@ -231,6 +273,7 @@ mod tests {
             1,
             3,
             &CandidateAttemptOutcome::AtCapacity,
+            Some("session-t2"),
         );
         emit_failover_candidate_attempt(
             "t3",
@@ -239,6 +282,7 @@ mod tests {
             2,
             3,
             &CandidateAttemptOutcome::Error("pool dispatch failed".to_owned()),
+            None,
         );
     }
 
@@ -262,7 +306,23 @@ mod tests {
 
     #[test]
     fn emit_failover_candidate_accepted_does_not_panic() {
-        emit_failover_candidate_accepted("t1", "worker", "zai/glm-5.2", 1, 3, 1);
-        emit_failover_candidate_accepted("t2", "worker", "xiaomi/mimo-v2.5-pro", 0, 3, 0);
+        emit_failover_candidate_accepted("t1", "worker", "zai/glm-5.2", 1, 3, 1, None);
+        emit_failover_candidate_accepted(
+            "t2",
+            "worker",
+            "xiaomi/mimo-v2.5-pro",
+            0,
+            3,
+            0,
+            Some("session-t2"),
+        );
+    }
+
+    // ── emit_failover_chain_exhausted ──────────────────────────────
+
+    #[test]
+    fn emit_failover_chain_exhausted_does_not_panic() {
+        emit_failover_chain_exhausted("t1", "worker", "kimi-for-coding/k2p7", 3, 3, None);
+        emit_failover_chain_exhausted("t2", "reviewer", "zai/glm-5.2", 2, 2, Some("session-t2"));
     }
 }

@@ -45,3 +45,4 @@ data:
   {{- with .Values.env.webUrl }}
   DJINN_WEB_URL: {{ . | quote }}
   {{- end }}
+  DJINN_ENABLE_SELF_SETUP: {{ .Values.env.enableSelfSetup | quote }}
