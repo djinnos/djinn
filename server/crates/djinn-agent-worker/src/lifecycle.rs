@@ -631,12 +631,24 @@ pub async fn prepare_task_run_inputs() -> Result<TaskRunPreTaskInputs> {
     })
 }
 
+/// Test seam: when set, [`check_service_readiness`] returns an error to
+/// simulate a readiness failure before pre-task commands run.
+#[cfg(test)]
+static TEST_READINESS_SHOULD_FAIL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Stub: check that all required backing services are ready.
 ///
 /// Currently always returns `Ok(())`.  Later tasks replace this with
 /// real readiness probes against the injected sidecars.
 pub async fn check_service_readiness(_service_metadata: &TaskRunServiceMetadata) -> Result<()> {
     // Stub — later tasks implement actual TCP readiness checks.
+    #[cfg(test)]
+    {
+        if TEST_READINESS_SHOULD_FAIL.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("service readiness check failed (test-injected)");
+        }
+    }
     Ok(())
 }
 
@@ -2777,24 +2789,54 @@ mod tests {
         assert!(sink.is_empty());
     }
 
+    /// RAII guard that forces [`check_service_readiness`] to fail and
+    /// resets the flag on drop, keeping parallel tests isolated.
+    struct ReadinessFailureGuard;
+    impl Drop for ReadinessFailureGuard {
+        fn drop(&mut self) {
+            TEST_READINESS_SHOULD_FAIL
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     #[tokio::test]
     async fn pretask_activity_no_events_on_service_readiness_failure() {
-        // The runner lives below `check_service_readiness` and is never
-        // reached when readiness fails.  This pins that contract: no
-        // misleading pre-task success events when the blocking pre-task
-        // step that runs FIRST (service readiness) errored out and
-        // nothing else actually ran.
-        let _tmp = tempfile::tempdir().expect("tempdir");
+        // Force the readiness check to fail before any pre-task commands
+        // run.  This exercises the full startup boundary path through
+        // `execute_task_run_startup_boundary` and proves that:
+        // 1. The boundary short-circuits at readiness and returns Err.
+        // 2. Zero `task_run_pretask_ran` activity events are emitted —
+        //    there's no command outcome to record, and emitting a success
+        //    event for a non-attempt would be misleading.
+        TEST_READINESS_SHOULD_FAIL
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _guard = ReadinessFailureGuard;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cancel = CancellationToken::new();
         let sink = RecordingActivitySink::new();
-        // Call check_service_readiness directly with an empty service
-        // metadata; the current stub returns Ok(()) — what matters is
-        // that the sink stays empty across the boundary path.  The
-        // runner itself is what we cover in the empty-commands test.
-        let meta = TaskRunServiceMetadata::default();
-        let _ = check_service_readiness(&meta).await;
+        let result = execute_task_run_startup_boundary(
+            tmp.path(),
+            &cancel,
+            Some("t-readiness-fail"),
+            &sink,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "startup boundary must fail when readiness check fails: {result:?}"
+        );
+        // Verify the error is specifically from readiness (not a mount
+        // or config loading failure) by checking the error message.
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("service readiness check failed"),
+            "error must be from readiness failure, got: {err_msg}"
+        );
         assert!(
             sink.is_empty(),
-            "no pre-task activity events should be emitted when no commands run"
+            "no task_run_pretask_ran events should be emitted when \
+             readiness fails before pre-task commands are attempted"
         );
     }
 
