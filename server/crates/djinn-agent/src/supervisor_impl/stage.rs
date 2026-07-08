@@ -371,14 +371,31 @@ fn reviewer_stage_outcome(
                 .to_string(),
             provider_failure: None,
         },
-        "request_lead" => StageOutcome::Escalate {
+        "request_planner" => StageOutcome::Escalate {
             reason: payload_str("reason")
                 .filter(|v| !v.is_empty())
                 .or_else(|| payload_str("message").filter(|v| !v.is_empty()))
                 .or_else(|| payload_str("summary").filter(|v| !v.is_empty()))
-                .unwrap_or("reviewer escalated to lead")
+                .unwrap_or("reviewer escalated to planner")
                 .to_string(),
         },
+        // Deprecated drain compatibility: stale request_lead from a
+        // pre-cutover reviewer session routes to Planner (not Lead) and
+        // is treated as deprecated planner escalation/failure.
+        "request_lead" => {
+            tracing::warn!(
+                "deprecated request_lead finalize tool called by reviewer; \
+                 routing to planner escalation (drain compatibility)"
+            );
+            StageOutcome::Escalate {
+                reason: format!(
+                    "deprecated request_lead: {}",
+                    payload_str("reason")
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or("reviewer escalated via deprecated request_lead"),
+                ),
+            }
+        }
         other => StageOutcome::Failed {
             reason: format!("reviewer finalized via unexpected tool '{other}'"),
             provider_failure: None,
@@ -1209,10 +1226,27 @@ pub(crate) async fn execute_stage(
                 match role_kind {
                     RoleKind::Worker => match finalize_name {
                         "submit_work" => StageOutcome::WorkerDone,
-                        "request_lead" => StageOutcome::Escalate {
+                        "request_planner" => StageOutcome::Escalate {
                             reason: extract_reason(&final_output.finalize_payload)
-                                .unwrap_or_else(|| "worker requested lead escalation".into()),
+                                .unwrap_or_else(|| "worker requested planner escalation".into()),
                         },
+                        // Deprecated drain compatibility: stale request_lead
+                        // from a pre-cutover worker session routes to Planner
+                        // (not Lead) as deprecated planner escalation.
+                        "request_lead" => {
+                            tracing::warn!(
+                                "deprecated request_lead finalize tool called by worker; \
+                                 routing to planner escalation (drain compatibility)"
+                            );
+                            StageOutcome::Escalate {
+                                reason: format!(
+                                    "deprecated request_lead: {}",
+                                    extract_reason(&final_output.finalize_payload).unwrap_or_else(
+                                        || "worker escalated via deprecated request_lead".into()
+                                    ),
+                                ),
+                            }
+                        }
                         "" => StageOutcome::WorkerDone,
                         other => StageOutcome::Failed {
                             reason: format!("worker finalized via unexpected tool '{other}'"),
@@ -1885,15 +1919,36 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_request_lead_escalates() {
+    fn reviewer_request_planner_escalates() {
         let payload = serde_json::json!({"reason": "needs architectural call"});
         assert!(
             matches!(
-                reviewer_stage_outcome("request_lead", Some(&payload)),
+                reviewer_stage_outcome("request_planner", Some(&payload)),
                 StageOutcome::Escalate { reason } if reason == "needs architectural call"
             ),
-            "request_lead must escalate to the lead, carrying the stated reason",
+            "request_planner must escalate, carrying the stated reason",
         );
+    }
+
+    #[test]
+    fn reviewer_deprecated_request_lead_escalates_to_planner() {
+        // Deprecated request_lead should still produce Escalate (routed to
+        // planner by the supervisor), with a deprecation-prefixed reason.
+        let payload = serde_json::json!({"reason": "needs architectural call"});
+        let outcome = reviewer_stage_outcome("request_lead", Some(&payload));
+        match outcome {
+            StageOutcome::Escalate { reason } => {
+                assert!(
+                    reason.contains("deprecated request_lead"),
+                    "deprecated request_lead reason must be prefixed with deprecation marker, got: {reason}"
+                );
+                assert!(
+                    reason.contains("needs architectural call"),
+                    "deprecated request_lead reason must preserve caller's reason, got: {reason}"
+                );
+            }
+            other => panic!("expected Escalate for deprecated request_lead, got {other:?}"),
+        }
     }
 
     // ── Arbiter submit_decision payload validation ─────────────────────
