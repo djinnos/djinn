@@ -2477,8 +2477,15 @@ mod tests {
             "call_request_lead must route through dispatch_planner_escalation"
         );
         // Must NOT transition to needs_lead_intervention.
+        // Strip `//` comment lines before searching so that explanatory
+        // comments (e.g. "no needs_lead_intervention transition") don't
+        // produce false positives — only actual code usage triggers failure.
+        let code_only: String = fn_body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect();
         assert!(
-            !fn_body.contains("needs_lead_intervention"),
+            !code_only.contains("needs_lead_intervention"),
             "call_request_lead must NOT transition task to needs_lead_intervention"
         );
     }
