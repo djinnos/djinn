@@ -3640,6 +3640,434 @@ mod tests {
         );
     }
 
+    // ---- non-djinn generic pre-task database-preparation regression ----
+    //
+    // Proves a non-djinn-shaped target repo can prepare a test database
+    // purely through `EnvironmentConfig.lifecycle.pre_task` plus an injected
+    // service connection env var (`TEST_POSTGRES_URL`), without invoking
+    // djinn-core template bootstrap or any djinn-db-specific branch.
+    //
+    // The fixture models a generic repo carrying `schema.sql` and a
+    // deterministic shell helper that reads the injected connection string,
+    // "runs" the schema file, and writes an observable proof marker at the
+    // repo root.  This stands in for psql/Rails/Django/Prisma-style
+    // database preparation commands while remaining fully self-contained
+    // (no live Postgres needed).
+
+    /// AC: A worker regression models a non-djinn target repo database
+    /// preparation command declared through `EnvironmentConfig.lifecycle.pre_task`,
+    /// consuming an injected `TEST_POSTGRES_URL` env var.  The command runs
+    /// from the repo root and is driven by generic config only — no
+    /// djinn-db/template-bootstrap special case or target-repo code path
+    /// is added to core runtime code.
+    ///
+    /// The regression verifies a `task_run_pretask_ran` outcome for the
+    /// generic command with reviewer-checkable command name/index/failure
+    /// policy/result fields.
+    #[tokio::test]
+    async fn nondjinn_db_preparation_fixture_via_config_only() {
+        // ---- 1. Build a minimal non-djinn repo fixture on disk ----------
+        let repo_root = tempfile::tempdir().expect("tempdir");
+
+        // schema.sql — deterministic stand-in for a real migration file.
+        // A real repo might have `db/migrate/*.sql` or `prisma/schema.prisma`.
+        let schema_sql = repo_root.path().join("schema.sql");
+        std::fs::write(
+            &schema_sql,
+            "CREATE TABLE IF NOT EXISTS widgets (id SERIAL PRIMARY KEY, name TEXT NOT NULL);\n",
+        )
+        .expect("write schema.sql");
+
+        // prepare-test-db.sh — shell helper that consumes $TEST_POSTGRES_URL
+        // and "runs" the schema.  In a real repo this might be
+        //   psql "$TEST_POSTGRES_URL" -f schema.sql
+        // or `rails db:prepare` or `npx prisma db push`.
+        //
+        // The deterministic stand-in:
+        //   1. Reads TEST_POSTGRES_URL from the environment.
+        //   2. Verifies schema.sql exists at the repo root.
+        //   3. Writes a proof marker containing the connection string,
+        //      the resolved repo root, and the schema content — proving
+        //      the command ran from the correct working directory and
+        //      consumed the injected env var.
+        let prepare_script = repo_root.path().join("prepare-test-db.sh");
+        let proof_marker = repo_root.path().join(".db-prepared.marker");
+        let proof_marker_str = proof_marker.to_string_lossy().to_string();
+        std::fs::write(
+            &prepare_script,
+            format!(
+                r#"#!/bin/sh
+set -e
+# Read the injected connection env var (produced by the service sidecar).
+CONN_URL="${{TEST_POSTGRES_URL:?TEST_POSTGRES_URL not set}}"
+REPO_ROOT="$(pwd)"
+
+# Verify the schema file is present at the repo root.
+test -f "$REPO_ROOT/schema.sql" || exit 1
+
+# "Run" the schema: read it and record proof that we ran from the repo root
+# with the injected connection string.  A real command would pipe this into
+# a SQL client.
+SCHEMA_CONTENT=$(cat "$REPO_ROOT/schema.sql")
+cat > "{marker}" <<EOF
+connection_url=$CONN_URL
+repo_root=$REPO_ROOT
+schema_applied=true
+schema_content=$SCHEMA_CONTENT
+EOF
+"#,
+                marker = proof_marker_str,
+            ),
+        )
+        .expect("write prepare-test-db.sh");
+
+        // ---- 2. Inject the service connection env var -------------------
+        let sentinel_url = "postgres://test-user:test-pass@127.0.0.1:5432/testdb?sslmode=disable";
+        let _guard = TestEnvGuard::set("TEST_POSTGRES_URL", sentinel_url);
+
+        // ---- 3. Declare the pre-task command through pure config ---------
+        // No djinn-core template bootstrap, no djinn-db branch — just a
+        // generic `lifecycle.pre_task` entry pointing at the repo's own
+        // shell helper.
+        let cfg = EnvironmentConfig {
+            lifecycle: djinn_stack::environment::LifecycleHooks {
+                pre_task: vec![PreTaskCommand {
+                    name: Some("prepare-test-db".into()),
+                    command: "sh prepare-test-db.sh".into(),
+                    timeout_seconds: 30,
+                    failure_policy: PreTaskFailurePolicy::Blocking,
+                }],
+                ..Default::default()
+            },
+            ..EnvironmentConfig::empty()
+        };
+
+        // ---- 4. Run the pre-task commands --------------------------------
+        let cancel = CancellationToken::new();
+        let sink = RecordingActivitySink::new();
+        let result = run_pre_task_commands(
+            &cfg,
+            repo_root.path(),
+            &cancel,
+            Some("t-nondjinn-db"),
+            &sink,
+        )
+        .await
+        .expect("pre-task should succeed");
+
+        // ---- 5. Assert the command succeeded before session continuation -
+        assert!(
+            result.all_succeeded(),
+            "generic db preparation must succeed (AllSucceeded)"
+        );
+        assert!(
+            !result.is_blocked(),
+            "must not be blocked — the command should have completed"
+        );
+        assert_eq!(
+            result.all_results().len(),
+            1,
+            "exactly one pre-task command should have run"
+        );
+
+        let cmd_result = &result.all_results()[0];
+        assert_eq!(
+            cmd_result.name, "prepare-test-db",
+            "command name must match config"
+        );
+        assert_eq!(cmd_result.index, 0, "command index must be 0");
+        assert_eq!(cmd_result.exit_code, Some(0), "command must exit 0");
+        assert!(!cmd_result.timed_out);
+        assert!(!cmd_result.cancelled);
+        assert_eq!(
+            cmd_result.failure_policy,
+            PreTaskFailurePolicy::Blocking,
+            "failure policy must match config"
+        );
+
+        // ---- 6. Assert the proof marker was written at the repo root -----
+        assert!(
+            proof_marker.exists(),
+            "proof marker must exist at the repo root"
+        );
+        let marker_content = std::fs::read_to_string(&proof_marker).expect("read marker");
+        assert!(
+            marker_content.contains(sentinel_url),
+            "marker must contain the injected TEST_POSTGRES_URL value; got: {marker_content}"
+        );
+        assert!(
+            marker_content.contains(&format!("repo_root={}", repo_root.path().display())),
+            "marker must record the actual repo root (cwd); got: {marker_content}"
+        );
+        assert!(
+            marker_content.contains("schema_applied=true"),
+            "marker must confirm schema was processed; got: {marker_content}"
+        );
+        assert!(
+            marker_content.contains("CREATE TABLE"),
+            "marker must include the schema.sql content; got: {marker_content}"
+        );
+
+        // ---- 7. Assert task_run_pretask_ran activity was emitted ----------
+        assert_eq!(
+            sink.len(),
+            1,
+            "exactly one activity event must be emitted for the started command"
+        );
+
+        let events = sink.events();
+        assert_eq!(
+            events[0].0.as_deref(),
+            Some("t-nondjinn-db"),
+            "activity event must carry the task_id"
+        );
+
+        let payload = &sink.payloads()[0];
+
+        // Reviewer-checkable payload shape: all required stable fields present.
+        assert_pretask_payload_shape(&payload, &cfg.lifecycle.pre_task[0], 0);
+
+        // Command-level assertions on the payload.
+        assert_eq!(
+            payload["name"].as_str(),
+            Some("prepare-test-db"),
+            "activity payload name must match config"
+        );
+        assert_eq!(
+            payload["index"].as_u64(),
+            Some(0),
+            "activity payload index must be 0"
+        );
+        assert_eq!(
+            payload["failure_policy"].as_str(),
+            Some("blocking"),
+            "activity payload failure_policy must be 'blocking'"
+        );
+        assert_eq!(
+            payload["exit_code"].as_i64(),
+            Some(0),
+            "activity payload exit_code must be 0"
+        );
+        assert_eq!(
+            payload["blocked"].as_bool(),
+            Some(false),
+            "successful command must not be blocked"
+        );
+        assert_eq!(
+            payload["timed_out"].as_bool(),
+            Some(false),
+            "must not have timed out"
+        );
+        assert_eq!(
+            payload["cancelled"].as_bool(),
+            Some(false),
+            "must not have been cancelled"
+        );
+        assert!(
+            !payload.as_object().unwrap().contains_key("failure_class"),
+            "successful command must not carry failure_class"
+        );
+        assert!(
+            payload["started_at"].as_str().is_some(),
+            "started_at must be a string"
+        );
+        assert!(
+            payload["duration_ms"].as_u64().is_some(),
+            "duration_ms must be a number"
+        );
+
+        // The command field in the payload must be present (and redacted if
+        // it contains secrets — it doesn't here, but the contract is that
+        // it is always a string).
+        let payload_cmd = payload["command"].as_str().expect("command must be string");
+        assert!(
+            payload_cmd.contains("prepare-test-db.sh"),
+            "payload command must reference the repo script: {payload_cmd}"
+        );
+
+        // output_tail confirms the command actually ran — the script itself
+        // produces no stdout, so the tail may be empty, but the field must
+        // exist.
+        assert!(
+            payload["output_tail"].is_string(),
+            "output_tail must be a string field"
+        );
+        assert!(
+            payload["output_truncated"].is_boolean(),
+            "output_truncated must be a boolean field"
+        );
+    }
+
+    /// AC: Multi-command database preparation — a generic repo declares
+    /// a two-step preparation (schema application + seed data) through
+    /// `lifecycle.pre_task`, both consuming `TEST_POSTGRES_URL`.  The
+    /// second command depends on the first (verifies the proof marker
+    /// written by the first).  This proves sequential multi-command
+    /// database preparation is config-driven with no djinn special case.
+    #[tokio::test]
+    async fn nondjinn_multistep_db_preparation_fixture() {
+        let repo_root = tempfile::tempdir().expect("tempdir");
+
+        // schema.sql — the migration.
+        let schema_sql = repo_root.path().join("schema.sql");
+        std::fs::write(
+            &schema_sql,
+            "CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY);\n",
+        )
+        .expect("write schema.sql");
+
+        // seeds.sql — deterministic seed data (not actually executed, just
+        // read to prove the second step can access it).
+        let seeds_sql = repo_root.path().join("seeds.sql");
+        std::fs::write(&seeds_sql, "INSERT INTO users DEFAULT VALUES;\n").expect("write seeds.sql");
+
+        let proof_marker = repo_root.path().join(".db-ready.marker");
+
+        // Step 1: apply schema, write proof.
+        let step1_cmd = format!(
+            "test -n \"$TEST_POSTGRES_URL\" && test -f schema.sql && echo schema_applied > {marker}",
+            marker = proof_marker.to_string_lossy(),
+        );
+
+        // Step 2: verify the proof marker exists, then "apply seeds".
+        let step2_cmd = format!(
+            "test -f {marker} && test -f seeds.sql && echo seeds_applied >> {marker}",
+            marker = proof_marker.to_string_lossy(),
+        );
+
+        let sentinel_url = "postgres://app:secret@db.example.com:5432/myapp";
+        let _guard = TestEnvGuard::set("TEST_POSTGRES_URL", sentinel_url);
+
+        let cfg = EnvironmentConfig {
+            lifecycle: djinn_stack::environment::LifecycleHooks {
+                pre_task: vec![
+                    PreTaskCommand {
+                        name: Some("apply-schema".into()),
+                        command: step1_cmd,
+                        timeout_seconds: 30,
+                        failure_policy: PreTaskFailurePolicy::Blocking,
+                    },
+                    PreTaskCommand {
+                        name: Some("seed-data".into()),
+                        command: step2_cmd,
+                        timeout_seconds: 30,
+                        failure_policy: PreTaskFailurePolicy::Blocking,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..EnvironmentConfig::empty()
+        };
+
+        let cancel = CancellationToken::new();
+        let sink = RecordingActivitySink::new();
+        let result = run_pre_task_commands(
+            &cfg,
+            repo_root.path(),
+            &cancel,
+            Some("t-multistep-db"),
+            &sink,
+        )
+        .await
+        .expect("multi-step db prep should succeed");
+
+        assert!(result.all_succeeded());
+        assert_eq!(result.all_results().len(), 2);
+
+        // Verify ordering: apply-schema first, then seed-data.
+        assert_eq!(result.all_results()[0].name, "apply-schema");
+        assert_eq!(result.all_results()[0].index, 0);
+        assert_eq!(result.all_results()[1].name, "seed-data");
+        assert_eq!(result.all_results()[1].index, 1);
+
+        // The proof marker shows both steps ran in order.
+        let content = std::fs::read_to_string(&proof_marker).expect("read marker");
+        assert!(
+            content.contains("schema_applied"),
+            "marker must show schema was applied first: {content}"
+        );
+        assert!(
+            content.contains("seeds_applied"),
+            "marker must show seeds were applied second: {content}"
+        );
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "marker must have exactly two lines");
+        assert_eq!(lines[0], "schema_applied");
+        assert_eq!(lines[1], "seeds_applied");
+
+        // Activity: two events, one per started command.
+        assert_eq!(sink.len(), 2, "one activity event per started command");
+        assert_eq!(sink.payloads()[0]["name"], "apply-schema");
+        assert_eq!(sink.payloads()[0]["index"], 0);
+        assert_eq!(sink.payloads()[0]["exit_code"], 0);
+        assert_eq!(sink.payloads()[0]["blocked"], false);
+        assert_eq!(sink.payloads()[1]["name"], "seed-data");
+        assert_eq!(sink.payloads()[1]["index"], 1);
+        assert_eq!(sink.payloads()[1]["exit_code"], 0);
+        assert_eq!(sink.payloads()[1]["blocked"], false);
+
+        // No failure_class on success.
+        for p in sink.payloads() {
+            assert!(
+                !p.as_object().unwrap().contains_key("failure_class"),
+                "successful commands must not carry failure_class"
+            );
+        }
+    }
+
+    /// AC: The generic database preparation fixture is config-driven only —
+    /// when the same `EnvironmentConfig` is used with a different repo root
+    /// (no schema.sql), the command fails proving the lifecycle is purely
+    /// config + cwd, with no hardcoded djinn special-casing.
+    #[tokio::test]
+    async fn nondjinn_db_preparation_fails_gracefully_without_schema() {
+        let empty_repo = tempfile::tempdir().expect("tempdir");
+
+        let sentinel_url = "postgres://test:test@127.0.0.1:5432/empty";
+        let _guard = TestEnvGuard::set("TEST_POSTGRES_URL", sentinel_url);
+
+        // Same command shape as the success test, but in a repo root that
+        // has no schema.sql — the script should fail.
+        let cfg = EnvironmentConfig {
+            lifecycle: djinn_stack::environment::LifecycleHooks {
+                pre_task: vec![PreTaskCommand {
+                    name: Some("prepare-test-db".into()),
+                    command: "test -f schema.sql || exit 1".into(),
+                    timeout_seconds: 10,
+                    failure_policy: PreTaskFailurePolicy::Blocking,
+                }],
+                ..Default::default()
+            },
+            ..EnvironmentConfig::empty()
+        };
+
+        let cancel = CancellationToken::new();
+        let sink = RecordingActivitySink::new();
+        let result = run_pre_task_commands(
+            &cfg,
+            empty_repo.path(),
+            &cancel,
+            Some("t-nondjinn-noschema"),
+            &sink,
+        )
+        .await
+        .expect("runner should not error on nonzero exit");
+
+        // The command fails (no schema.sql in the empty repo).
+        assert!(
+            result.is_blocked(),
+            "blocking failure must produce Blocked when schema is missing"
+        );
+
+        // Activity was emitted for the started (and failed) command.
+        assert_eq!(sink.len(), 1);
+        let payload = &sink.payloads()[0];
+        assert_eq!(payload["name"], "prepare-test-db");
+        assert_eq!(payload["exit_code"], 1);
+        assert_eq!(payload["blocked"], true);
+        assert_eq!(payload["failure_class"], "environmental");
+    }
+
     /// Helper RAII guard for test-scoped env var management.
     ///
     /// Sets a variable on construction and restores the original value
