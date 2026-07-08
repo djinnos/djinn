@@ -129,11 +129,9 @@ async fn guard_allows_for_different_role() {
 
     // Insert a pending attempt for "reviewer".
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "reviewer");
-    super::super::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "reviewer", None, &dk,
-    )
-    .await
-    .expect("record_dispatch_start should succeed");
+    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "reviewer", None, &dk)
+        .await
+        .expect("record_dispatch_start should succeed");
 
     // Guard for "worker" role should allow (different role).
     let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
@@ -374,7 +372,8 @@ async fn guard_pr_adoption_takes_precedence_over_pending_attempt() {
 
 // ─── PrReworkSignal derivation tests ─────────────────────────────────
 
-const CONFLICT_METADATA: &str = r#"{"conflicting_files":["src/note/mod.rs"],"base_branch":"main","merge_target":"main"}"#;
+const CONFLICT_METADATA: &str =
+    r#"{"conflicting_files":["src/note/mod.rs"],"base_branch":"main","merge_target":"main"}"#;
 
 #[test]
 fn rework_signal_from_task_row_mapping() {
@@ -695,11 +694,9 @@ async fn guard_reopened_fallback_is_role_scoped() {
     // A `reopened` attempt for a DIFFERENT role must not bypass adoption
     // for this role.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "reviewer");
-    super::super::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "reviewer", None, &dk,
-    )
-    .await
-    .expect("record_dispatch_start should succeed");
+    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "reviewer", None, &dk)
+        .await
+        .expect("record_dispatch_start should succeed");
     super::super::attempt_lifecycle::advance_latest_to_terminal(
         &db,
         super::super::attempt_lifecycle::TerminalAdvancementParams {
@@ -758,7 +755,10 @@ async fn guard_does_not_adopt_for_reviewer_role_with_open_pr() {
     // The guard itself records no attempt rows for an Allow.
     let repo = TaskAttemptRepository::new(db);
     let all = repo.list_for_task(&task.id).await.unwrap();
-    assert!(all.is_empty(), "reviewer guard must not create attempt rows");
+    assert!(
+        all.is_empty(),
+        "reviewer guard must not create attempt rows"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -769,11 +769,9 @@ async fn guard_defers_reviewer_role_when_reviewer_attempt_in_flight() {
     // With adoption skipped for reviewers, the step-2 in-flight dedup still
     // prevents a duplicate reviewer even when an open PR is present.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "reviewer");
-    super::super::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "reviewer", None, &dk,
-    )
-    .await
-    .expect("record_dispatch_start should succeed");
+    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "reviewer", None, &dk)
+        .await
+        .expect("record_dispatch_start should succeed");
 
     let decision = run_respawn_guard(
         &db,
