@@ -1420,6 +1420,8 @@ async fn app_manifest_callback(
         }
     }
 
+    state.clear_setup_session_token().await;
+
     // Build the install URL for the newly created App.
     let install_url = cfg
         .install_url()
@@ -2580,6 +2582,11 @@ mod tests {
         assert_eq!(cfg.app_id, 42);
         assert_eq!(cfg.slug, "djinn-test");
         assert_eq!(cfg.client_id, "Iv1.test-client");
+
+        assert!(
+            !state.validate_setup_session_token(&session).await,
+            "old setup session token must be invalidated after successful credential persistence"
+        );
 
         // After credentials are loaded, setup routes must return 404.
         let resp = create_app(

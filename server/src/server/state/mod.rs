@@ -603,6 +603,15 @@ impl AppState {
         }
     }
 
+    /// Invalidate the currently stored setup session token.
+    ///
+    /// Called after manifest credential persistence and hot-reload succeeds so
+    /// the one-time setup session cannot be replayed in this process after the
+    /// terminal setup step completes.
+    pub(crate) async fn clear_setup_session_token(&self) {
+        *self.inner.setup_session_token.write().await = None;
+    }
+
     /// Exchange a raw boot token for a setup session.
     ///
     /// Validates the token, atomically marks it consumed, stores the generated
