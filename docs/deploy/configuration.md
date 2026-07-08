@@ -13,6 +13,7 @@ comments there are authoritative; this page is the map.
 - [Secrets](#secrets)
 - [LLM providers](#llm-providers)
 - [Resources & scheduling](#resources--scheduling)
+- [Pre-task lifecycle hooks](#pre-task-lifecycle-hooks)
 - [Observability (Langfuse)](#observability-langfuse)
 - [Extra env](#extra-env)
 - [Users & admin](#users--admin)
@@ -234,6 +235,50 @@ limits apply per-Job, so total load = limits × your per-user concurrency caps.
 
 `nodeSelector` / `tolerations` / `affinity` at the top level place the server
 Deployment itself.
+
+## Pre-task lifecycle hooks
+
+Each project can declare `lifecycle.pre_task` commands that run in the task-run
+Pod before the agent supervisor starts.  The primary use case is test-database
+preparation — running migrations against a Postgres sidecar whose connection
+string is injected as an environment variable.
+
+```yaml
+# In your project or image environment config:
+schema_version: 1
+lifecycle:
+  pre_task:
+    - name: migrate-test-db
+      command: psql "$TEST_POSTGRES_URL" -f schema.sql
+      timeout_seconds: 120
+      failure_policy: blocking
+```
+
+**Quick reference:**
+
+| Field | Default | Range / constraint |
+|-------|---------|-------------------|
+| `name` | `pre_task_N` (1-based) | unique across list |
+| `command` | *required* | non-empty, ≤ 4,096 bytes |
+| `timeout_seconds` | `300` | 1 – 1,800 |
+| `failure_policy` | `blocking` | `blocking` or `best_effort` |
+
+Up to 20 commands per list; commands run sequentially at the project root with
+the full worker environment (including injected service connection env vars).
+
+Blocking failures are classified as **environmental non-attempts** (not code
+failures), so they don't count against the agent.  Output is secret-redacted
+and truncated to 16 KiB.  Each command emits a `task_run_pretask_ran` activity
+event with a stable payload shape.
+
+**Framework examples** (Rails, Django, Prisma, raw SQL) and the full
+validation/failure-policy/redaction/rollout reference are in
+**[lifecycle-pre-task.md](lifecycle-pre-task.md)**.
+
+> **Note:** Djinn's own repo uses an in-process advisory-lock helper
+> (`template_bootstrap.rs`) for its `djinn_test_template` database.  This is
+> an intentional exception, not the generic mechanism.  See
+> [lifecycle-pre-task.md](lifecycle-pre-task.md#djinns-own-djinn_test_template-exception).
 
 ## Observability (Langfuse)
 

@@ -10,3 +10,4 @@
 | Managed or self-managed Kubernetes (EKS / GKE / AKS / kubeadm) | [deploy/kubernetes.md](deploy/kubernetes.md) |
 | Values reference, external Postgres (RDS / Cloud SQL), registries, secrets, storage, dispatch-state debug endpoint | [deploy/configuration.md](deploy/configuration.md) |
 | AI-assisted install (paste-a-prompt) | [deploy/AGENT.md](deploy/AGENT.md) |
+| Pre-task lifecycle hooks: database migrations, validation constraints, failure policies, rollout sequencing | [deploy/lifecycle-pre-task.md](deploy/lifecycle-pre-task.md) |
