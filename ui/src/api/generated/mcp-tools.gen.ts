@@ -10437,9 +10437,24 @@ export namespace TaskListOutputSchema {
    */
   gate_state: (("passing" | "failing" | "pending" | "unknown") | "awaiting_ci")
   /**
+   * Head SHA of the GitHub PR branch, when known.
+   */
+  github_head_sha?: string
+  /**
+   * Concise error string from the most recent publication/observation
+   * failure, when one is recorded.  Absent when no error is known.
+   */
+  head_observation_error?: string
+  /**
    * Git SHA of the PR head this snapshot describes.
    */
   head_sha: string
+  /**
+   * `true` only when both heads are known and differ; `false` only when
+   * both are known and equal; absent/null-compatible when either side is
+   * unknown.
+   */
+  heads_diverged?: boolean
   /**
    * Base SHA of the last remediation attempt for this failing signature.
    * `None` when no remediation has been attempted yet.
@@ -10457,6 +10472,10 @@ export namespace TaskListOutputSchema {
    * snapshot exists.
    */
   merge_blocked_reason?: string
+  /**
+   * Head SHA of the internal mirror branch, when known.
+   */
+  mirror_head_sha?: string
   /**
    * GitHub PR number the CI snapshot belongs to, when available.
    */

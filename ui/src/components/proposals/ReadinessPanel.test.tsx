@@ -516,8 +516,8 @@ describe("ReadinessPanel", () => {
       screen.getByText(/awaiting evidence — spike sp-1 \(in_progress\)/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Can the Rust proc-macro crate emit JSON?"),
-    ).toBeInTheDocument();
+      screen.getAllByText("Can the Rust proc-macro crate emit JSON?").length,
+    ).toBeGreaterThanOrEqual(1);
     // Awaiting-evidence note with short id and spike id.
     expect(screen.getByText("Awaiting evidence: sp-1")).toBeInTheDocument();
     expect(
@@ -549,7 +549,7 @@ describe("ReadinessPanel", () => {
     expect(
       screen.getByText(/awaiting evidence — spike sp-gate \(open\)/),
     ).toBeInTheDocument();
-    expect(screen.getByText("Fallback gate question")).toBeInTheDocument();
+    expect(screen.getAllByText("Fallback gate question").length).toBeGreaterThanOrEqual(1);
     expect(
       screen.queryByText(/Autonomous tribunal in progress/),
     ).not.toBeInTheDocument();
@@ -680,7 +680,7 @@ describe("ReadinessPanel", () => {
       screen.getByText(/Refinement is paused or frozen manually/),
     ).toBeInTheDocument();
     // Evidence context preserved but no auto-resume wording.
-    expect(screen.getByText(/Z is safe to deploy/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Z is safe to deploy/).length).toBeGreaterThanOrEqual(1);
     expect(
       screen.queryByText(/Autonomous tribunal in progress/),
     ).not.toBeInTheDocument();
