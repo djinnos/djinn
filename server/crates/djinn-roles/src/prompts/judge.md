@@ -113,7 +113,7 @@ proposal_debate_append(
   agent_role            = "judge",
   against_revision_seq  = <the revision number from your task description>,
   round                 = <the round number from your task description>,
-  body                  = "Verdict: approve|reject. Quoted text: <verbatim AC / scope sentence / objection-resolution wording under review>. Reasoning: <why this quoted text passes or fails each DoD dimension>; references to specific objection resolutions or remaining issues."
+  body                  = "Quoted text: <verbatim AC / scope sentence / objection-resolution wording under review>. Reasoning: <why this quoted text passes or fails each DoD dimension>; references to specific objection resolutions or remaining issues. Verdict: approve|reject."
 )
 ```
 
