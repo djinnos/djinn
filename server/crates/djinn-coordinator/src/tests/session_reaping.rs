@@ -5979,7 +5979,10 @@ async fn orphaned_submitted_no_pr_reaper_finalizes_stale_rows_only() {
         .set_pr_url(&task_b.id, "https://github.example/owner/repo/pull/11")
         .await
         .unwrap();
-    task_b_repo.set_status(&task_b.id, "pr_review").await.unwrap();
+    task_b_repo
+        .set_status(&task_b.id, "pr_review")
+        .await
+        .unwrap();
 
     // C: FRESH submitted-no-PR (younger than threshold) → untouched.
     let (task_c, _n) = create_task_with_note(&db, &tx, "submitted-reaper-fresh").await;
