@@ -115,7 +115,7 @@
           "type": "boolean"
         },
         "learned_prompt": {
-          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces;\nmutations flow through agent_amend_prompt (Planner) and the\nevaluator/confirmation loop.",
+          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
           "type": [
             "string",
             "null"
@@ -224,7 +224,7 @@
               "type": "boolean"
             },
             "learned_prompt": {
-              "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces;\nmutations flow through agent_amend_prompt (Planner) and the\nevaluator/confirmation loop.",
+              "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
               "type": [
                 "string",
                 "null"
@@ -528,7 +528,7 @@
           "type": "boolean"
         },
         "learned_prompt": {
-          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces;\nmutations flow through agent_amend_prompt (Planner) and the\nevaluator/confirmation loop.",
+          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
           "type": [
             "string",
             "null"
@@ -615,7 +615,7 @@
           }
         },
         "clear_learned_prompt": {
-          "description": "Set to true to clear machine-managed learned_prompt back to NULL.\nAdmin/operator reset path; learned_prompt is otherwise managed through\nagent_amend_prompt and the evaluator loop.",
+          "description": "Set to true to clear machine-managed learned_prompt back to NULL.\nAdmin/operator reset path.",
           "type": [
             "boolean",
             "null"
@@ -674,7 +674,7 @@
           "type": "boolean"
         },
         "learned_prompt": {
-          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces;\nmutations flow through agent_amend_prompt (Planner) and the\nevaluator/confirmation loop.",
+          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
           "type": [
             "string",
             "null"
