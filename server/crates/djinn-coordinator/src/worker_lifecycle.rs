@@ -621,6 +621,13 @@ pub fn evaluate_no_progress_controlled_exit(
 }
 
 /// Resume-via-git metadata placeholder populated by sibling epics.
+///
+/// Field shapes mirror `djinn_runtime::ResumeLifecycleMetadata` so the
+/// coordinator can serialize its selection directly into a [`TaskRunSpec`]
+/// without a translation layer, and the worker can deserialize the same shape
+/// when reading the spec off the bincode wire. All fields are
+/// `#[serde(default)]` so older worker pods continue to deserialize new specs
+/// without an `EOF` on bincode decode.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResumeLifecycleMetadata {
     /// Whether resume selection was considered for this dispatch/session.
@@ -638,6 +645,40 @@ pub struct ResumeLifecycleMetadata {
     /// Free-form extension map for rollout-specific resume details.
     #[serde(default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+    /// Previous model used before the termination that triggered this
+    /// resume. Populated by the coordinator from model-rotation metadata or
+    /// from prior-session failover activity when available. Mirrors the
+    /// runtime `ResumeLifecycleMetadata::previous_model` field so the
+    /// failover-aware worker resume note (`kv6i`) can report which model was
+    /// tried before the rescue candidate.
+    #[serde(default)]
+    pub previous_model: Option<String>,
+    /// New/current model selected after failover. When the failover chain
+    /// advances past a failed provider, this is the candidate that ultimately
+    /// accepted the dispatch (the rescued model's id). Mirrors the runtime
+    /// `ResumeLifecycleMetadata::new_model` field so the worker resume note
+    /// can tell the fallback worker which model it is now running on.
+    #[serde(default)]
+    pub new_model: Option<String>,
+    /// Human-readable failover/termination reason supplied by the
+    /// coordinator. Populated from model-rotation reason metadata, from
+    /// failover-chain candidate events, or from prior-session preservation
+    /// activity when available. Mirrors the runtime
+    /// `ResumeLifecycleMetadata::failover_reason` field.
+    #[serde(default)]
+    pub failover_reason: Option<String>,
+    /// Last durable-progress summary from the prior session, when
+    /// available. Mirrors the runtime `ResumeLifecycleMetadata::
+    /// last_durable_progress_summary` field so the worker resume note can
+    /// preserve context for the fallback worker.
+    #[serde(default)]
+    pub last_durable_progress_summary: Option<String>,
+    /// Suggested verification command from the prior session's
+    /// auto-submit/checkpoint metadata, when available. Mirrors the runtime
+    /// `ResumeLifecycleMetadata::verification_command` field so the fallback
+    /// worker can re-verify quickly.
+    #[serde(default)]
+    pub verification_command: Option<String>,
 }
 
 /// Passive resume rollout config; defaults do not alter dispatch selection.
@@ -1026,6 +1067,11 @@ mod tests {
                 commit_sha: Some("abc123".to_string()),
                 selection_reason: Some(ResumeSelectionReason::LatestSafeCheckpoint),
                 extra: serde_json::Map::new(),
+                previous_model: Some("provider/old".to_string()),
+                new_model: Some("provider/new".to_string()),
+                failover_reason: Some("no_durable_progress_streak".to_string()),
+                last_durable_progress_summary: Some("Wrote the parser module".to_string()),
+                verification_command: Some("cargo test".to_string()),
             }),
             model_rotation: Some(ModelRotationLifecycleMetadata {
                 considered: true,
@@ -1086,7 +1132,12 @@ mod tests {
                     "checkpoint_id": "ckpt-1",
                     "commit_sha": "abc123",
                     "selection_reason": "latest_safe_checkpoint",
-                    "extra": {}
+                    "extra": {},
+                    "previous_model": "provider/old",
+                    "new_model": "provider/new",
+                    "failover_reason": "no_durable_progress_streak",
+                    "last_durable_progress_summary": "Wrote the parser module",
+                    "verification_command": "cargo test",
                 },
                 "model_rotation": {
                     "considered": true,

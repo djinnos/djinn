@@ -39,6 +39,30 @@ fn record_dispatch_live_state(cooldowns_active: usize, inflight_ledger_size: usi
     djinn_telemetry::dispatch::set_inflight_ledger_size(inflight_ledger_size);
 }
 
+/// Map a free-form failover / rotation reason string from the activity log
+/// onto the typed [`crate::ModelRotationReason`] enum. The mapping accepts
+/// both the snake_case serde form (`no_durable_progress_streak`) and the
+/// Debug form (`NoProgress` / `NoDurableProgressStreak`) emitted by
+/// `emit_rotation_event` in the agent. Unknown values return `None` so the
+/// resume metadata degrades to "rotation considered but no reason recorded"
+/// instead of persisting an invalid enum variant.
+fn map_model_rotation_reason(raw: &str) -> Option<crate::ModelRotationReason> {
+    use crate::ModelRotationReason as R;
+    let normalized = raw.trim().to_ascii_lowercase();
+    let normalized = normalized.split_whitespace().next().unwrap_or("");
+    // Strip surrounding quotes the Debug formatter may leave on strings.
+    let normalized = normalized.trim_matches('"');
+    match normalized {
+        "no_durable_progress_streak" | "noprogress" => Some(R::NoDurableProgressStreak),
+        "repeated_read_only_no_op" | "repeatedverifyloop" => Some(R::RepeatedReadOnlyNoOp),
+        "repeated_flaky_verification" | "flaky" => Some(R::RepeatedFlakyVerification),
+        "context_budget_pressure" | "deadline" => Some(R::ContextBudgetPressure),
+        "provider_health_degraded" => Some(R::ProviderHealthDegraded),
+        "operator_requested" => Some(R::OperatorRequested),
+        "not_eligible" => Some(R::NotEligible),
+        _ => None,
+    }
+}
 /// Env flag allowing operators (and the in-process TestRuntime path) to
 /// bypass the devcontainer-image + graph-warm readiness gate. Default is
 /// "on" (fail-closed). Set to `0`/`false`/`no` to dispatch as soon as a
@@ -288,46 +312,45 @@ impl CoordinatorActor {
         let metadata = crate::dispatch::resume_source::selection_to_metadata(&selection);
 
         // Thread additional context fields from the lifecycle metadata into
-        // the resume metadata's extra map so they deserialize into the
+        // the resume metadata's TYPED fields so they deserialize into the
         // runtime ResumeLifecycleMetadata typed fields (previous_model,
-        // verification_command, last_durable_progress_summary). These are
-        // consumed by the worker resume-prompt note (48ru).
+        // new_model, failover_reason, verification_command,
+        // last_durable_progress_summary). These are consumed by the worker
+        // resume-prompt note (`48ru`) and by the failover-aware fallback
+        // worker (`kv6i`). Putting them on the typed fields (not the `extra`
+        // map) is what lets the worker deserialize the wire blob: serde does
+        // not promote nested map entries into top-level typed fields, so the
+        // legacy `extra[...]` insertion was effectively dead code on the
+        // worker side.
         let mut metadata = metadata;
-        if let Some(model_rotation) = &lifecycle.model_rotation
-            && let Some(prev) = &model_rotation.previous_model
-        {
-            metadata
-                .extra
-                .insert("previous_model".to_string(), serde_json::json!(prev));
-        }
-        // Thread model-rotation target model and reason so the worker
-        // resume-prompt note can report failover context.
         if let Some(model_rotation) = &lifecycle.model_rotation {
-            if let Some(next) = &model_rotation.next_model {
-                metadata
-                    .extra
-                    .insert("new_model".to_string(), serde_json::json!(next));
+            if let Some(prev) = &model_rotation.previous_model {
+                metadata.previous_model = Some(prev.clone());
             }
+            if let Some(next) = &model_rotation.next_model {
+                metadata.new_model = Some(next.clone());
+            }
+            // Serialize the typed enum reason into a snake_case string so the
+            // worker resume note can read it back as plain text.
             if let Some(reason) = &model_rotation.reason {
-                metadata
-                    .extra
-                    .insert("failover_reason".to_string(), serde_json::json!(reason));
+                let reason_str = serde_json::to_value(reason)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| format!("{:?}", reason));
+                metadata.failover_reason = Some(reason_str);
             }
         }
         if let Some(auto_submit) = &lifecycle.auto_submit
             && let Some(cmd) = &auto_submit.verification_command
         {
-            metadata
-                .extra
-                .insert("verification_command".to_string(), serde_json::json!(cmd));
+            metadata.verification_command = Some(cmd.clone());
         }
         // last_durable_progress_summary: extract from checkpoint extra if present.
         if let Some(checkpoint) = &lifecycle.checkpoint
             && let Some(summary) = checkpoint.extra.get("last_durable_progress_summary")
+            && let Some(summary_str) = summary.as_str()
         {
-            metadata
-                .extra
-                .insert("last_durable_progress_summary".to_string(), summary.clone());
+            metadata.last_durable_progress_summary = Some(summary_str.to_owned());
         }
 
         let payload = serde_json::json!({
@@ -379,6 +402,7 @@ impl CoordinatorActor {
             lifecycle.auto_submit = self.auto_submit_lifecycle_for_task_run(task_run_id).await;
         }
         lifecycle.checkpoint = self.checkpoint_lifecycle_from_activity(task).await;
+        lifecycle.model_rotation = self.model_rotation_lifecycle_from_activity(task).await;
         lifecycle
     }
 
@@ -440,6 +464,15 @@ impl CoordinatorActor {
             if let Some(session_id) = value.get("session_id").and_then(serde_json::Value::as_str) {
                 extra.insert("session_id".to_string(), serde_json::json!(session_id));
             }
+            if let Some(summary) = value
+                .get("last_durable_progress_summary")
+                .and_then(serde_json::Value::as_str)
+            {
+                extra.insert(
+                    "last_durable_progress_summary".to_string(),
+                    serde_json::json!(summary),
+                );
+            }
             Some(crate::CheckpointLifecycleMetadata {
                 checkpoint_id: None,
                 commit_sha: Some(commit_sha),
@@ -452,6 +485,88 @@ impl CoordinatorActor {
                 }),
                 preservation_outcome: Some(crate::PreservationOutcome::Succeeded),
                 extra,
+            })
+        })
+    }
+
+    /// Populate `model_rotation` lifecycle metadata from the activity log.
+    ///
+    /// Looks for the most recent activity entry tagged as a model rotation
+    /// step (event_type == "model_rotation" or payload contains a
+    /// `model_rotation` marker). Such entries are persisted by failover-aware
+    /// workers when the supervisor rotates to a fallback candidate mid-session.
+    /// The helper extracts `previous_model`, `selected_model`, and
+    /// `termination_cause` / `fallback_reason` fields and maps them onto the
+    /// typed [`crate::ModelRotationLifecycleMetadata`] consumed by
+    /// [`Self::select_resume_lifecycle_metadata_for_dispatch`].
+    ///
+    /// When no rotation entry exists (no failover happened, or the rotation
+    /// event hasn't been bridged to the activity log yet), the helper returns
+    /// `None` — the resume path then degrades to a plain resume-source
+    /// selection without failover context, which matches the pre-`kv6i`
+    /// behaviour. This is the **only** seam through which the coordinator
+    /// learns about the prior session's model rotation; the dispatch-time
+    /// failover chain records observations on `HealthTracker` but does not
+    /// persist a rotation metadata entry. Sibling epic `97f8` already plumbs
+    /// the worker-side rotation events; this helper is the read side.
+    async fn model_rotation_lifecycle_from_activity(
+        &self,
+        task: &djinn_core::models::Task,
+    ) -> Option<crate::ModelRotationLifecycleMetadata> {
+        let entries = match self.task_repo().list_activity(&task.id).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to load activity for resume model-rotation selection");
+                return None;
+            }
+        };
+        // Walk in reverse chronological order so the most recent rotation wins.
+        entries.iter().rev().find_map(|entry| {
+            let value: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
+            // Two formats are accepted:
+            //   1. event_type == "model_rotation" with structured payload (97f8)
+            //   2. inline `model_rotation` block in a comment payload (legacy)
+            let is_event = entry.event_type == "model_rotation";
+            let has_inline = value.get("model_rotation").is_some();
+            if !is_event && !has_inline {
+                return None;
+            }
+            let block = if is_event {
+                value.clone()
+            } else {
+                value.get("model_rotation")?.clone()
+            };
+            let previous_model = block
+                .get("previous_model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            // Try `selected_model` (97f8 `rotated` action) and `next_model`
+            // (legacy naming) so both shapes are consumable.
+            let next_model = block
+                .get("selected_model")
+                .or_else(|| block.get("next_model"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            // Reason can be `termination_cause` (Debug formatted) or
+            // `fallback_reason`. Map the well-known cases onto the typed
+            // [`crate::ModelRotationReason`] enum; unknown reasons stay `None`
+            // rather than being persisted as an invalid value.
+            let reason_raw = block
+                .get("termination_cause")
+                .or_else(|| block.get("fallback_reason"))
+                .or_else(|| block.get("reason"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let reason = reason_raw.as_deref().and_then(map_model_rotation_reason);
+            if previous_model.is_none() && next_model.is_none() && reason.is_none() {
+                return None;
+            }
+            Some(crate::ModelRotationLifecycleMetadata {
+                considered: true,
+                reason,
+                previous_model,
+                next_model,
+                extra: serde_json::Map::new(),
             })
         })
     }
@@ -5744,5 +5859,385 @@ mod failover_chain_tests {
         );
 
         cancel.cancel();
+    }
+
+    /// AC5 (kv6i): A dirty-work session that is rescued by a fallback
+    /// candidate carries failover-aware context (previous model, new model,
+    /// failover reason) on the resume lifecycle metadata the worker sees,
+    /// AND the session/task are NOT suspended or quality-struck solely
+    /// because the original provider/candidate failed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tracing_test::traced_test]
+    async fn ac5_dirty_work_fallback_rescue_threads_failover_context_without_terminal_effects() {
+        use djinn_core::events::EventBus;
+        use djinn_db::{
+            DispatchStateRepository, EpicRepository, SessionRepository, TaskRepository,
+        };
+
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let event_bus = EventBus::noop();
+        let epic_repo = EpicRepository::new(db.clone(), event_bus.clone());
+        let epic = epic_repo
+            .create("ac5-epic", "", "", "", "", None)
+            .await
+            .expect("create epic");
+        let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+        let task = task_repo
+            .create(
+                &epic.id,
+                "ac5-dirty-fallback-task",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+            )
+            .await
+            .expect("create task");
+        let _ = crate::test_helpers::create_test_project(&db).await;
+
+        let preservation_payload = serde_json::json!({
+            "message": "Coordinator preservation gate: dirty work preserved",
+            "preservation_outcome": "succeeded",
+            "preservation_trigger": "session_terminated_with_dirty_work",
+            "preservation_reason": "termination_before_commit",
+            "preservation_commit_sha": "abc123",
+            "preservation_ref_name": "refs/djinn/checkpoints/ac5-dirty-fallback-task",
+            "session_id": "session-prior",
+            "last_durable_progress_summary": "Wrote the parser module",
+        })
+        .to_string();
+        task_repo
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                "comment",
+                &preservation_payload,
+            )
+            .await
+            .expect("log preservation activity");
+
+        let rotation_payload = serde_json::json!({
+            "action": "rotated",
+            "previous_model": "provider/model-a",
+            "selected_model": "provider/model-b",
+            "termination_cause": "NoProgress",
+            "session_id": "session-prior",
+        })
+        .to_string();
+        task_repo
+            .log_activity(
+                Some(&task.id),
+                "agent",
+                "system",
+                "model_rotation",
+                &rotation_payload,
+            )
+            .await
+            .expect("log model_rotation activity");
+
+        let (mut actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+        actor.worker_lifecycle_config.resume.enabled = true;
+        actor.worker_lifecycle_config.resume.prefer_checkpoint = true;
+
+        let resume_meta = actor
+            .select_resume_lifecycle_metadata_for_dispatch(&task)
+            .await
+            .expect(
+                "resume selector must return metadata when resume is enabled and a \
+                 preserved checkpoint exists",
+            );
+
+        assert!(
+            resume_meta.considered,
+            "resume metadata must be marked considered"
+        );
+        assert_eq!(
+            resume_meta.commit_sha.as_deref(),
+            Some("abc123"),
+            "resume metadata must carry the preserved checkpoint commit SHA (amth contract)"
+        );
+        assert_eq!(
+            resume_meta.previous_model.as_deref(),
+            Some("provider/model-a"),
+            "resume metadata must thread the previous (failed) model from model_rotation activity"
+        );
+        assert_eq!(
+            resume_meta.new_model.as_deref(),
+            Some("provider/model-b"),
+            "resume metadata must thread the new (rescue) model from model_rotation activity"
+        );
+        assert_eq!(
+            resume_meta.failover_reason.as_deref(),
+            Some("no_durable_progress_streak"),
+            "resume metadata must thread the failover reason mapped from the typed \
+             ModelRotationReason::NoDurableProgressStreak enum (97f8 contract)"
+        );
+        assert_eq!(
+            resume_meta.last_durable_progress_summary.as_deref(),
+            Some("Wrote the parser module"),
+            "resume metadata must thread the durable-progress summary from the \
+             preservation activity so the fallback worker has context"
+        );
+
+        let wire = serde_json::to_value(&resume_meta).expect("serialize resume metadata");
+        assert_eq!(
+            wire["previous_model"],
+            serde_json::json!("provider/model-a"),
+            "previous_model must be a top-level typed field on the wire, not nested in extra"
+        );
+        assert_eq!(
+            wire["new_model"],
+            serde_json::json!("provider/model-b"),
+            "new_model must be a top-level typed field on the wire, not nested in extra"
+        );
+        assert_eq!(
+            wire["failover_reason"],
+            serde_json::json!("no_durable_progress_streak"),
+            "failover_reason must be a top-level typed field on the wire, not nested in extra"
+        );
+
+        let session_repo = SessionRepository::new(db.clone(), event_bus.clone());
+        let session_a = session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: "provider/model-a",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create session for model-a");
+        assert_eq!(
+            session_a.status, "running",
+            "seeded session must be running"
+        );
+
+        let pre_reopen_count = task.reopen_count;
+        let pre_total_reopen_count = task.total_reopen_count;
+        let pre_intervention_count = task.intervention_count;
+        let pre_status = task.status.clone();
+
+        let attempted_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let attempted_models_clone = attempted_models.clone();
+        let outcome = actor
+            .try_dispatch_to_pool(
+                &task.short_id,
+                "worker",
+                0,
+                Some(task.created_by_user_id.as_deref().unwrap_or("user-x")),
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "ac5-dirty-fallback-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    let tracker = attempted_models_clone.clone();
+                    async move {
+                        tracker.lock().unwrap().push(mid.clone());
+                        if mid == "provider/model-a" {
+                            Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
+                        } else {
+                            pool.dispatch(&tid, &pp, &mid).await
+                        }
+                    }
+                },
+            )
+            .await;
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "fallback should rescue the dispatch on model-b; got {outcome:?}"
+        );
+
+        let post_sessions = session_repo
+            .list_for_task(&task.id)
+            .await
+            .expect("list sessions");
+        assert_eq!(
+            post_sessions.len(),
+            1,
+            "no new session should be created on the failing model-a"
+        );
+        let session_a_post = &post_sessions[0];
+        assert_eq!(
+            session_a_post.id, session_a.id,
+            "the surviving session must be the one we pre-created"
+        );
+        assert_eq!(
+            session_a_post.status, "running",
+            "dirty-work fallback-rescued session must NOT be suspended"
+        );
+
+        let post_task = task_repo
+            .get(&task.id)
+            .await
+            .expect("get task")
+            .expect("task should still exist");
+        assert_eq!(
+            post_task.status, pre_status,
+            "task status must be unchanged after dirty-work fallback rescue"
+        );
+        assert_eq!(post_task.status, "open", "task must remain `open`");
+        assert_eq!(
+            post_task.reopen_count, pre_reopen_count,
+            "dirty-work fallback rescue must NOT bump reopen_count (no quality strike)"
+        );
+        assert_eq!(
+            post_task.total_reopen_count, pre_total_reopen_count,
+            "dirty-work fallback rescue must NOT bump total_reopen_count"
+        );
+        assert_eq!(
+            post_task.intervention_count, pre_intervention_count,
+            "dirty-work fallback rescue must NOT bump intervention_count"
+        );
+
+        let dispatch_repo = DispatchStateRepository::new(db.clone());
+        match dispatch_repo
+            .get(&task.id)
+            .await
+            .expect("get dispatch_state")
+        {
+            None => {}
+            Some(state) => {
+                assert_eq!(state.failure_streak, 0, "no failure streak persisted");
+                assert!(
+                    state.cooldown_until.is_none(),
+                    "no cooldown_until persisted"
+                );
+            }
+        }
+
+        cancel.cancel();
+    }
+
+    /// AC6 (kv6i): When no prior session produced a model-rotation entry,
+    /// the resume metadata degrades to the pre-`kv6i` shape (failover fields
+    /// remain `None`) rather than carrying a fabricated reason.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tracing_test::traced_test]
+    async fn ac6_resume_metadata_without_rotation_activity_has_no_failover_context() {
+        use djinn_core::events::EventBus;
+        use djinn_db::{EpicRepository, TaskRepository};
+
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let event_bus = EventBus::noop();
+        let epic_repo = EpicRepository::new(db.clone(), event_bus.clone());
+        let epic = epic_repo
+            .create("ac6-epic", "", "", "", "", None)
+            .await
+            .expect("create epic");
+        let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+        let task = task_repo
+            .create(&epic.id, "ac6-clean-task", "", "", "task", 0, "", None)
+            .await
+            .expect("create task");
+        let _ = crate::test_helpers::create_test_project(&db).await;
+
+        let preservation_payload = serde_json::json!({
+            "preservation_outcome": "succeeded",
+            "preservation_commit_sha": "clean-sha",
+            "session_id": "session-clean",
+        })
+        .to_string();
+        task_repo
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                "comment",
+                &preservation_payload,
+            )
+            .await
+            .expect("log preservation activity");
+
+        let (mut actor, cancel, _releases) =
+            failover_actor(&db, &events_tx, vec![("provider/model-a", 1)]);
+        actor.worker_lifecycle_config.resume.enabled = true;
+
+        let resume_meta = actor
+            .select_resume_lifecycle_metadata_for_dispatch(&task)
+            .await
+            .expect("resume selector must return a clean-task-branch candidate");
+
+        assert!(
+            resume_meta.considered,
+            "resume metadata must be considered when a preservation exists"
+        );
+        assert!(
+            resume_meta.previous_model.is_none(),
+            "previous_model must stay None when no model_rotation activity is recorded (no fabrication)"
+        );
+        assert!(
+            resume_meta.new_model.is_none(),
+            "new_model must stay None when no model_rotation activity is recorded"
+        );
+        assert!(
+            resume_meta.failover_reason.is_none(),
+            "failover_reason must stay None when no model_rotation activity is recorded"
+        );
+        assert_eq!(
+            resume_meta.commit_sha.as_deref(),
+            Some("clean-sha"),
+            "preservation sha must still flow through to resume metadata"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC7 (kv6i): `map_model_rotation_reason` translates both snake_case
+    /// serde forms and Debug-formatted strings (as emitted by
+    /// `emit_rotation_event` in the agent) onto the typed
+    /// [`crate::ModelRotationReason`] enum. Unknown strings map to `None`
+    /// rather than persisting an invalid variant.
+    #[test]
+    fn ac7_map_model_rotation_reason_translates_known_and_unknown_forms() {
+        use crate::ModelRotationReason as R;
+        assert_eq!(
+            map_model_rotation_reason("no_durable_progress_streak"),
+            Some(R::NoDurableProgressStreak)
+        );
+        assert_eq!(
+            map_model_rotation_reason("provider_health_degraded"),
+            Some(R::ProviderHealthDegraded)
+        );
+        assert_eq!(
+            map_model_rotation_reason("operator_requested"),
+            Some(R::OperatorRequested)
+        );
+        assert_eq!(
+            map_model_rotation_reason("NoProgress"),
+            Some(R::NoDurableProgressStreak)
+        );
+        assert_eq!(
+            map_model_rotation_reason("Flaky"),
+            Some(R::RepeatedFlakyVerification)
+        );
+        assert_eq!(
+            map_model_rotation_reason("Deadline"),
+            Some(R::ContextBudgetPressure)
+        );
+        assert_eq!(
+            map_model_rotation_reason("RepeatedVerifyLoop"),
+            Some(R::RepeatedReadOnlyNoOp)
+        );
+        assert_eq!(
+            map_model_rotation_reason("\"NoProgress\""),
+            Some(R::NoDurableProgressStreak)
+        );
+        assert_eq!(map_model_rotation_reason("completely-unknown-reason"), None);
+        assert_eq!(map_model_rotation_reason(""), None);
     }
 }
