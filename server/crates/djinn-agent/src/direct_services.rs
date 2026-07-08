@@ -1093,6 +1093,221 @@ impl SupervisorServices for DirectServices {
         Ok(())
     }
 
+    async fn record_arbiter_session_termination(
+        &self,
+        task_id: String,
+        is_infra_failure: bool,
+    ) -> Result<bool, String> {
+        use djinn_db::TaskRepository;
+        use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
+
+        let db = self.callbacks.agent_context.db.clone();
+        let event_bus = self.callbacks.agent_context.event_bus.clone();
+        let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+        let arb_repo = TaskArbitrationRepository::new(db.clone());
+
+        // Load the source task for short_id (activity logging).
+        let task = task_repo
+            .get(&task_id)
+            .await
+            .map_err(|e| format!("record_arbiter_session_termination: failed to load task: {e}"))?
+            .ok_or_else(|| {
+                format!("record_arbiter_session_termination: task {task_id} not found")
+            })?;
+
+        // Load the latest arbitration for this task.
+        let latest = arb_repo.get_latest_for_task(&task_id).await.map_err(|e| {
+            format!("record_arbiter_session_termination: failed to load latest arbitration: {e}")
+        })?;
+
+        let Some(record) = latest else {
+            // No arbitration row — nothing to account.
+            tracing::debug!(
+                task_id = %task.short_id,
+                "record_arbiter_session_termination: no arbitration row found; skipping"
+            );
+            return Ok(false);
+        };
+
+        // Do not mutate accounting for consumed (decision already accepted)
+        // or failed (terminal) arbitrations.
+        if record.state != "unconsumed" {
+            tracing::debug!(
+                task_id = %task.short_id,
+                hold_cycle = record.hold_cycle,
+                state = %record.state,
+                "record_arbiter_session_termination: arbitration is not unconsumed; skipping accounting"
+            );
+            return Ok(false);
+        }
+
+        if is_infra_failure {
+            // Infra-class failures before a decision increment only infra
+            // observability — they do not count as bad arbiter decisions.
+            let _ = arb_repo
+                .increment_infra_retry(&task_id, record.hold_cycle)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "record_arbiter_session_termination: failed to increment infra retry: {e}"
+                    )
+                });
+            tracing::info!(
+                task_id = %task.short_id,
+                hold_cycle = record.hold_cycle,
+                infra_retry_count = record.infra_retry_count + 1,
+                "record_arbiter_session_termination: infra failure recorded"
+            );
+            return Ok(false);
+        }
+
+        // No-valid-decision failure: the session ran and ended without
+        // calling submit_decision.  Increment decision_failure_count.
+        let _ = arb_repo
+            .increment_decision_failure(&task_id, record.hold_cycle)
+            .await
+            .map_err(|e| {
+                format!(
+                    "record_arbiter_session_termination: failed to increment decision failure: {e}"
+                )
+            });
+
+        let new_count = record.decision_failure_count + 1;
+        tracing::info!(
+            task_id = %task.short_id,
+            hold_cycle = record.hold_cycle,
+            decision_failure_count = new_count,
+            "record_arbiter_session_termination: no-decision failure recorded"
+        );
+
+        // Decision-failure cap: at 2, mark the arbitration as failed and
+        // park the task behind HumanReview with a generated dossier.
+        const DECISION_FAILURE_CAP: i32 = 2;
+        if new_count >= DECISION_FAILURE_CAP {
+            // Mark the arbitration as failed (terminal for this hold cycle).
+            let _ = arb_repo
+                .mark_failed(&task_id, record.hold_cycle)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "record_arbiter_session_termination: failed to mark arbitration failed: {e}"
+                    )
+                });
+
+            // Generate an arbiter-failure dossier.
+            let dossier = serde_json::json!({
+                "kind": "arbiter_decision_failure_cap",
+                "summary": format!(
+                    "Arbiter session terminated without a valid decision {} times for hold cycle {}; \
+                     parking behind HumanReview.  No further arbiter dispatch for this hold cycle.",
+                    new_count, record.hold_cycle,
+                ),
+                "task_id": task.short_id,
+                "hold_cycle": record.hold_cycle,
+                "decision_failure_count": new_count,
+                "infra_retry_count": record.infra_retry_count,
+                "deadline_at": record.deadline_at,
+            });
+
+            // Update the arbitration row with the dossier.
+            use djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams;
+            let _ = arb_repo
+                .update_dispatch_ledger(UpdateDispatchLedgerParams {
+                    task_id: &task_id,
+                    hold_cycle: record.hold_cycle,
+                    mirror_head_sha: None,
+                    github_head_sha: None,
+                    pr_url: None,
+                    failing_ci_job_ids: None,
+                    dossier: Some(&dossier),
+                    directive: None,
+                    verification_command: None,
+                    excluded_models: None,
+                })
+                .await
+                .map_err(|e| {
+                    format!("record_arbiter_session_termination: failed to update dossier: {e}")
+                });
+
+            // Create the HumanReview remediation hold (reuses the existing
+            // arbiter-park hold creation logic so the task is blocked before
+            // it lands at `open`).
+            let dossier_summary = dossier
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("arbiter decision-failure cap reached");
+            if let Err(e) = self
+                .create_arbiter_human_review_hold(
+                    &task_id,
+                    &task.project_id,
+                    &dossier,
+                    dossier_summary,
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "record_arbiter_session_termination: failed to create HumanReview hold"
+                );
+            }
+
+            // Transition the task: in_lead_intervention → open.
+            if let Err(e) = task_repo
+                .transition(
+                    &task_id,
+                    djinn_core::models::TransitionAction::ArbiterPark,
+                    "system",
+                    "coordinator",
+                    Some(&dossier.to_string()),
+                    None,
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "record_arbiter_session_termination: arbiter_park transition failed — \
+                     task remains in_lead_intervention"
+                );
+            }
+
+            // Log the parking activity.
+            let activity_payload = serde_json::json!({
+                "event": "arbiter_decision_failure_parked",
+                "task_id": task.short_id,
+                "hold_cycle": record.hold_cycle,
+                "decision_failure_count": new_count,
+            });
+            if let Err(e) = task_repo
+                .log_activity(
+                    Some(&task_id),
+                    "system",
+                    "coordinator",
+                    "arbiter_decision_failure_parked",
+                    &activity_payload.to_string(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "record_arbiter_session_termination: failed to log parking activity"
+                );
+            }
+
+            tracing::warn!(
+                task_id = %task.short_id,
+                hold_cycle = record.hold_cycle,
+                decision_failure_count = new_count,
+                "record_arbiter_session_termination: decision-failure cap reached; arbiter parked"
+            );
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
     async fn publish_branch_to_github(
         &self,
         spec: &TaskRunSpec,

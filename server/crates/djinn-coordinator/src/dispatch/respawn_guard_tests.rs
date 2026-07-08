@@ -129,11 +129,9 @@ async fn guard_allows_for_different_role() {
 
     // Insert a pending attempt for "reviewer".
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "reviewer");
-    super::super::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "reviewer", None, &dk,
-    )
-    .await
-    .expect("record_dispatch_start should succeed");
+    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "reviewer", None, &dk)
+        .await
+        .expect("record_dispatch_start should succeed");
 
     // Guard for "worker" role should allow (different role).
     let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
@@ -374,7 +372,8 @@ async fn guard_pr_adoption_takes_precedence_over_pending_attempt() {
 
 // ─── PrReworkSignal derivation tests ─────────────────────────────────
 
-const CONFLICT_METADATA: &str = r#"{"conflicting_files":["src/note/mod.rs"],"base_branch":"main","merge_target":"main"}"#;
+const CONFLICT_METADATA: &str =
+    r#"{"conflicting_files":["src/note/mod.rs"],"base_branch":"main","merge_target":"main"}"#;
 
 #[test]
 fn rework_signal_from_task_row_mapping() {
@@ -695,11 +694,9 @@ async fn guard_reopened_fallback_is_role_scoped() {
     // A `reopened` attempt for a DIFFERENT role must not bypass adoption
     // for this role.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "reviewer");
-    super::super::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "reviewer", None, &dk,
-    )
-    .await
-    .expect("record_dispatch_start should succeed");
+    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "reviewer", None, &dk)
+        .await
+        .expect("record_dispatch_start should succeed");
     super::super::attempt_lifecycle::advance_latest_to_terminal(
         &db,
         super::super::attempt_lifecycle::TerminalAdvancementParams {
@@ -758,7 +755,10 @@ async fn guard_does_not_adopt_for_reviewer_role_with_open_pr() {
     // The guard itself records no attempt rows for an Allow.
     let repo = TaskAttemptRepository::new(db);
     let all = repo.list_for_task(&task.id).await.unwrap();
-    assert!(all.is_empty(), "reviewer guard must not create attempt rows");
+    assert!(
+        all.is_empty(),
+        "reviewer guard must not create attempt rows"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -769,11 +769,9 @@ async fn guard_defers_reviewer_role_when_reviewer_attempt_in_flight() {
     // With adoption skipped for reviewers, the step-2 in-flight dedup still
     // prevents a duplicate reviewer even when an open PR is present.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "reviewer");
-    super::super::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "reviewer", None, &dk,
-    )
-    .await
-    .expect("record_dispatch_start should succeed");
+    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "reviewer", None, &dk)
+        .await
+        .expect("record_dispatch_start should succeed");
 
     let decision = run_respawn_guard(
         &db,
@@ -1062,4 +1060,103 @@ async fn guard_allows_when_no_pr_url_and_no_pending() {
     // attempt, so the guard allows and the spawn path proceeds.
     let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(decision, RespawnGuardDecision::Allow);
+}
+
+// ── Hole C: supervisor rework-reopen chokepoint (control-plane path) ──────
+//
+// The control-plane `task_transition` MCP tool cannot terminalize the worker
+// attempt itself (`djinn-control-plane` cannot depend on `djinn-coordinator`);
+// it delegates to `crate::record_supervisor_rework_reopen` through the
+// `CoordinatorOps` bridge, which in tests is stubbed to a no-op. This test
+// exercises that exact chokepoint directly — with the same `TransitionAction`
+// values the tool passes — proving a rework action terminalizes an in-flight
+// `submitted` worker attempt to `reopened`, while a non-rework action is a
+// no-op. (Per the task spec, the coordinator-level test stands in for the
+// control-plane path because the bridge stub makes an end-to-end tool test
+// impossible.)
+
+/// Seed a `submitted` worker attempt (pending → submitted) for a task.
+async fn seed_submitted_attempt(db: &Database, task_id: &str) {
+    let dk = super::super::attempt_lifecycle::make_dispatch_key(task_id, "worker");
+    super::super::attempt_lifecycle::record_dispatch_start(db, task_id, "worker", None, &dk)
+        .await
+        .expect("record_dispatch_start should succeed");
+    super::super::attempt_lifecycle::advance_to_submitted(
+        db,
+        super::super::attempt_lifecycle::SubmitAdvancementParams {
+            task_id,
+            role: "worker",
+            submit_ref: Some("ref-1"),
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some("submitted"),
+            summary_json: None,
+        },
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supervisor_rework_reopen_terminalizes_submitted_attempt_to_reopened() {
+    use djinn_core::models::TransitionAction;
+
+    let db = test_db();
+    let task = create_task(&db).await;
+    seed_submitted_attempt(&db, &task.id).await;
+
+    // A rework action (as passed by the control-plane task_transition tool)
+    // terminalizes the in-flight submitted attempt to `reopened`.
+    crate::record_supervisor_rework_reopen(
+        &db,
+        &task.id,
+        &TransitionAction::TaskReviewReject,
+        Some("reviewer rejected"),
+    )
+    .await;
+
+    let repo = TaskAttemptRepository::new(db.clone());
+    let latest = repo
+        .list_for_task(&task.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.role == "worker")
+        .expect("worker attempt exists");
+    assert_eq!(
+        latest.outcome, "reopened",
+        "rework transition must advance the submitted attempt to reopened"
+    );
+
+    // And the guard now allows a fresh rework worker (no live attempt remains).
+    assert_eq!(
+        run_respawn_guard(&db, &task.id, "worker", None, None).await,
+        RespawnGuardDecision::Allow,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supervisor_rework_reopen_is_noop_for_non_rework_action() {
+    use djinn_core::models::TransitionAction;
+
+    let db = test_db();
+    let task = create_task(&db).await;
+    seed_submitted_attempt(&db, &task.id).await;
+
+    // A non-rework action must NOT touch the in-flight submitted attempt.
+    crate::record_supervisor_rework_reopen(
+        &db,
+        &task.id,
+        &TransitionAction::Start,
+        Some("started"),
+    )
+    .await;
+
+    let repo = TaskAttemptRepository::new(db.clone());
+    let attempts = repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(attempts.len(), 1, "no marker rows for non-rework actions");
+    assert_eq!(
+        attempts[0].outcome, "submitted",
+        "non-rework action must leave the submitted attempt untouched"
+    );
 }

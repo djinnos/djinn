@@ -476,6 +476,16 @@ pub fn selection_to_metadata(selection: &ResumeSourceSelection) -> ResumeLifecyc
         commit_sha: selection.checkpoint_sha.clone(),
         selection_reason: Some(selection.reason),
         extra,
+        // Failover-aware fields stay `None` here — they're populated by
+        // `select_resume_lifecycle_metadata_for_dispatch` from the model
+        // rotation lifecycle row, not from the resume source selection. This
+        // keeps `selection_to_metadata` a pure reflection of the
+        // [`ResumeSourceSelection`] without leaking dispatch-time knowledge.
+        previous_model: None,
+        new_model: None,
+        failover_reason: None,
+        last_durable_progress_summary: None,
+        verification_command: None,
     }
 }
 

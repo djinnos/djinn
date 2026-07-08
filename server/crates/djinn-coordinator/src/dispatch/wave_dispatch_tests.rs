@@ -689,3 +689,116 @@ async fn wiring_already_terminal_attempt_is_not_moved_backward() {
         "must not overwrite terminal summary_json"
     );
 }
+
+// ── Hole B: branch-missing PrConflict reopens (NOT handoffs) ─────────────
+
+/// Newest non-guard worker attempt outcome for a task (mirrors the respawn
+/// guard's `latest_attempt_is_reopened` filter): skips guard-only audit rows.
+async fn newest_non_guard_worker_outcome(db: &Database, task_id: &str) -> Option<String> {
+    TaskAttemptRepository::new(db.clone())
+        .list_for_task(task_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.role == "worker")
+        .find(|a| {
+            a.outcome != TaskAttemptOutcome::Deferred.as_str()
+                && a.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
+        })
+        .map(|a| a.outcome)
+}
+
+/// Pure-logic: the `Reopened` outcome maps to `TaskAttemptOutcome::Reopened`
+/// and records the `reopened` summary_json path with task PR / branch context.
+#[test]
+fn build_terminal_params_reopened_records_reopen_path_and_branch() {
+    let mut task = test_task("t-reopen");
+    task.pr_url = Some("https://github.example/owner/repo/pull/7".into());
+    task.ci_head_sha = Some("cafef00d".into());
+    let params = build_wave_dispatch_terminal_params(
+        &task,
+        WaveDispatchAttemptOutcome::Reopened {
+            reason: "approved with no pushed task_branch",
+        },
+    );
+    assert_eq!(params.outcome, TaskAttemptOutcome::Reopened);
+    assert_eq!(
+        params.pr_url,
+        Some("https://github.example/owner/repo/pull/7")
+    );
+    assert_eq!(params.github_head_sha, Some("cafef00d"));
+    assert_eq!(params.submit_ref, "refs/heads/task/t-reopen");
+    let ctx: serde_json::Value = serde_json::from_str(&params.summary_json).unwrap();
+    assert_eq!(ctx["source"], "wave_dispatch");
+    assert_eq!(ctx["path"], "reopened");
+    assert_eq!(ctx["reason"], "approved with no pushed task_branch");
+    assert_eq!(ctx["task_branch"], "task/t-reopen");
+}
+
+/// Wiring: a branch-missing PrConflict reopen terminalizes the live `submitted`
+/// worker attempt to `reopened` (NOT `handoff`), so the respawn guard's
+/// latest-attempt-is-reopened gate sees the rework reopen (#1719 invariant).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wiring_reopened_terminalizes_live_submitted_attempt_to_reopened() {
+    let db = lifecycle_test_db();
+    let (task, attempt_id) = setup_pending_attempt(&db).await;
+    let repo = TaskAttemptRepository::new(db.clone());
+    // Advance to `submitted` to mirror the real branch-missing approved task
+    // (the worker already submitted before the PR-open push found no branch).
+    repo.advance_to_submitted(djinn_db::SubmitTaskAttemptParams {
+        id: &attempt_id,
+        submit_ref: Some("ref-1"),
+        checkpoint_ref: None,
+        mirror_head_sha: None,
+        github_head_sha: None,
+        summary: Some("submitted"),
+        summary_json: None,
+        log_tail: None,
+    })
+    .await
+    .unwrap();
+
+    terminalize_wave_dispatch_attempt_on_db(
+        &db,
+        &task,
+        WaveDispatchAttemptOutcome::Reopened {
+            reason: "approved with no pushed task_branch; re-running worker",
+        },
+    )
+    .await;
+
+    let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        attempt.outcome, "reopened",
+        "branch-missing PrConflict must terminalize as reopened, not handoff"
+    );
+    assert_eq!(
+        newest_non_guard_worker_outcome(&db, &task.id).await.as_deref(),
+        Some("reopened"),
+        "newest non-guard worker attempt must be reopened"
+    );
+}
+
+/// Wiring: with NO live attempt, the `Reopened` outcome still leaves a durable
+/// `reopened` marker (via ensure_rework_marker), preserving #1719's invariant
+/// that every rework reopen leaves a `reopened` latest attempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wiring_reopened_with_no_live_attempt_records_durable_marker() {
+    let db = lifecycle_test_db();
+    let task = lifecycle_create_task(&db).await;
+
+    terminalize_wave_dispatch_attempt_on_db(
+        &db,
+        &task,
+        WaveDispatchAttemptOutcome::Reopened {
+            reason: "approved with no pushed task_branch",
+        },
+    )
+    .await;
+
+    assert_eq!(
+        newest_non_guard_worker_outcome(&db, &task.id).await.as_deref(),
+        Some("reopened"),
+        "a durable reopened marker must exist even with no live attempt to terminalize"
+    );
+}

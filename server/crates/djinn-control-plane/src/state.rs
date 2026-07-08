@@ -394,6 +394,13 @@ pub mod stubs {
         ) -> Result<(), String> {
             Err("coordinator not initialized".into())
         }
+        async fn record_supervisor_rework_reopen(
+            &self,
+            _: &str,
+            _: &djinn_core::models::TransitionAction,
+            _: Option<&str>,
+        ) {
+        }
     }
 
     /// Test-only coordinator stub that accepts refinement starts (returns Ok)
@@ -427,6 +434,13 @@ pub mod stubs {
             _: Option<String>,
         ) -> Result<(), String> {
             Ok(())
+        }
+        async fn record_supervisor_rework_reopen(
+            &self,
+            _: &str,
+            _: &djinn_core::models::TransitionAction,
+            _: Option<&str>,
+        ) {
         }
     }
 

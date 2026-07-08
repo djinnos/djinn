@@ -199,6 +199,18 @@ struct Inner {
     /// `None` when the gate is disabled, credentials are present, or the
     /// token was already consumed.
     pub boot_token: tokio::sync::RwLock<Option<crate::server::auth::boot_token::BootToken>>,
+    /// Valid setup session token from the most recent boot-token exchange.
+    /// Populated by [`AppState::exchange_boot_token`]; validated by
+    /// `extract_setup_session` so an arbitrary cookie value is rejected.
+    /// `None` means no exchange has occurred or the session was cleared after
+    /// credential persistence.
+    pub(crate) setup_session_token: tokio::sync::RwLock<Option<String>>,
+    /// Test-only flag: when `true`, `persist_and_reload_app_config` skips the
+    /// real database persistence and just hot-swaps the in-memory config.
+    /// This allows the full callback flow to be tested without a Postgres
+    /// database.
+    #[cfg(test)]
+    test_bypass_persist: tokio::sync::RwLock<bool>,
     /// Per-project bare git mirrors on disk. Single shared instance so
     /// fetches serialize correctly and clones hit the same hardlink pool.
     /// Path resolution mirrors the vault key: `$DJINN_HOME/mirrors` or
@@ -301,6 +313,9 @@ impl AppState {
                 memory_mount: Mutex::new(None),
                 app_config: tokio::sync::RwLock::new(None),
                 boot_token: tokio::sync::RwLock::new(None),
+                setup_session_token: tokio::sync::RwLock::new(None),
+                #[cfg(test)]
+                test_bypass_persist: tokio::sync::RwLock::new(false),
                 mirror,
                 rpc_server: tokio::sync::Mutex::new(None),
                 rpc_registry: Arc::new(ConnectionRegistry::new()),
@@ -559,10 +574,49 @@ impl AppState {
         *self.inner.boot_token.write().await = token;
     }
 
+    /// Inject a known setup session token for testing.
+    #[cfg(test)]
+    pub(crate) async fn set_setup_session_token_for_tests(&self, token: Option<String>) {
+        *self.inner.setup_session_token.write().await = token;
+    }
+
+    /// Enable or disable the test bypass for persistence. When enabled,
+    /// `persist_and_reload_app_config` skips the real DB write and just
+    /// hot-swaps the in-memory config.
+    #[cfg(test)]
+    pub(crate) async fn set_test_bypass_persist(&self, bypass: bool) {
+        *self.inner.test_bypass_persist.write().await = bypass;
+    }
+
+    /// Validate a candidate setup session token against the stored token.
+    ///
+    /// Returns `true` when a stored token exists and `candidate` matches it
+    /// (constant-time comparison). Returns `false` when no token is stored
+    /// or the values don't match.
+    pub(crate) async fn validate_setup_session_token(&self, candidate: &str) -> bool {
+        let stored = self.inner.setup_session_token.read().await;
+        match stored.as_ref() {
+            Some(expected) => {
+                crate::server::auth::constant_time_eq(candidate.as_bytes(), expected.as_bytes())
+            }
+            None => false,
+        }
+    }
+
+    /// Invalidate the currently stored setup session token.
+    ///
+    /// Called after manifest credential persistence and hot-reload succeeds so
+    /// the one-time setup session cannot be replayed in this process after the
+    /// terminal setup step completes.
+    pub(crate) async fn clear_setup_session_token(&self) {
+        *self.inner.setup_session_token.write().await = None;
+    }
+
     /// Exchange a raw boot token for a setup session.
     ///
-    /// Validates the token, atomically marks it consumed, and returns
-    /// a result the auth handler can map to HTTP responses.
+    /// Validates the token, atomically marks it consumed, stores the generated
+    /// session token for later validation by `extract_setup_session`, and
+    /// returns a result the auth handler can map to HTTP responses.
     pub async fn exchange_boot_token(&self, raw_token: &str) -> BootTokenExchangeResult {
         let mut guard = self.inner.boot_token.write().await;
         let Some(bt) = guard.as_mut() else {
@@ -577,7 +631,10 @@ impl AppState {
             return BootTokenExchangeResult::InvalidOrUsed;
         }
 
-        BootTokenExchangeResult::Ok(crate::server::auth::random_token_b64())
+        let session_token = crate::server::auth::random_token_b64();
+        // Store so `extract_setup_session` can validate the cookie against it.
+        *self.inner.setup_session_token.write().await = Some(session_token.clone());
+        BootTokenExchangeResult::Ok(session_token)
     }
 
     /// Initialise the in-memory App config using the deterministic credential
@@ -659,6 +716,19 @@ impl AppState {
         &self,
         config: &GitHubAppConfig,
     ) -> Result<CredentialSourceState, String> {
+        // Test bypass: when set, skip the real DB persistence and just
+        // hot-reload from the provided config.
+        #[cfg(test)]
+        if *self.inner.test_bypass_persist.read().await {
+            let cfg = Arc::new(config.clone());
+            *self.inner.app_config.write().await = Some(cfg);
+            tracing::info!(
+                app_id = config.app_id,
+                "github_app: (test) simulated persistence and hot-reload"
+            );
+            return Ok(CredentialSourceState::ValidSecret(Arc::new(config.clone())));
+        }
+
         let credential_repo = CredentialRepository::new(self.db().clone(), self.event_bus());
         djinn_provider::github_app::persist_app_config(&credential_repo, config).await?;
 
