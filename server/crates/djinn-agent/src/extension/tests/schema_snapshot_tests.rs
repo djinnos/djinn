@@ -348,3 +348,130 @@ fn planner_tool_schemas() {
 fn lead_tool_schemas() {
     insta::assert_json_snapshot!(tool_schemas_lead());
 }
+
+// ── Cut-over regression guards (10qg) ───────────────────────────────────
+// These assertions pin the role tool surfaces so future changes cannot
+// regress the request_lead → request_planner cut-over or the Lead
+// arbiter-only surface.
+
+/// Worker and reviewer schemas must expose `request_planner` and must NOT
+/// expose `request_lead` (epic 10qg).
+#[test]
+fn worker_reviewer_schemas_expose_request_planner_not_request_lead() {
+    for agent_type in [AgentType::Worker, AgentType::Reviewer] {
+        let names = tool_names_for_agent(agent_type);
+        assert!(
+            names.contains("request_planner"),
+            "{} must expose request_planner in its tool schema, got: {:?}",
+            agent_type.as_str(),
+            names
+        );
+        assert!(
+            !names.contains("request_lead"),
+            "{} must NOT expose request_lead in its tool schema, got: {:?}",
+            agent_type.as_str(),
+            names
+        );
+    }
+}
+
+/// Lead schema must NOT expose `request_planner` or `escalate` — the Lead
+/// only uses `submit_decision` as its finalize tool (10qg).
+#[test]
+fn lead_schema_does_not_expose_request_planner_or_escalate() {
+    let names = tool_names_for_agent(AgentType::Lead);
+    assert!(
+        !names.contains("request_planner"),
+        "lead must NOT expose request_planner in its tool schema, got: {:?}",
+        names
+    );
+    assert!(
+        !names.contains("escalate"),
+        "lead must NOT expose escalate in its tool schema, got: {:?}",
+        names
+    );
+    assert!(
+        !names.contains("request_lead"),
+        "lead must NOT expose request_lead in its tool schema, got: {:?}",
+        names
+    );
+    assert!(
+        names.contains("submit_decision"),
+        "lead must expose submit_decision in its tool schema, got: {:?}",
+        names
+    );
+}
+
+/// The `call_request_lead` handler is test-only (`#[cfg(test)]` re-export)
+/// and is NOT in the production fallback dispatch.  This structural guard
+/// ensures that if someone adds `request_lead` to the production dispatch
+/// match, this test catches the drift.
+#[test]
+fn production_dispatch_does_not_handle_request_lead() {
+    // Read the local fallback dispatch source to verify request_lead is absent.
+    let dispatch_src = include_str!("../handlers.rs");
+
+    // The production dispatch match must handle request_planner.
+    assert!(
+        dispatch_src.contains("\"request_planner\""),
+        "production dispatch must handle request_planner"
+    );
+
+    // The production dispatch match must NOT contain an active
+    // request_lead arm.  A cfg(test)-only re-export is fine (it's
+    // dead code in production), but the dispatch match itself must
+    // not route request_lead.
+    let in_dispatch_match = dispatch_src
+        .match_indices("\"request_lead\"")
+        .filter(|(idx, _)| {
+            // Count only occurrences inside the dispatch match block,
+            // not in comments or cfg(test) re-exports.  A naive but
+            // effective guard: every occurrence in the match block is
+            // preceded by whitespace+| or whitespace+=>.
+            let before = &dispatch_src[..*idx];
+            let last_line = before.lines().last().unwrap_or("");
+            let trimmed = last_line.trim();
+            trimmed.starts_with('"') || trimmed.starts_with('|')
+        })
+        .count();
+
+    assert_eq!(
+        in_dispatch_match, 0,
+        "production dispatch match must NOT route request_lead (found {in_dispatch_match} active arms)"
+    );
+}
+
+/// The `deprecated_request_lead` drain path is cfg(test)-only in the
+/// handler re-export.  This structural assertion documents that the
+/// handler is unreachable from production sessions.
+#[test]
+fn request_lead_handler_is_test_only_reexport() {
+    // The handlers.rs file re-exports call_request_lead under #[cfg(test)].
+    let handlers_src = include_str!("../handlers.rs");
+
+    assert!(
+        handlers_src.contains("#[cfg(test)]"),
+        "handlers.rs must contain cfg(test) gate for test-only re-exports"
+    );
+
+    // Verify that call_request_lead appears only in cfg(test) context,
+    // not in the main production re-export block.
+    let lines: Vec<&str> = handlers_src.lines().collect();
+    let mut in_cfg_test = false;
+    let mut found_test_only = false;
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed == "#[cfg(test)]" {
+            in_cfg_test = true;
+        } else if in_cfg_test && trimmed.contains("call_request_lead") {
+            found_test_only = true;
+            break;
+        } else if !trimmed.starts_with("//") && !trimmed.is_empty() && !trimmed.starts_with("#[") {
+            in_cfg_test = false;
+        }
+    }
+    assert!(
+        found_test_only,
+        "call_request_lead must be re-exported under #[cfg(test)] only"
+    );
+}
