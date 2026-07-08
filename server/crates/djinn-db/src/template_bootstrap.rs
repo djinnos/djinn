@@ -5,9 +5,36 @@
 //! run djinn's DB-backed tests inside a worker pod whose image provides a bare
 //! Postgres sidecar. It is intrinsically coupled to djinn's schema/migrations.
 //!
-//! It is NOT a general mechanism for making arbitrary target repos' test
-//! databases work in the pod, and must not be generalized in place — hardcoding
-//! the `djinn_test_template` name and djinn's migrations is intentional.
+//! # Advisory-lock in-process exception
+//!
+//! This helper is an **intentional advisory-lock in-process exception** for
+//! djinn's own repo.  It runs compiled djinn migrations inside the worker
+//! process using `pg_advisory_lock` to serialize concurrent template creation
+//! across pods.  It is **not** the generic mechanism for target repos and must
+//! not be generalized in place — the `djinn_test_template` name, the
+//! `migrations_postgres` path, and the advisory lock id are all hardcoded to
+//! djinn's schema on purpose.
+//!
+//! A future migration could express the equivalent generic shape through
+//! `lifecycle.pre_task`, for example:
+//!
+//! ```yaml
+//! # Generic equivalent for any target repo (not djinn itself):
+//! lifecycle:
+//!   pre_task:
+//!     - name: migrate-test-db
+//!       command: psql "$TEST_POSTGRES_URL" -f schema.sql
+//!       timeout_seconds: 120
+//!       failure_policy: blocking
+//! ```
+//!
+//! or a sqlx-migrate / Rails / Django / Prisma equivalent consuming the
+//! injected `TEST_POSTGRES_URL` (or framework-specific env var).  Djinn's own
+//! `djinn_test_template` bootstrap stays here because it needs in-process
+//! advisory locking and the `sqlx::migrate!` macro — neither of which the
+//! shell-based `pre_task` runner provides today.
+//!
+//! # Where the generic path lives
 //!
 //! The generic, reusable half of this capability lives in `djinn-k8s`: service
 //! preset injection (`sidecar::resolve_image_services_with_metadata`) stands up
