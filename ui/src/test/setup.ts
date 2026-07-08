@@ -9,6 +9,17 @@ if (typeof globalThis.TransformStream === "undefined") {
   globalThis.WritableStream = streams.WritableStream as typeof globalThis.WritableStream;
 }
 
+// jsdom doesn't provide WebGL2RenderingContext — sigma 3.x CJS build
+// references it at import time; stub so the module can load.
+if (typeof globalThis.WebGL2RenderingContext === "undefined") {
+  // @ts-expect-error minimal stub for sigma import
+  globalThis.WebGL2RenderingContext = class {};
+}
+if (typeof globalThis.WebGLRenderingContext === "undefined") {
+  // @ts-expect-error minimal stub for sigma import
+  globalThis.WebGLRenderingContext = class {};
+}
+
 // jsdom does not implement scrollIntoView; make it safe for components using autoscroll effects
 if (!Element.prototype.scrollIntoView) {
   Object.defineProperty(Element.prototype, "scrollIntoView", {
