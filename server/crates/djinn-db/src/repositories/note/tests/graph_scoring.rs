@@ -947,7 +947,26 @@ async fn graph_proximity_co_access_unchanged_with_embedding_related_present() {
 
     // Now add an embedding_related edge from A → B as well and verify the
     // co_access contribution is unchanged (best path wins, doesn't sum).
-    insert_embedding_association(&repo, &a.id, &b.id, 0.3).await;
+    //
+    // We insert via raw SQL rather than `insert_embedding_association`
+    // (which calls `upsert_typed_association`) because that helper deletes
+    // any `(a, b, kind='co_access', source='session_co_access')` row before
+    // inserting — which would remove the co_access edge we just created.
+    // Using a different source (`'test_regression'`) lets both rows coexist
+    // so the test proves co_access scoring is genuinely preserved.
+    sqlx::query(
+        r#"INSERT INTO note_associations
+             (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind, source)
+           VALUES ($1, $2, $3, 0, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                   'embedding_related', 'test_regression')
+           ON CONFLICT (note_a_id, note_b_id, kind, source) DO NOTHING"#,
+    )
+    .bind(&a.id)
+    .bind(&b.id)
+    .bind(0.3_f64)
+    .execute(repo.db.pool())
+    .await
+    .unwrap();
 
     let (scores_after, _) = repo
         .graph_proximity_scores_with_edge_kinds(&[a.id.clone()], 1, None)
