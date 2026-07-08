@@ -7,9 +7,11 @@ import logoSvg from "@/assets/logo.svg";
 import { LoadingScreen } from "@/components/LoadingScreen";
 import { InstallationPicker } from "@/components/InstallationPicker";
 import {
+  fetchAuthConfig,
   fetchCurrentUser,
   fetchSetupStatus,
   startGithubLogin,
+  type AuthConfig,
   type SetupStatus,
   type User,
 } from "@/api/auth";
@@ -28,6 +30,7 @@ export function useAuthUser(): User | null {
 }
 
 export const AUTH_ME_QUERY_KEY = ["auth", "me"] as const;
+export const AUTH_CONFIG_QUERY_KEY = ["auth", "config"] as const;
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const {
@@ -62,12 +65,31 @@ export function AuthGate({ children }: { children: ReactNode }) {
     staleTime: 0,
   });
 
-  if (userLoading || setupLoading) {
+  // Auth config carries `selfSetupAvailable`, which only matters when
+  // credentials are missing. If this endpoint errors (e.g. an older server
+  // without it), we default to `null` and treat self-setup as unavailable —
+  // preserving existing production behavior. We DO wait for it during the
+  // initial loading phase so the gate doesn't flash the wrong screen.
+  const {
+    data: authConfig,
+    isLoading: configLoading,
+    isError: configIsError,
+    error: configError,
+  } = useQuery({
+    queryKey: AUTH_CONFIG_QUERY_KEY,
+    queryFn: fetchAuthConfig,
+    retry: false,
+    staleTime: 0,
+  });
+
+  if (userLoading || setupLoading || configLoading) {
     return <LoadingScreen message="Checking authentication..." />;
   }
 
-  // Collapse the two possible loading/error sources into one set of props for
-  // the shell, then let AuthBody pick the right screen.
+  // Collapse the three possible loading/error sources into one set of props for
+  // the shell, then let AuthBody pick the right screen. Auth-config errors are
+  // non-fatal — if the endpoint is missing on an older server, we just won't
+  // show self-setup guidance, which preserves the existing runbook screen.
   const reachError = setupIsError
     ? setupError instanceof Error
       ? setupError.message
@@ -76,7 +98,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
       ? userError instanceof Error
         ? userError.message
         : "Could not reach the Djinn server."
-      : null;
+      : configIsError
+        ? configError instanceof Error
+          ? configError.message
+          : "Could not reach the Djinn server."
+        : null;
 
   const needsAppInstall = !setupStatus || setupStatus.needsAppInstall;
   const needsSignin = !needsAppInstall && !user;
@@ -99,6 +125,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
           <AuthBody
             setupStatus={setupStatus ?? null}
+            authConfig={authConfig ?? null}
             reachError={reachError}
           />
 
@@ -135,9 +162,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
 function AuthBody({
   setupStatus,
+  authConfig,
   reachError,
 }: {
   setupStatus: SetupStatus | null;
+  authConfig: AuthConfig | null;
   reachError: string | null;
 }) {
   // Server unreachable or /setup/status errored.
@@ -185,9 +214,160 @@ function AuthBody({
     return <InstallationPicker />;
   }
 
-  // Server reachable but the App credentials themselves are missing (no
-  // Secret mounted, env unset). The UI can't recover automatically —
-  // point operators at the runbook.
+  // ─── Credentials missing — distinguish why and whether self-setup helps ───
+  //
+  // From here on, `needsAppInstall === true` and `appCredentialsConfigured
+  // === false`. We branch on the credential-source state machine to show the
+  // right operator-facing guidance. Fatal and recovery states take priority
+  // over self-setup so the UI never silently falls through to a setup CTA
+  // when the real problem is a broken Secret or an undecryptable vault.
+
+  // Fatal: the mounted Secret exists but is invalid or incomplete. The
+  // operator must fix it — self-setup is NOT offered as a silent fallback
+  // because the Secret presence signals an intentional production deployment.
+  if (setupStatus.setupState === "invalid_secret") {
+    return (
+      <div className="w-full space-y-4 text-left">
+        <div className="space-y-2 text-center">
+          <h2 className="text-lg font-semibold">GitHub App Secret is invalid</h2>
+          <p className="text-sm text-muted-foreground">
+            The mounted GitHub App Secret contains invalid or incomplete
+            credentials. Fix the Secret values and restart the server.
+          </p>
+        </div>
+
+        <div className="rounded-lg border border-border/60 bg-card/50 p-4 text-sm text-muted-foreground">
+          <p>
+            {setupStatus.setupError
+              ? setupStatus.setupError
+              : "The Secret is missing required fields or the values are malformed."}
+          </p>
+        </div>
+
+        <div className="text-center">
+          <a
+            href={SETUP_DOC_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          >
+            Read the full setup guide
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  // Recovery: persisted credentials are present but cannot be decrypted
+  // (wrong vault key, corrupt data). The operator must re-provision or
+  // restore the vault key — this is not a generic "missing config" case.
+  if (
+    setupStatus.setupState === "unrecoverable" ||
+    setupStatus.credentialsUnrecoverable
+  ) {
+    return (
+      <div className="w-full space-y-4 text-left">
+        <div className="space-y-2 text-center">
+          <h2 className="text-lg font-semibold">
+            Stored credentials cannot be recovered
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Previously saved GitHub App credentials are present but cannot be
+            decrypted. Reset the persisted credentials or restore the vault
+            encryption key, then restart the server.
+          </p>
+        </div>
+
+        <div className="rounded-lg border border-border/60 bg-card/50 p-4 text-sm text-muted-foreground">
+          <p>
+            {setupStatus.setupError
+              ? setupStatus.setupError
+              : "The persisted credential store could not be decrypted. Re-provision the GitHub App credentials to recover."}
+          </p>
+        </div>
+
+        <div className="text-center">
+          <a
+            href={SETUP_DOC_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          >
+            Read the full setup guide
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  // Setup in progress or a retryable error. Direct the operator to restart
+  // from the boot-log setup URL or the setup route — never ask them to paste
+  // secrets or tokens into the browser.
+  if (setupStatus.setupRetryable) {
+    return (
+      <div className="w-full space-y-4 text-left">
+        <div className="space-y-2 text-center">
+          <h2 className="text-lg font-semibold">
+            GitHub App setup in progress
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Setup is in progress or hit a temporary error. Restart the server
+            and open the setup URL from the boot logs to retry.
+          </p>
+        </div>
+
+        <div className="rounded-lg border border-border/60 bg-card/50 p-4 text-sm text-muted-foreground">
+          <p>
+            {setupStatus.setupError
+              ? setupStatus.setupError
+              : "Waiting for the setup flow to complete. If this persists, restart the server."}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // Self-setup enabled but credentials not yet configured — show setup
+  // guidance that points to the one-time setup URL emitted in server boot
+  // logs. We never display or request the raw setup token here; the operator
+  // simply opens the URL the server already printed.
+  if (authConfig?.selfSetupAvailable) {
+    return (
+      <div className="w-full space-y-4 text-left">
+        <div className="space-y-2 text-center">
+          <h2 className="text-lg font-semibold">Set up GitHub access</h2>
+          <p className="text-sm text-muted-foreground">
+            This deployment supports one-click GitHub App setup. Find the setup
+            URL printed in the server boot logs and open it in your browser to
+            create and install the App. You never need to paste secrets or
+            tokens here.
+          </p>
+        </div>
+
+        <div className="rounded-lg border border-border/60 bg-card/50 p-4 text-sm text-muted-foreground">
+          <p>
+            Check the server logs for a line containing the one-time setup URL,
+            then open that URL in your browser to authorize the GitHub App.
+          </p>
+        </div>
+
+        <div className="text-center">
+          <a
+            href={SETUP_DOC_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          >
+            Read the full setup guide
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  // Self-setup disabled/unconfigured: server reachable but the App credentials
+  // themselves are missing (no Secret mounted, env unset). The UI can't
+  // recover automatically — point operators at the manual runbook.
   return (
     <div className="w-full space-y-4 text-left">
       <div className="space-y-2 text-center">
