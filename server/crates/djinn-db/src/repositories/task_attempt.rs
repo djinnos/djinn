@@ -722,20 +722,35 @@ impl TaskAttemptRepository {
         .await?)
     }
 
-    /// List `submitted` attempt rows that look orphaned AND whose task carries
-    /// no open PR: created before `created_before_iso`, whose task has no
-    /// `pr_url` (and the attempt itself no `pr_url`), no live
-    /// (`starting`/`running`) `task_run`, and no `running` session.
+    /// List `submitted` attempt rows that look orphaned AND that the PR poller
+    /// can never own: created before `created_before_iso`, with no live
+    /// (`starting`/`running`) `task_run` and no `running` session, and whose
+    /// task falls in the poller's blind spot.
     ///
-    /// Companion to [`list_orphaned_pending`] for the reaper.  `submitted` rows
-    /// that HAVE a PR are deliberately excluded — the PR poller owns their
-    /// adoption/terminalization flow.  But a `submitted` attempt with NO PR
-    /// (e.g. an internal task-review rejection that reopened the task without
-    /// terminalizing the worker's `submitted` row — the ylme orphan) can never
-    /// be advanced by the poller and hard-blocks the respawn guard's step-2
-    /// dedup forever, so the reaper finalizes it to `reopened` (submitted work
-    /// existed, and the reopened marker lets a rework worker dispatch).
-    pub async fn list_orphaned_submitted_no_pr(
+    /// Companion to [`list_orphaned_pending`] for the reaper. The PR poller
+    /// drives adoption/terminalization ONLY for the statuses it polls
+    /// (`pr_draft`/`pr_review`), keyed off `tasks.pr_url`. A `submitted` attempt
+    /// is therefore "unowned" — and reapable — in exactly two poller-blind
+    /// cases, both of which otherwise hard-block the respawn guard's step-2
+    /// dedup forever:
+    ///
+    ///   1. The task carries NO PR (and the attempt itself no `pr_url`) — e.g.
+    ///      an internal task-review rejection that reopened the task without
+    ///      terminalizing the worker's `submitted` row (the ylme orphan). The
+    ///      poller never sees a PR-less task.
+    ///   2. The task sits in `open` — the sole dispatchable status
+    ///      (`list_ready` / `build_ready_where` require `status = 'open'`), which
+    ///      the poller never polls even when a stale `pr_url` was RETAINED across
+    ///      a `PrConflict` reopen (`task` transition logic does not clear it).
+    ///      Here the pr_url gate is bypassed entirely: no `open`-status task is
+    ///      ever poller-owned, so the retained PR link is irrelevant.
+    ///
+    /// The old assumption "has pr_url ⟹ poller owns it" is FALSE for `open`
+    /// tasks; the true rule is "the poller owns `submitted` attempts only for
+    /// tasks in poller-polled statuses (`pr_draft`/`pr_review`)". The reaper
+    /// finalizes every match to `reopened` (submitted work existed, and the
+    /// reopened marker lets a rework worker dispatch).
+    pub async fn list_orphaned_submitted_unowned(
         &self,
         created_before_iso: &str,
     ) -> Result<Vec<OrphanedPendingAttempt>> {
@@ -749,8 +764,16 @@ impl TaskAttemptRepository {
              JOIN tasks t ON t.id = ta.task_id
              WHERE ta.outcome = 'submitted'
                AND ta.created_at < $1
-               AND (t.pr_url IS NULL OR t.pr_url = '')
-               AND (ta.pr_url IS NULL OR ta.pr_url = '')
+               AND (
+                   -- Case 2: `open` is the sole dispatchable status and is never
+                   -- polled — reap regardless of a retained (task or attempt) PR.
+                   t.status = 'open'
+                   -- Case 1: PR-less task the poller never sees (the ylme orphan).
+                   OR (
+                       (t.pr_url IS NULL OR t.pr_url = '')
+                       AND (ta.pr_url IS NULL OR ta.pr_url = '')
+                   )
+               )
                AND NOT EXISTS (
                    SELECT 1 FROM task_runs tr
                    WHERE tr.task_id = ta.task_id

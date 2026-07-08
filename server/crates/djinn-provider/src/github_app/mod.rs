@@ -27,6 +27,7 @@ pub mod config;
 pub mod credential_state;
 pub mod installations;
 pub mod jwt;
+pub mod manifest;
 
 pub use client::{GitHubAppClient, InstallationRepo, find_installation_for_repo, install_url};
 pub use config::{AppConfig, DEFAULT_PUBLIC_URL, ENV_PUBLIC_URL, ENV_WEBHOOK_SECRET};
@@ -39,6 +40,7 @@ pub use installations::{
     list_installations_for_app, list_installations_for_user,
 };
 pub use jwt::{AppJwtError, app_id, mint_app_jwt, private_key_pem};
+pub use manifest::{ManifestConversion, exchange_manifest_code};
 
 /// Env var: numeric GitHub App ID.
 pub const ENV_APP_ID: &str = "GITHUB_APP_ID";
