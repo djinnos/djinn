@@ -2591,4 +2591,875 @@ mod tests {
         // Clean up the override.
         *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
     }
+
+    // ─── Install-continuation flow tests (AC1) ───────────────────────────
+
+    /// `/auth/github/callback` with `installation_id` and `setup_action=install`
+    /// redirects to `/auth/github/app-setup-callback` preserving the
+    /// installation params. This is the install-continuation entry point that
+    /// GitHub uses when `request_oauth_on_install: true` in the manifest.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_forwards_install_to_app_setup_callback() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let headers = HeaderMap::new();
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: None,
+                state: None,
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FOUND,
+            "must redirect to app-setup-callback"
+        );
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            location.contains("/auth/github/app-setup-callback"),
+            "must redirect to app-setup-callback, got: {location}"
+        );
+        assert!(
+            location.contains("installation_id=42"),
+            "must preserve installation_id, got: {location}"
+        );
+        assert!(
+            location.contains("setup_action=install"),
+            "must preserve setup_action, got: {location}"
+        );
+    }
+
+    /// The install-redirect from `/auth/github/callback` does not contain
+    /// any OAuth state, boot tokens, or session tokens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_redirect_no_token_leak() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: Some("leaked-code".into()),
+                state: Some("leaked-state".into()),
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !location.contains("code="),
+            "OAuth code must not leak: {location}"
+        );
+        assert!(
+            !location.contains("state="),
+            "OAuth state must not leak: {location}"
+        );
+        assert!(
+            !location.contains("setup_token"),
+            "setup_token must not leak: {location}"
+        );
+    }
+
+    /// When `installation_id` is present but `setup_action` is not `install`,
+    /// the callback falls through to the normal OAuth flow (not the install
+    /// redirect). This preserves the existing callback behavior for
+    /// `setup_action=update` or other values.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_non_install_action_falls_through_to_oauth() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: None,
+                state: None,
+                installation_id: Some("42".into()),
+                setup_action: Some("update".into()),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        // Without code/state, it should return BAD_REQUEST (falling through
+        // to the normal OAuth validation), not a redirect to app-setup-callback.
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "non-install setup_action should fall through to OAuth validation"
+        );
+    }
+
+    // ─── Regression: production auth behavior (AC4) ──────────────────────
+
+    /// With `DJINN_ENABLE_SELF_SETUP` unset/false, ALL setup routes return
+    /// 404 and `/auth/config` does not advertise setup availability.
+    /// This is the production default — no setup affordances leak.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn self_setup_disabled_all_setup_routes_hidden_and_config_clean() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(false)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        // Config must not advertise self-setup.
+        let cfg_resp = config(State(state.clone())).await;
+        assert!(
+            !cfg_resp.0.self_setup_available,
+            "self_setup_available must be false when gate is disabled"
+        );
+
+        // create-app returns 404.
+        let resp = create_app(
+            State(state.clone()),
+            Query(CreateAppQuery { setup_token: None }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // manifest-callback returns 404.
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: None,
+                state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// With configured Secret/env credentials (app_config set) and the
+    /// self-setup gate enabled, setup routes still return 404 because usable
+    /// credentials take precedence. This is the "production configured" path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configured_credentials_hide_setup_routes_and_config_reports_configured() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // Config must report configured=true and self_setup_available=false.
+        let cfg_resp = config(State(state.clone())).await;
+        assert!(cfg_resp.0.configured, "must report configured=true");
+        assert!(
+            !cfg_resp.0.self_setup_available,
+            "must not advertise self-setup when credentials exist"
+        );
+        assert!(
+            cfg_resp.0.missing.is_empty(),
+            "no missing env vars when credentials are loaded"
+        );
+
+        // Setup routes return 404 even with gate enabled.
+        let resp = create_app(
+            State(state.clone()),
+            Query(CreateAppQuery { setup_token: None }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let resp = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: None,
+                state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `/auth/github/start` with configured credentials produces a 302
+    /// redirect to GitHub's OAuth authorize page with the expected params.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_start_produces_oauth_redirect_with_credentials() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.test-client-id".into(),
+            client_secret: "secret".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let resp = github_start(
+            State(state),
+            Query(StartQuery {
+                redirect: Some("/tasks".into()),
+                install: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            location.starts_with("https://github.com/login/oauth/authorize"),
+            "must redirect to GitHub OAuth, got: {location}"
+        );
+        assert!(
+            location.contains("client_id=Iv1.test-client-id"),
+            "must include client_id, got: {location}"
+        );
+        assert!(
+            location.contains("redirect_uri="),
+            "must include redirect_uri, got: {location}"
+        );
+        assert!(
+            location.contains("state="),
+            "must include CSRF state, got: {location}"
+        );
+
+        // OAuth state cookie must be set.
+        let set_cookies: Vec<_> = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap_or("").to_string())
+            .collect();
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.starts_with(OAUTH_STATE_COOKIE)),
+            "OAuth state cookie must be set: {set_cookies:?}"
+        );
+    }
+
+    /// `/auth/github/start` without configured credentials returns 503.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_start_returns_503_without_credentials() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let resp = github_start(
+            State(state),
+            Query(StartQuery {
+                redirect: None,
+                install: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// `app-setup-callback` rejects missing or invalid installation_id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_rejects_missing_or_invalid_installation_id() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        // Missing installation_id.
+        let resp = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: None,
+                setup_action: Some("install".into()),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Empty installation_id.
+        let resp = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: Some(String::new()),
+                setup_action: Some("install".into()),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Non-numeric installation_id.
+        let resp = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: Some("not-a-number".into()),
+                setup_action: Some("install".into()),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Zero installation_id.
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("0".into()),
+                setup_action: Some("install".into()),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `app-setup-callback` returns CONFLICT when no credentials are
+    /// configured. This is the case when GitHub redirects here but the
+    /// deployment hasn't set up the App yet.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_returns_conflict_without_credentials() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "must return 409 when credentials are missing"
+        );
+    }
+
+    // ─── OAuth callback: no state cookie ─────────────────────────────────
+
+    /// `/auth/github/callback` without the OAuth state cookie returns 400.
+    /// This is a regression guard ensuring the CSRF state check is not
+    /// bypassed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_rejects_missing_state_cookie() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: Some("some-code".into()),
+                state: Some("some-state".into()),
+                installation_id: None,
+                setup_action: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `/auth/github/callback` with mismatched state returns 400.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_rejects_state_mismatch() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{}=cookie-state", OAUTH_STATE_COOKIE)).unwrap(),
+        );
+
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: Some("code".into()),
+                state: Some("different-state".into()),
+                installation_id: None,
+                setup_action: None,
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `/auth/github/callback` with missing code or state returns 400.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_callback_rejects_missing_code_or_state() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        // Missing code.
+        let resp = github_callback(
+            State(state.clone()),
+            Query(CallbackQuery {
+                code: None,
+                state: Some("state".into()),
+                installation_id: None,
+                setup_action: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Missing state.
+        let resp = github_callback(
+            State(state.clone()),
+            Query(CallbackQuery {
+                code: Some("code".into()),
+                state: None,
+                installation_id: None,
+                setup_action: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Empty code.
+        let resp = github_callback(
+            State(state),
+            Query(CallbackQuery {
+                code: Some(String::new()),
+                state: Some("state".into()),
+                installation_id: None,
+                setup_action: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ─── No-token-leak assertions (AC5) ──────────────────────────────────
+
+    /// OAuth start redirect URL contains only the expected params — no
+    /// boot token, setup session, or credential material.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oauth_start_redirect_no_token_leak() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.test-client-id".into(),
+            client_secret: "super-secret-value".into(),
+            pem: "SENSITIVE-PEM".into(),
+            webhook_secret: "webhook-secret".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // Inject a boot token and setup session — neither should appear.
+        let (raw_token, bt) = boot_token::BootToken::generate();
+        state.set_boot_token_for_tests(Some(bt)).await;
+
+        let resp = github_start(
+            State(state),
+            Query(StartQuery {
+                redirect: None,
+                install: None,
+            }),
+        )
+        .await;
+
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !location.contains("setup_token"),
+            "setup_token must not appear: {location}"
+        );
+        assert!(
+            !location.contains(&raw_token),
+            "raw boot token must not appear: {location}"
+        );
+        assert!(
+            !location.contains("super-secret-value"),
+            "client_secret must not appear: {location}"
+        );
+        assert!(
+            !location.contains("SENSITIVE-PEM"),
+            "private key must not appear: {location}"
+        );
+    }
+
+    /// After successful manifest callback, the install URL redirect does
+    /// not contain any credential material or setup tokens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_install_redirect_no_token_leak() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        state.set_test_bypass_persist(true).await;
+        let csrf = "csrf-no-leak-test".to_string();
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 42,
+            slug: "djinn-test".into(),
+            client_id: "Iv1.test-client".into(),
+            client_secret: "leaked-secret".into(),
+            webhook_secret: Some("leaked-webhook".into()),
+            pem: "SENSITIVE-PEM-KEY".into(),
+        }));
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        let resp = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: Some("manifest-code".into()),
+                state: Some(csrf),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        // Must be a clean GitHub install URL.
+        assert!(
+            location.contains("github.com/apps/"),
+            "must redirect to GitHub, got: {location}"
+        );
+        // No credential or token leaks.
+        assert!(
+            !location.contains("leaked-secret"),
+            "client_secret must not leak: {location}"
+        );
+        assert!(
+            !location.contains("leaked-webhook"),
+            "webhook_secret must not leak: {location}"
+        );
+        assert!(
+            !location.contains("SENSITIVE-PEM"),
+            "PEM must not leak: {location}"
+        );
+        assert!(
+            !location.contains("setup_token"),
+            "setup_token must not leak: {location}"
+        );
+        assert!(
+            !location.contains("manifest-code"),
+            "manifest code must not leak: {location}"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    /// The CSRF state value in the OAuth start redirect is a public nonce,
+    /// not a secret. Verify it is base64-encoded random bytes (same format
+    /// as our random tokens) and does not contain raw credential content.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oauth_state_is_public_csrf_nonce_not_secret() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "secret".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let resp = github_start(
+            State(state),
+            Query(StartQuery {
+                redirect: None,
+                install: None,
+            }),
+        )
+        .await;
+
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+
+        // Extract the state param.
+        let state_param = location
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+        // Must be URL-safe base64 (our random_token_b64 format).
+        assert!(
+            !state_param.contains('+') && !state_param.contains('/') && !state_param.contains('='),
+            "state must be URL-safe base64: {state_param}"
+        );
+        assert_eq!(state_param.len(), 43, "32 bytes → 43 base64 chars");
+    }
+
+    // ─── Config reporting after persistence (AC3) ────────────────────────
+
+    /// After successful manifest callback with credential persistence,
+    /// `/auth/config` reports `configured=true`, `self_setup_available=false`,
+    /// and no missing env vars (credentials came from manifest, not env).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn config_reports_configured_and_no_setup_after_manifest_persistence() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        state.set_test_bypass_persist(true).await;
+        let csrf = "csrf-config-test".to_string();
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 42,
+            slug: "djinn-test".into(),
+            client_id: "Iv1.test-client".into(),
+            client_secret: "test-secret".into(),
+            webhook_secret: None,
+            pem: "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----".into(),
+        }));
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        // Run the manifest callback.
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("code".into()),
+                state: Some(csrf),
+            }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FOUND);
+
+        // Now check /auth/config.
+        let cfg_resp = config(State(state)).await;
+        assert!(
+            cfg_resp.0.configured,
+            "config must report configured=true after persistence"
+        );
+        assert!(
+            !cfg_resp.0.self_setup_available,
+            "self_setup_available must be false after credentials persist"
+        );
+        // Credentials came from manifest, not env — so env vars are "missing"
+        // but that's fine because the persisted creds are loaded.
+        // Actually, with test bypass, the config is loaded directly into
+        // app_config. The missing list is populated only when
+        // active.is_none(), so it should be empty.
+        assert!(
+            cfg_resp.0.missing.is_empty(),
+            "no missing vars when credentials are loaded"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    // ─── Retry from create-app after exchange failure (AC2) ──────────────
+
+    /// Full retry flow: manifest exchange fails → setup session preserved →
+    /// user retries from create-app → new manifest form rendered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_retry_flow_after_exchange_failure() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        let csrf = "retry-csrf".to_string();
+
+        // 1. Exchange fails.
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Err("GitHub says no".into()));
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("bad-code".into()),
+                state: Some(csrf),
+            }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+
+        // 2. Setup session is still valid — user can hit create-app again.
+        let headers = headers_with_session(&session);
+        let resp = create_app(
+            State(state.clone()),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "create-app must succeed after exchange failure"
+        );
+
+        // Verify the response is HTML (the manifest form).
+        let body = resp.into_body();
+        let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(
+            html.contains("<form"),
+            "must render the manifest form for retry"
+        );
+        assert!(
+            html.contains("github.com/settings/apps/new"),
+            "form must target GitHub's app creation page"
+        );
+
+        // 3. After credentials are loaded, retry is no longer possible.
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let headers = headers_with_session(&session);
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "setup routes must be hidden after credentials are loaded"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    // ─── Manifest form shape (AC1) ───────────────────────────────────────
+
+    /// The create-app manifest form renders the expected auto-submit HTML
+    /// with the manifest JSON and CSRF state embedded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_app_renders_manifest_form_with_correct_target() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+
+        let headers = headers_with_session(&session);
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/html"), "must be HTML, got: {ct}");
+
+        // Manifest state cookie must be set for CSRF protection.
+        let set_cookies: Vec<_> = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap_or("").to_string())
+            .collect();
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.starts_with(MANIFEST_STATE_COOKIE)),
+            "manifest CSRF cookie must be set: {set_cookies:?}"
+        );
+
+        let body = resp.into_body();
+        let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+        let html = String::from_utf8_lossy(&bytes);
+
+        // Form must target GitHub's app creation endpoint.
+        assert!(
+            html.contains("action=\"https://github.com/settings/apps/new"),
+            "form must target GitHub: {html}"
+        );
+        // Must contain a `state` param in the action URL (CSRF).
+        assert!(
+            html.contains("state="),
+            "form action must include CSRF state: {html}"
+        );
+        // Must contain the manifest JSON hidden input.
+        assert!(
+            html.contains("name=\"manifest\""),
+            "form must have manifest input: {html}"
+        );
+        // Auto-submit script must be present.
+        assert!(html.contains(".submit()"), "form must auto-submit: {html}");
+    }
 }
