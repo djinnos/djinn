@@ -907,7 +907,11 @@ impl CoordinatorActor {
             } else {
                 djinn_telemetry::reasoning_kill::FAILURE_CLASS_IDLE_STALL
             };
-            djinn_telemetry::reasoning_kill::increment_kill(model_context, failure_class);
+            djinn_telemetry::reasoning_kill::increment(
+                model_context,
+                failure_class,
+                djinn_telemetry::reasoning_kill::OUTCOME_KILLED,
+            );
 
             self.terminalize_recovery_attempt(
                 task_id,

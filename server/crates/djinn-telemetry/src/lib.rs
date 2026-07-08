@@ -732,16 +732,19 @@ fn register_metrics() {
     metrics::counter!(FALLBACK_RESCUE_TOTAL).absolute(0);
     metrics::describe_counter!(
         REASONING_KILL_TOTAL,
-        "Session stall-kill outcomes classified by reasoning-model context and failure class. model_context=(reasoning|non_reasoning), failure_class=(first_call_hang|idle_stall)."
+        "Reasoning-model session outcomes classified by model context, failure class, and outcome (killed/rescued/typed_failure)."
     );
     for fc in reasoning_kill::FAILURE_CLASSES {
         for mc in reasoning_kill::MODEL_CONTEXTS {
-            metrics::counter!(
-                REASONING_KILL_TOTAL,
-                "model_context" => mc,
-                "failure_class" => fc
-            )
-            .absolute(0);
+            for oc in reasoning_kill::OUTCOMES {
+                metrics::counter!(
+                    REASONING_KILL_TOTAL,
+                    "model_context" => mc,
+                    "failure_class" => fc,
+                    "outcome" => oc
+                )
+                .absolute(0);
+            }
         }
     }
 }
@@ -1020,15 +1023,17 @@ pub mod fallback_rescue {
 pub mod reasoning_kill {
     //! Reasoning-model false-positive kill observability.
     //!
-    //! Classifies stall-kill outcomes by reasoning-model context and failure
-    //! class so operators can track whether reasoning models are being
-    //! disproportionately killed by stall timeouts (especially the
+    //! Classifies reasoning-model session outcomes by model context, failure
+    //! class, and outcome so operators can track whether reasoning models are
+    //! being disproportionately killed by stall timeouts (especially the
     //! first-call-hang detection, which targets backend latency rather than
-    //! genuine hangs).
+    //! genuine hangs), rescued by fallback candidates, or experiencing typed
+    //! failures.
     //!
     //! Bounded labels:
     //! - `model_context` — `"reasoning"` or `"non_reasoning"`
     //! - `failure_class` — `"first_call_hang"` or `"idle_stall"`
+    //! - `outcome` — `"killed"`, `"rescued"`, or `"typed_failure"`
 
     pub const MODEL_CONTEXT_REASONING: &str = "reasoning";
     pub const MODEL_CONTEXT_NON_REASONING: &str = "non_reasoning";
@@ -1036,10 +1041,15 @@ pub mod reasoning_kill {
     pub const FAILURE_CLASS_FIRST_CALL_HANG: &str = "first_call_hang";
     pub const FAILURE_CLASS_IDLE_STALL: &str = "idle_stall";
 
+    pub const OUTCOME_KILLED: &str = "killed";
+    pub const OUTCOME_RESCUED: &str = "rescued";
+    pub const OUTCOME_TYPED_FAILURE: &str = "typed_failure";
+
     pub(crate) const MODEL_CONTEXTS: [&str; 2] =
         [MODEL_CONTEXT_REASONING, MODEL_CONTEXT_NON_REASONING];
     pub(crate) const FAILURE_CLASSES: [&str; 2] =
         [FAILURE_CLASS_FIRST_CALL_HANG, FAILURE_CLASS_IDLE_STALL];
+    pub(crate) const OUTCOMES: [&str; 3] = [OUTCOME_KILLED, OUTCOME_RESCUED, OUTCOME_TYPED_FAILURE];
 
     /// Heuristic check whether a `model_id` string refers to a known
     /// reasoning-capable model.
@@ -1064,18 +1074,25 @@ pub mod reasoning_kill {
             || lower.contains("thinking")
     }
 
-    /// Increment the reasoning-kill counter for the given model context and
-    /// failure class.
+    /// Emit a reasoning-model outcome observation with all three bounded
+    /// labels: model context, failure class, and outcome.
     ///
     /// `model_context` MUST be one of `MODEL_CONTEXT_REASONING` or
     /// `MODEL_CONTEXT_NON_REASONING`.
     /// `failure_class` MUST be one of `FAILURE_CLASS_FIRST_CALL_HANG` or
     /// `FAILURE_CLASS_IDLE_STALL`.
-    pub fn increment_kill(model_context: &'static str, failure_class: &'static str) {
+    /// `outcome` MUST be one of `OUTCOME_KILLED`, `OUTCOME_RESCUED`, or
+    /// `OUTCOME_TYPED_FAILURE`.
+    pub fn increment(
+        model_context: &'static str,
+        failure_class: &'static str,
+        outcome: &'static str,
+    ) {
         metrics::counter!(
             super::REASONING_KILL_TOTAL,
             "model_context" => model_context,
             "failure_class" => failure_class,
+            "outcome" => outcome,
         )
         .increment(1);
     }
@@ -2029,11 +2046,17 @@ mod tests {
         let rendered = render().unwrap();
         for fc in reasoning_kill::FAILURE_CLASSES {
             for mc in reasoning_kill::MODEL_CONTEXTS {
-                rendered_sample(
-                    &rendered,
-                    REASONING_KILL_TOTAL,
-                    &[("model_context", mc), ("failure_class", fc)],
-                );
+                for oc in reasoning_kill::OUTCOMES {
+                    rendered_sample(
+                        &rendered,
+                        REASONING_KILL_TOTAL,
+                        &[
+                            ("model_context", mc),
+                            ("failure_class", fc),
+                            ("outcome", oc),
+                        ],
+                    );
+                }
             }
         }
     }
@@ -2043,13 +2066,20 @@ mod tests {
         let _guard = test_guard();
         init().unwrap();
 
-        reasoning_kill::increment_kill(
+        reasoning_kill::increment(
             reasoning_kill::MODEL_CONTEXT_REASONING,
             reasoning_kill::FAILURE_CLASS_FIRST_CALL_HANG,
+            reasoning_kill::OUTCOME_KILLED,
         );
-        reasoning_kill::increment_kill(
+        reasoning_kill::increment(
             reasoning_kill::MODEL_CONTEXT_NON_REASONING,
             reasoning_kill::FAILURE_CLASS_IDLE_STALL,
+            reasoning_kill::OUTCOME_RESCUED,
+        );
+        reasoning_kill::increment(
+            reasoning_kill::MODEL_CONTEXT_REASONING,
+            reasoning_kill::FAILURE_CLASS_IDLE_STALL,
+            reasoning_kill::OUTCOME_TYPED_FAILURE,
         );
 
         let rendered = render().unwrap();
@@ -2059,10 +2089,11 @@ mod tests {
                 REASONING_KILL_TOTAL,
                 &[
                     ("model_context", "reasoning"),
-                    ("failure_class", "first_call_hang")
+                    ("failure_class", "first_call_hang"),
+                    ("outcome", "killed"),
                 ]
             ) >= 1.0,
-            "reasoning kill reasoning/first_call_hang should be >= 1"
+            "reasoning kill reasoning/first_call_hang/killed should be >= 1"
         );
         assert!(
             labeled_sample_value(
@@ -2070,10 +2101,23 @@ mod tests {
                 REASONING_KILL_TOTAL,
                 &[
                     ("model_context", "non_reasoning"),
-                    ("failure_class", "idle_stall")
+                    ("failure_class", "idle_stall"),
+                    ("outcome", "rescued"),
                 ]
             ) >= 1.0,
-            "reasoning kill non_reasoning/idle_stall should be >= 1"
+            "reasoning kill non_reasoning/idle_stall/rescued should be >= 1"
+        );
+        assert!(
+            labeled_sample_value(
+                &rendered,
+                REASONING_KILL_TOTAL,
+                &[
+                    ("model_context", "reasoning"),
+                    ("failure_class", "idle_stall"),
+                    ("outcome", "typed_failure"),
+                ]
+            ) >= 1.0,
+            "reasoning kill reasoning/idle_stall/typed_failure should be >= 1"
         );
     }
 
@@ -2107,15 +2151,53 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_kill_outcomes_render_as_distinct_samples() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        // Emit one of each outcome for the same model_context/failure_class.
+        reasoning_kill::increment(
+            reasoning_kill::MODEL_CONTEXT_REASONING,
+            reasoning_kill::FAILURE_CLASS_FIRST_CALL_HANG,
+            reasoning_kill::OUTCOME_KILLED,
+        );
+        reasoning_kill::increment(
+            reasoning_kill::MODEL_CONTEXT_REASONING,
+            reasoning_kill::FAILURE_CLASS_FIRST_CALL_HANG,
+            reasoning_kill::OUTCOME_RESCUED,
+        );
+        reasoning_kill::increment(
+            reasoning_kill::MODEL_CONTEXT_REASONING,
+            reasoning_kill::FAILURE_CLASS_FIRST_CALL_HANG,
+            reasoning_kill::OUTCOME_TYPED_FAILURE,
+        );
+
+        let rendered = render().unwrap();
+        for oc in reasoning_kill::OUTCOMES {
+            let val = labeled_sample_value(
+                &rendered,
+                REASONING_KILL_TOTAL,
+                &[
+                    ("model_context", "reasoning"),
+                    ("failure_class", "first_call_hang"),
+                    ("outcome", oc),
+                ],
+            );
+            assert!(val >= 1.0, "reasoning kill outcome={oc} should be >= 1");
+        }
+    }
+
+    #[test]
     fn rollout_counters_do_not_contain_high_cardinality_labels() {
         let _guard = test_guard();
         init().unwrap();
 
         infra_delta::increment(infra_delta::OUTCOME_TOTAL, true);
         fallback_rescue::increment_rescue();
-        reasoning_kill::increment_kill(
+        reasoning_kill::increment(
             reasoning_kill::MODEL_CONTEXT_REASONING,
             reasoning_kill::FAILURE_CLASS_FIRST_CALL_HANG,
+            reasoning_kill::OUTCOME_KILLED,
         );
 
         let rendered = render().unwrap();

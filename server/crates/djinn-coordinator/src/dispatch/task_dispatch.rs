@@ -1063,6 +1063,17 @@ impl CoordinatorActor {
                     // candidates failed and this one rescued the dispatch).
                     if candidate_index > 0 {
                         djinn_telemetry::fallback_rescue::increment_rescue();
+                        // Emit reasoning-model outcome observability for the
+                        // rescued path: the first candidate's model is the one
+                        // that would have been killed without the fallback.
+                        let first_model = &model_ids[0];
+                        if djinn_telemetry::reasoning_kill::is_reasoning_model(first_model) {
+                            djinn_telemetry::reasoning_kill::increment(
+                                djinn_telemetry::reasoning_kill::MODEL_CONTEXT_REASONING,
+                                djinn_telemetry::reasoning_kill::FAILURE_CLASS_IDLE_STALL,
+                                djinn_telemetry::reasoning_kill::OUTCOME_RESCUED,
+                            );
+                        }
                     }
                     // Successful fallback: discard chain-scoped observations.
                     // The earlier candidate's failure counts stay recorded in
@@ -1159,6 +1170,19 @@ impl CoordinatorActor {
                 super::lane_resolution_log::parse_provider_model(last_model_id);
             djinn_telemetry::failover::increment_chain_exhausted(provider_id, model_name);
             djinn_telemetry::failover::record_latency(failover_chain_start.elapsed());
+        }
+        // Emit reasoning-model typed-failure observability when the first
+        // candidate (the primary dispatch target) was a reasoning model.
+        // The chain was exhausted without rescue, so the outcome is a typed
+        // failure rather than a kill or rescue.
+        if !model_ids.is_empty()
+            && djinn_telemetry::reasoning_kill::is_reasoning_model(&model_ids[0])
+        {
+            djinn_telemetry::reasoning_kill::increment(
+                djinn_telemetry::reasoning_kill::MODEL_CONTEXT_REASONING,
+                djinn_telemetry::reasoning_kill::FAILURE_CLASS_IDLE_STALL,
+                djinn_telemetry::reasoning_kill::OUTCOME_TYPED_FAILURE,
+            );
         }
         super::lane_resolution_log::emit_failover_chain_exhausted(
             label,
