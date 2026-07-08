@@ -314,9 +314,6 @@ async fn dispatch_agent_tools(
 ) -> Option<Result<serde_json::Value, String>> {
     match name {
         "agent_metrics" => Some(memory_agent::call_agent_metrics(ctx, args, project_ref).await),
-        "agent_amend_prompt" => {
-            Some(memory_agent::call_agent_amend_prompt(ctx, args, worktree_project_path).await)
-        }
         "agent_create" => {
             Some(memory_agent::call_agent_create(ctx, args, worktree_project_path).await)
         }

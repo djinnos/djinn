@@ -829,9 +829,6 @@ impl CoordinatorActor {
                     .await;
             }
             self.evict_throughput_events();
-            if !self.should_skip_background_llm_work("hourly_prompt_amendment_evaluation") {
-                self.evaluate_prompt_amendments().await;
-            }
         }
         // ADR-048 §3A: idle-time memory consolidation.
         // Check if a previously spawned sweep has completed.

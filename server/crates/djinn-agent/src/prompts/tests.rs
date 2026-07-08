@@ -355,7 +355,7 @@ fn planner_prompt_contains_learned_prompt_amendment_guidance() {
 }
 
 /// Architect must NOT carry the learned-prompt amendment guidance or the
-/// `agent_amend_prompt` tool — that ownership moved to the Planner per ADR-051.
+/// `agent_amend_prompt` tool — the amendment path has been removed.
 #[test]
 fn architect_prompt_omits_learned_prompt_amendment_guidance_and_tool() {
     ensure_registry();
@@ -365,11 +365,11 @@ fn architect_prompt_omits_learned_prompt_amendment_guidance_and_tool() {
 
     assert!(
         !prompt.contains("Learned-prompt amendments"),
-        "architect prompt must NOT contain the learned-prompt amendment section — it is Planner-owned per ADR-051"
+        "architect prompt must NOT contain the learned-prompt amendment section"
     );
     assert!(
         !prompt.contains("`agent_amend_prompt("),
-        "architect prompt must NOT contain agent_amend_prompt tool — it is Planner-owned per ADR-051"
+        "architect prompt must NOT contain agent_amend_prompt tool"
     );
 }
 
@@ -673,32 +673,31 @@ fn tools_section_injected_into_rendered_prompt() {
         "architect prompt should contain memory_health"
     );
 
+    // The agent_amend_prompt tool has been removed from all roles.
     let planner_tools = crate::roles::tool_schemas_for(AgentType::Planner);
     let planner_has_amend_tool = planner_tools.iter().any(|schema| {
         schema.get("name").and_then(|name| name.as_str()) == Some("agent_amend_prompt")
     });
+    assert!(
+        !planner_prompt.contains("`agent_amend_prompt("),
+        "planner prompt should NOT contain agent_amend_prompt — the tool has been removed"
+    );
+    assert!(
+        !planner_has_amend_tool,
+        "planner tool schemas should NOT expose agent_amend_prompt — the tool has been removed"
+    );
 
     let architect_tools = crate::roles::tool_schemas_for(AgentType::Architect);
     let architect_has_amend_tool = architect_tools.iter().any(|schema| {
         schema.get("name").and_then(|name| name.as_str()) == Some("agent_amend_prompt")
     });
-
-    // Per ADR-051 §1 `role_amend_prompt` moved from Architect to Planner
     assert!(
         !architect_prompt.contains("`agent_amend_prompt("),
-        "architect prompt should NOT contain agent_amend_prompt — it moved to Planner per ADR-051"
+        "architect prompt should NOT contain agent_amend_prompt — the tool has been removed"
     );
     assert!(
         !architect_has_amend_tool,
-        "architect tool schemas should NOT expose agent_amend_prompt — learned-prompt amendments are Planner-owned"
-    );
-    assert!(
-        planner_prompt.contains("`agent_amend_prompt("),
-        "planner prompt should contain agent_amend_prompt — it moved here per ADR-051"
-    );
-    assert!(
-        planner_has_amend_tool,
-        "planner tool schemas should expose agent_amend_prompt for evidence-based learned-prompt amendments"
+        "architect tool schemas should NOT expose agent_amend_prompt — the tool has been removed"
     );
 
     // Tribunal roles (k9zw): verify each role renders its finalize tool.
