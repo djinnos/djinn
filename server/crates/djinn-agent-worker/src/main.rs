@@ -1362,6 +1362,20 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         .context("attach workspace")?;
     info!(path = %workspace.path().display(), branch = %workspace.branch(), "workspace attached");
 
+    // 4b. Pre-task startup boundary: load the effective EnvironmentConfig
+    //     and resolved service metadata from the hgd0 Secret-backed mounts,
+    //     then check service readiness and run pre-task commands (currently
+    //     stubbed to success).  This must complete before supervisor dispatch
+    //     so the workspace is fully prepared when the agent session starts.
+    let pre_task_inputs = lifecycle::execute_task_run_startup_boundary(workspace.path())
+        .await
+        .context("pre-task startup boundary")?;
+    info!(
+        pre_task_count = pre_task_inputs.environment_config.lifecycle.pre_task.len(),
+        injected_services = pre_task_inputs.service_metadata.injected.len(),
+        "pre-task startup boundary complete"
+    );
+
     // 5. Build the in-Pod `WorkerSupervisorServices` around the RPC connection
     //    + resolved credentials. `execute_stage` runs locally in the Pod;
     //    every other trait method delegates to djinn-server over the same

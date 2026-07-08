@@ -1507,6 +1507,16 @@ impl CoordinatorActor {
                 );
                 continue;
             }
+            if self
+                .enforce_expired_arbiter_deadline_before_dispatch(&task)
+                .await
+            {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    "CoordinatorActor: expired active arbitration auto-parked before Lead dispatch"
+                );
+                continue;
+            }
             let ctx = DispatchContext;
             let Some(role) = self.role_registry.dispatch_role_for_task(&task, &ctx) else {
                 continue;

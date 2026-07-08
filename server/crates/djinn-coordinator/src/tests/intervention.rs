@@ -5217,6 +5217,126 @@ async fn arbiter_park_persists_decision_creates_human_review_hold() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_pass_auto_parks_expired_unconsumed_arbiter_deadline() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    repo.set_status(&task.id, "needs_lead_intervention")
+        .await
+        .unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.status, "needs_lead_intervention");
+
+    let expired_deadline = (time::OffsetDateTime::now_utc() - time::Duration::hours(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: Some(&expired_deadline),
+            mirror_head_sha: Some("mirror-expired-deadline"),
+            github_head_sha: Some("github-expired-deadline"),
+            pr_url: None,
+            failing_ci_job_ids: &serde_json::json!([]),
+            dossier: Some(&serde_json::json!({"seed": "expired-active-arbiter"})),
+            directive: None,
+            verification_command: None,
+            excluded_models: &serde_json::json!([]),
+        })
+        .await
+        .unwrap();
+
+    // Exercise the real ready-dispatch pass. Without the pre-Lead-dispatch
+    // deadline guard this task is eligible for Lead arbiter re-entry from
+    // `needs_lead_intervention`; the expired unconsumed arbitration must be
+    // terminally auto-parked before any arbiter dispatch is selected.
+    actor.dispatch_ready_tasks(Some(&task.project_id)).await;
+
+    assert_eq!(
+        actor.dispatched, 0,
+        "expired arbitration must prevent any further arbiter dispatch in this pass"
+    );
+    assert!(
+        !actor.last_dispatched.contains_key(&task.id),
+        "deadline auto-park must not mark the source as dispatched"
+    );
+
+    let parked = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        parked.status, "open",
+        "deadline auto-park parks the source behind a HumanReview blocker"
+    );
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert!(
+        !blockers.is_empty(),
+        "deadline auto-park must create a HumanReview blocker"
+    );
+    let hold_task = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
+    assert_eq!(hold_task.issue_type, "review");
+    assert!(
+        hold_task.labels.contains("human-review-hold"),
+        "HumanReview hold task must carry human-review-hold label"
+    );
+    assert!(
+        hold_task.description.contains("arbiter_deadline_expired"),
+        "hold description must include the deadline-expired dossier, got: {}",
+        hold_task.description
+    );
+    assert!(
+        hold_task.description.contains(&task.short_id),
+        "hold description must include source task context, got: {}",
+        hold_task.description
+    );
+    assert!(
+        hold_task.description.contains("\"hold_cycle\": 0"),
+        "hold description must include hold-cycle context, got: {}",
+        hold_task.description
+    );
+
+    let record = arb_repo
+        .get_by_task_and_cycle(&task.id, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.arbitration_state(),
+        Some(djinn_db::repositories::task_arbitration::ArbitrationState::Failed),
+        "expired unconsumed arbitration must be durably terminal"
+    );
+    let stored = record.dossier.expect("deadline dossier must be stored");
+    assert_eq!(
+        stored.get("kind").and_then(|v| v.as_str()),
+        Some("arbiter_deadline_expired")
+    );
+    assert_eq!(
+        stored.get("cause").and_then(|v| v.as_str()),
+        Some("arbiter_deadline_expired")
+    );
+    assert_eq!(
+        stored.get("task_uuid").and_then(|v| v.as_str()),
+        Some(task.id.as_str())
+    );
+    assert_eq!(stored.get("hold_cycle").and_then(|v| v.as_i64()), Some(0));
+
+    let dispatched_activity = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("arbiter_dispatched".to_string()),
+            ..ActivityQuery::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        dispatched_activity.is_empty(),
+        "deadline auto-park path must not emit arbiter_dispatched"
+    );
+}
 /// Verify the ArbiterPark transition is only valid from InLeadIntervention.
 #[test]
 fn arbiter_park_transition_rejects_non_lead_intervention_states() {

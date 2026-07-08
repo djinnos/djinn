@@ -107,6 +107,26 @@ pub struct GuardAdoptedPrTaskAttemptParams<'a> {
     pub summary_json: Option<&'a str>,
 }
 
+/// Parameters for inserting a durable `reopened` rework-marker attempt row.
+///
+/// A rework-marker row is a synthetic terminal `reopened` attempt inserted when
+/// a rework reopen (PrCiFailed / PrChangesRequested / PrConflict /
+/// task_review_reject* / lead_approve_conflict / merge-queue dequeue) fires but
+/// no in-flight `pending`/`submitted` attempt existed to terminalize. It gives
+/// the respawn guard's latest-attempt gate a durable "this PR needs a worker"
+/// signal even for reopens that leave no live attempt behind (the kv6i
+/// invisible-reopen gap). Idempotent on `dispatch_key`
+/// (`{task_id}:{role}:rework_marker`) via `ON CONFLICT DO NOTHING`.
+#[derive(Clone, Debug)]
+pub struct ReworkMarkerTaskAttemptParams<'a> {
+    pub id: &'a str,
+    pub task_id: &'a str,
+    pub role: &'a str,
+    pub dispatch_key: &'a str,
+    pub summary: Option<&'a str>,
+    pub summary_json: Option<&'a str>,
+}
+
 /// Parameters for filling previously-null refs/SHAs/summary/log_tail without
 /// changing the outcome/lifecycle.
 #[derive(Clone, Debug, Default)]
@@ -464,6 +484,54 @@ impl TaskAttemptRepository {
         })
     }
 
+    /// Insert a durable `reopened` rework-marker attempt row.  Idempotent on
+    /// `dispatch_key`.
+    ///
+    /// The row is terminal (`reopened` outcome) with a NULL `session_id` and no
+    /// guard decision — it is a synthetic marker, not a real dispatch.  It is
+    /// inserted by the rework-reopen path when no in-flight `pending`/`submitted`
+    /// attempt existed to terminalize, so the respawn guard's latest-attempt
+    /// gate still sees a `reopened` newest attempt and dispatches a rework
+    /// worker instead of adopting the open PR (the kv6i invisible-reopen gap).
+    pub async fn insert_rework_marker(
+        &self,
+        params: ReworkMarkerTaskAttemptParams<'_>,
+    ) -> Result<TaskAttempt> {
+        self.db.ensure_initialized().await?;
+        Self::validate_dispatch_key(params.dispatch_key)?;
+        Self::validate_summary(params.summary)?;
+        Self::validate_summary_json(params.summary_json)?;
+
+        let outcome_str = TaskAttemptOutcome::Reopened.as_str();
+        let attempt_seq = self.next_attempt_seq(params.task_id).await?;
+
+        // Runtime-checked query: avoids sqlx compile-time cache dependency for
+        // this new query.  The column/parameter types mirror `insert_guard_deferred`.
+        sqlx::query(
+            r#"INSERT INTO task_attempts
+                (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome,
+                 summary, summary_json, terminal_at)
+             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8::text::jsonb,
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (dispatch_key) DO NOTHING"#,
+        )
+        .bind(params.id)
+        .bind(params.task_id)
+        .bind(params.role)
+        .bind(attempt_seq)
+        .bind(params.dispatch_key)
+        .bind(outcome_str)
+        .bind(params.summary)
+        .bind(params.summary_json)
+        .execute(self.db.pool())
+        .await?;
+
+        let row = self.get_by_dispatch_key(params.dispatch_key).await?;
+        row.ok_or_else(|| {
+            DbError::Internal("rework_marker task_attempt row disappeared after insert".to_owned())
+        })
+    }
+
     /// Fill previously-null refs/SHAs/summary/log_tail without changing outcome.
     /// Only non-null provided values are applied, and only when the current
     /// column value is NULL.  This is safe to call on terminal rows.
@@ -652,6 +720,64 @@ impl TaskAttemptRepository {
         )
         .fetch_all(self.db.pool())
         .await?)
+    }
+
+    /// List `submitted` attempt rows that look orphaned AND whose task carries
+    /// no open PR: created before `created_before_iso`, whose task has no
+    /// `pr_url` (and the attempt itself no `pr_url`), no live
+    /// (`starting`/`running`) `task_run`, and no `running` session.
+    ///
+    /// Companion to [`list_orphaned_pending`] for the reaper.  `submitted` rows
+    /// that HAVE a PR are deliberately excluded — the PR poller owns their
+    /// adoption/terminalization flow.  But a `submitted` attempt with NO PR
+    /// (e.g. an internal task-review rejection that reopened the task without
+    /// terminalizing the worker's `submitted` row — the ylme orphan) can never
+    /// be advanced by the poller and hard-blocks the respawn guard's step-2
+    /// dedup forever, so the reaper finalizes it to `reopened` (submitted work
+    /// existed, and the reopened marker lets a rework worker dispatch).
+    pub async fn list_orphaned_submitted_no_pr(
+        &self,
+        created_before_iso: &str,
+    ) -> Result<Vec<OrphanedPendingAttempt>> {
+        self.db.ensure_initialized().await?;
+        use sqlx::Row;
+        // Runtime-checked query: avoids sqlx compile-time cache dependency for
+        // this new query (mirrors `insert_rework_marker`/`ledger_for_task_since`).
+        let rows = sqlx::query(
+            r#"SELECT ta.id, ta.task_id, ta.role, ta.dispatch_key, ta.created_at
+             FROM task_attempts ta
+             JOIN tasks t ON t.id = ta.task_id
+             WHERE ta.outcome = 'submitted'
+               AND ta.created_at < $1
+               AND (t.pr_url IS NULL OR t.pr_url = '')
+               AND (ta.pr_url IS NULL OR ta.pr_url = '')
+               AND NOT EXISTS (
+                   SELECT 1 FROM task_runs tr
+                   WHERE tr.task_id = ta.task_id
+                     AND tr.status IN ('starting', 'running')
+                     AND tr.ended_at IS NULL
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM sessions s
+                   WHERE s.task_id = ta.task_id
+                     AND s.status = 'running'
+               )
+             ORDER BY ta.created_at ASC"#,
+        )
+        .bind(created_before_iso)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| OrphanedPendingAttempt {
+                id: r.get("id"),
+                task_id: r.get("task_id"),
+                role: r.get("role"),
+                dispatch_key: r.get("dispatch_key"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     /// Latest `submitted` attempt for a task, optionally filtered by role.
