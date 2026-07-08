@@ -1362,17 +1362,35 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         .context("attach workspace")?;
     info!(path = %workspace.path().display(), branch = %workspace.branch(), "workspace attached");
 
+    // 4a. Bootstrap the in-Pod database.  The pre-task boundary emits one
+    //     `task_run_pretask_ran` activity event per started command into the
+    //     same `activity_log` table the host-side runtime writes to, so the
+    //     DB handle must be ready BEFORE the boundary runs.  The handle is
+    //     reused below for `WorkerSupervisorServices` (via `AgentContext`).
+    let in_pod_db = bootstrap_warm_database()
+        .await
+        .context("bootstrap in-Pod database for pre-task activity")?;
+    let pretask_activity_sink =
+        lifecycle::TaskRepositoryActivitySink::from_database(in_pod_db.clone());
+
     // 4b. Pre-task startup boundary: load the effective EnvironmentConfig
     //     and resolved service metadata from the hgd0 Secret-backed mounts,
     //     then check service readiness and run pre-task commands.  This must
     //     complete before supervisor dispatch so the workspace is fully
     //     prepared when the agent session starts.  A blocking pre-task
     //     failure surfaces as an error for environmental non-attempt
-    //     classification (c9l4).
-    let (pre_task_inputs, pretask_result) =
-        lifecycle::execute_task_run_startup_boundary(workspace.path(), &cancel)
-            .await
-            .context("pre-task startup boundary")?;
+    //     classification (c9l4).  One `task_run_pretask_ran` activity event
+    //     is emitted per started command; if readiness fails the runner is
+    //     never reached and no event is recorded (the explicit readiness
+    //     error path wins).
+    let (pre_task_inputs, pretask_result) = lifecycle::execute_task_run_startup_boundary(
+        workspace.path(),
+        &cancel,
+        Some(&spec.task_id),
+        &pretask_activity_sink,
+    )
+    .await
+    .context("pre-task startup boundary")?;
     info!(
         pre_task_count = pre_task_inputs.environment_config.lifecycle.pre_task.len(),
         injected_services = pre_task_inputs.service_metadata.injected.len(),
@@ -1392,9 +1410,6 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    `spawn_post_session_work`). Phase 7-followup: route those reads
     //    through `SupervisorServices` too so the worker can run without a
     //    local Database connection.
-    let in_pod_db = bootstrap_warm_database()
-        .await
-        .context("bootstrap in-Pod database for WorkerSupervisorServices")?;
     let agent_context = build_worker_agent_context(in_pod_db, rpc.clone(), spec.project_id.clone());
     let worker_services: Arc<dyn SupervisorServices> = Arc::new(WorkerSupervisorServices::new(
         rpc.clone(),
