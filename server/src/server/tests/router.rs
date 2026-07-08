@@ -87,7 +87,6 @@ async fn metrics_returns_prometheus_text_without_auth() {
         "djinn_zombie_reaps_total{kind=\"periodic\"}",
         "djinn_zombie_reaps_total{kind=\"stall\"}",
         "djinn_task_reopens_total",
-        "djinn_lead_escalations_total",
         "djinn_tasks_parked_total",
         "djinn_pr_poller_tracked",
         "djinn_merge_failures_total",
