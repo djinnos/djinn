@@ -126,7 +126,7 @@ async fn run_with_provider_and_model(
             project_path,
             worktree_path,
             role_name: "worker",
-            finalize_tool_names: &["submit_work", "request_lead"],
+            finalize_tool_names: &["submit_work", "request_planner"],
             context_window: 10_000,
             model_id,
             cancel,

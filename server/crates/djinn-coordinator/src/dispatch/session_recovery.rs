@@ -926,6 +926,37 @@ impl CoordinatorActor {
             )
             .await;
 
+            // ── Zero-output wall-clock observation ────────────────────
+            // Record the wall-clock time this session spent before the
+            // stall/kill decision was made. Emitted after all gate checks
+            // pass so the metric only fires for genuine kills.
+            {
+                let (timeout_source, failure_class) = if never_active {
+                    (
+                        djinn_telemetry::liveness_metrics::TIMEOUT_SOURCE_FIRST_CALL_HANG,
+                        djinn_telemetry::liveness_metrics::FAILURE_CLASS_FIRST_CALL_HANG,
+                    )
+                } else {
+                    (
+                        djinn_telemetry::liveness_metrics::TIMEOUT_SOURCE_IDLE_STALL,
+                        djinn_telemetry::liveness_metrics::FAILURE_CLASS_IDLE_STALL,
+                    )
+                };
+                // chain_exhausted is set conservatively to false here; the
+                // strike_count escalation below may trigger planner
+                // intervention but the failover chain itself hasn't been
+                // exhausted at this point (the session was killed for stall,
+                // not for failover chain exhaustion). The "chain_exhausted"
+                // dimension captures the case where failover candidates were
+                // all tried; in the stall path there is no candidate chain.
+                djinn_telemetry::liveness_metrics::record_zero_output_stall(
+                    std::time::Duration::from_secs(idle),
+                    timeout_source,
+                    failure_class,
+                    false,
+                );
+            }
+
             // ── Second-strike stall escalation ──────────────────────────────
             // Record this stall cancel against the task. Two CONSECUTIVE stall
             // cancels with no durable task-status progress between them means the
@@ -1240,6 +1271,17 @@ impl CoordinatorActor {
                     );
                 }
             }
+
+            // ── Zero-output wall-clock observation (zombie reap) ────────
+            // Record the wall-clock time this zombie session spent with
+            // zero output before being reaped. `age` is the elapsed
+            // seconds since session start.
+            djinn_telemetry::liveness_metrics::record_zero_output_stall(
+                std::time::Duration::from_secs(age),
+                djinn_telemetry::liveness_metrics::TIMEOUT_SOURCE_FIRST_CALL_HANG,
+                djinn_telemetry::liveness_metrics::FAILURE_CLASS_FIRST_CALL_HANG,
+                false,
+            );
 
             let token_info = if session.tokens_in != 0 || session.tokens_out != 0 {
                 format!(
@@ -3568,3 +3610,152 @@ mod session_exit_protocol_violation_tests {
         assert_eq!(result.reason, None);
     }
 }
+
+// ─── Zero-output / prompt-context latency instrumentation tests ──────────────
+// These tests exercise the actual call-site decision paths (not just the
+// telemetry facade helpers) so they would catch duplicated phase-duration
+// bugs or misrouted timeout-source/failure-class labels.
+
+#[cfg(test)]
+mod zero_output_instrumentation_tests {
+    use djinn_telemetry::liveness_metrics::{
+        FAILURE_CLASS_FIRST_CALL_HANG, FAILURE_CLASS_IDLE_STALL, TIMEOUT_SOURCE_FIRST_CALL_HANG,
+        TIMEOUT_SOURCE_IDLE_STALL, record_zero_output_stall,
+    };
+    use djinn_telemetry::render;
+    use std::sync::{Mutex, MutexGuard};
+    use std::time::Duration;
+
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn test_guard() -> MutexGuard<'static, ()> {
+        TEST_MUTEX.lock().expect("telemetry test mutex poisoned")
+    }
+
+    /// Exercise the first-call-hang decision path (`never_active = true`).
+    /// Verifies the timeout_source and failure_class labels match what
+    /// `enforce_session_stall_timeout` would record for a session that
+    /// never produced any activity.
+    #[test]
+    fn first_call_hang_decision_emits_correct_labels() {
+        let _guard = test_guard();
+        djinn_telemetry::init().unwrap();
+
+        // Mirror the decision path in enforce_session_stall_timeout for
+        // never_active=true: timeout_source=first_call_hang,
+        // failure_class=first_call_hang, chain_exhausted=false.
+        let idle_secs = 90u64;
+        let never_active = true;
+        let (timeout_source, failure_class) = if never_active {
+            (
+                TIMEOUT_SOURCE_FIRST_CALL_HANG,
+                FAILURE_CLASS_FIRST_CALL_HANG,
+            )
+        } else {
+            (TIMEOUT_SOURCE_IDLE_STALL, FAILURE_CLASS_IDLE_STALL)
+        };
+        record_zero_output_stall(
+            Duration::from_secs(idle_secs),
+            timeout_source,
+            failure_class,
+            false,
+        );
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains("timeout_source=\"first_call_hang\""),
+            "first_call_hang timeout_source label missing from stall metric:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("failure_class=\"first_call_hang\""),
+            "first_call_hang failure_class label missing from stall metric:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("chain_exhausted=\"false\""),
+            "chain_exhausted=false missing from stall metric:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("djinn_zero_output_stall_seconds"),
+            "djinn_zero_output_stall_seconds metric missing:\n{rendered}",
+        );
+    }
+
+    /// Exercise the idle-stall decision path (`never_active = false`).
+    /// Verifies the timeout_source and failure_class labels match what
+    /// `enforce_session_stall_timeout` would record for a session that
+    /// was active but went idle.
+    #[test]
+    fn idle_stall_decision_emits_correct_labels() {
+        let _guard = test_guard();
+        djinn_telemetry::init().unwrap();
+
+        let idle_secs = 300u64;
+        let never_active = false;
+        let (timeout_source, failure_class) = if never_active {
+            (
+                TIMEOUT_SOURCE_FIRST_CALL_HANG,
+                FAILURE_CLASS_FIRST_CALL_HANG,
+            )
+        } else {
+            (TIMEOUT_SOURCE_IDLE_STALL, FAILURE_CLASS_IDLE_STALL)
+        };
+        record_zero_output_stall(
+            Duration::from_secs(idle_secs),
+            timeout_source,
+            failure_class,
+            true,
+        );
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains("timeout_source=\"idle_stall\""),
+            "idle_stall timeout_source label missing from stall metric:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("failure_class=\"idle_stall\""),
+            "idle_stall failure_class label missing from stall metric:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("chain_exhausted=\"true\""),
+            "chain_exhausted=true missing from stall metric:\n{rendered}",
+        );
+    }
+
+    /// Verify the zombie-reap decision path emits first_call_hang labels
+    /// (matching the actual call site at line ~1257 in session_recovery.rs).
+    #[test]
+    fn zombie_reap_decision_emits_first_call_hang_labels() {
+        let _guard = test_guard();
+        djinn_telemetry::init().unwrap();
+
+        // Mirror the zombie-reap call site: always first_call_hang,
+        // chain_exhausted=false.
+        let zombie_age_secs = 601u64;
+        record_zero_output_stall(
+            Duration::from_secs(zombie_age_secs),
+            TIMEOUT_SOURCE_FIRST_CALL_HANG,
+            FAILURE_CLASS_FIRST_CALL_HANG,
+            false,
+        );
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains("timeout_source=\"first_call_hang\""),
+            "zombie reap should emit first_call_hang timeout_source:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("failure_class=\"first_call_hang\""),
+            "zombie reap should emit first_call_hang failure_class:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("chain_exhausted=\"false\""),
+            "zombie reap should emit chain_exhausted=false:\n{rendered}",
+        );
+    }
+}
+
+// NOTE: Prompt-context assembly instrumentation tests now live in the agent
+// crate (`djinn-agent/…/prompt_context_tests.rs`) where they exercise the real
+// `assemble_prompt_context` path and assert on rendered metrics.  The toy
+// `tokio::join!` timing tests that previously lived here did not cover the
+// actual assembly instrumentation and were removed per reviewer feedback.

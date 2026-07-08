@@ -21,7 +21,6 @@ const BREAKER_TRIPS_TOTAL: &str = "djinn_breaker_trips_total";
 const BREAKER_STATE: &str = "djinn_breaker_state";
 const ZOMBIE_REAPS_TOTAL: &str = "djinn_zombie_reaps_total";
 const ZOMBIE_REAP_KINDS: [&str; 3] = ["startup", "periodic", "stall"];
-const LEAD_ESCALATIONS_TOTAL: &str = "djinn_lead_escalations_total";
 const TASK_REOPENS_TOTAL: &str = "djinn_task_reopens_total";
 const TASKS_PARKED_TOTAL: &str = "djinn_tasks_parked_total";
 const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
@@ -76,6 +75,14 @@ const FAILOVER_CANDIDATE_ACCEPTED_TOTAL: &str = "djinn_failover_candidate_accept
 const FAILOVER_CHAIN_EXHAUSTED_TOTAL: &str = "djinn_failover_chain_exhausted_total";
 const FAILOVER_LATENCY_SECONDS: &str = "djinn_failover_latency_seconds";
 
+// ─── Zero-output / stall wall-clock observability ───────────────────
+const ZERO_OUTPUT_STALL_SECONDS: &str = "djinn_zero_output_stall_seconds";
+
+// ─── Prompt-context assembly latency observability ──────────────────
+const PROMPT_CONTEXT_LATENCY_SECONDS: &str = "djinn_prompt_context_latency_seconds";
+const PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS: &str =
+    "djinn_prompt_context_child_span_latency_seconds";
+
 // ─── Rollout-validation counters (proposal uk2d AC17) ────────────────────
 const INFRA_EXEMPT_TOTAL: &str = "djinn_infra_exempt_total";
 const FALLBACK_RESCUE_TOTAL: &str = "djinn_fallback_rescue_total";
@@ -112,13 +119,6 @@ pub mod zombie {
     /// Increment the zombie-reap counter for one of the stable kind labels.
     pub fn increment_reap(kind: &'static str) {
         metrics::counter!(super::ZOMBIE_REAPS_TOTAL, "kind" => kind).increment(1);
-    }
-}
-
-pub mod lead {
-    /// Increment the Lead-escalation counter. Synchronous and non-async by design.
-    pub fn increment_escalation() {
-        metrics::counter!(super::LEAD_ESCALATIONS_TOTAL).increment(1);
     }
 }
 
@@ -544,11 +544,6 @@ fn register_metrics() {
     for kind in ZOMBIE_REAP_KINDS {
         metrics::counter!(ZOMBIE_REAPS_TOTAL, "kind" => kind).absolute(0);
     }
-    metrics::describe_counter!(
-        LEAD_ESCALATIONS_TOTAL,
-        "Lead escalation requests recorded by the coordinator."
-    );
-    metrics::counter!(LEAD_ESCALATIONS_TOTAL).absolute(0);
     metrics::describe_counter!(TASK_REOPENS_TOTAL, "Tasks reopened for another work cycle.");
     metrics::counter!(TASK_REOPENS_TOTAL).absolute(0);
     metrics::describe_counter!(
@@ -705,6 +700,20 @@ fn register_metrics() {
     metrics::describe_histogram!(
         FAILOVER_LATENCY_SECONDS,
         "Wall-clock elapsed time for a failover-chain traversal from first attempt to terminal event (acceptance or exhaustion)."
+    );
+    // ─── Zero-output / stall wall-clock observability ────────────────
+    metrics::describe_histogram!(
+        ZERO_OUTPUT_STALL_SECONDS,
+        "Wall-clock time a session spent with zero output before a stall/reap/failover decision was made. Partitioned by timeout_source, failure_class, and chain_exhausted."
+    );
+    // ─── Prompt-context assembly latency observability ───────────────
+    metrics::describe_histogram!(
+        PROMPT_CONTEXT_LATENCY_SECONDS,
+        "Total wall-clock time for prompt-context assembly across all concurrent phases."
+    );
+    metrics::describe_histogram!(
+        PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS,
+        "Wall-clock time for an individual prompt-context child-span phase. Partitioned by bounded span label."
     );
     // ─── Rollout-validation counters (proposal uk2d AC17) ────────────
     metrics::describe_counter!(
@@ -960,6 +969,112 @@ pub mod failover {
     /// spans from the first candidate attempt to the terminal event.
     pub fn record_latency(latency: std::time::Duration) {
         metrics::histogram!(super::FAILOVER_LATENCY_SECONDS).record(latency);
+    }
+}
+
+pub mod liveness_metrics {
+    //! Zero-output / stall wall-clock observability metrics.
+    //!
+    //! These histograms track the wall-clock time a session spent with zero
+    //! output before a stall/reap/failover decision was made. Labels are
+    //! intentionally bounded to keep Prometheus cardinality under control:
+    //!
+    //! - `timeout_source` — why the decision fired (`first_call_hang` or
+    //!   `idle_stall`); bounded, closed set.
+    //! - `failure_class` — the liveness failure class (e.g.
+    //!   `first_call_hang`, `idle_stall`); bounded by the set of failure
+    //!   classes the coordinator produces.
+    //! - `chain_exhausted` — `"true"` or `"false"`; O(1) cardinality.
+    //!
+    //! High-cardinality dimensions (`task_id`, `session_id`, `provider_id`,
+    //! `model_id`) belong in structured tracing fields emitted at the
+    //! decision site, not in Prometheus labels.
+
+    /// Stable timeout-source labels for the zero-output stall histogram.
+    pub const TIMEOUT_SOURCE_FIRST_CALL_HANG: &str = "first_call_hang";
+    pub const TIMEOUT_SOURCE_IDLE_STALL: &str = "idle_stall";
+
+    /// Stable failure-class labels.
+    pub const FAILURE_CLASS_FIRST_CALL_HANG: &str = "first_call_hang";
+    pub const FAILURE_CLASS_IDLE_STALL: &str = "idle_stall";
+
+    /// Record the wall-clock time a session spent with zero output before a
+    /// stall/kill/reap decision was made.
+    ///
+    /// `duration` is the elapsed wall-clock from session start (or last
+    /// activity) to the decision point. `timeout_source` is one of the
+    /// `TIMEOUT_SOURCE_*` constants above; `failure_class` is one of the
+    /// `FAILURE_CLASS_*` constants. `chain_exhausted` indicates whether the
+    /// failover chain was exhausted for this decision.
+    ///
+    /// This is intentionally synchronous and non-async so stall-decision
+    /// hot paths never need to hold any application lock across an await.
+    pub fn record_zero_output_stall(
+        duration: std::time::Duration,
+        timeout_source: &'static str,
+        failure_class: &'static str,
+        chain_exhausted: bool,
+    ) {
+        metrics::histogram!(
+            super::ZERO_OUTPUT_STALL_SECONDS,
+            "timeout_source" => timeout_source,
+            "failure_class" => failure_class,
+            "chain_exhausted" => if chain_exhausted { "true" } else { "false" },
+        )
+        .record(duration);
+    }
+}
+
+pub mod prompt_context_metrics {
+    //! Prompt-context assembly latency observability metrics.
+    //!
+    //! These histograms track the wall-clock time spent assembling the
+    //! prompt context for a worker/reviewer/planner session. Two levels:
+    //!
+    //! - **Total** — wall-clock for the entire `assemble_prompt_context`
+    //!   call (all phases, including concurrency).
+    //! - **Child span** — wall-clock for an individual child-span phase
+    //!   (activity_db, epic_context, knowledge_context, attempt_history,
+    //!   code_graph, reviewer_diff).
+    //!
+    //! The child-span metric carries a bounded `span` label whose value
+    //! is one of the stable span-name constants below. No other labels
+    //! are added — `task_id` is in the tracing span, not in the metric.
+
+    /// Stable child-span labels for the prompt-context child-span
+    /// latency histogram.
+    pub const SPAN_ACTIVITY_DB: &str = "activity_db";
+    pub const SPAN_EPIC_CONTEXT: &str = "epic_context";
+    pub const SPAN_KNOWLEDGE_CONTEXT: &str = "knowledge_context";
+    pub const SPAN_ATTEMPT_HISTORY: &str = "attempt_history";
+    pub const SPAN_CODE_GRAPH: &str = "code_graph";
+    pub const SPAN_REVIEWER_DIFF: &str = "reviewer_diff";
+
+    /// All bounded child-span labels — used for registration seeding and tests.
+    #[cfg(test)]
+    pub(crate) const ALL_SPANS: [&str; 6] = [
+        SPAN_ACTIVITY_DB,
+        SPAN_EPIC_CONTEXT,
+        SPAN_KNOWLEDGE_CONTEXT,
+        SPAN_ATTEMPT_HISTORY,
+        SPAN_CODE_GRAPH,
+        SPAN_REVIEWER_DIFF,
+    ];
+
+    /// Record the total wall-clock time for prompt-context assembly.
+    pub fn record_total(duration: std::time::Duration) {
+        metrics::histogram!(super::PROMPT_CONTEXT_LATENCY_SECONDS).record(duration);
+    }
+
+    /// Record the wall-clock time for an individual child-span phase.
+    ///
+    /// `span_name` MUST be one of the `SPAN_*` constants above.
+    pub fn record_child_span(span_name: &'static str, duration: std::time::Duration) {
+        metrics::histogram!(
+            super::PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS,
+            "span" => span_name,
+        )
+        .record(duration);
     }
 }
 
@@ -1265,7 +1380,6 @@ mod tests {
         assert_sync_unit(pr_poller::increment_merge_failure);
         assert_sync_unit(breaker::increment_trip);
         assert_sync_unit(|| zombie::increment_reap(zombie::KIND_STALL));
-        assert_sync_unit(lead::increment_escalation);
         assert_sync_unit(|| doctor::set_findings("sample.shared_resolver", 1));
         assert_sync_unit(|| doctor::set_run_duration_seconds("sample.shared_resolver", 0.25));
         assert_sync_unit(|| {
@@ -1529,21 +1643,19 @@ mod tests {
     }
 
     #[test]
-    fn zombie_and_lead_counters_render() {
+    fn zombie_and_jit_counters_render() {
         let _guard = test_guard();
         init().unwrap();
 
         zombie::increment_reap(zombie::KIND_STARTUP);
         zombie::increment_reap(zombie::KIND_PERIODIC);
         zombie::increment_reap(zombie::KIND_STALL);
-        lead::increment_escalation();
         jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_INJECTED);
 
         let rendered = render().unwrap();
         for kind in ZOMBIE_REAP_KINDS {
             assert!(rendered.contains(&format!("djinn_zombie_reaps_total{{kind=\"{kind}\"}}")));
         }
-        assert!(rendered.contains("djinn_lead_escalations_total"));
         assert!(rendered.contains("djinn_jit_pitfall_hints_total{outcome=\"injected\"}"));
     }
 
@@ -1972,6 +2084,224 @@ mod tests {
                     "failover metric must not carry high-cardinality label {forbidden}: {line}",
                 );
             }
+        }
+    }
+
+    // ─── zero-output / stall observability tests ──────────────────
+
+    #[test]
+    fn zero_output_stall_metric_facade_helpers_are_synchronous_unit_functions() {
+        let _guard = test_guard();
+
+        fn assert_sync_unit<F: FnOnce()>(f: F) {
+            f();
+        }
+
+        init().unwrap();
+        assert_sync_unit(|| {
+            liveness_metrics::record_zero_output_stall(
+                std::time::Duration::from_secs(120),
+                liveness_metrics::TIMEOUT_SOURCE_IDLE_STALL,
+                liveness_metrics::FAILURE_CLASS_IDLE_STALL,
+                false,
+            );
+        });
+        assert_sync_unit(|| {
+            liveness_metrics::record_zero_output_stall(
+                std::time::Duration::from_secs(300),
+                liveness_metrics::TIMEOUT_SOURCE_FIRST_CALL_HANG,
+                liveness_metrics::FAILURE_CLASS_FIRST_CALL_HANG,
+                true,
+            );
+        });
+    }
+
+    #[test]
+    fn zero_output_stall_histogram_renders_after_recording() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        liveness_metrics::record_zero_output_stall(
+            std::time::Duration::from_secs(120),
+            liveness_metrics::TIMEOUT_SOURCE_IDLE_STALL,
+            liveness_metrics::FAILURE_CLASS_IDLE_STALL,
+            false,
+        );
+        liveness_metrics::record_zero_output_stall(
+            std::time::Duration::from_secs(300),
+            liveness_metrics::TIMEOUT_SOURCE_FIRST_CALL_HANG,
+            liveness_metrics::FAILURE_CLASS_FIRST_CALL_HANG,
+            true,
+        );
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains(ZERO_OUTPUT_STALL_SECONDS),
+            "missing {ZERO_OUTPUT_STALL_SECONDS} in rendered output:\n{rendered}",
+        );
+        assert!(
+            rendered.contains(&format!("# HELP {ZERO_OUTPUT_STALL_SECONDS}")),
+            "missing HELP line for zero-output stall histogram:\n{rendered}",
+        );
+        assert!(
+            rendered.contains(&format!("# TYPE {ZERO_OUTPUT_STALL_SECONDS} summary")),
+            "missing TYPE line for zero-output stall histogram:\n{rendered}",
+        );
+    }
+
+    #[test]
+    fn zero_output_stall_labels_render_with_bounded_dimensions() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        liveness_metrics::record_zero_output_stall(
+            std::time::Duration::from_secs(90),
+            liveness_metrics::TIMEOUT_SOURCE_FIRST_CALL_HANG,
+            liveness_metrics::FAILURE_CLASS_FIRST_CALL_HANG,
+            false,
+        );
+        liveness_metrics::record_zero_output_stall(
+            std::time::Duration::from_secs(600),
+            liveness_metrics::TIMEOUT_SOURCE_IDLE_STALL,
+            liveness_metrics::FAILURE_CLASS_IDLE_STALL,
+            true,
+        );
+
+        let rendered = render().unwrap();
+        // Both label combos should be present.
+        assert!(
+            rendered.contains("timeout_source=\"first_call_hang\""),
+            "missing first_call_hang timeout_source label:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("failure_class=\"idle_stall\""),
+            "missing idle_stall failure_class label:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("chain_exhausted=\"true\""),
+            "missing chain_exhausted=true label:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("chain_exhausted=\"false\""),
+            "missing chain_exhausted=false label:\n{rendered}",
+        );
+        // No high-cardinality labels.
+        for forbidden in ["task_id=", "session_id=", "provider_id=", "model_id="] {
+            for line in rendered.lines() {
+                if !line.starts_with(ZERO_OUTPUT_STALL_SECONDS) {
+                    continue;
+                }
+                assert!(
+                    !line.contains(forbidden),
+                    "zero-output stall metric must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
+        }
+    }
+
+    // ─── prompt-context latency observability tests ───────────────
+
+    #[test]
+    fn prompt_context_latency_metric_facade_helpers_are_synchronous_unit_functions() {
+        let _guard = test_guard();
+
+        fn assert_sync_unit<F: FnOnce()>(f: F) {
+            f();
+        }
+
+        init().unwrap();
+        assert_sync_unit(|| {
+            prompt_context_metrics::record_total(std::time::Duration::from_millis(250));
+        });
+        for span in prompt_context_metrics::ALL_SPANS {
+            assert_sync_unit(|| {
+                prompt_context_metrics::record_child_span(
+                    span,
+                    std::time::Duration::from_millis(50),
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn prompt_context_total_latency_histogram_renders_after_recording() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        prompt_context_metrics::record_total(std::time::Duration::from_millis(500));
+        prompt_context_metrics::record_total(std::time::Duration::from_millis(1200));
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains(PROMPT_CONTEXT_LATENCY_SECONDS),
+            "missing {PROMPT_CONTEXT_LATENCY_SECONDS} in rendered output:\n{rendered}",
+        );
+        assert!(
+            rendered.contains(&format!("# HELP {PROMPT_CONTEXT_LATENCY_SECONDS}")),
+            "missing HELP line for prompt-context total latency:\n{rendered}",
+        );
+        assert!(
+            rendered.contains(&format!("# TYPE {PROMPT_CONTEXT_LATENCY_SECONDS} summary")),
+            "missing TYPE line for prompt-context total latency:\n{rendered}",
+        );
+    }
+
+    #[test]
+    fn prompt_context_child_span_latency_renders_span_label() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        prompt_context_metrics::record_child_span(
+            prompt_context_metrics::SPAN_ACTIVITY_DB,
+            std::time::Duration::from_millis(100),
+        );
+        prompt_context_metrics::record_child_span(
+            prompt_context_metrics::SPAN_CODE_GRAPH,
+            std::time::Duration::from_millis(300),
+        );
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains(PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS),
+            "missing {PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS} in rendered output:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("span=\"activity_db\""),
+            "missing activity_db span label:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("span=\"code_graph\""),
+            "missing code_graph span label:\n{rendered}",
+        );
+        // No high-cardinality labels.
+        for forbidden in ["task_id=", "session_id="] {
+            for line in rendered.lines() {
+                if !line.starts_with(PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS) {
+                    continue;
+                }
+                assert!(
+                    !line.contains(forbidden),
+                    "prompt-context child-span metric must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_context_all_span_labels_render_distinctly() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        for span in prompt_context_metrics::ALL_SPANS {
+            prompt_context_metrics::record_child_span(span, std::time::Duration::from_millis(50));
+        }
+
+        let rendered = render().unwrap();
+        for span in prompt_context_metrics::ALL_SPANS {
+            assert!(
+                rendered.contains(&format!("span=\"{span}\"")),
+                "missing span label {span} in rendered output:\n{rendered}",
+            );
         }
     }
 

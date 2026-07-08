@@ -458,9 +458,6 @@ pub fn tool_schemas_worker() -> Vec<serde_json::Value> {
         shared_schemas::tool_memory_edit(),
         mutation(),
     ));
-    tool_values.push(serialize_tool(tool_request_lead(), mutation()));
-    // request_planner is the intended planner-escalation path for workers;
-    // request_lead is retained during the drain window for stale sessions.
     tool_values.push(serialize_tool(tool_request_planner(), mutation()));
     tool_values.push(serialize_tool(
         crate::finalize_tools::tool_submit_work(),
