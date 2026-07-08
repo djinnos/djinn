@@ -90,16 +90,14 @@ pub async fn record_supervisor_rework_reopen(
     }
     // Best-effort: read the task's pr_url so the terminalized attempt keeps its
     // PR linkage when one exists (internal task-review rejects often have none).
-    let pr_url = match djinn_db::TaskRepository::new(
-        db.clone(),
-        djinn_core::events::EventBus::noop(),
-    )
-    .get(task_id)
-    .await
-    {
-        Ok(Some(t)) => t.pr_url,
-        _ => None,
-    };
+    let pr_url =
+        match djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .get(task_id)
+            .await
+        {
+            Ok(Some(t)) => t.pr_url,
+            _ => None,
+        };
     crate::dispatch::attempt_lifecycle::record_rework_reopen(
         db,
         task_id,
