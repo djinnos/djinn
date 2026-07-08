@@ -137,6 +137,7 @@ pub struct FillTaskAttemptParams<'a> {
     pub pr_url: Option<&'a str>,
     pub mirror_head_sha: Option<&'a str>,
     pub github_head_sha: Option<&'a str>,
+    pub github_publication_error: Option<&'a str>,
     pub summary: Option<&'a str>,
     pub summary_json: Option<&'a str>,
     pub log_tail: Option<&'a str>,
@@ -257,7 +258,7 @@ impl TaskAttemptRepository {
             TaskAttempt,
             r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                 outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
-                log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
+                log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
                 created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
              FROM task_attempts WHERE id = $1"#,
             id
@@ -272,7 +273,7 @@ impl TaskAttemptRepository {
             TaskAttempt,
             r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                 outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
-                log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
+                log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
                 created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
              FROM task_attempts WHERE dispatch_key = $1"#,
             dispatch_key
@@ -548,9 +549,10 @@ impl TaskAttemptRepository {
                    pr_url = COALESCE(pr_url, $4),
                    mirror_head_sha = COALESCE(mirror_head_sha, $5),
                    github_head_sha = COALESCE(github_head_sha, $6),
-                   summary = COALESCE(summary, $7),
-                   summary_json = COALESCE(summary_json, $8::text::jsonb),
-                   log_tail = COALESCE(log_tail, $9),
+                   github_publication_error = COALESCE(github_publication_error, $7),
+                   summary = COALESCE(summary, $8),
+                   summary_json = COALESCE(summary_json, $9::text::jsonb),
+                   log_tail = COALESCE(log_tail, $10),
                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                WHERE id = $1"#,
             params.id,
@@ -559,6 +561,7 @@ impl TaskAttemptRepository {
             params.pr_url,
             params.mirror_head_sha,
             params.github_head_sha,
+            params.github_publication_error,
             params.summary,
             params.summary_json,
             params.log_tail,
@@ -622,7 +625,7 @@ impl TaskAttemptRepository {
             TaskAttempt,
             r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                 outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
-                log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
+                log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
                 created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
              FROM task_attempts
              WHERE task_id = $1
@@ -646,7 +649,7 @@ impl TaskAttemptRepository {
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
-                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
+                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND role = $2 AND outcome IN ('pending', 'submitted')
@@ -662,7 +665,7 @@ impl TaskAttemptRepository {
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
-                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
+                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND outcome IN ('pending', 'submitted')
@@ -815,7 +818,7 @@ impl TaskAttemptRepository {
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
-                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
+                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND role = $2 AND outcome = 'submitted'
@@ -831,7 +834,7 @@ impl TaskAttemptRepository {
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
-                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
+                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND outcome = 'submitted'
@@ -857,7 +860,7 @@ impl TaskAttemptRepository {
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
-                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
+                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND role = $2 AND outcome = 'pending'
@@ -873,7 +876,7 @@ impl TaskAttemptRepository {
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
-                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
+                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND outcome = 'pending'
@@ -1012,7 +1015,7 @@ impl TaskAttemptRepository {
                 TaskAttemptHistoryRow,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary,
-                    checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
+                    checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
                     created_at AS "created_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND role = $2
@@ -1029,7 +1032,7 @@ impl TaskAttemptRepository {
                 TaskAttemptHistoryRow,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary,
-                    checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
+                    checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
                     created_at AS "created_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1
@@ -1073,7 +1076,7 @@ impl TaskAttemptRepository {
         let base = r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                 outcome, guard_decision, guard_reason, summary, summary_json::text,
                 log_tail, checkpoint_ref, submit_ref, pr_url,
-                mirror_head_sha, github_head_sha,
+                mirror_head_sha, github_head_sha, github_publication_error,
                 created_at, updated_at, submitted_at, terminal_at
              FROM task_attempts"#;
 
@@ -1466,6 +1469,7 @@ mod tests {
             pr_url: Some("pr-fill"),
             mirror_head_sha: Some("mirror-fill"),
             github_head_sha: Some("github-fill"),
+            github_publication_error: None,
             summary: Some("summary-fill"),
             summary_json: Some(r#"{"filled": true}"#),
             log_tail: Some("tail-fill"),
@@ -1681,6 +1685,7 @@ mod tests {
                 pr_url: None,
                 mirror_head_sha: None,
                 github_head_sha: None,
+                github_publication_error: None,
                 summary: None,
                 summary_json: None,
                 log_tail: Some(&big_tail),

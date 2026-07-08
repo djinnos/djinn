@@ -2590,6 +2590,10 @@ mod inflight_ledger_tests {
             ci_last_seen_at: None,
             ci_same_signature_count: 0,
             ci_last_remediation_base_sha: None,
+            ci_mirror_head_sha: None,
+            ci_github_head_sha: None,
+            ci_heads_diverged: None,
+            ci_head_observation_error: None,
             unresolved_blocker_count: 0,
         }
     }
@@ -4980,6 +4984,10 @@ mod failover_chain_tests {
             ci_last_seen_at: None,
             ci_same_signature_count: 0,
             ci_last_remediation_base_sha: None,
+            ci_mirror_head_sha: None,
+            ci_github_head_sha: None,
+            ci_heads_diverged: None,
+            ci_head_observation_error: None,
             unresolved_blocker_count: 0,
         };
 
@@ -5162,6 +5170,10 @@ mod failover_chain_tests {
             ci_last_seen_at: None,
             ci_same_signature_count: 0,
             ci_last_remediation_base_sha: None,
+            ci_mirror_head_sha: None,
+            ci_github_head_sha: None,
+            ci_heads_diverged: None,
+            ci_head_observation_error: None,
             unresolved_blocker_count: 0,
         };
 
@@ -5712,6 +5724,10 @@ mod failover_chain_tests {
             ci_last_seen_at: None,
             ci_same_signature_count: 0,
             ci_last_remediation_base_sha: None,
+            ci_mirror_head_sha: None,
+            ci_github_head_sha: None,
+            ci_heads_diverged: None,
+            ci_head_observation_error: None,
             unresolved_blocker_count: 0,
         };
 

@@ -404,6 +404,33 @@ pub struct Task {
     pub ci_same_signature_count: i64,
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub ci_last_remediation_base_sha: Option<String>,
+    // ── CI head reconciliation (m116) ──────────────────────────────────
+    //
+    // These fields are populated from the **latest task attempt** that
+    // carries mirror/GitHub head evidence, NOT from `task_pr_ci_snapshots`.
+    // They exist so operators and coordinators can see whether the internal
+    // mirror branch head matches the GitHub PR branch head.  `ci_head_sha`
+    // above (the CI snapshot head) is untouched — it remains the
+    // GitHub/PR CI snapshot head from `task_pr_ci_snapshots.head_sha`.
+    //
+    // The mirror branch head SHA recorded by the most recent task attempt,
+    // when known.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_mirror_head_sha: Option<String>,
+    // The GitHub PR branch head SHA recorded by the most recent task attempt,
+    // when known.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_github_head_sha: Option<String>,
+    // `Some(true)` only when both heads are known and differ; `Some(false)`
+    // only when both heads are known and equal; `None` when either side is
+    // unknown.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_heads_diverged: Option<bool>,
+    // Concise nullable error string from the most recent publication /
+    // branch-head observation failure, when one is recorded.  Absent
+    // (`None`) when no error is known.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_head_observation_error: Option<String>,
     /// Number of unresolved blocker tasks (blocking tasks not yet closed).
     /// Populated by list queries via subquery; defaults to 0 elsewhere.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
