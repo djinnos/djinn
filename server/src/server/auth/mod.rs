@@ -66,6 +66,7 @@ use crate::server::AppState;
 use djinn_db::{
     CreateUserAuthSession, NewOrgConfig, OrgConfigRepository, SessionAuthRepository, UserRepository,
 };
+use djinn_provider::github_app::ManifestConversion;
 use djinn_provider::github_app::jwt::mint_app_jwt_anyhow;
 use djinn_provider::github_server::{AppInstallation, GitHubServerClient};
 use djinn_provider::oauth::github_app_user::{self, GithubUserTokens};
@@ -75,6 +76,8 @@ const OAUTH_STATE_COOKIE: &str = "djinn_oauth_state";
 pub(super) const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8372";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30; // 30 days
 const STATE_COOKIE_TTL_SECS: i64 = 60 * 10; // 10 minutes
+/// CSRF state cookie for the GitHub App manifest creation flow.
+const MANIFEST_STATE_COOKIE: &str = "djinn_app_manifest_state";
 
 /// Cookie name for the short-lived setup session established after a
 /// successful boot-token exchange.
@@ -240,20 +243,23 @@ fn set_setup_cookie(headers: &mut HeaderMap, value: &str) {
 
 /// Extract and validate a `djinn_setup_session` cookie from the request
 /// headers. Returns `Some(session_token)` when the cookie is present and
-/// the token parses as non-expired.
-fn extract_setup_session(headers: &HeaderMap) -> Option<String> {
+/// matches the session token stored by a prior `exchange_boot_token` call.
+async fn extract_setup_session(headers: &HeaderMap, state: &AppState) -> Option<String> {
     let token = extract_cookie(headers, SETUP_SESSION_COOKIE)?;
-    // The setup session token is a base64 random value stamped with
-    // `rfc3339_in(SETUP_SESSION_TTL_SECS)` — we embedded the expiry as
-    // a separate field in the cookie value.  For simplicity and because
-    // the cookie `Max-Age` already handles TTL, we just verify presence.
-    // The cookie Max-Age=900 means the browser discards it after 15 min.
-    if token.is_empty() { None } else { Some(token) }
+    if token.is_empty() {
+        return None;
+    }
+    // Validate against the stored session token so an arbitrary cookie value
+    // is rejected.  The token was stored by `exchange_boot_token`; it remains
+    // valid until cleared after credential persistence.
+    state
+        .validate_setup_session_token(&token)
+        .await
+        .then_some(token)
 }
 
 /// Clear the setup session cookie.
-/// Used by the follow-up manifest-exchange task after credential persistence.
-#[allow(dead_code)]
+/// Used after credential persistence to clear the setup session.
 fn clear_setup_cookie(headers: &mut HeaderMap) {
     let secure = if cookie_secure() { "; Secure" } else { "" };
     let cookie = format!(
@@ -1236,8 +1242,8 @@ struct CreateAppQuery {
 ///
 /// 2. **Session-gated** (no query param, valid `djinn_setup_session` cookie):
 ///    the caller has already completed the token exchange. This path will
-///    render the manifest creation form — *placeholder for the follow-up
-///    manifest-exchange task*.
+///    render an auto-submitting HTML form that POSTs the manifest JSON to
+///    GitHub's App creation page, minting a CSRF state cookie along the way.
 async fn create_app(
     State(state): State<AppState>,
     Query(q): Query<CreateAppQuery>,
@@ -1275,7 +1281,7 @@ async fn create_app(
     }
 
     // Session-gated mode: require a valid setup session cookie.
-    if extract_setup_session(&headers).is_none() {
+    if extract_setup_session(&headers, &state).await.is_none() {
         return (
             StatusCode::UNAUTHORIZED,
             "setup session required — provide ?setup_token=... for first access",
@@ -1283,29 +1289,70 @@ async fn create_app(
             .into_response();
     }
 
-    // Valid setup session — proceed with manifest creation.
-    // Placeholder: the manifest exchange is implemented by the follow-up task.
-    (
-        StatusCode::OK,
-        "self-setup: manifest creation form placeholder — \
-         the manifest exchange will be implemented by the next task",
-    )
-        .into_response()
+    // Build the manifest and render an auto-submitting HTML form that
+    // navigates to GitHub's App creation page. The CSRF state cookie
+    // protects the manifest-code callback below.
+    let public = public_url();
+    let manifest = build_manifest_json(&public);
+    let manifest_json = manifest.to_string();
+    let csrf = random_token_b64();
+    let manifest_escaped = html_attr_escape(&manifest_json);
+    let csrf_escaped = html_attr_escape(&csrf);
+
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Create Djinn GitHub App</title></head>\
+         <body><p>Redirecting to GitHub to create the Djinn App…</p>\
+         <form id=\"f\" method=\"post\" action=\"https://github.com/settings/apps/new?state={csrf}\">\
+         <input type=\"hidden\" name=\"manifest\" value=\"{manifest}\" />\
+         <noscript><button type=\"submit\">Continue to GitHub</button></noscript>\
+         </form>\
+         <script>document.getElementById('f').submit();</script>\
+         </body></html>",
+        csrf = csrf_escaped,
+        manifest = manifest_escaped,
+    );
+
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    set_cookie(
+        &mut resp_headers,
+        MANIFEST_STATE_COOKIE,
+        &csrf,
+        STATE_COOKIE_TTL_SECS,
+    );
+    (StatusCode::OK, resp_headers, html).into_response()
 }
 
 /// `GET /auth/github/app-manifest-callback` — handles the callback from
 /// GitHub after the user completes the manifest creation flow.
 ///
-/// Requires a valid `djinn_setup_session` cookie. The actual manifest-code
-/// exchange and credential persistence are implemented by the follow-up task.
-async fn app_manifest_callback(State(state): State<AppState>, headers: HeaderMap) -> Response {
+/// Validates the CSRF manifest state cookie, exchanges the manifest code
+/// via the GitHub API, persists the returned credentials under the
+/// encrypted boundary, hot-reloads the active App config, clears setup
+/// cookies/state, and redirects to the new App's install URL.
+///
+/// Requires a valid `djinn_setup_session` cookie.
+#[derive(Deserialize)]
+struct ManifestCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+}
+
+async fn app_manifest_callback(
+    State(state): State<AppState>,
+    Query(q): Query<ManifestCallbackQuery>,
+    headers: HeaderMap,
+) -> Response {
     // Gate: 404 when self-setup is disabled or usable credentials exist.
     if let Some(resp) = setup_route_guard(&state).await {
         return resp;
     }
 
     // Require a valid setup session.
-    if extract_setup_session(&headers).is_none() {
+    if extract_setup_session(&headers, &state).await.is_none() {
         return (
             StatusCode::UNAUTHORIZED,
             "setup session required for manifest callback",
@@ -1313,19 +1360,196 @@ async fn app_manifest_callback(State(state): State<AppState>, headers: HeaderMap
             .into_response();
     }
 
-    // Placeholder: the manifest-code exchange is implemented by the follow-up task.
-    (
-        StatusCode::OK,
-        "self-setup: manifest callback placeholder — \
-         the manifest-code exchange will be implemented by the next task",
-    )
-        .into_response()
+    // Extract the manifest code and CSRF state from the callback query.
+    let (code, state_param) = match (q.code, q.state) {
+        (Some(c), Some(s)) if !c.is_empty() && !s.is_empty() => (c, s),
+        _ => return (StatusCode::BAD_REQUEST, "missing code or state").into_response(),
+    };
+
+    // Validate the manifest CSRF state cookie against the query state.
+    let Some(cookie_state) = extract_cookie(&headers, MANIFEST_STATE_COOKIE) else {
+        return (StatusCode::BAD_REQUEST, "missing manifest state cookie").into_response();
+    };
+    if !constant_time_eq(cookie_state.as_bytes(), state_param.as_bytes()) {
+        return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
+    }
+
+    // Exchange the manifest code for the App credentials.
+    let conversion = match exchange_manifest_code(&code).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "manifest callback: exchange failed");
+            // Preserve retry ability: clear the manifest state cookie so
+            // the user can restart the setup flow, but do NOT clear the
+            // setup session cookie — they can retry from the create-app page.
+            let mut resp_headers = HeaderMap::new();
+            clear_cookie(&mut resp_headers, MANIFEST_STATE_COOKIE);
+            return (
+                StatusCode::BAD_GATEWAY,
+                resp_headers,
+                "manifest exchange failed — try again",
+            )
+                .into_response();
+        }
+    };
+
+    // Build the AppConfig from the manifest conversion response.
+    let public = public_url();
+    let cfg = djinn_provider::github_app::AppConfig {
+        app_id: conversion.id,
+        slug: conversion.slug,
+        client_id: conversion.client_id,
+        client_secret: conversion.client_secret,
+        pem: conversion.pem,
+        webhook_secret: conversion.webhook_secret.unwrap_or_default(),
+        public_url: public.clone(),
+    };
+
+    // Persist credentials under the encrypted boundary and hot-reload.
+    match state.persist_and_reload_app_config(&cfg).await {
+        Ok(_state) => {
+            tracing::info!(
+                app_id = cfg.app_id,
+                slug = %cfg.slug,
+                "manifest callback: credentials persisted and hot-reloaded"
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "manifest callback: persistence failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    state.clear_setup_session_token().await;
+
+    // Build the install URL for the newly created App.
+    let install_url = cfg
+        .install_url()
+        .unwrap_or_else(|| format!("{}/", web_url().trim_end_matches('/')));
+
+    // Clear all setup cookies/state: manifest CSRF + setup session.
+    let mut resp_headers = HeaderMap::new();
+    clear_cookie(&mut resp_headers, MANIFEST_STATE_COOKIE);
+    clear_setup_cookie(&mut resp_headers);
+    resp_headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&install_url).unwrap_or_else(|_| HeaderValue::from_static("/")),
+    );
+    (StatusCode::FOUND, resp_headers).into_response()
 }
+
+// ─── Manifest helpers ────────────────────────────────────────────────────────
+
+/// Build the manifest JSON object for a given public URL.
+///
+/// Pure function so tests can pin its shape. Requirements:
+/// - App name prefix is `djinn-`
+/// - `request_oauth_on_install: true`
+/// - webhook inactive
+/// - permissions exactly `contents: write` and `pull_requests: write`
+pub(crate) fn build_manifest_json(public_url: &str) -> serde_json::Value {
+    // GitHub automatically grants `metadata: read` as a base permission; we
+    // only list the permissions we explicitly need.
+    let permissions = serde_json::json!({
+        "contents": "write",
+        "pull_requests": "write",
+    });
+    serde_json::json!({
+        "name": format!("djinn-{}", url_host(public_url).unwrap_or_else(|| "local".to_string())),
+        "url": public_url,
+        "hook_attributes": {
+            "url": format!("{}/webhooks/github", public_url),
+            "active": false,
+        },
+        "redirect_url": format!("{}/auth/github/app-manifest-callback", public_url),
+        "callback_urls": [format!("{}/auth/github/callback", public_url)],
+        "request_oauth_on_install": true,
+        "public": false,
+        "default_permissions": permissions,
+    })
+}
+
+/// Lightweight URL host parser: strip scheme, take up to first `/` or `:`.
+fn url_host(s: &str) -> Option<String> {
+    let after_scheme = s.split("://").nth(1).unwrap_or(s);
+    let host_with_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = host_with_port.split(':').next().unwrap_or(host_with_port);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+/// Escape characters that are unsafe inside HTML attribute values.
+fn html_attr_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Exchange a manifest code for App credentials via the GitHub API.
+///
+/// In test builds, the result can be overridden via `EXCHANGE_MANIFEST_RESULT_OVERRIDE`.
+async fn exchange_manifest_code(code: &str) -> Result<ManifestConversion, String> {
+    // Test override: allow tests to simulate success or failure without
+    // making a real HTTP call to the GitHub API.
+    #[cfg(test)]
+    if let Some(override_result) = EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap().clone() {
+        return override_result;
+    }
+
+    djinn_provider::github_app::exchange_manifest_code(code)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Test-only override for `exchange_manifest_code`. When set to `Some(...)`,
+/// the exchange function returns the overridden result instead of calling the
+/// GitHub API. This allows tests to simulate exchange success/failure without
+/// network access.
+#[cfg(test)]
+static EXCHANGE_MANIFEST_RESULT_OVERRIDE: std::sync::Mutex<
+    Option<Result<ManifestConversion, String>>,
+> = std::sync::Mutex::new(None);
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// Register a known setup session token in `state` and return it.
+    /// Callers can then use this value as the `djinn_setup_session` cookie
+    /// so that `extract_setup_session` validation succeeds.
+    async fn register_valid_session(state: &AppState) -> String {
+        let token = "test-session-token-42".to_string();
+        state
+            .set_setup_session_token_for_tests(Some(token.clone()))
+            .await;
+        token
+    }
+
+    /// Build headers with a valid `djinn_setup_session` cookie for the given
+    /// session token value.
+    fn headers_with_session(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SETUP_SESSION_COOKIE}={token}")).unwrap(),
+        );
+        headers
+    }
 
     #[test]
     fn extract_cookie_handles_multiple_pairs() {
@@ -1593,7 +1817,15 @@ mod tests {
         let _lock = with_self_setup_override(Some(false)).await;
         let state = test_helpers::test_app_state_in_memory().await;
         let headers = HeaderMap::new();
-        let resp = app_manifest_callback(State(state), headers).await;
+        let resp = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: None,
+                state: None,
+            }),
+            headers,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
@@ -1778,40 +2010,37 @@ mod tests {
         use crate::test_helpers;
         let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_str(&format!("{}=valid-session-token", SETUP_SESSION_COOKIE))
-                .unwrap(),
-        );
+        let session = register_valid_session(&state).await;
 
         let resp = create_app(
             State(state),
             Query(CreateAppQuery { setup_token: None }),
-            headers,
+            headers_with_session(&session),
         )
         .await;
 
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// `app_manifest_callback` with a valid setup session returns 200.
+    /// `app_manifest_callback` with a valid setup session but no code/state
+    /// returns 400 (missing code or state).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn manifest_callback_with_valid_session_returns_200() {
+    async fn manifest_callback_with_valid_session_but_no_code_returns_400() {
         use crate::test_helpers;
         let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_str(&format!("{}=valid-session-token", SETUP_SESSION_COOKIE))
-                .unwrap(),
-        );
-
-        let resp = app_manifest_callback(State(state), headers).await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: None,
+                state: None,
+            }),
+            headers_with_session(&session),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     /// `app_manifest_callback` without a session returns 401.
@@ -1821,7 +2050,15 @@ mod tests {
         let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
         let headers = HeaderMap::new();
-        let resp = app_manifest_callback(State(state), headers).await;
+        let resp = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: None,
+                state: None,
+            }),
+            headers,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -1876,5 +2113,482 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ─── Manifest JSON shape tests ──────────────────────────────────────────
+
+    #[test]
+    fn manifest_json_has_expected_shape() {
+        let manifest = build_manifest_json("https://djinn.example.com");
+        // App name prefix is `djinn-`
+        assert_eq!(manifest["name"], "djinn-djinn.example.com");
+        assert_eq!(manifest["url"], "https://djinn.example.com");
+        assert_eq!(
+            manifest["redirect_url"],
+            "https://djinn.example.com/auth/github/app-manifest-callback"
+        );
+        assert_eq!(
+            manifest["callback_urls"][0],
+            "https://djinn.example.com/auth/github/callback"
+        );
+        assert_eq!(
+            manifest["hook_attributes"]["url"],
+            "https://djinn.example.com/webhooks/github"
+        );
+        assert_eq!(manifest["hook_attributes"]["active"], false);
+        assert_eq!(manifest["request_oauth_on_install"], true);
+        assert_eq!(manifest["public"], false);
+        // Permissions: exactly contents:write, pull_requests:write
+        // (metadata:read is granted by GitHub automatically, not listed).
+        assert_eq!(manifest["default_permissions"]["contents"], "write");
+        assert_eq!(manifest["default_permissions"]["pull_requests"], "write");
+        assert!(manifest["default_permissions"].get("metadata").is_none());
+        // No extra permissions beyond the required set.
+        let perms = manifest["default_permissions"].as_object().unwrap();
+        assert_eq!(perms.len(), 2, "only contents, pull_requests");
+        // Round-trips as valid JSON.
+        let s = manifest.to_string();
+        let _back: serde_json::Value = serde_json::from_str(&s).unwrap();
+    }
+
+    #[test]
+    fn manifest_json_name_uses_djinn_prefix() {
+        let manifest = build_manifest_json("https://mycompany.example.com");
+        let name = manifest["name"].as_str().unwrap();
+        assert!(
+            name.starts_with("djinn-"),
+            "name must start with djinn-, got: {name}"
+        );
+    }
+
+    #[test]
+    fn manifest_json_no_extra_events() {
+        let manifest = build_manifest_json("https://djinn.example.com");
+        // No default_events field — the design requires only permissions.
+        assert!(
+            manifest.get("default_events").is_none(),
+            "manifest should not include default_events"
+        );
+    }
+
+    #[test]
+    fn manifest_url_host_handles_localhost_fallback() {
+        assert_eq!(
+            url_host("http://127.0.0.1:8372").as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            url_host("https://djinn.example.com/path").as_deref(),
+            Some("djinn.example.com")
+        );
+        assert_eq!(url_host("not a url").as_deref(), Some("not a url"));
+    }
+
+    #[test]
+    fn html_attr_escape_neutralises_quotes_and_brackets() {
+        let raw = "<\"&'>";
+        assert_eq!(html_attr_escape(raw), "&lt;&quot;&amp;&#39;&gt;");
+    }
+
+    // ─── Manifest state mismatch tests ──────────────────────────────────────
+
+    /// `app_manifest_callback` with a valid setup session but missing manifest
+    /// state cookie returns 400.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_missing_state_cookie_returns_400() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+
+        let resp = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: Some("some-code".into()),
+                state: Some("some-state".into()),
+            }),
+            headers_with_session(&session),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `app_manifest_callback` with mismatched manifest state cookie returns 400.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_state_mismatch_returns_400() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{}=cookie-state", MANIFEST_STATE_COOKIE)).unwrap(),
+        );
+
+        let resp = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: Some("some-code".into()),
+                state: Some("different-state".into()),
+            }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ─── Setup gate + credential presence tests ─────────────────────────────
+
+    /// After credentials are persisted, `create_app` returns 404 because
+    /// the gate detects usable credentials.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_app_returns_404_after_credentials_persisted() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+
+        // Initially setup is available (no credentials).
+        let headers = headers_with_session(&session);
+        let resp = create_app(
+            State(state.clone()),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "should proceed before credentials"
+        );
+
+        // Simulate credential persistence (hot-reload).
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // Now setup should return 404.
+        let headers2 = HeaderMap::new();
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers2,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "should be 404 after credentials"
+        );
+    }
+
+    /// After credentials are persisted, `app_manifest_callback` returns 404.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_returns_404_after_credentials_persisted() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let headers = HeaderMap::new();
+        let resp = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: Some("code".into()),
+                state: Some("state".into()),
+            }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ─── Invalid setup session rejection ──────────────────────────────────
+
+    /// An arbitrary (non-registered) setup session cookie is rejected even
+    /// when self-setup is enabled and no credentials exist.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_app_rejects_invalid_setup_session() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        // Store a *different* token in state so validation fails.
+        state
+            .set_setup_session_token_for_tests(Some("the-real-token".into()))
+            .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SETUP_SESSION_COOKIE}=forged-token")).unwrap(),
+        );
+
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "arbitrary session cookie must be rejected"
+        );
+    }
+
+    /// `app_manifest_callback` rejects an invalid setup session cookie even
+    /// when a valid manifest state cookie and code/state pair are present.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_rejects_invalid_setup_session() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        state
+            .set_setup_session_token_for_tests(Some("the-real-token".into()))
+            .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!(
+                "{SETUP_SESSION_COOKIE}=forged-token; {MANIFEST_STATE_COOKIE}=csrf"
+            ))
+            .unwrap(),
+        );
+
+        let resp = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: Some("code".into()),
+                state: Some("csrf".into()),
+            }),
+            headers,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ─── Exchange failure preserves retry ability ─────────────────────────
+
+    /// When `exchange_manifest_code` fails after a valid CSRF state check,
+    /// the handler returns 502, clears the manifest state cookie, but
+    /// preserves the setup session cookie so the user can retry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_exchange_failure_preserves_setup_session() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() =
+            Some(Err("simulated GitHub API failure".into()));
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        let csrf = "test-csrf-token".to_string();
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("expired-code".into()),
+                state: Some(csrf),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "exchange failure should return 502"
+        );
+
+        // Manifest state cookie should be cleared (allows re-initiating the flow).
+        // Setup session cookie should NOT be cleared (allows retry).
+        let set_cookies: Vec<_> = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap_or("").to_string())
+            .collect();
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.starts_with(MANIFEST_STATE_COOKIE) && c.contains("Max-Age=0")),
+            "manifest state cookie must be cleared on exchange failure: {set_cookies:?}"
+        );
+        // The setup session cookie should NOT appear — it was not cleared.
+        assert!(
+            !set_cookies
+                .iter()
+                .any(|c| c.starts_with(SETUP_SESSION_COOKIE) && c.contains("Max-Age=0")),
+            "setup session cookie must NOT be cleared on exchange failure: {set_cookies:?}"
+        );
+
+        // Clean up the override.
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    // ─── Successful persistence/hot-reload + cookie clearing ──────────────
+
+    /// On a successful manifest exchange the callback persists the returned
+    /// credentials, hot-reloads the active App config, clears both the
+    /// manifest state and setup session cookies, and redirects to the new
+    /// App's install URL.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_success_persists_hot_reloads_and_clears_cookies() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        // Bypass real DB persistence — this test exercises the full callback
+        // flow (exchange → build AppConfig → persist → hot-reload → cookies)
+        // without requiring a running Postgres instance.
+        state.set_test_bypass_persist(true).await;
+        let csrf = "test-csrf-token".to_string();
+
+        // Inject a mock exchange result.
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 42,
+            slug: "djinn-test".into(),
+            client_id: "Iv1.test-client".into(),
+            client_secret: "test-secret".into(),
+            webhook_secret: Some("test-webhook-secret".into()),
+            pem: "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----".into(),
+        }));
+
+        // Before the callback, no credentials should exist.
+        assert!(
+            state.app_config().await.is_none(),
+            "no credentials before callback"
+        );
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("valid-manifest-code".into()),
+                state: Some(csrf),
+            }),
+            headers,
+        )
+        .await;
+
+        // Must redirect to the install URL.
+        assert_eq!(
+            resp.status(),
+            StatusCode::FOUND,
+            "successful callback must redirect"
+        );
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            location.contains("github.com/apps/djinn-test/installations/new"),
+            "must redirect to the new App install URL, got: {location}"
+        );
+        // No setup token or session nonce leaks into the redirect.
+        assert!(
+            !location.contains("setup_token"),
+            "setup_token must not appear in Location: {location}"
+        );
+
+        // Both cookies must be cleared.
+        let set_cookies: Vec<_> = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap_or("").to_string())
+            .collect();
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.starts_with(MANIFEST_STATE_COOKIE) && c.contains("Max-Age=0")),
+            "manifest state cookie must be cleared after success: {set_cookies:?}"
+        );
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.starts_with(SETUP_SESSION_COOKIE) && c.contains("Max-Age=0")),
+            "setup session cookie must be cleared after success: {set_cookies:?}"
+        );
+
+        // Credentials must have been persisted and hot-reloaded.
+        let cfg = state.app_config().await;
+        assert!(
+            cfg.is_some(),
+            "credentials must be present after persistence"
+        );
+        let cfg = cfg.unwrap();
+        assert_eq!(cfg.app_id, 42);
+        assert_eq!(cfg.slug, "djinn-test");
+        assert_eq!(cfg.client_id, "Iv1.test-client");
+
+        assert!(
+            !state.validate_setup_session_token(&session).await,
+            "old setup session token must be invalidated after successful credential persistence"
+        );
+
+        // After credentials are loaded, setup routes must return 404.
+        let resp = create_app(
+            State(state.clone()),
+            Query(CreateAppQuery { setup_token: None }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "setup routes must be 404 after credentials persisted"
+        );
+
+        // Setup session is also invalidated — the stored token was cleared
+        // after persistence, so the old cookie no longer validates.
+        let headers = headers_with_session(&session);
+        let resp = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            headers,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "routes are 404 due to credentials, regardless of session"
+        );
+
+        // Clean up the override.
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
     }
 }
