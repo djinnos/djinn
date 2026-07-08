@@ -17,7 +17,7 @@ use super::test_support::{
 
 async fn lead_prompt_context(db: Database, task: &Task) -> PromptContext {
     let role = LeadRole;
-    assemble_for_role(db, task, &role, None, "", None, &[], &[]).await
+    assemble_for_role(db, task, &role, None, "", &[], &[]).await
 }
 
 #[tokio::test]
@@ -59,7 +59,7 @@ async fn conflict_context_formats_files_and_preserves_prompt_fields() {
         merge_target: "main".to_string(),
     };
     let role = LeadRole;
-    let ctx = assemble_for_role(db, &task, &role, Some(&conflict), "", None, &[], &[]).await;
+    let ctx = assemble_for_role(db, &task, &role, Some(&conflict), "", &[], &[]).await;
     assert_contains_all(
         ctx.conflict_files
             .as_deref()
@@ -91,7 +91,6 @@ async fn prompt_sections_append_in_canonical_order() {
         &role,
         None,
         "Custom extension text.",
-        None,
         &skills,
         &sources,
     )
@@ -170,13 +169,12 @@ fn format_activity_text_absence_and_comment_counts() {
 fn apply_prompt_sections_cases() {
     let empty_instructions = std::collections::BTreeMap::new();
     assert_eq!(
-        apply_prompt_sections("Base prompt.", "", None, &[], &[], &empty_instructions),
+        apply_prompt_sections("Base prompt.", "", &[], &[], &empty_instructions),
         "Base prompt."
     );
     let result = apply_prompt_sections(
         "Base system prompt content.",
         "Custom extension text.",
-        None,
         &[skill("test-skill", "A test skill", "Skill body.", false)],
         &[source("sibling-repo", "Sibling")],
         &empty_instructions,
@@ -238,7 +236,7 @@ async fn epic_context_not_loaded_when_role_does_not_need_it() {
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
     assert!(load_epic_context(&task, false, &app_state).await.is_none());
     let role = NoEpicRole;
-    let ctx = assemble_for_role(db, &task, &role, None, "", None, &[], &[]).await;
+    let ctx = assemble_for_role(db, &task, &role, None, "", &[], &[]).await;
     assert!(ctx.epic_context.is_none());
     assert!(ctx.knowledge_context.is_none());
 }
@@ -763,7 +761,6 @@ async fn concurrent_assembly_is_deterministic() {
         merge_validation_ctx: None,
         prompt_setup_commands: None,
         system_prompt_extensions: "",
-        learned_prompt: None,
         resolved_skills: &[],
         app_state: &app_state,
         read_sources: &[],
@@ -783,7 +780,6 @@ async fn concurrent_assembly_is_deterministic() {
         merge_validation_ctx: None,
         prompt_setup_commands: None,
         system_prompt_extensions: "",
-        learned_prompt: None,
         resolved_skills: &[],
         app_state: &app_state,
         read_sources: &[],
@@ -811,7 +807,7 @@ async fn concurrent_assembly_empty_contexts_yield_none_fields() {
     // Create a standalone task with no epic (epic_context will be empty)
     let task = create_project_epic_task(&db, &events, "Empty epic", "Empty task").await;
     let role = WorkerRole;
-    let ctx = assemble_for_role(db, &task, &role, None, "", None, &[], &[]).await;
+    let ctx = assemble_for_role(db, &task, &role, None, "", &[], &[]).await;
 
     // Activity/attempt fields should be None (no activity entries seeded)
     assert!(ctx.activity_text.is_none(), "no activity → None");
@@ -1104,7 +1100,6 @@ async fn ci_blocking_appears_before_resume_context_in_prompt() {
         merge_validation_ctx: None,
         prompt_setup_commands: None,
         system_prompt_extensions: "",
-        learned_prompt: None,
         resolved_skills: &[],
         app_state: &app_state,
         read_sources: &[],
@@ -1141,7 +1136,7 @@ async fn activity_section_appears_after_knowledge_and_code_graph() {
     let task =
         create_project_epic_task(&db, &events, "Activity order epic", "Activity order task").await;
     let role = LeadRole;
-    let ctx = assemble_for_role(db, &task, &role, None, "", None, &[], &[]).await;
+    let ctx = assemble_for_role(db, &task, &role, None, "", &[], &[]).await;
     let prompt = &ctx.system_prompt;
 
     // The template ordering is: Epic Context → Relevant Knowledge → Code Graph → Activity
@@ -1250,7 +1245,6 @@ async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
         merge_validation_ctx: None,
         prompt_setup_commands: None,
         system_prompt_extensions: "Custom extension.",
-        learned_prompt: None,
         resolved_skills: &skills,
         app_state: &app_state,
         read_sources: &sources,
@@ -1327,7 +1321,7 @@ mod prompt_context_instrumentation_tests {
 
         // Invoke the real assembly path — this exercises the full
         // phase-0/1/2/3 pipeline including concurrent children.
-        let ctx = assemble_for_role(db, &task, &role, None, "", None, &[], &[]).await;
+        let ctx = assemble_for_role(db, &task, &role, None, "", &[], &[]).await;
 
         // Re-acquire guard for metric assertions (no await after this).
         let _guard = telemetry_guard();

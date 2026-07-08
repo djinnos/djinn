@@ -692,7 +692,7 @@ pub(crate) async fn execute_stage(
     let provider_override = callbacks.provider_override.clone();
 
     // ── Role-level overrides: specialist (Worker stage) or project default ────
-    // Picks up `system_prompt_extensions`, `learned_prompt`, role-level MCP
+    // Picks up `system_prompt_extensions`, role-level MCP
     // server + skill lists, and swaps `runtime_role`
     // when a Worker stage's `task.agent_type` names a specialist whose
     // `base_role` differs from the injected RoleKind.  Non-Worker stages
@@ -700,7 +700,6 @@ pub(crate) async fn execute_stage(
     let ResolvedRoleOverrides {
         runtime_role,
         system_prompt_extensions,
-        learned_prompt,
         mcp_servers: role_mcp_servers,
         skills: role_skills,
         model_preference: _role_model_preference,
@@ -919,7 +918,6 @@ pub(crate) async fn execute_stage(
         merge_validation_ctx: None,
         prompt_setup_commands,
         system_prompt_extensions: &system_prompt_extensions,
-        learned_prompt: learned_prompt.as_deref(),
         resolved_skills: &resolved_skills,
         app_state: agent_context,
         read_sources: &read_sources,

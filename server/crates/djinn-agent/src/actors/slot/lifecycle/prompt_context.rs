@@ -51,7 +51,7 @@ pub(crate) struct PromptContext {
     pub arbiter_directive: Option<String>,
     /// Base system prompt rendered from the role template + `TaskContext`.
     pub base_system_prompt: String,
-    /// Base prompt with role-level extensions + `learned_prompt` appended.
+    /// Base prompt with role-level `system_prompt_extensions` appended.
     pub system_prompt_with_extensions: String,
     /// Final prompt: extensions + skills. Pushed as the system message.
     pub system_prompt: String,
@@ -102,7 +102,6 @@ pub(crate) struct PromptContextInputs<'a> {
     pub merge_validation_ctx: Option<String>,
     pub prompt_setup_commands: Option<String>,
     pub system_prompt_extensions: &'a str,
-    pub learned_prompt: Option<&'a str>,
     pub resolved_skills: &'a [ResolvedSkill],
     pub app_state: &'a AgentContext,
     /// Read-only multi-repo sources for the task.
@@ -197,13 +196,11 @@ fn format_mcp_instructions(
 fn apply_prompt_sections(
     base_system_prompt: &str,
     system_prompt_extensions: &str,
-    learned_prompt: Option<&str>,
     resolved_skills: &[ResolvedSkill],
     read_sources: &[ReadSourceInfo],
     mcp_server_instructions: &std::collections::BTreeMap<String, String>,
 ) -> String {
-    let with_extensions =
-        apply_role_extensions(base_system_prompt, system_prompt_extensions, learned_prompt);
+    let with_extensions = apply_role_extensions(base_system_prompt, system_prompt_extensions);
     let with_skills = apply_skills(&with_extensions, resolved_skills);
     let with_read_sources = append_read_sources_prompt(&with_skills, read_sources);
     match format_mcp_instructions(mcp_server_instructions) {
@@ -432,7 +429,6 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         merge_validation_ctx,
         prompt_setup_commands,
         system_prompt_extensions,
-        learned_prompt,
         resolved_skills,
         app_state,
         read_sources,
@@ -667,15 +663,11 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             arbiter_directive: arbiter_directive.map(str::to_string),
         },
     );
-    let system_prompt_with_extensions = apply_role_extensions(
-        &base_system_prompt,
-        system_prompt_extensions,
-        learned_prompt,
-    );
+    let system_prompt_with_extensions =
+        apply_role_extensions(&base_system_prompt, system_prompt_extensions);
     let system_prompt = apply_prompt_sections(
         &base_system_prompt,
         system_prompt_extensions,
-        learned_prompt,
         resolved_skills,
         read_sources,
         mcp_server_instructions,

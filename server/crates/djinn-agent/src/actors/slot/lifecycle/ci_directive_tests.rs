@@ -113,7 +113,7 @@ async fn prompt_context_has_one_promoted_structured_ci_directive_per_role() {
         let db = Database::ephemeral().await.expect("create ephemeral db");
         let events = EventBus::noop();
         let task = task_with_structured_red_ci_and_audit_activity(&db, &events).await;
-        let ctx = assemble_for_role(db, &task, role, None, "", None, &[], &[]).await;
+        let ctx = assemble_for_role(db, &task, role, None, "", &[], &[]).await;
         assert_single_structured_ci_directive(&ctx.system_prompt);
         let activity = ctx
             .activity_text
