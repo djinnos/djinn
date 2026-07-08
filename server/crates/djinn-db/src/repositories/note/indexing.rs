@@ -104,6 +104,40 @@ pub(super) async fn resolve_links_for_note(
 }
 
 impl NoteRepository {
+    /// Upsert a resolved explicit wikilink edge between two notes.
+    ///
+    /// Most callers should let note creation/update re-index wikilinks from
+    /// note content. This small repository-layer escape hatch exists for
+    /// control-plane end-to-end fixtures that need a deterministic resolved
+    /// wikilink without issuing raw SQL outside `djinn-db`.
+    pub async fn upsert_wikilink_edge(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        target_raw: &str,
+        display_text: Option<&str>,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO note_links (id, source_id, target_id, target_raw, display_text)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (source_id, target_raw)
+             DO UPDATE SET target_id = EXCLUDED.target_id,
+                           display_text = EXCLUDED.display_text",
+        )
+        .bind(id)
+        .bind(source_id)
+        .bind(target_id)
+        .bind(target_raw)
+        .bind(display_text)
+        .execute(self.db.pool())
+        .await?;
+
+        Ok(())
+    }
+
     /// Load the set of explicit wikilink edges (`note_links` with resolved
     /// `target_id`) that connect any pair of notes within the given set.
     ///
