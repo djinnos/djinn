@@ -194,29 +194,32 @@ async fn embedding_related_creates_machine_connected_orphan() {
 
     let health = repo.health(&project.id).await.unwrap();
 
-    // MachineRescued has no inbound wikilink or authored association → still
-    // an authored orphan (machine edges don't hide debt).
+    // Hub, MachineRescued, and Isolated all have no inbound wikilink or
+    // authored association → all three are authored orphans (machine edges
+    // don't hide debt).
     assert_eq!(
-        health.authored_orphan_count, 2,
-        "MachineRescued and Isolated are both authored orphans"
+        health.authored_orphan_count, 3,
+        "Hub, MachineRescued, and Isolated are authored orphans"
     );
     assert_eq!(health.orphan_note_count, health.authored_orphan_count);
 
-    // But MachineRescued is NOT isolated because the embedding_related edge
-    // connects it.
+    // Only Isolated is graph-isolated; Hub and MachineRescued are connected
+    // by the embedding_related edge.
     assert_eq!(health.isolated_count, 1, "only Isolated is graph-isolated");
 
-    // MachineRescued is a machine-connected orphan.
+    // Hub and MachineRescued are both machine-connected orphans (the
+    // embedding_related edge connects them).
     assert_eq!(
-        health.machine_connected_orphan_count, 1,
-        "MachineRescued is rescued from isolation by embedding_related edge"
+        health.machine_connected_orphan_count, 2,
+        "Hub and MachineRescued are rescued from isolation by embedding_related edge"
     );
 
-    // orphans() should include MachineRescued (embedding_related does not
-    // hide authored-link debt).
+    // orphans() should include all three (embedding_related does not hide
+    // authored-link debt).
     let orphans = repo.orphans(&project.id, None).await.unwrap();
-    assert_eq!(orphans.len(), 2);
+    assert_eq!(orphans.len(), 3);
     let titles: Vec<&str> = orphans.iter().map(|o| o.title.as_str()).collect();
+    assert!(titles.contains(&"Hub"));
     assert!(titles.contains(&"MachineRescued"));
     assert!(titles.contains(&"Isolated"));
 }
@@ -251,17 +254,18 @@ async fn co_access_creates_machine_connected_orphan() {
 
     let health = repo.health(&project.id).await.unwrap();
 
-    // CoRescued has no inbound wikilink or authored association → still an
-    // authored orphan.
-    assert_eq!(health.authored_orphan_count, 2);
+    // Hub, CoRescued, and Isolated all have no inbound wikilink or authored
+    // association → all three are authored orphans.
+    assert_eq!(health.authored_orphan_count, 3);
     assert_eq!(health.orphan_note_count, health.authored_orphan_count);
 
-    // CoRescued is NOT isolated because co_access connects it.
+    // Only Isolated is graph-isolated; Hub and CoRescued are connected by
+    // the co_access edge.
     assert_eq!(health.isolated_count, 1, "only Isolated is graph-isolated");
-    assert_eq!(health.machine_connected_orphan_count, 1);
+    assert_eq!(health.machine_connected_orphan_count, 2);
 
     let orphans = repo.orphans(&project.id, None).await.unwrap();
-    assert_eq!(orphans.len(), 2);
+    assert_eq!(orphans.len(), 3);
 }
 
 /// An `embedding_related` edge with confidence *below* threshold should NOT
@@ -303,18 +307,19 @@ async fn below_threshold_embedding_does_not_reduce_isolation() {
 
     let health = repo.health(&project.id).await.unwrap();
 
-    // WeakNote is still an authored orphan.
-    assert_eq!(health.authored_orphan_count, 1);
+    // Both Hub and WeakNote are authored orphans (neither has an inbound
+    // wikilink or authored association).
+    assert_eq!(health.authored_orphan_count, 2);
 
-    // WeakNote is ALSO still graph-isolated because the below-threshold
+    // Both are ALSO graph-isolated because the below-threshold
     // embedding_related edge is not retrieval-effective.
     assert_eq!(
-        health.isolated_count, 1,
+        health.isolated_count, 2,
         "below-threshold embedding edge does not reduce isolation"
     );
     assert_eq!(
         health.machine_connected_orphan_count, 0,
-        "WeakNote is not machine-connected because its only edge is below threshold"
+        "no machine-connected orphans"
     );
 }
 
