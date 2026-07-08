@@ -86,6 +86,9 @@ pub(crate) const SETUP_SESSION_COOKIE: &str = "djinn_setup_session";
 const SETUP_SESSION_PATH: &str = "/auth/github";
 /// Setup session TTL: 15 minutes.
 const SETUP_SESSION_TTL_SECS: i64 = 60 * 15;
+/// Query parameter name for the install-continuation nonce appended to the
+/// GitHub install URL after manifest credential persistence.
+const INSTALL_CONTINUATION_PARAM: &str = "djinn_continuation";
 
 /// Read a GitHub App OAuth client id/secret from the environment.
 ///
@@ -1018,11 +1021,18 @@ pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Query parameters for `GET /auth/github/app-setup-callback` — GitHub
 /// appends `?installation_id=<N>&setup_action=install` after the user
 /// completes (or requests) an installation via the App's install page.
+///
+/// When the request originates from the manifest-continuation flow (i.e.
+/// after credential persistence), an additional `djinn_continuation` param
+/// is present and must match the pending continuation nonce.
 #[derive(Deserialize)]
 struct AppSetupQuery {
     installation_id: Option<String>,
     #[serde(default)]
     setup_action: Option<String>,
+    /// Install-continuation nonce appended by the manifest callback redirect.
+    #[serde(default, rename = "djinn_continuation")]
+    continuation_state: Option<String>,
 }
 
 /// `GET /auth/github/app-setup-callback` — invoked by GitHub after the user
@@ -1053,6 +1063,25 @@ async fn app_setup_callback(
     // any post-install hit with a valid installation_id should complete the
     // binding — but we log it for auditability.
     let action = q.setup_action.as_deref().unwrap_or("");
+
+    // Validate install-continuation state when a manifest flow just completed.
+    // A pending nonce means this callback must carry the matching continuation
+    // param. Non-manifest flows (pre-configured credentials) have no pending
+    // nonce, so they pass through unconditionally.
+    if !state
+        .validate_and_consume_install_continuation(q.continuation_state.as_deref())
+        .await
+    {
+        tracing::warn!(
+            installation_id,
+            "app_setup_callback: install-continuation state mismatch or missing"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "install-continuation state mismatch — restart the setup flow",
+        )
+            .into_response();
+    }
 
     let cfg = match state.app_config().await {
         Some(c) => c,
@@ -1422,10 +1451,32 @@ async fn app_manifest_callback(
 
     state.clear_setup_session_token().await;
 
-    // Build the install URL for the newly created App.
-    let install_url = cfg
+    // Generate an install-continuation nonce and store it so that
+    // `/auth/github/app-setup-callback` can validate the redirect came from
+    // this manifest flow (not a direct/unsolicited hit).
+    let continuation_nonce = random_token_b64();
+    state
+        .set_pending_install_continuation(continuation_nonce.clone())
+        .await;
+
+    // Build the install URL for the newly created App, appending the
+    // continuation nonce as a query parameter.
+    let base_install_url = cfg
         .install_url()
         .unwrap_or_else(|| format!("{}/", web_url().trim_end_matches('/')));
+    let install_url = if base_install_url.contains('?') {
+        format!(
+            "{base_install_url}&{param}={nonce}",
+            param = INSTALL_CONTINUATION_PARAM,
+            nonce = urlencode(&continuation_nonce),
+        )
+    } else {
+        format!(
+            "{base_install_url}?{param}={nonce}",
+            param = INSTALL_CONTINUATION_PARAM,
+            nonce = urlencode(&continuation_nonce),
+        )
+    };
 
     // Clear all setup cookies/state: manifest CSRF + setup session.
     let mut resp_headers = HeaderMap::new();
@@ -2518,6 +2569,11 @@ mod tests {
             location.contains("github.com/apps/djinn-test/installations/new"),
             "must redirect to the new App install URL, got: {location}"
         );
+        // Install-continuation nonce must be present in the redirect.
+        assert!(
+            location.contains(INSTALL_CONTINUATION_PARAM),
+            "install URL must contain continuation param, got: {location}"
+        );
         // No setup token or session nonce leaks into the redirect.
         assert!(
             !location.contains("setup_token"),
@@ -2899,6 +2955,7 @@ mod tests {
             Query(AppSetupQuery {
                 installation_id: None,
                 setup_action: Some("install".into()),
+                continuation_state: None,
             }),
         )
         .await;
@@ -2910,6 +2967,7 @@ mod tests {
             Query(AppSetupQuery {
                 installation_id: Some(String::new()),
                 setup_action: Some("install".into()),
+                continuation_state: None,
             }),
         )
         .await;
@@ -2921,6 +2979,7 @@ mod tests {
             Query(AppSetupQuery {
                 installation_id: Some("not-a-number".into()),
                 setup_action: Some("install".into()),
+                continuation_state: None,
             }),
         )
         .await;
@@ -2932,6 +2991,7 @@ mod tests {
             Query(AppSetupQuery {
                 installation_id: Some("0".into()),
                 setup_action: Some("install".into()),
+                continuation_state: None,
             }),
         )
         .await;
@@ -2951,6 +3011,7 @@ mod tests {
             Query(AppSetupQuery {
                 installation_id: Some("42".into()),
                 setup_action: Some("install".into()),
+                continuation_state: None,
             }),
         )
         .await;
@@ -2959,6 +3020,281 @@ mod tests {
             StatusCode::CONFLICT,
             "must return 409 when credentials are missing"
         );
+    }
+
+    // ─── Install-continuation state validation (AC1/AC4) ────────────────
+
+    /// When a pending install-continuation nonce exists and the callback
+    /// carries the matching `continuation_state` param, the callback proceeds
+    /// normally and the nonce is consumed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_valid_continuation_state_succeeds() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // Set a pending continuation nonce.
+        let nonce = "test-continuation-nonce-abc".to_string();
+        state
+            .set_pending_install_continuation_for_tests(Some(nonce.clone()))
+            .await;
+
+        // The callback carries the matching continuation_state — but will
+        // still fail because fetch_installation_for_setup requires a real
+        // GitHub App JWT. We just verify the continuation validation passes
+        // (status != FORBIDDEN).
+        let resp = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+                continuation_state: Some(nonce.clone()),
+            }),
+        )
+        .await;
+
+        // Should NOT be FORBIDDEN — continuation passed.
+        // It will fail at the JWT/installation step (BAD_GATEWAY or similar),
+        // which proves the continuation check didn't block it.
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "valid continuation must not be rejected"
+        );
+
+        // The nonce should now be consumed (single-use).
+        assert!(
+            state.validate_and_consume_install_continuation(None).await,
+            "after consumption, no continuation is pending, so None should pass"
+        );
+    }
+
+    /// When a pending continuation nonce exists but the callback does NOT
+    /// carry a `continuation_state` param, the callback is rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_missing_continuation_state_rejected() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // Set a pending continuation nonce.
+        state
+            .set_pending_install_continuation_for_tests(Some("expected-nonce".into()))
+            .await;
+
+        // Callback without continuation_state — should be rejected.
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "missing continuation_state must be rejected when one is pending"
+        );
+    }
+
+    /// When a pending continuation nonce exists but the callback carries a
+    /// wrong `continuation_state`, the callback is rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_mismatched_continuation_state_rejected() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // Set a pending continuation nonce.
+        state
+            .set_pending_install_continuation_for_tests(Some("correct-nonce".into()))
+            .await;
+
+        // Callback with a different continuation_state — should be rejected.
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+                continuation_state: Some("wrong-nonce".into()),
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "mismatched continuation_state must be rejected"
+        );
+    }
+
+    /// When NO pending continuation nonce exists (non-manifest flow), the
+    /// callback proceeds without requiring a continuation_state. This
+    /// preserves the existing behavior for pre-configured credentials.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_no_pending_continuation_allows_request() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        // No pending continuation — don't set one.
+        // Callback without continuation_state should NOT be rejected with
+        // FORBIDDEN (it may fail at the JWT step, which is fine).
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+        )
+        .await;
+
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "no pending continuation must not produce FORBIDDEN"
+        );
+    }
+
+    /// The continuation nonce is included in the manifest callback's install
+    /// URL redirect and can be used to validate the subsequent
+    /// app-setup-callback request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_redirect_contains_valid_continuation_for_setup_callback() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let session = register_valid_session(&state).await;
+        state.set_test_bypass_persist(true).await;
+        let csrf = "csrf-continuation-roundtrip".to_string();
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 42,
+            slug: "djinn-test".into(),
+            client_id: "Iv1.test-client".into(),
+            client_secret: "test-secret".into(),
+            webhook_secret: Some("test-webhook-secret".into()),
+            pem: "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----".into(),
+        }));
+
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("valid-code".into()),
+                state: Some(csrf),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Extract the continuation nonce from the URL.
+        let continuation_nonce = location
+            .split(&format!("{INSTALL_CONTINUATION_PARAM}="))
+            .nth(1)
+            .expect("continuation param must be present")
+            .split('&')
+            .next()
+            .unwrap();
+        assert!(
+            !continuation_nonce.is_empty(),
+            "continuation nonce must not be empty"
+        );
+
+        // Now simulate the app-setup-callback with the extracted nonce.
+        // It should NOT be rejected with FORBIDDEN (the nonce matches).
+        let resp = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+                continuation_state: Some(continuation_nonce.to_string()),
+            }),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "matching continuation nonce must not be rejected"
+        );
+
+        // Replay: the nonce was consumed, so a second call without one
+        // should now pass (no pending continuation).
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("99".into()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "after nonce consumed, no continuation required"
+        );
+
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
     }
 
     // ─── OAuth callback: no state cookie ─────────────────────────────────
@@ -3167,6 +3503,12 @@ mod tests {
         assert!(
             location.contains("github.com/apps/"),
             "must redirect to GitHub, got: {location}"
+        );
+        // Install-continuation nonce must be present (it's a public nonce,
+        // not a secret — same class as CSRF state).
+        assert!(
+            location.contains(INSTALL_CONTINUATION_PARAM),
+            "install URL must contain continuation param, got: {location}"
         );
         // No credential or token leaks.
         assert!(
