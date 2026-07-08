@@ -70,6 +70,12 @@ const ORPHAN_WORKER_SESSIONS_REAPED_TOTAL: &str = "djinn_orphan_worker_sessions_
 // ─── Coordinator checkpoint preservation gate ─────────────────────────
 const PRESERVATION_ATTEMPTS_TOTAL: &str = "djinn_preservation_attempts_total";
 
+// ─── Failover-chain observability ────────────────────────────────────
+const FAILOVER_CANDIDATE_ATTEMPTS_TOTAL: &str = "djinn_failover_candidate_attempts_total";
+const FAILOVER_CANDIDATE_ACCEPTED_TOTAL: &str = "djinn_failover_candidate_accepted_total";
+const FAILOVER_CHAIN_EXHAUSTED_TOTAL: &str = "djinn_failover_chain_exhausted_total";
+const FAILOVER_LATENCY_SECONDS: &str = "djinn_failover_latency_seconds";
+
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
 /// Install the process-global Prometheus recorder.
@@ -657,6 +663,44 @@ fn register_metrics() {
         CARGO_WARM_STEP_COMPILING_COUNT,
         "Cargo warm-step crate count reported as Compiling, partitioned by project id and step."
     );
+    // ─── Failover-chain observability ────────────────────────────────
+    metrics::describe_counter!(
+        FAILOVER_CANDIDATE_ATTEMPTS_TOTAL,
+        "Per-candidate failover-chain dispatch attempts, partitioned by bounded outcome, provider_id, and model_id."
+    );
+    for outcome in failover::ALL_OUTCOMES {
+        metrics::counter!(
+            FAILOVER_CANDIDATE_ATTEMPTS_TOTAL,
+            "outcome" => outcome,
+            "provider_id" => "",
+            "model_id" => "",
+        )
+        .absolute(0);
+    }
+    metrics::describe_counter!(
+        FAILOVER_CANDIDATE_ACCEPTED_TOTAL,
+        "Failover candidates that accepted the dispatch, partitioned by provider_id and model_id."
+    );
+    metrics::counter!(
+        FAILOVER_CANDIDATE_ACCEPTED_TOTAL,
+        "provider_id" => "",
+        "model_id" => "",
+    )
+    .absolute(0);
+    metrics::describe_counter!(
+        FAILOVER_CHAIN_EXHAUSTED_TOTAL,
+        "Failover chains that exhausted all candidates without acceptance, partitioned by provider_id and model_id of the last tried candidate."
+    );
+    metrics::counter!(
+        FAILOVER_CHAIN_EXHAUSTED_TOTAL,
+        "provider_id" => "",
+        "model_id" => "",
+    )
+    .absolute(0);
+    metrics::describe_histogram!(
+        FAILOVER_LATENCY_SECONDS,
+        "Wall-clock elapsed time for a failover-chain traversal from first attempt to terminal event (acceptance or exhaustion)."
+    );
 }
 
 pub mod dispatch {
@@ -779,6 +823,97 @@ pub mod preservation {
             "trigger" => trigger,
         )
         .increment(1);
+    }
+}
+
+pub mod failover {
+    //! Failover-chain observability metrics.
+    //!
+    //! These counters and the latency histogram track per-candidate attempt,
+    //! acceptance, and chain-exhaustion outcomes during coordinator failover-
+    //! chain traversal. Labels are intentionally bounded to keep Prometheus
+    //! cardinality under control:
+    //!
+    //! - `provider_id` / `model_id` — candidate identity (bounded by the
+    //!   catalog size, typically single-digit).
+    //! - `outcome` — one of the `OUTCOME_*` constants below (3 variants).
+    //!
+    //! High-cardinality dimensions that MUST NOT appear as Prometheus labels:
+    //!
+    //! - `task_id` — available in the tracing span (`djinn.dispatch.task_id`)
+    //!   and in structured log fields emitted by
+    //!   [`djinn_coordinator::dispatch::lane_resolution_log`].
+    //! - `session_id` — present in tracing fields when the dispatch path has
+    //!   access to an active session; likewise belongs in structured logs, not
+    //!   in metric labels.
+    //! - `candidate_index` — recorded in tracing/log fields for per-candidate
+    //!   detail; its range is bounded but including it as a Prometheus label
+    //!   would multiply series by max-candidates-per-chain.
+    //!
+    //! Callers should emit complementary `tracing` events (the existing
+    //! `failover_candidate_attempt`, `failover_candidate_accepted`, and a new
+    //! `failover_chain_exhausted` event) so that task-scoped drill-down is
+    //! available via structured-log queries without exploding metric series.
+
+    /// Bounded outcome labels for `djinn_failover_candidate_attempts_total`.
+    pub const OUTCOME_BREAKER_OPEN: &str = "breaker_open";
+    pub const OUTCOME_AT_CAPACITY: &str = "at_capacity";
+    pub const OUTCOME_ERROR: &str = "error";
+
+    /// All bounded outcome labels — used for registration seeding.
+    pub(crate) const ALL_OUTCOMES: [&str; 3] =
+        [OUTCOME_BREAKER_OPEN, OUTCOME_AT_CAPACITY, OUTCOME_ERROR];
+
+    /// Increment the per-candidate failover attempt counter.
+    ///
+    /// `outcome` MUST be one of the `OUTCOME_*` constants above.
+    /// `provider_id` and `model_id` are the candidate's parsed identifiers.
+    ///
+    /// This is intentionally synchronous and non-async so failover traversal
+    /// hot paths never need to hold any application lock across an await.
+    pub fn increment_candidate_attempt(outcome: &'static str, provider_id: &str, model_id: &str) {
+        metrics::counter!(
+            super::FAILOVER_CANDIDATE_ATTEMPTS_TOTAL,
+            "outcome" => outcome,
+            "provider_id" => provider_id.to_owned(),
+            "model_id" => model_id.to_owned(),
+        )
+        .increment(1);
+    }
+
+    /// Increment the failover candidate accepted counter.
+    ///
+    /// Emitted when the first candidate in the failover chain that accepts
+    /// the dispatch is found.
+    pub fn increment_candidate_accepted(provider_id: &str, model_id: &str) {
+        metrics::counter!(
+            super::FAILOVER_CANDIDATE_ACCEPTED_TOTAL,
+            "provider_id" => provider_id.to_owned(),
+            "model_id" => model_id.to_owned(),
+        )
+        .increment(1);
+    }
+
+    /// Increment the failover chain exhausted counter.
+    ///
+    /// Emitted once per dispatch attempt when all failover candidates have
+    /// been tried and none accepted the dispatch.
+    pub fn increment_chain_exhausted(provider_id: &str, model_id: &str) {
+        metrics::counter!(
+            super::FAILOVER_CHAIN_EXHAUSTED_TOTAL,
+            "provider_id" => provider_id.to_owned(),
+            "model_id" => model_id.to_owned(),
+        )
+        .increment(1);
+    }
+
+    /// Record the elapsed wall-clock time for a failover-chain traversal.
+    ///
+    /// Called once per dispatch attempt: either when a candidate is accepted
+    /// (successful chain) or when the chain is fully exhausted. The duration
+    /// spans from the first candidate attempt to the terminal event.
+    pub fn record_latency(latency: std::time::Duration) {
+        metrics::histogram!(super::FAILOVER_LATENCY_SECONDS).record(latency);
     }
 }
 
@@ -1433,6 +1568,229 @@ mod tests {
                 before_vals[i] + 1.0,
                 "cargo-target-seed fallback reason {reason} should increment by 1: {after_sample}"
             );
+        }
+    }
+
+    // ── failover-chain telemetry tests ───────────────────────────────
+
+    #[test]
+    fn failover_metric_facade_helpers_are_synchronous_unit_functions() {
+        let _guard = test_guard();
+
+        fn assert_sync_unit<F: FnOnce()>(f: F) {
+            f();
+        }
+
+        init().unwrap();
+        assert_sync_unit(|| {
+            failover::increment_candidate_attempt(
+                failover::OUTCOME_BREAKER_OPEN,
+                "test-provider",
+                "test-model",
+            );
+        });
+        assert_sync_unit(|| {
+            failover::increment_candidate_accepted("test-provider", "test-model");
+        });
+        assert_sync_unit(|| {
+            failover::increment_chain_exhausted("test-provider", "test-model");
+        });
+        assert_sync_unit(|| {
+            failover::record_latency(std::time::Duration::from_millis(250));
+        });
+    }
+
+    #[test]
+    fn failover_candidate_attempts_render_outcome_and_model_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        failover::increment_candidate_attempt(
+            failover::OUTCOME_BREAKER_OPEN,
+            "provider-a",
+            "model-a",
+        );
+        failover::increment_candidate_attempt(
+            failover::OUTCOME_AT_CAPACITY,
+            "provider-b",
+            "model-b",
+        );
+        failover::increment_candidate_attempt(failover::OUTCOME_ERROR, "provider-c", "model-c");
+
+        let rendered = render().unwrap();
+        for outcome in failover::ALL_OUTCOMES {
+            assert!(
+                rendered.contains(FAILOVER_CANDIDATE_ATTEMPTS_TOTAL),
+                "missing {FAILOVER_CANDIDATE_ATTEMPTS_TOTAL} in rendered output:\n{rendered}",
+            );
+            let sample = rendered_sample(
+                &rendered,
+                FAILOVER_CANDIDATE_ATTEMPTS_TOTAL,
+                &[("outcome", outcome), ("provider_id", ""), ("model_id", "")],
+            );
+            // At minimum the zero-seeded sample must exist.
+            let _ = sample;
+        }
+        // Our real samples should also be present.
+        assert!(
+            rendered_sample(
+                &rendered,
+                FAILOVER_CANDIDATE_ATTEMPTS_TOTAL,
+                &[
+                    ("outcome", failover::OUTCOME_BREAKER_OPEN),
+                    ("provider_id", "provider-a"),
+                    ("model_id", "model-a"),
+                ],
+            )
+            .ends_with(" 1"),
+        );
+        assert!(
+            rendered_sample(
+                &rendered,
+                FAILOVER_CANDIDATE_ATTEMPTS_TOTAL,
+                &[
+                    ("outcome", failover::OUTCOME_AT_CAPACITY),
+                    ("provider_id", "provider-b"),
+                    ("model_id", "model-b"),
+                ],
+            )
+            .ends_with(" 1"),
+        );
+        assert!(
+            rendered_sample(
+                &rendered,
+                FAILOVER_CANDIDATE_ATTEMPTS_TOTAL,
+                &[
+                    ("outcome", failover::OUTCOME_ERROR),
+                    ("provider_id", "provider-c"),
+                    ("model_id", "model-c"),
+                ],
+            )
+            .ends_with(" 1"),
+        );
+    }
+
+    #[test]
+    fn failover_candidate_accepted_renders_model_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        failover::increment_candidate_accepted("provider-x", "model-y");
+
+        let rendered = render().unwrap();
+        let sample = rendered_sample(
+            &rendered,
+            FAILOVER_CANDIDATE_ACCEPTED_TOTAL,
+            &[("provider_id", "provider-x"), ("model_id", "model-y")],
+        );
+        assert!(
+            sample.ends_with(" 1"),
+            "unexpected accepted sample: {sample}"
+        );
+    }
+
+    #[test]
+    fn failover_chain_exhausted_renders_model_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        failover::increment_chain_exhausted("provider-z", "model-w");
+
+        let rendered = render().unwrap();
+        let sample = rendered_sample(
+            &rendered,
+            FAILOVER_CHAIN_EXHAUSTED_TOTAL,
+            &[("provider_id", "provider-z"), ("model_id", "model-w")],
+        );
+        assert!(
+            sample.ends_with(" 1"),
+            "unexpected exhausted sample: {sample}"
+        );
+    }
+
+    #[test]
+    fn failover_latency_histogram_renders_after_recording() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        failover::record_latency(std::time::Duration::from_millis(150));
+        failover::record_latency(std::time::Duration::from_millis(4500));
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains(FAILOVER_LATENCY_SECONDS),
+            "missing {FAILOVER_LATENCY_SECONDS} in rendered output:\n{rendered}",
+        );
+        assert!(
+            rendered.contains(&format!("# HELP {FAILOVER_LATENCY_SECONDS}")),
+            "missing HELP line for latency summary:\n{rendered}",
+        );
+        // The metrics-exporter-prometheus crate renders `histogram!` metrics
+        // as DDSketch summaries (with quantiles) rather than classic
+        // histogram buckets.
+        assert!(
+            rendered.contains(&format!("# TYPE {FAILOVER_LATENCY_SECONDS} summary")),
+            "missing TYPE line for latency summary:\n{rendered}",
+        );
+    }
+
+    #[test]
+    fn failover_metrics_registered_labels_render_at_zero_on_init() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let rendered = render().unwrap();
+        // After init, the zero-seeded samples should be present so that
+        // the metric is visible even before the first real event.
+        for outcome in failover::ALL_OUTCOMES {
+            assert!(
+                rendered.contains(&format!(
+                    "{FAILOVER_CANDIDATE_ATTEMPTS_TOTAL}{{outcome=\"{outcome}\",provider_id=\"\",model_id=\"\"}} 0"
+                )),
+                "missing zero-seeded attempt sample for outcome={outcome}:\n{rendered}",
+            );
+        }
+        assert!(
+            rendered.contains(&format!(
+                "{FAILOVER_CANDIDATE_ACCEPTED_TOTAL}{{provider_id=\"\",model_id=\"\"}} 0"
+            )),
+            "missing zero-seeded accepted sample:\n{rendered}",
+        );
+        assert!(
+            rendered.contains(&format!(
+                "{FAILOVER_CHAIN_EXHAUSTED_TOTAL}{{provider_id=\"\",model_id=\"\"}} 0"
+            )),
+            "missing zero-seeded exhausted sample:\n{rendered}",
+        );
+    }
+
+    #[test]
+    fn failover_metrics_do_not_contain_high_cardinality_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        failover::increment_candidate_attempt(
+            failover::OUTCOME_BREAKER_OPEN,
+            "provider-check",
+            "model-check",
+        );
+        failover::record_latency(std::time::Duration::from_millis(100));
+
+        let rendered = render().unwrap();
+        for forbidden in ["task_id=", "session_id=", "candidate_index="] {
+            for line in rendered.lines() {
+                if !line.starts_with(FAILOVER_CANDIDATE_ATTEMPTS_TOTAL)
+                    && !line.starts_with(FAILOVER_CANDIDATE_ACCEPTED_TOTAL)
+                    && !line.starts_with(FAILOVER_CHAIN_EXHAUSTED_TOTAL)
+                    && !line.starts_with(FAILOVER_LATENCY_SECONDS)
+                {
+                    continue;
+                }
+                assert!(
+                    !line.contains(forbidden),
+                    "failover metric must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
         }
     }
 }

@@ -1000,8 +1000,14 @@ impl CoordinatorActor {
         // `DispatchOutcome::Failed { exhausted_observations }`; discarded on
         // every other branch.
         let mut exhausted_observations: Vec<djinn_provider::catalog::HealthKey> = Vec::new();
+        // Failover latency: wall-clock from first candidate attempt to
+        // terminal event (acceptance or exhaustion).
+        let failover_chain_start = SystemClock::new().now_instant();
+        // Track the last model_id for the chain-exhausted structured log.
+        let mut last_model_id: &str = "";
 
         for (candidate_index, model_id) in model_ids.iter().enumerate() {
+            last_model_id = model_id.as_str();
             tracing::Span::current().record("model_id", tracing::field::display(model_id));
             if !self.health.is_available(scope, model_id) {
                 tracing::Span::current().record("outcome", "breaker");
@@ -1019,6 +1025,14 @@ impl CoordinatorActor {
                     candidate_index,
                     total_candidates,
                     &super::lane_resolution_log::CandidateAttemptOutcome::BreakerOpen,
+                    None,
+                );
+                let (provider_id, model_name) =
+                    super::lane_resolution_log::parse_provider_model(model_id);
+                djinn_telemetry::failover::increment_candidate_attempt(
+                    djinn_telemetry::failover::OUTCOME_BREAKER_OPEN,
+                    provider_id,
+                    model_name,
                 );
                 skipped_count += 1;
                 continue;
@@ -1035,7 +1049,15 @@ impl CoordinatorActor {
                         candidate_index,
                         total_candidates,
                         skipped_count,
+                        None,
                     );
+                    let (provider_id, model_name) =
+                        super::lane_resolution_log::parse_provider_model(model_id);
+                    djinn_telemetry::failover::increment_candidate_accepted(
+                        provider_id,
+                        model_name,
+                    );
+                    djinn_telemetry::failover::record_latency(failover_chain_start.elapsed());
                     // Successful fallback: discard chain-scoped observations.
                     // The earlier candidate's failure counts stay recorded in
                     // `HealthTracker` (for diagnostics) but no breaker trip
@@ -1060,6 +1082,14 @@ impl CoordinatorActor {
                         candidate_index,
                         total_candidates,
                         &super::lane_resolution_log::CandidateAttemptOutcome::AtCapacity,
+                        None,
+                    );
+                    let (provider_id, model_name) =
+                        super::lane_resolution_log::parse_provider_model(model_id);
+                    djinn_telemetry::failover::increment_candidate_attempt(
+                        djinn_telemetry::failover::OUTCOME_AT_CAPACITY,
+                        provider_id,
+                        model_name,
                     );
                     skipped_count += 1;
                 }
@@ -1101,6 +1131,14 @@ impl CoordinatorActor {
                         candidate_index,
                         total_candidates,
                         &super::lane_resolution_log::CandidateAttemptOutcome::Error(e.to_string()),
+                        None,
+                    );
+                    let (provider_id, model_name) =
+                        super::lane_resolution_log::parse_provider_model(model_id);
+                    djinn_telemetry::failover::increment_candidate_attempt(
+                        djinn_telemetry::failover::OUTCOME_ERROR,
+                        provider_id,
+                        model_name,
                     );
                     skipped_count += 1;
                     continue;
@@ -1109,6 +1147,21 @@ impl CoordinatorActor {
         }
 
         // All candidates exhausted: the failover chain is depleted.
+        // Record chain-exhausted telemetry (metrics + structured log).
+        {
+            let (provider_id, model_name) =
+                super::lane_resolution_log::parse_provider_model(last_model_id);
+            djinn_telemetry::failover::increment_chain_exhausted(provider_id, model_name);
+            djinn_telemetry::failover::record_latency(failover_chain_start.elapsed());
+        }
+        super::lane_resolution_log::emit_failover_chain_exhausted(
+            label,
+            role,
+            last_model_id,
+            total_candidates,
+            exhausted_observations.len(),
+            None,
+        );
         if any_at_capacity {
             tracing::Span::current().record("outcome", "cap");
             DispatchOutcome::AtCapacity
