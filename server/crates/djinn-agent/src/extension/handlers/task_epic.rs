@@ -961,7 +961,7 @@ pub(super) async fn call_task_update_ac(
 /// (epic 10qg).  Logs a typed `deprecated_request_lead` activity and routes
 /// through `dispatch_planner_escalation` WITHOUT transitioning the task to
 /// `needs_lead_intervention`.
-pub(super) async fn call_request_lead(
+pub(crate) async fn call_request_lead(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
@@ -1007,8 +1007,15 @@ pub(super) async fn call_request_lead(
         }));
     };
 
+    // Fold suggested_breakdown into the reason so the Planner remediation
+    // task/comment receives the stale caller's full context — not just the
+    // bare reason.
+    let planner_reason = match p.suggested_breakdown {
+        Some(ref breakdown) => format!("{}\n\nSuggested breakdown:\n{breakdown}", p.reason),
+        None => p.reason.clone(),
+    };
     let _ = coordinator
-        .dispatch_planner_escalation(&task.id, &p.reason, &task.project_id)
+        .dispatch_planner_escalation(&task.id, &planner_reason, &task.project_id)
         .await;
 
     Ok(serde_json::json!({
@@ -1022,7 +1029,7 @@ pub(super) async fn call_request_lead(
 /// Route a planner escalation request from any role (worker, reviewer, or lead).
 /// Logs a role-neutral Planner-request activity that preserves the caller's
 /// reason, then dispatches `dispatch_planner_escalation`.
-pub(super) async fn call_request_planner(
+pub(crate) async fn call_request_planner(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
