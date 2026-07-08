@@ -1274,6 +1274,15 @@ async fn dispatch(
             let result = services.complete_monitored_reopen(task_id).await;
             ServiceRpcResponse::CompleteMonitoredReopen(result)
         }
+        ServiceRpcRequest::RecordArbiterSessionTermination {
+            task_id,
+            is_infra_failure,
+        } => {
+            let result = services
+                .record_arbiter_session_termination(task_id, is_infra_failure)
+                .await;
+            ServiceRpcResponse::RecordArbiterSessionTermination(result)
+        }
         ServiceRpcRequest::PublishBranchToGithub { spec, task } => {
             let result = services.publish_branch_to_github(&spec, &task).await;
             ServiceRpcResponse::PublishBranchToGithub(result)
@@ -1488,6 +1497,14 @@ mod tests {
         }
 
         async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn record_arbiter_session_termination(
+            &self,
+            _task_id: String,
+            _is_infra_failure: bool,
+        ) -> Result<bool, String> {
             unimplemented!("not exercised in server tests")
         }
     }

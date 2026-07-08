@@ -88,7 +88,6 @@ use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_core::events::EventBus;
 use djinn_db::{Database, DatabaseConnectConfig, PostgresDatabaseConfig};
-use djinn_git;
 use djinn_graph::graph_parity::{GraphArtifactBlobParityError, assert_graph_artifact_blob_parity};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_runtime::{ResolvedCredentials, RoleKind, TaskRunSpec, WorkerEvent};
@@ -1968,7 +1967,7 @@ fn build_worker_agent_context(
     let event_bus = EventBus::spawning(move |envelope: DjinnEventEnvelope| {
         let rpc = rpc_for_bus.clone();
         async move {
-            if !worker_bridge_should_serialize_event(&envelope.entity_type, &envelope.action) {
+            if !worker_bridge_should_serialize_event(envelope.entity_type, envelope.action) {
                 return;
             }
 

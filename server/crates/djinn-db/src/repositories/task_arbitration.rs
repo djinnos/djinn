@@ -1532,4 +1532,212 @@ mod tests {
             "row still unconsumed until terminal"
         );
     }
+
+    /// Infra-class failures before a decision increment only infra_retry_count
+    /// and do NOT increment decision_failure_count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn infra_failure_does_not_increment_decision_failure_count() {
+        let db = test_db();
+        let (_proj, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskArbitrationRepository::new(db);
+        let empty = serde_json::json!([]);
+
+        repo.try_create(CreateArbitrationParams {
+            task_id: &task_id,
+            hold_cycle: 1,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &empty,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &empty,
+        })
+        .await
+        .unwrap();
+
+        // Simulate 3 infra failures.
+        for _ in 0..3 {
+            repo.increment_infra_retry(&task_id, 1).await.unwrap();
+        }
+
+        let record = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.infra_retry_count, 3);
+        assert_eq!(
+            record.decision_failure_count, 0,
+            "infra failures must NOT increment decision_failure_count"
+        );
+    }
+
+    /// No-valid-decision failures increment decision_failure_count.  Two
+    /// such failures reach the cap; a third call still increments the
+    /// counter (the cap enforcement is in the caller, not the SQL).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn decision_failure_count_increments_and_can_be_capped() {
+        let db = test_db();
+        let (_proj, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskArbitrationRepository::new(db);
+        let empty = serde_json::json!([]);
+
+        repo.try_create(CreateArbitrationParams {
+            task_id: &task_id,
+            hold_cycle: 1,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &empty,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &empty,
+        })
+        .await
+        .unwrap();
+
+        // First no-decision failure.
+        repo.increment_decision_failure(&task_id, 1).await.unwrap();
+        let r1 = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r1.decision_failure_count, 1);
+        assert_eq!(r1.state, "unconsumed");
+
+        // Second no-decision failure — cap reached.
+        repo.increment_decision_failure(&task_id, 1).await.unwrap();
+        let r2 = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r2.decision_failure_count, 2);
+
+        // Mark failed at cap — transitions to terminal failed state.
+        assert!(repo.mark_failed(&task_id, 1).await.unwrap());
+        let r3 = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r3.state, "failed");
+    }
+
+    /// Mixed infra and decision failures accumulate independently.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn infra_and_decision_failures_accumulate_independently() {
+        let db = test_db();
+        let (_proj, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskArbitrationRepository::new(db);
+        let empty = serde_json::json!([]);
+
+        repo.try_create(CreateArbitrationParams {
+            task_id: &task_id,
+            hold_cycle: 1,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &empty,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &empty,
+        })
+        .await
+        .unwrap();
+
+        // 2 infra failures, 1 decision failure.
+        repo.increment_infra_retry(&task_id, 1).await.unwrap();
+        repo.increment_infra_retry(&task_id, 1).await.unwrap();
+        repo.increment_decision_failure(&task_id, 1).await.unwrap();
+
+        let record = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.infra_retry_count, 2);
+        assert_eq!(record.decision_failure_count, 1);
+        assert_eq!(record.state, "unconsumed");
+    }
+
+    /// mark_failed on an unconsumed row with expired deadline transitions
+    /// to failed, demonstrating the terminal state for deadline auto-park.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deadline_expiry_mark_failed_transitions_to_failed() {
+        let db = test_db();
+        let (_proj, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskArbitrationRepository::new(db);
+        let empty = serde_json::json!([]);
+
+        // Create with a past deadline.
+        repo.try_create(CreateArbitrationParams {
+            task_id: &task_id,
+            hold_cycle: 1,
+            deadline_at: Some("2020-01-01T00:00:00.000Z"),
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &empty,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &empty,
+        })
+        .await
+        .unwrap();
+
+        let record = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, "unconsumed");
+        assert_eq!(
+            record.deadline_at.as_deref(),
+            Some("2020-01-01T00:00:00.000Z")
+        );
+
+        // Simulate deadline auto-park: mark failed and update dossier.
+        repo.mark_failed(&task_id, 1).await.unwrap();
+
+        let dossier = serde_json::json!({
+            "kind": "arbiter_deadline_expired",
+            "summary": "Arbitration deadline expired",
+            "hold_cycle": 1,
+            "deadline_at": "2020-01-01T00:00:00.000Z",
+        });
+        repo.update_dispatch_ledger(UpdateDispatchLedgerParams {
+            task_id: &task_id,
+            hold_cycle: 1,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: None,
+            dossier: Some(&dossier),
+            directive: None,
+            verification_command: None,
+            excluded_models: None,
+        })
+        .await
+        .unwrap();
+
+        let final_record = repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(final_record.state, "failed");
+        let stored_dossier = final_record.dossier.unwrap();
+        assert_eq!(stored_dossier["kind"], "arbiter_deadline_expired");
+        assert_eq!(stored_dossier["deadline_at"], "2020-01-01T00:00:00.000Z");
+    }
 }
