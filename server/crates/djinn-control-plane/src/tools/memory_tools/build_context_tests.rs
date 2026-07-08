@@ -753,12 +753,13 @@ mod tests {
             .unwrap();
 
         // Neighbor: connected to seed only via embedding_related.
-        // Has some content overlap so it may appear via FTS too.
+        // Content intentionally unrelated to seed's FTS query so the
+        // neighbor's appearance in results is purely graph-driven.
         let neighbor = repo
             .create(
                 &project.id,
                 "BC Embed Neighbor",
-                "architecture build context related embeddings neighborhood graph",
+                "quantum entanglement physics experiment results data",
                 "reference",
                 "[]",
             )
@@ -814,7 +815,9 @@ mod tests {
 
         // Check if the embedding neighbor appears in related notes
         // (either L1 or L0). With embedding_related edges included by
-        // default, the graph expansion should find this neighbor.
+        // default and the neighbor's content intentionally unrelated to
+        // the seed's FTS query, the neighbor can only be discovered
+        // through graph expansion — so this assertion is not masked by FTS.
         let all_related_ids: Vec<&str> = response
             .related_l1
             .iter()
@@ -822,16 +825,10 @@ mod tests {
             .chain(response.related_l0.iter().map(|n| n.id.as_str()))
             .collect();
 
-        // The neighbor should be discoverable through graph expansion when
-        // embedding_related edges participate. If it's not in related, it
-        // may still be in FTS — we assert the function completes without
-        // error and the edge was at least considered.
-        // A strict assertion: if any related notes exist, the neighbor
-        // with the direct embedding edge should rank among them.
-        if !all_related_ids.is_empty() {
-            // The neighbor may or may not appear depending on FTS/ranking,
-            // but the test verifies the code path doesn't error.
-        }
+        assert!(
+            all_related_ids.contains(&neighbor.id.as_str()),
+            "embedding-related neighbor must appear in related notes when edge_kinds is None (default); got: {all_related_ids:?}"
+        );
     }
 
     /// `memory_build_context` with `edge_kinds` that exclude
@@ -856,25 +853,27 @@ mod tests {
             .await
             .unwrap();
 
-        // Connected only via embedding_related.
+        // Connected only via embedding_related. Content is intentionally
+        // unrelated to the seed's FTS query so its appearance in results
+        // proves graph expansion, not FTS discovery.
         let embed_neighbor = repo
             .create(
                 &project.id,
                 "Filter Embed Neighbor",
-                "system design filter embeddings neighborhood",
+                "quantum physics entanglement research unrelated content",
                 "reference",
                 "[]",
             )
             .await
             .unwrap();
 
-        // Connected via co_access (should still appear when filtering
-        // to co_access only).
+        // Connected via co_access. Content intentionally unrelated to seed's
+        // FTS query to isolate graph expansion behavior.
         let co_neighbor = repo
             .create(
                 &project.id,
                 "Filter Co Neighbor",
-                "system design filter co-access neighborhood",
+                "biology genetics mutation research unrelated",
                 "reference",
                 "[]",
             )
@@ -907,6 +906,8 @@ mod tests {
         let server = DjinnMcpServer::new(state);
 
         // Filter to co_access only → embedding_related edges excluded.
+        // The embed_neighbor, whose only connection is an embedding_related
+        // edge, must NOT appear in related notes.
         let co_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
@@ -929,7 +930,21 @@ mod tests {
             co_response.error
         );
 
+        let co_related_ids: Vec<&str> = co_response
+            .related_l1
+            .iter()
+            .map(|n| n.id.as_str())
+            .chain(co_response.related_l0.iter().map(|n| n.id.as_str()))
+            .collect();
+        assert!(
+            !co_related_ids.contains(&embed_neighbor.id.as_str()),
+            "embed_neighbor must NOT appear when edge_kinds excludes embedding_related; got: {co_related_ids:?}"
+        );
+
         // Filter to embedding_related only → co_access edges excluded.
+        // The embed_neighbor, whose connection IS embedding_related, must
+        // appear in related notes. The co_neighbor, whose connection is
+        // co_access, must NOT appear.
         let embed_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
@@ -952,9 +967,34 @@ mod tests {
             embed_response.error
         );
 
-        // Both paths should complete without error — the filter is applied
-        // inside graph_proximity_scores_with_edge_kinds. We verify that
-        // the code paths are exercised and produce valid responses.
+        let embed_related_ids: Vec<&str> = embed_response
+            .related_l1
+            .iter()
+            .map(|n| n.id.as_str())
+            .chain(embed_response.related_l0.iter().map(|n| n.id.as_str()))
+            .collect();
+        assert!(
+            embed_related_ids.contains(&embed_neighbor.id.as_str()),
+            "embed_neighbor must appear when edge_kinds includes embedding_related; got: {embed_related_ids:?}"
+        );
+
+        // The embed_neighbor has an embedding_related graph proximity boost
+        // that the co_neighbor lacks.  Both appear via temporal scores, but
+        // the graph boost should push embed_neighbor above co_neighbor.
+        if let (Some(em_rank), Some(co_rank)) = (
+            embed_related_ids
+                .iter()
+                .position(|&id| id == embed_neighbor.id),
+            embed_related_ids
+                .iter()
+                .position(|&id| id == co_neighbor.id),
+        ) {
+            assert!(
+                em_rank <= co_rank,
+                "embed_neighbor (rank={em_rank}) must outrank or equal co_neighbor \
+                 (rank={co_rank}) when edge_kinds=embedding_related — graph boost applies"
+            );
+        }
     }
 
     /// Explicit wikilinks remain the strongest retrieval signal in
@@ -982,11 +1022,12 @@ mod tests {
             .unwrap();
 
         // Wikilinked note: explicitly links to seed via [[Precedence BC Seed]].
+        // Shares FTS terms ("database", "architecture") with the seed.
         let wikilinked = repo
             .create(
                 &project.id,
                 "Precedence Wikilinked",
-                "This note discusses precedence. See [[Precedence BC Seed]] for the canonical source on database architecture.",
+                "This note discusses database architecture precedence. See [[Precedence BC Seed]] for the canonical source.",
                 "reference",
                 "[]",
             )
@@ -994,11 +1035,27 @@ mod tests {
             .unwrap();
 
         // Embedding-only note: connected to seed via embedding_related only.
+        // Content intentionally unrelated to seed's FTS query so it does
+        // NOT appear through text matching — only through graph expansion.
         let embedding_note = repo
             .create(
                 &project.id,
                 "Precedence Embedding Only",
-                "This note discusses similar architecture patterns for database systems",
+                "quantum entanglement physics experiment data analysis",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // Co-access note: connected via co_access only. Shares some FTS
+        // overlap with the seed ("architecture") so it's a candidate.
+        // Verifies co-access (Hebbian) behavior is not demoted.
+        let co_access_note = repo
+            .create(
+                &project.id,
+                "Precedence Co Access",
+                "architecture system design patterns for distributed computing",
                 "reference",
                 "[]",
             )
@@ -1021,6 +1078,11 @@ mod tests {
         )
         .await
         .unwrap();
+
+        // Seed co_access (Hebbian) edge to the co-access note.
+        repo.upsert_association(&seed.id, &co_access_note.id, 3)
+            .await
+            .unwrap();
 
         let state = test_mcp_state(db, &tx);
         let server = DjinnMcpServer::new(state);
@@ -1051,35 +1113,58 @@ mod tests {
         assert_eq!(response.primary.len(), 1);
         assert_eq!(response.primary[0].id, seed.id);
 
-        // The wikilinked note should appear in L1 (direct neighbor via
-        // wikilink) — wikilinks are the strongest edge type.
+        // The wikilinked note must be in L1 (direct wikilink neighbor).
+        // It has an explicit [[Precedence BC Seed]] wikilink and shares
+        // FTS terms with the seed, so it should be both a direct neighbor
+        // and a high-ranking RRF candidate.
         let l1_ids: Vec<&str> = response.related_l1.iter().map(|n| n.id.as_str()).collect();
+        assert!(
+            l1_ids.contains(&wikilinked.id.as_str()),
+            "wikilinked note must be in L1 (direct wikilink neighbor); got L1: {l1_ids:?}"
+        );
 
-        // The wikilinked note should be in L1 since it has an explicit
-        // wikilink to the seed — that's the primary graph expansion path.
-        // The embedding-only note, if discovered, should be in L0 or at
-        // a lower rank in L1.
-        if l1_ids.contains(&wikilinked.id.as_str()) {
-            // Good: wikilinked note is in L1 as expected.
-            // Verify the embedding note is not ranked higher.
-            let all_related: Vec<&str> = response
-                .related_l1
-                .iter()
-                .map(|n| n.id.as_str())
-                .chain(response.related_l0.iter().map(|n| n.id.as_str()))
-                .collect();
+        // Collect all related IDs (L1 + L0) for rank comparison.
+        let all_related: Vec<&str> = response
+            .related_l1
+            .iter()
+            .map(|n| n.id.as_str())
+            .chain(response.related_l0.iter().map(|n| n.id.as_str()))
+            .collect();
 
-            if let (Some(wl_rank), Some(em_rank)) = (
-                all_related.iter().position(|&id| id == wikilinked.id),
-                all_related.iter().position(|&id| id == embedding_note.id),
-            ) {
-                assert!(
-                    wl_rank <= em_rank,
-                    "wikilinked note (rank={wl_rank}) should outrank embedding-only (rank={em_rank})"
-                );
-            }
+        // The embedding note (quantum content, no FTS overlap) should not
+        // outrank the wikilinked note. Since the embedding note's content
+        // is unrelated to the seed's FTS query, it may not even appear in
+        // results. If it does appear (via graph proximity + temporal), its
+        // rank must be lower than the wikilinked note's.
+        if let (Some(wl_rank), Some(em_rank)) = (
+            all_related.iter().position(|&id| id == wikilinked.id),
+            all_related.iter().position(|&id| id == embedding_note.id),
+        ) {
+            assert!(
+                wl_rank < em_rank,
+                "wikilinked note (rank={wl_rank}) must outrank embedding-only note (rank={em_rank})"
+            );
         }
-        // If the wikilinked note is not in L1 (edge case with RRF scoring),
-        // the test still validates no errors and the code path is exercised.
+
+        // Co-access (Hebbian) behavior: the co_access_note, connected via
+        // co_access with shared FTS terms ("architecture"), should appear
+        // in results — verifying co-access edges are not demoted by the
+        // presence of embedding edges.
+        assert!(
+            all_related.contains(&co_access_note.id.as_str()),
+            "co_access note must appear in related results (Hebbian behavior preserved); got: {all_related:?}"
+        );
+
+        // Wikilinked note must outrank co-access note too — explicit
+        // wikilinks are the strongest signal.
+        if let (Some(wl_rank), Some(co_rank)) = (
+            all_related.iter().position(|&id| id == wikilinked.id),
+            all_related.iter().position(|&id| id == co_access_note.id),
+        ) {
+            assert!(
+                wl_rank < co_rank,
+                "wikilinked note (rank={wl_rank}) must outrank co_access note (rank={co_rank})"
+            );
+        }
     }
 }

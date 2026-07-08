@@ -1254,7 +1254,8 @@ mod tests {
 
     /// `memory_search` includes `embedding_related` edges in graph expansion
     /// by default (when `edge_kinds` is `None`), and excludes them when
-    /// `edge_kinds` filters to other kinds.
+    /// `edge_kinds` filters to other kinds. Verifies actual ranking
+    /// differences, not just absence of errors.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_search_respects_edge_kinds_for_embedding_related() {
         let _tmp = workspace_tempdir();
@@ -1269,12 +1270,12 @@ mod tests {
             .unwrap();
         let repo = NoteRepository::new(db.clone(), event_bus.clone());
 
-        // Seed: a note that matches the search query.
+        // Seed: a note that strongly matches the search query.
         let seed = repo
             .create(
                 &project.id,
                 "Embedding Seed",
-                "architecture planning context for embeddings",
+                "neural network training optimization deep learning",
                 "adr",
                 "[]",
             )
@@ -1282,24 +1283,29 @@ mod tests {
             .unwrap();
 
         // Neighbor: connected to seed via embedding_related edge only.
-        // Has overlapping content so FTS also matches.
+        // Shares enough FTS overlap with the query to be a candidate
+        // but less than the seed. The embedding edge gives it a graph
+        // proximity boost when edge_kinds includes embedding_related.
         let neighbor = repo
             .create(
                 &project.id,
                 "Embedding Neighbor",
-                "architecture planning embeddings context",
+                "network training optimization techniques overview",
                 "reference",
                 "[]",
             )
             .await
             .unwrap();
 
-        // Control: another note with similar content but no edge to seed.
-        let _control = repo
+        // Control: same content as neighbor (same FTS profile) but with
+        // NO embedding edge to the seed. This isolates the graph-proximity
+        // effect: any ranking difference between neighbor and control is
+        // purely due to the embedding_related edge.
+        let control = repo
             .create(
                 &project.id,
                 "Control Note",
-                "architecture planning embeddings context control",
+                "network training optimization techniques overview",
                 "reference",
                 "[]",
             )
@@ -1326,11 +1332,13 @@ mod tests {
         let server = DjinnMcpServer::new(test_mcp_state(db, &tx));
 
         // Default search (edge_kinds = None) → all edge kinds participate.
+        // The neighbor should receive a graph proximity boost from its
+        // embedding_related edge, pushing it above the control.
         let all_kinds = ops::memory_search(
             &server,
             SearchParams {
                 project: project.slug(),
-                query: "architecture planning embeddings".to_string(),
+                query: "neural network training optimization".to_string(),
                 folder: None,
                 note_type: None,
                 limit: Some(10),
@@ -1342,19 +1350,37 @@ mod tests {
         .await;
         assert!(all_kinds.error.is_none(), "{:?}", all_kinds.error);
         assert!(
-            !all_kinds.results.is_empty(),
-            "default search should return results"
+            all_kinds.results.len() >= 2,
+            "default search should return at least seed + neighbor: {:?}",
+            all_kinds
+                .results
+                .iter()
+                .map(|r| &r.title)
+                .collect::<Vec<_>>()
         );
 
+        let default_neighbor_pos = all_kinds.results.iter().position(|r| r.id == neighbor.id);
+        let default_control_pos = all_kinds.results.iter().position(|r| r.id == control.id);
+
+        // With edge_kinds=None the embedding_related edge provides a graph
+        // proximity boost to the neighbor.  The control (same FTS profile,
+        // no graph edge) must rank at or below the neighbor.
+        if let (Some(n_pos), Some(c_pos)) = (default_neighbor_pos, default_control_pos) {
+            assert!(
+                n_pos <= c_pos,
+                "with default edge_kinds, embedding neighbor (pos={n_pos}) must outrank \
+                 or equal unconnected control (pos={c_pos}) due to graph proximity boost"
+            );
+        }
+
         // Search with edge_kinds excluding embedding_related → the neighbor
-        // loses its graph boost but may still appear via FTS. The key
-        // assertion is that the result set does not error and the graph
-        // expansion path is exercised.
+        // loses its graph boost.  Both neighbor and control have the same
+        // FTS profile, so the ranking difference should disappear.
         let co_only = ops::memory_search(
             &server,
             SearchParams {
                 project: project.slug(),
-                query: "architecture planning embeddings".to_string(),
+                query: "neural network training optimization".to_string(),
                 folder: None,
                 note_type: None,
                 limit: Some(10),
@@ -1370,27 +1396,19 @@ mod tests {
             co_only.error
         );
 
-        // Search with edge_kinds = ["embedding_related"] → only embedding
-        // edges participate in graph expansion.
-        let embedding_only = ops::memory_search(
-            &server,
-            SearchParams {
-                project: project.slug(),
-                query: "architecture planning embeddings".to_string(),
-                folder: None,
-                note_type: None,
-                limit: Some(10),
-                entity_types: None,
-                edge_kinds: Some(vec!["embedding_related".to_string()]),
-            },
-            None,
-        )
-        .await;
-        assert!(
-            embedding_only.error.is_none(),
-            "embedding_only edge_kinds should not cause errors: {:?}",
-            embedding_only.error
-        );
+        let co_neighbor_pos = co_only.results.iter().position(|r| r.id == neighbor.id);
+        let co_control_pos = co_only.results.iter().position(|r| r.id == control.id);
+
+        // Without the embedding_related graph boost, the neighbor must NOT
+        // rank strictly above the control — the advantage came solely from
+        // the embedding edge.
+        if let (Some(n_pos), Some(c_pos)) = (co_neighbor_pos, co_control_pos) {
+            assert!(
+                n_pos >= c_pos,
+                "without embedding_related edge, neighbor (pos={n_pos}) must not outrank \
+                 control (pos={c_pos}) — the graph boost must be absent"
+            );
+        }
     }
 
     /// Explicit wikilinks remain the strongest retrieval signal — notes
@@ -1411,44 +1429,62 @@ mod tests {
             .unwrap();
         let repo = NoteRepository::new(db.clone(), event_bus.clone());
 
-        // Wikilinked note: content explicitly links to seed via [[wikilink]].
-        let wikilinked = repo
+        // Seed: target of the wikilink. Contains query terms.
+        let seed = repo
             .create(
                 &project.id,
-                "Wikilinked Note",
-                "This note is about precedence testing. See [[Precedence Seed]] for details.",
-                "adr",
-                "[]",
-            )
-            .await
-            .unwrap();
-
-        // Seed: target of the wikilink.
-        repo.create(
-            &project.id,
-            "Precedence Seed",
-            "Precedence testing seed note about architecture.",
-            "reference",
-            "[]",
-        )
-        .await
-        .unwrap();
-
-        // Embedding-only note: connected to wikilinked via embedding_related.
-        let embedding_only = repo
-            .create(
-                &project.id,
-                "Embedding Only Note",
-                "This note is about precedence testing with embedding context.",
+                "Precedence Seed",
+                "Precedence testing seed note about architecture and system design.",
                 "reference",
                 "[]",
             )
             .await
             .unwrap();
 
-        // Seed embedding_related edge between wikilinked and embedding_only.
+        // Wikilinked note: explicitly links to seed via [[Precedence Seed]].
+        // Also shares FTS terms ("architecture") with the query.
+        let wikilinked = repo
+            .create(
+                &project.id,
+                "Wikilinked Note",
+                "This note is about precedence testing for architecture. See [[Precedence Seed]] for details.",
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // Embedding-only note: connected to seed via embedding_related only.
+        // Content intentionally FTS-unrelated to the query to eliminate
+        // FTS masking of the graph signal.
+        let embedding_only = repo
+            .create(
+                &project.id,
+                "Embedding Only Note",
+                "quantum entanglement physics experiment data results",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // Co-access note: connected via co_access (Hebbian) to seed.
+        // Shares FTS terms ("architecture") with the query so it's a
+        // candidate. Verifies co-access behavior is not demoted.
+        let co_access_note = repo
+            .create(
+                &project.id,
+                "Co Access Note",
+                "architecture system patterns distributed computing design",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // Seed embedding_related edge between seed and embedding_only.
         repo.upsert_provenance_association(
-            &wikilinked.id,
+            &seed.id,
             &embedding_only.id,
             &djinn_db::NoteAssociationProvenanceUpsert {
                 kind: djinn_db::NoteAssociationKind::EmbeddingRelated,
@@ -1463,9 +1499,9 @@ mod tests {
         .await
         .unwrap();
 
-        // Also seed a co_access (Hebbian) edge to verify co-access behavior
-        // is not demoted by embedding edges.
-        repo.upsert_association(&wikilinked.id, &embedding_only.id, 3)
+        // Seed co_access (Hebbian) edge between seed and co_access_note.
+        // This is a separate note from the embedding_only note.
+        repo.upsert_association(&seed.id, &co_access_note.id, 3)
             .await
             .unwrap();
 
@@ -1487,38 +1523,45 @@ mod tests {
         .await;
 
         assert!(response.error.is_none(), "{:?}", response.error);
-        assert!(
-            response.results.len() >= 2,
-            "should find at least wikilinked and seed notes"
-        );
 
-        // The wikilinked note (which has explicit wikilink content) should
-        // appear in the results. Its rank should be high due to both FTS
-        // and wikilink graph proximity.
-        let wikilinked_pos = response.results.iter().position(|r| r.id == wikilinked.id);
+        // The seed and wikilinked must both appear (they share FTS terms
+        // and have strong graph connections).
+        let wikilinked_pos = response
+            .results
+            .iter()
+            .position(|r| r.id == wikilinked.id)
+            .expect("wikilinked note must appear in search results");
+
+        // The wikilinked note (explicit wikilink + FTS overlap) must rank
+        // at or above any embedding_only note that appears.
         let embedding_pos = response
             .results
             .iter()
             .position(|r| r.id == embedding_only.id);
 
-        // Both should be found (via FTS at minimum).
-        assert!(
-            wikilinked_pos.is_some(),
-            "wikilinked note must appear in results"
-        );
-        assert!(
-            embedding_pos.is_some(),
-            "embedding-only note must appear in results"
-        );
-
-        // The wikilinked note should rank at least as high as (or higher
-        // than) the embedding-only note — wikilink graph boost is the
-        // strongest signal.
-        if let (Some(wl_pos), Some(em_pos)) = (wikilinked_pos, embedding_pos) {
+        if let Some(em_pos) = embedding_pos {
             assert!(
-                wl_pos <= em_pos,
-                "wikilinked note (pos={wl_pos}) should outrank embedding-only note (pos={em_pos})"
+                wikilinked_pos < em_pos,
+                "wikilinked note (pos={wikilinked_pos}) must outrank embedding-only note \
+                 (pos={em_pos}) — wikilink graph signal is the strongest"
             );
         }
+
+        // Co-access (Hebbian) behavior: the co_access_note, connected
+        // via co_access with FTS overlap, must appear in results — proving
+        // co-access edges are not demoted by the presence of embedding edges.
+        let co_access_pos = response
+            .results
+            .iter()
+            .position(|r| r.id == co_access_note.id)
+            .expect("co_access note must appear in results (Hebbian behavior preserved)");
+
+        // Wikilinked note must outrank co_access note — explicit wikilinks
+        // are the strongest signal.
+        assert!(
+            wikilinked_pos < co_access_pos,
+            "wikilinked note (pos={wikilinked_pos}) must outrank co_access note \
+             (pos={co_access_pos}) — explicit wikilinks are strongest"
+        );
     }
 }
