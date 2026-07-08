@@ -1253,6 +1253,12 @@ fn report_to_terminal_status(report: &TaskRunReport) -> TaskRunStatus {
             TaskRunStatus::Failed
         }
         TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
+        // Environmental non-attempt: no session/attempt was created.
+        // Map to Completed so the run is terminal without triggering model
+        // breaker failures.  `terminal_report_feeds_model_success` returns
+        // false because `stages_completed` is always empty for this outcome,
+        // so no quality/arbiter/park penalties are applied.
+        TaskRunOutcome::EnvironmentalNonAttempt { .. } => TaskRunStatus::Completed,
     }
 }
 
@@ -1984,6 +1990,50 @@ mod tests {
         assert_eq!(
             got.expect("report after first turn").task_run_id,
             "run-live"
+        );
+    }
+    #[test]
+    fn environmental_non_attempt_has_no_provider_breaker_signal() {
+        let env_report = report(
+            "env-run",
+            vec![],
+            TaskRunOutcome::EnvironmentalNonAttempt {
+                reason: "pre_task_failed".into(),
+            },
+        );
+        assert_eq!(
+            report_to_terminal_status(&env_report),
+            TaskRunStatus::Completed,
+            "environmental non-attempt maps to Completed (terminal, no penalty)"
+        );
+        assert_eq!(
+            provider_failure_class_for_report(&env_report),
+            None,
+            "environmental non-attempt must not feed provider breaker"
+        );
+        assert!(
+            !terminal_report_feeds_model_success(&env_report),
+            "environmental non-attempt must not feed model-health success \
+             (stages_completed is empty)"
+        );
+    }
+    #[test]
+    fn environmental_non_attempt_service_readiness_has_no_breaker_signal() {
+        let env_report = report(
+            "env-svc-run",
+            vec![],
+            TaskRunOutcome::EnvironmentalNonAttempt {
+                reason: "service_readiness_failed".into(),
+            },
+        );
+        assert_eq!(
+            report_to_terminal_status(&env_report),
+            TaskRunStatus::Completed,
+            "service readiness failure maps to Completed (terminal, no penalty)"
+        );
+        assert!(
+            !terminal_report_feeds_model_success(&env_report),
+            "service readiness failure must not feed model-health success"
         );
     }
 }
