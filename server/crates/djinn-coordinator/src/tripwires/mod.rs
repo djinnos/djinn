@@ -44,9 +44,10 @@ pub use activity_payloads::{
 };
 #[allow(unused_imports)]
 pub use policy::{
-    BoundaryAllowlistRef, CIWorkflowRuleConfig, DependencyIdentityRuleConfig, GeneratedExclusions,
-    LargeDeleteRewriteRuleConfig, MigrationRuleConfig, NetworkEgressRuleConfig, PolicySource,
-    TripwirePolicy, UnsafeCodeRuleConfig, VendorExclusions,
+    BoundaryAllowlistRef, BoundaryPathRuleConfig, CIWorkflowRuleConfig,
+    DependencyIdentityRuleConfig, GeneratedExclusions, LargeDeleteRewriteRuleConfig,
+    MigrationRuleConfig, NetworkEgressRuleConfig, PolicySource, TripwirePolicy,
+    UnsafeCodeRuleConfig, VendorExclusions,
 };
 #[allow(unused_imports)]
 pub use reason_codes::{

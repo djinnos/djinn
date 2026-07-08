@@ -9,7 +9,7 @@
 //! 2. [`DependencyIdentityRuleConfig`] — `dependency_identity_change`
 //! 3. [`NetworkEgressRuleConfig`] — `network_egress_change`
 //! 4. [`UnsafeCodeRuleConfig`] — `unsafe_code_change`
-//! 5. boundary path (see [`TripwirePolicy::boundary_path`] and
+//! 5. [`BoundaryPathRuleConfig`] (see also [`TripwirePolicy::allowlist`] /
 //!    [`BoundaryAllowlistRef`]) — `boundary_path_change`
 //! 6. [`LargeDeleteRewriteRuleConfig`] — `large_delete_or_rewrite`
 //! 7. [`CIWorkflowRuleConfig`] — `ci_workflow_change`
@@ -241,6 +241,55 @@ impl Default for UnsafeCodeRuleConfig {
     }
 }
 
+/// Boundary-path change: changed path matches auth, permission, secrets,
+/// deployment, billing, or capability-boundary allowlist patterns.
+///
+/// Tuning knobs:
+/// - `match_outside_allowlist`: `true` → any changed file matching the
+///   boundary category patterns that is NOT in the allowlist trips the rule;
+///   `false` → only new boundary-category files trip it.
+/// - `category_patterns`: glob patterns identifying boundary-sensitive paths
+///   (e.g. `scripts/capability-boundary-allowlist.toml`, auth/permission
+///   files, secrets, deployment configs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoundaryPathRuleConfig {
+    /// Master switch. `false` → rule is skipped entirely.
+    pub enabled: bool,
+    /// When `true`, findings are recorded as report-only (advisory) and do
+    /// not block the gate.
+    pub report_only: bool,
+    /// `true` → changed files matching boundary category patterns that are
+    /// absent from the allowlist trip the rule. `false` → only newly
+    /// introduced boundary-category files trigger findings.
+    pub match_outside_allowlist: bool,
+    /// Glob patterns identifying boundary-sensitive paths (auth, permission,
+    /// secrets, deployment, billing, capability-boundary allowlist).
+    pub category_patterns: Vec<String>,
+}
+
+impl Default for BoundaryPathRuleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            report_only: false,
+            match_outside_allowlist: true,
+            category_patterns: vec![
+                "scripts/capability-boundary-allowlist.toml".to_owned(),
+                "**/auth/**".to_owned(),
+                "**/authz/**".to_owned(),
+                "**/permissions/**".to_owned(),
+                "**/secrets/**".to_owned(),
+                "**/deploy/**".to_owned(),
+                "**/deployment/**".to_owned(),
+                "**/billing/**".to_owned(),
+                "**/.env*".to_owned(),
+                "**/iam/**".to_owned(),
+                "**/rbac/**".to_owned(),
+            ],
+        }
+    }
+}
+
 /// Boundary allowlist reference carried inside [`TripwirePolicy`].
 ///
 /// The boundary-path rule uses the allowlist as its positive list for
@@ -426,6 +475,11 @@ pub struct TripwirePolicy {
     pub network_egress: NetworkEgressRuleConfig,
     /// Unsafe code change rule.
     pub unsafe_code: UnsafeCodeRuleConfig,
+    /// Boundary-path change rule with per-rule enabled/report_only/tuning
+    /// controls. The [`allowlist`](TripwirePolicy::allowlist) field carries
+    /// revision/source metadata; this field controls whether the rule fires
+    /// and how findings are surfaced.
+    pub boundary_path: BoundaryPathRuleConfig,
     /// Large deletion/rewrite rule.
     pub large_delete_rewrite: LargeDeleteRewriteRuleConfig,
     /// CI / workflow / release / deploy automation rule.
@@ -454,6 +508,7 @@ impl Default for TripwirePolicy {
             dependency_identity: DependencyIdentityRuleConfig::default(),
             network_egress: NetworkEgressRuleConfig::default(),
             unsafe_code: UnsafeCodeRuleConfig::default(),
+            boundary_path: BoundaryPathRuleConfig::default(),
             large_delete_rewrite: LargeDeleteRewriteRuleConfig::default(),
             ci_workflow: CIWorkflowRuleConfig::default(),
             rationale: None,
@@ -521,6 +576,11 @@ mod tests {
                 p.unsafe_code.report_only,
             ),
             (
+                "boundary_path",
+                p.boundary_path.enabled,
+                p.boundary_path.report_only,
+            ),
+            (
                 "large_delete_rewrite",
                 p.large_delete_rewrite.enabled,
                 p.large_delete_rewrite.report_only,
@@ -538,8 +598,8 @@ mod tests {
             );
         }
 
-        // Boundary path rule family is encoded structurally (allowlist
-        // presence); the degraded-mode flag must reflect the default.
+        // Boundary allowlist degraded-mode flag must reflect the default
+        // (allowlist has not been published).
         assert!(p.boundary_allowlist_is_degraded());
     }
 
@@ -567,6 +627,10 @@ mod tests {
         assert!(
             !p.unsafe_code.matcher_substrings.is_empty(),
             "unsafe matchers must be populated"
+        );
+        assert!(
+            !p.boundary_path.category_patterns.is_empty(),
+            "boundary category_patterns must be populated"
         );
         assert!(
             p.large_delete_rewrite.per_file_line_threshold > 0
@@ -673,6 +737,10 @@ mod tests {
             (
                 "unsafe_code",
                 serde_json::to_string(&UnsafeCodeRuleConfig::default()).unwrap(),
+            ),
+            (
+                "boundary_path",
+                serde_json::to_string(&BoundaryPathRuleConfig::default()).unwrap(),
             ),
             (
                 "large_delete_rewrite",
