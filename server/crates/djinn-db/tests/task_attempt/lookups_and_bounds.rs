@@ -395,6 +395,7 @@ async fn fill_forward_preserves_existing_values() {
         pr_url: Some("new-pr"),
         mirror_head_sha: Some("new-mirror"),
         github_head_sha: Some("new-github"),
+        github_publication_error: None,
         summary: Some("new-summary"),
         summary_json: Some(r#"{"new": true}"#),
         log_tail: Some("new-tail"),
