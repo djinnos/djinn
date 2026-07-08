@@ -58,16 +58,10 @@ fn normal_worker_dispatch_keeps_implement_lane() {
 
 #[test]
 fn reviewer_and_planner_lanes_unchanged_even_post_intervention() {
-    // Only the worker role is rerouted; other roles never get an override,
-    // regardless of intervention_count.
-    for role in [
-        "reviewer",
-        "planner",
-        "architect",
-        "lead",
-        "chat",
-        "unknown",
-    ] {
+    // Only the worker and lead roles are rerouted; reviewers, planners,
+    // architects never get an override regardless of intervention_count.
+    // (Lead is tested separately in `lead_arbiter_always_routes_to_plan_lane`.)
+    for role in ["reviewer", "planner", "architect", "chat", "unknown"] {
         assert_eq!(
             effective_dispatch_lane(role, 0, true),
             None,
@@ -86,6 +80,46 @@ fn feature_disabled_leaves_post_intervention_worker_on_implement_lane() {
     // With the flag off, even a post-intervention worker resolves from its
     // role-implied (implement) lane — the override is fully gated on the flag.
     assert_eq!(effective_dispatch_lane("worker", 2, false), None);
+}
+
+// ── Lead arbiter always routes to plan lane ─────────────────────────────────
+
+#[test]
+fn lead_arbiter_always_routes_to_plan_lane() {
+    // The park-rung forensic arbiter (role == "lead") always resolves through
+    // the plan lane, regardless of feature flag or intervention count.
+    assert_eq!(
+        effective_dispatch_lane("lead", 0, true),
+        Some(ModelLane::Plan),
+        "lead with intervention_count=0 must route to plan lane"
+    );
+    assert_eq!(
+        effective_dispatch_lane("lead", 1, true),
+        Some(ModelLane::Plan),
+        "lead with intervention_count=1 must route to plan lane"
+    );
+    assert_eq!(
+        effective_dispatch_lane("lead", 5, true),
+        Some(ModelLane::Plan),
+        "lead with intervention_count=5 must route to plan lane"
+    );
+}
+
+#[test]
+fn lead_arbiter_routes_to_plan_lane_even_with_feature_disabled() {
+    // Unlike workers, lead arbiter routing is not gated on the post-intervention
+    // feature flag. The lead role is always an arbiter dispatch, not a worker
+    // retry, so its plan-lane routing is unconditional.
+    assert_eq!(
+        effective_dispatch_lane("lead", 0, false),
+        Some(ModelLane::Plan),
+        "lead must route to plan lane even with feature disabled"
+    );
+    assert_eq!(
+        effective_dispatch_lane("lead", 3, false),
+        Some(ModelLane::Plan),
+        "lead must route to plan lane even with feature disabled"
+    );
 }
 
 // ── AC4: model-resolution override is out of reach for the in-crate harness ─
@@ -130,4 +164,9 @@ fn resolution_override_seam_is_documented_not_observable_in_crate() {
         Some(ModelLane::Plan)
     );
     assert_eq!(effective_dispatch_lane("worker", 0, true), None);
+    // Lead arbiter is always plan-lane.
+    assert_eq!(
+        effective_dispatch_lane("lead", 0, true),
+        Some(ModelLane::Plan)
+    );
 }
