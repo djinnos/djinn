@@ -155,7 +155,7 @@ impl CoordinatorHandle {
     /// Dispatch a Planner escalation for a task.
     ///
     /// Creates a review task and dispatches the Planner to it.
-    /// Called when Lead uses `request_planner` or auto-escalation fires on 2nd `request_lead`.
+    /// Called when Lead uses `request_planner` or auto-escalation fires on 2nd planner escalation.
     /// Per ADR-051 §8 the Planner is the escalation ceiling above Lead.
     pub async fn dispatch_planner_escalation(
         &self,

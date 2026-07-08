@@ -147,8 +147,8 @@ pub(super) struct CoordinatorActor {
     /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
     // Restart-safe-to-lose: sliding window for throughput metrics, rebuilt on the next metrics tick.
     pub(super) throughput_events: HashMap<String, Vec<StdInstant>>,
-    /// Durable dispatch-state: per-task Lead escalation count (request_lead call count per task UUID).
-    /// When a task accumulates ≥ 2 escalations, the next request_lead routes to Architect.
+    /// Durable dispatch-state: per-task escalation count (escalation call count per task UUID).
+    /// When a task accumulates ≥ 2 escalations, the next escalation routes to Architect.
     // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) escalation_counts: HashMap<String, u32>,
     /// Restart-safe-to-lose: PR status cache; losing it causes one redundant
@@ -1031,7 +1031,7 @@ impl CoordinatorActor {
                         );
                         // Fail open to the escalation ceiling instead of returning
                         // a reset in-memory count after restart. That keeps
-                        // repeated request_lead calls from being silently routed
+                        // repeated escalation calls from being silently routed
                         // back to Lead when durable state is unavailable.
                         let _ = reply.send(u32::MAX);
                     }

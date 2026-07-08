@@ -693,36 +693,6 @@ expression: tool_schemas_worker()
     "concurrent_safe": false
   },
   {
-    "name": "request_lead",
-    "description": "Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call.",
-    "inputSchema": {
-      "type": "object",
-      "required": [
-        "id",
-        "reason"
-      ],
-      "properties": {
-        "id": {
-          "type": "string",
-          "description": "Task UUID or short_id"
-        },
-        "reason": {
-          "type": "string",
-          "description": "Why Lead intervention is needed (e.g. task too large, design ambiguous, blocked on decision)"
-        },
-        "suggested_breakdown": {
-          "type": "string",
-          "description": "Optional suggested split: list of smaller tasks the Lead should create"
-        }
-      }
-    },
-    "readOnly": false,
-    "destructive": false,
-    "idempotent": false,
-    "openWorld": false,
-    "concurrent_safe": false
-  },
-  {
     "name": "request_planner",
     "description": "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs to be split or merged, or has failed multiple Lead interventions. The Planner owns the board and decides whether to reshape the work, dedupe it, or — if the issue requires deeper code-structural reasoning — dispatch an Architect spike. Adds a comment and dispatches the Planner. Your session should end after this call.",
     "inputSchema": {

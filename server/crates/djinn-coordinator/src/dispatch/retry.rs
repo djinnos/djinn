@@ -2042,7 +2042,7 @@ impl CoordinatorActor {
     /// to the source task, then dispatch the Planner to it.
     ///
     /// Called when Lead calls `request_planner` or when auto-escalation fires on the
-    /// 2nd `request_lead` for the same task.  Per ADR-051 §8 the Planner is now the
+    /// 2nd planner escalation for the same task.  Per ADR-051 §8 the Planner is now the
     /// escalation ceiling above Lead — it owns the board and decides whether to
     /// reshape, dedupe, or (if the issue requires deeper code-structural reasoning)
     /// dispatch an Architect spike.
@@ -2061,7 +2061,7 @@ impl CoordinatorActor {
     /// Planner to it.
     ///
     /// Called when Lead calls `request_planner`, when auto-escalation fires on the
-    /// 2nd `request_lead` for the same task, and on the CI-loop / second-strike
+    /// 2nd planner escalation for the same task, and on the CI-loop / second-strike
     /// park paths. Per ADR-051 §8 the Planner is the escalation ceiling above Lead
     /// — it owns the board and decides whether to reshape, dedupe, or (if the issue
     /// requires deeper code-structural reasoning) dispatch an Architect spike.
