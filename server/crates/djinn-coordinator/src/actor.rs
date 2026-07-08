@@ -32,7 +32,7 @@ use djinn_slot::SlotPoolHandle;
 /// Coordinator actor state.
 ///
 /// Durability boundary: `last_dispatched`, `inflight_dispatches`,
-/// `dispatch_cooldowns`, `dispatch_failure_streak`, and `escalation_counts` are
+/// `dispatch_cooldowns`, and `dispatch_failure_streak` are
 /// persisted in the `dispatch_state` table via `DispatchStateRepository` (epic
 /// n6xw, proposal 8ipw). The other caches below are deliberately
 /// restart-safe-to-lose — they only feed poller/metrics decisions and are cheap
@@ -147,10 +147,6 @@ pub(super) struct CoordinatorActor {
     /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
     // Restart-safe-to-lose: sliding window for throughput metrics, rebuilt on the next metrics tick.
     pub(super) throughput_events: HashMap<String, Vec<StdInstant>>,
-    /// Durable dispatch-state: per-task escalation count (escalation call count per task UUID).
-    /// When a task accumulates ≥ 2 escalations, the next escalation routes to Architect.
-    // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
-    pub(super) escalation_counts: HashMap<String, u32>,
     /// Restart-safe-to-lose: PR status cache; losing it causes one redundant
     /// GitHub CI query, after which the cache is rebuilt.
     /// task_id → last known head SHA.
@@ -344,7 +340,6 @@ pub(super) struct RehydratedDispatchStateSummary {
     pub(super) expired_cooldowns: usize,
     pub(super) last_dispatched: usize,
     pub(super) inflight: usize,
-    pub(super) escalation_counts: usize,
 }
 
 fn parse_dispatch_wall_clock_ts(raw: &str) -> Option<::time::OffsetDateTime> {
@@ -483,7 +478,6 @@ impl CoordinatorActor {
             rpc_registry,
             prune_tick_counter: 0,
             throughput_events: HashMap::new(),
-            escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),
             review_stuck_sha_first_seen: HashMap::new(),
@@ -548,7 +542,6 @@ impl CoordinatorActor {
             expired_cooldowns = summary.expired_cooldowns,
             last_dispatched = summary.last_dispatched,
             inflight = summary.inflight,
-            escalation_counts = summary.escalation_counts,
             "CoordinatorActor: rehydrated durable dispatch state"
         );
     }
@@ -571,14 +564,6 @@ impl CoordinatorActor {
                     record.failure_streak.min(u32::MAX as i64) as u32,
                 );
                 summary.failure_streaks += 1;
-            }
-
-            if record.escalation_count > 0 {
-                self.escalation_counts.insert(
-                    record.task_id.clone(),
-                    record.escalation_count.min(u32::MAX as i64) as u32,
-                );
-                summary.escalation_counts += 1;
             }
 
             if let Some(deadline) = record
@@ -1016,26 +1001,6 @@ impl CoordinatorActor {
                     Err(err) => Err(CoordinatorError::LiveMoverEvidence(err.to_string())),
                 };
                 let _ = reply.send(result);
-            }
-            CoordinatorMessage::IncrementEscalationCount { task_id, reply } => {
-                match self.increment_durable_escalation_count(&task_id).await {
-                    Ok(count) => {
-                        self.escalation_counts.insert(task_id, count);
-                        let _ = reply.send(count);
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            task_id = %task_id,
-                            error = %e,
-                            "CoordinatorActor: failed to persist escalation count increment; forcing escalation ceiling"
-                        );
-                        // Fail open to the escalation ceiling instead of returning
-                        // a reset in-memory count after restart. That keeps
-                        // repeated escalation calls from being silently routed
-                        // back to Lead when durable state is unavailable.
-                        let _ = reply.send(u32::MAX);
-                    }
-                }
             }
             CoordinatorMessage::DebugSnapshot { reply } => {
                 let _ = reply.send(self.dispatch_state_snapshot());
