@@ -80,9 +80,12 @@ impl AppState {
     /// In production this is called after `initialize_agents()`, so both are
     /// populated. In tests neither is initialised; tools return graceful errors.
     pub fn mcp_state(&self) -> djinn_control_plane::McpState {
-        let coordinator = self
-            .coordinator_sync()
-            .map(|c| Arc::new(CoordinatorBridge(c)) as Arc<dyn CoordinatorOps>);
+        let coordinator = self.coordinator_sync().map(|c| {
+            Arc::new(CoordinatorBridge {
+                handle: c,
+                db: self.db().clone(),
+            }) as Arc<dyn CoordinatorOps>
+        });
         let pool = self
             .pool_sync()
             .map(|p| Arc::new(SlotPoolBridge(p)) as Arc<dyn SlotPoolOps>);
