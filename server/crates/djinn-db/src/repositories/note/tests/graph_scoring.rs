@@ -713,3 +713,275 @@ async fn temporal_scores_edge_cases_are_finite() {
     assert!(m[&old.id].is_finite());
     assert!(m[&zero_age.id] > m[&old.id]);
 }
+
+// ── embedding_related edge-kind filtering tests ──────────────────────────
+
+/// Helper: insert an `embedding_related` association between two notes.
+async fn insert_embedding_association(
+    repo: &NoteRepository,
+    note_a_id: &str,
+    note_b_id: &str,
+    weight: f64,
+) {
+    repo.upsert_typed_association(
+        note_a_id,
+        note_b_id,
+        NoteAssociationKind::EmbeddingRelated,
+        weight,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_proximity_embedding_related_included_by_default_no_filter() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let seed = repo
+        .create(&project.id, "Seed", "", "research", "[]")
+        .await
+        .unwrap();
+    let target = repo
+        .create(&project.id, "Target", "", "research", "[]")
+        .await
+        .unwrap();
+
+    insert_embedding_association(&repo, &seed.id, &target.id, 0.3).await;
+
+    // No edge_kinds filter → all kinds (including embedding_related) participate.
+    let (scores, _warnings) = repo
+        .graph_proximity_scores_with_edge_kinds(&[seed.id.clone()], 2, None)
+        .await
+        .unwrap();
+    let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+    assert!(
+        m.contains_key(&target.id),
+        "embedding_related should be included when no edge_kinds filter is set"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_proximity_edge_kinds_embedding_related_includes_machine_edges() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let seed = repo
+        .create(&project.id, "Seed", "", "research", "[]")
+        .await
+        .unwrap();
+    let target = repo
+        .create(&project.id, "Target", "", "research", "[]")
+        .await
+        .unwrap();
+
+    insert_embedding_association(&repo, &seed.id, &target.id, 0.3).await;
+
+    let only_embedding = vec!["embedding_related".to_string()];
+    let (scores, _warnings) = repo
+        .graph_proximity_scores_with_edge_kinds(&[seed.id.clone()], 2, Some(&only_embedding))
+        .await
+        .unwrap();
+    let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+    assert_eq!(
+        m.len(),
+        1,
+        "only embedding_related edge should be traversed"
+    );
+    assert!(
+        m.contains_key(&target.id),
+        "embedding_related target should be present"
+    );
+
+    // Verify the expected score: HOP_DECAY * 0.5 * weight
+    let expected = 0.7 * 0.5 * 0.3;
+    assert!(
+        (m[&target.id] - expected).abs() < 1e-9,
+        "expected embedding_related score {expected}, got {}",
+        m[&target.id]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_proximity_edge_kinds_without_embedding_related_excludes_machine_edges() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let seed = repo
+        .create(&project.id, "Seed", "", "research", "[]")
+        .await
+        .unwrap();
+    let co_access_note = repo
+        .create(&project.id, "Co Access", "", "research", "[]")
+        .await
+        .unwrap();
+    let embedding_note = repo
+        .create(&project.id, "Embedding Note", "", "research", "[]")
+        .await
+        .unwrap();
+
+    // Insert a co_access edge and an embedding_related edge.
+    sqlx::query(
+        r#"INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind)
+         VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'co_access')"#,
+    )
+    .bind(&seed.id)
+    .bind(&co_access_note.id)
+    .bind(0.5_f64)
+    .execute(repo.db.pool())
+    .await
+    .unwrap();
+
+    insert_embedding_association(&repo, &seed.id, &embedding_note.id, 0.3).await;
+
+    // Filter to only co_access — embedding_related should be excluded.
+    let only_co_access = vec!["co_access".to_string()];
+    let (scores, _warnings) = repo
+        .graph_proximity_scores_with_edge_kinds(&[seed.id.clone()], 2, Some(&only_co_access))
+        .await
+        .unwrap();
+    let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+    assert!(
+        m.contains_key(&co_access_note.id),
+        "co_access edge should be included"
+    );
+    assert!(
+        !m.contains_key(&embedding_note.id),
+        "embedding_related should be excluded when not in edge_kinds filter"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_proximity_wikilink_outranks_embedding_related() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    // Seed links to B via wikilink and C via embedding_related.
+    let a = repo
+        .create(&project.id, "A", "[[B]]", "research", "[]")
+        .await
+        .unwrap();
+    let b = repo
+        .create(&project.id, "B", "", "research", "[]")
+        .await
+        .unwrap();
+    let c = repo
+        .create(&project.id, "C", "", "research", "[]")
+        .await
+        .unwrap();
+
+    // Use a high embedding weight (0.35 = upper bound from 9sx6) to give
+    // embedding_related the best possible score — it must still lose to wikilink.
+    insert_embedding_association(&repo, &a.id, &c.id, 0.35).await;
+
+    let (scores, _warnings) = repo
+        .graph_proximity_scores_with_edge_kinds(&[a.id.clone()], 1, None)
+        .await
+        .unwrap();
+    let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+
+    assert!(m.contains_key(&b.id), "wikilink target should be present");
+    assert!(
+        m.contains_key(&c.id),
+        "embedding_related target should be present"
+    );
+
+    // Wikilink score = HOP_DECAY = 0.7
+    // Embedding_related score = HOP_DECAY * 0.5 * 0.35 = 0.1225
+    assert!(
+        m[&b.id] > m[&c.id],
+        "wikilink ({}) must outrank embedding_related ({})",
+        m[&b.id],
+        m[&c.id]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_proximity_co_access_unchanged_with_embedding_related_present() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let a = repo
+        .create(&project.id, "A", "", "research", "[]")
+        .await
+        .unwrap();
+    let b = repo
+        .create(&project.id, "B", "", "research", "[]")
+        .await
+        .unwrap();
+
+    // Insert a co_access association with known weight.
+    sqlx::query(
+        r#"INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind)
+         VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'co_access')"#,
+    )
+    .bind(&a.id)
+    .bind(&b.id)
+    .bind(0.5_f64)
+    .execute(repo.db.pool())
+    .await
+    .unwrap();
+
+    // Verify the co_access score with no embedding edges present.
+    let (scores_before, _) = repo
+        .graph_proximity_scores_with_edge_kinds(&[a.id.clone()], 1, None)
+        .await
+        .unwrap();
+    let m_before: std::collections::HashMap<_, _> = scores_before.into_iter().collect();
+    let co_access_score = m_before[&b.id];
+
+    // Now add an embedding_related edge from A → B as well and verify the
+    // co_access contribution is unchanged (best path wins, doesn't sum).
+    //
+    // We insert via raw SQL rather than `insert_embedding_association`
+    // (which calls `upsert_typed_association`) because that helper deletes
+    // any `(a, b, kind='co_access', source='session_co_access')` row before
+    // inserting — which would remove the co_access edge we just created.
+    // Using a different source (`'test_regression'`) lets both rows coexist
+    // so the test proves co_access scoring is genuinely preserved.
+    sqlx::query(
+        r#"INSERT INTO note_associations
+             (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind, source)
+           VALUES ($1, $2, $3, 0, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                   'embedding_related', 'test_regression')
+           ON CONFLICT (note_a_id, note_b_id, kind, source) DO NOTHING"#,
+    )
+    .bind(&a.id)
+    .bind(&b.id)
+    .bind(0.3_f64)
+    .execute(repo.db.pool())
+    .await
+    .unwrap();
+
+    let (scores_after, _) = repo
+        .graph_proximity_scores_with_edge_kinds(&[a.id.clone()], 1, None)
+        .await
+        .unwrap();
+    let m_after: std::collections::HashMap<_, _> = scores_after.into_iter().collect();
+
+    // Co_access multiplier: HOP_DECAY * 0.5 = 0.35
+    // Embedding_related multiplier: HOP_DECAY * 0.5 * 0.3 = 0.105
+    // Co_access is higher, so the max-path score should be unchanged.
+    assert!(
+        (m_after[&b.id] - co_access_score).abs() < 1e-9,
+        "co_access score should be unchanged when embedding_related is added: \
+         before={}, after={}",
+        co_access_score,
+        m_after[&b.id]
+    );
+}
