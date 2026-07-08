@@ -1689,6 +1689,29 @@ impl TaskRunSupervisor {
                         // the divergence. Gated on Worker role (matching the
                         // submit_task_review gate below); ArchitectDone tasks
                         // typically don't have open PRs.
+                        //
+                        // ── Branch-publication policy approval (icoe/vy47) ──
+                        //
+                        // It is acceptable and intentional to push unreviewed
+                        // WorkerDone commits to existing open-PR branches.
+                        // Internal review still gates approval/undraft/merge
+                        // readiness.  The goal is to keep GitHub Actions CI
+                        // evaluating the worker's latest commit rather than a
+                        // stale PR head, avoiding the aah4 stale-head
+                        // false-strike loop where GitHub evaluates an old SHA
+                        // and produces spurious CI failures.
+                        //
+                        // ── Helper reuse (icoe/vy47) ────────────────────────
+                        //
+                        // The GitHub push explicitly reuses
+                        // `push_task_branch_to_github` and its concurrent-push
+                        // race guard (`is_concurrent_push_race`) rather than
+                        // creating a second GitHub writer.  This ensures
+                        // consistent push semantics and race handling across the
+                        // codebase.
+                        //
+                        // See: epic vy47, proposal icoe acceptance criteria 4,
+                        // 5, 7, 8.
                         if push_succeeded && role_kind == RoleKind::Worker && task.pr_url.is_some()
                         {
                             match self.services.publish_branch_to_github(&spec, &task).await {
@@ -6745,6 +6768,14 @@ mod tests {
         publish_call_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         /// Configurable result returned by `publish_branch_to_github`.
         publish_result: BranchPublicationResult,
+        /// Tracks the "GitHub branch head" state, simulating the stale-head
+        /// condition (aah4 regression). Initially stale (e.g. old SHA);
+        /// `publish_branch_to_github` updates it to the new SHA.
+        github_head: std::sync::Arc<std::sync::Mutex<String>>,
+        /// Optional mirror for resolving the actual mirror HEAD at call time,
+        /// used by the aah4 regression test to populate the pushed SHA
+        /// dynamically.  `None` for tests that don't need real SHA resolution.
+        mirror: Option<Arc<MirrorManager>>,
         updated_statuses: std::sync::Arc<std::sync::Mutex<Vec<TaskRunStatus>>>,
     }
 
@@ -6951,7 +6982,43 @@ mod tests {
         ) -> BranchPublicationResult {
             self.publish_call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.publish_result.clone()
+            // Simulate the real push: update our tracked GitHub head to match
+            // the pushed SHA, modelling what happens when
+            // `push_task_branch_to_github` succeeds.
+            //
+            // If a `mirror` is provided, resolve the current mirror HEAD
+            // dynamically (used by aah4 regression test where the SHA is
+            // only known after the supervisor's commit+push).  Otherwise,
+            // fall back to the static `publish_result.pushed_sha`.
+            let effective_sha = if let Some(ref mirror) = self.mirror {
+                let mirror_path = mirror.mirror_path(&_spec.project_id);
+                let output = std::process::Command::new("git")
+                    .args([
+                        "--git-dir",
+                        &mirror_path.to_string_lossy(),
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{}", _spec.task_branch),
+                    ])
+                    .output()
+                    .expect("git rev-parse must run in mock publish_branch_to_github");
+                assert!(
+                    output.status.success(),
+                    "git rev-parse failed in mock: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            } else {
+                self.publish_result.pushed_sha.clone()
+            };
+            if let Some(ref sha) = effective_sha {
+                *self.github_head.lock().expect("github_head mutex poisoned") = sha.clone();
+            }
+            // Build a result that reflects the effective SHA.
+            let mut result = self.publish_result.clone();
+            result.pushed_sha = effective_sha;
+            result
         }
     }
 
@@ -7029,6 +7096,8 @@ mod tests {
                 error_class: None,
                 error_message: None,
             },
+            github_head: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            mirror: None,
             updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
@@ -7099,6 +7168,8 @@ mod tests {
                 error_class: None,
                 error_message: None,
             },
+            github_head: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            mirror: None,
             updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
@@ -7220,6 +7291,8 @@ mod tests {
                 error_class: None,
                 error_message: None,
             },
+            github_head: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            mirror: None,
             updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
@@ -7296,6 +7369,8 @@ mod tests {
                 error_class: Some("push_rejected".into()),
                 error_message: Some("remote: error: GH006: Protected branch update failed".into()),
             },
+            github_head: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            mirror: None,
             updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
@@ -7409,6 +7484,8 @@ mod tests {
                 error_class: None,
                 error_message: None,
             },
+            github_head: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            mirror: None,
             updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
@@ -7473,5 +7550,186 @@ mod tests {
             !changed_files.iter().any(|f| *f == "test2.txt"),
             "committed branch must NOT contain scratch file test2.txt, got: {changed_files:?}"
         );
+    }
+
+    /// Test 6: aah4-shaped stale-GitHub-head regression.
+    ///
+    /// Reproduces the stale-GitHub-head condition that task aah4 exposed:
+    /// a worker's new commit lands on the mirror (via the supervisor's
+    /// `commit` + `push_to_origin`), but the GitHub PR branch head is NOT
+    /// updated — so GitHub Actions evaluates a stale PR head instead of the
+    /// worker's latest commit.
+    ///
+    /// This test verifies that when `publish_branch_to_github` fires for a
+    /// task with an existing open PR, the mock's GitHub head is updated to
+    /// match the mirror head (heads aligned — the stale-head condition is
+    /// resolved).
+    ///
+    /// Contrast with Test 1 (`no_open_pr_worker_done_does_not_publish_to_github`):
+    /// when there is no open PR, `publish_branch_to_github` is NOT called and
+    /// the GitHub head remains stale, demonstrating the problem this feature
+    /// solves.
+    ///
+    /// Cross-references: epic vy47, proposal icoe acceptance criteria 4, 7, 8.
+    #[tokio::test]
+    async fn aah4_stale_github_head_reconciled_by_publish_branch_to_github() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "proj-aah4-stale";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        // Capture the initial base-branch SHA on the mirror BEFORE the
+        // worker commits.  This models the "old GitHub head" — the SHA that
+        // GitHub's PR branch points to before publication.
+        let mirror_path = mirror.mirror_path(project_id);
+        let base_sha = {
+            let output = std::process::Command::new("git")
+                .args([
+                    "--git-dir",
+                    &mirror_path.to_string_lossy(),
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/heads/main",
+                ])
+                .output()
+                .expect("git rev-parse base SHA");
+            assert!(
+                output.status.success(),
+                "git rev-parse failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        // The worker writes a file so the auto-commit produces a real diff.
+        let write_fn: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync> =
+            std::sync::Arc::new(|ws_path: &std::path::Path| {
+                std::fs::write(ws_path.join("real.rs"), "fn main() {}\n").expect("write real.rs");
+            });
+
+        let publish_call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transition_calls: Arc<Mutex<Vec<TransitionCall>>> = Arc::new(Mutex::new(Vec::new()));
+        let submit_task_review_called = Arc::new(AtomicBool::new(false));
+
+        let mut task = fixture_task("task-aah4-stale", project_id);
+        task.pr_url = Some("https://github.com/test/repo/pull/101".into());
+
+        // Model the stale-GitHub-head condition: the GitHub head is
+        // initially the OLD base SHA (stale), even though the worker will
+        // produce a new commit on the mirror.
+        let github_head = Arc::new(std::sync::Mutex::new(base_sha.clone()));
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(GitHubPublicationTestServices {
+            cancel: CancellationToken::new(),
+            task,
+            transition_calls: transition_calls.clone(),
+            submit_task_review_called: submit_task_review_called.clone(),
+            write_fn,
+            publish_call_count: publish_call_count.clone(),
+            publish_result: BranchPublicationResult {
+                success: true,
+                // The mirror ref is None; the mock resolves it dynamically
+                // from the mirror via `MirrorManager::mirror_path`.
+                pushed_sha: None,
+                mirror_head: String::new(),
+                attempted_github_head: String::new(),
+                pr_branch_existed: true,
+                error_class: None,
+                error_message: None,
+            },
+            github_head: github_head.clone(),
+            mirror: Some(mirror.clone()),
+            updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = gh_pub_spec(
+            "task-aah4-stale",
+            project_id,
+            "run-aah4-stale",
+            "djinn/aah4-stale",
+        );
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // The run must complete as WorkerSubmitted.
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::WorkerSubmitted),
+            "aah4 stale-head run must produce WorkerSubmitted, got {:?}",
+            report.outcome
+        );
+
+        // publish_branch_to_github must have been called exactly once
+        // (task has an open PR).
+        assert_eq!(
+            publish_call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "publish_branch_to_github must be called exactly once for open-PR tasks"
+        );
+
+        // Resolve the actual mirror HEAD after the supervisor committed and
+        // pushed to the mirror.  This is the new commit SHA the worker produced.
+        let mirror_head_after = {
+            let output = std::process::Command::new("git")
+                .args([
+                    "--git-dir",
+                    &mirror_path.to_string_lossy(),
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/djinn/aah4-stale"),
+                ])
+                .output()
+                .expect("git rev-parse mirror HEAD after run");
+            assert!(
+                output.status.success(),
+                "git rev-parse failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        // The mirror HEAD must be a NEW commit (different from the base SHA).
+        assert_ne!(
+            mirror_head_after, base_sha,
+            "mirror HEAD must be a new commit after the worker's auto-commit"
+        );
+
+        // ── Heads aligned ──
+        //
+        // After `publish_branch_to_github`, the GitHub head must equal the
+        // mirror head.  This is the key assertion: the stale-head condition
+        // is resolved.
+        let gh_head_after = github_head
+            .lock()
+            .expect("github_head mutex poisoned")
+            .clone();
+        assert_eq!(
+            gh_head_after, mirror_head_after,
+            "after publish_branch_to_github, GitHub head must equal mirror head \
+             (stale-head condition resolved). GitHub={gh_head_after}, mirror={mirror_head_after}"
+        );
+
+        // The GitHub head must have changed from the stale base SHA.
+        assert_ne!(
+            gh_head_after, base_sha,
+            "GitHub head must no longer be the stale base SHA"
+        );
+
+        // ── Contrast: no-open-PR scenario ──
+        //
+        // When `task.pr_url` is `None`, `publish_branch_to_github` is NOT
+        // called and the GitHub head remains at whatever it was before the
+        // run — demonstrating the stale-head problem this feature solves.
+        // This is verified by Test 1
+        // (`no_open_pr_worker_done_does_not_publish_to_github`), which asserts
+        // `publish_call_count == 0` when `pr_url` is `None`.
     }
 }
