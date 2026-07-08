@@ -631,22 +631,36 @@ pub async fn prepare_task_run_inputs() -> Result<TaskRunPreTaskInputs> {
     })
 }
 
-/// Test seam: when set, [`check_service_readiness`] returns an error to
-/// simulate a readiness failure before pre-task commands run.
+// Test seam: when this task-local is set within the current tokio task,
+// [`check_service_readiness`] calls this closure instead of the default
+// stub. Production code never sets it; tests scope it around the call
+// they want to override.
+//
+// Task-scoped (not process-global) so it cannot leak across parallel
+// tokio tests — `tokio::test` runs each test in its own runtime and the
+// override only propagates to `await` points inside the same task.
 #[cfg(test)]
-static TEST_READINESS_SHOULD_FAIL: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+tokio::task_local! {
+    pub static READINESS_OVERRIDE: ReadinessOverrideFn;
+}
+
+#[cfg(test)]
+type ReadinessOverrideFn =
+    std::sync::Arc<dyn Fn(&TaskRunServiceMetadata) -> Result<()> + Send + Sync>;
 
 /// Stub: check that all required backing services are ready.
 ///
 /// Currently always returns `Ok(())`.  Later tasks replace this with
 /// real readiness probes against the injected sidecars.
+///
+/// In test builds, when the calling task has a [`READINESS_OVERRIDE`]
+/// closure in scope, this delegates to the closure so tests can force a
+/// readiness failure without a process-global side effect.
 pub async fn check_service_readiness(_service_metadata: &TaskRunServiceMetadata) -> Result<()> {
-    // Stub — later tasks implement actual TCP readiness checks.
     #[cfg(test)]
     {
-        if TEST_READINESS_SHOULD_FAIL.load(std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!("service readiness check failed (test-injected)");
+        if let Ok(override_fn) = READINESS_OVERRIDE.try_with(|f| f.clone()) {
+            return override_fn(_service_metadata);
         }
     }
     Ok(())
@@ -2789,16 +2803,6 @@ mod tests {
         assert!(sink.is_empty());
     }
 
-    /// RAII guard that forces [`check_service_readiness`] to fail and
-    /// resets the flag on drop, keeping parallel tests isolated.
-    struct ReadinessFailureGuard;
-    impl Drop for ReadinessFailureGuard {
-        fn drop(&mut self) {
-            TEST_READINESS_SHOULD_FAIL
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
     #[tokio::test]
     async fn pretask_activity_no_events_on_service_readiness_failure() {
         // Force the readiness check to fail before any pre-task commands
@@ -2808,20 +2812,31 @@ mod tests {
         // 2. Zero `task_run_pretask_ran` activity events are emitted —
         //    there's no command outcome to record, and emitting a success
         //    event for a non-attempt would be misleading.
-        TEST_READINESS_SHOULD_FAIL
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let _guard = ReadinessFailureGuard;
-
+        //
+        // The override is scoped to this task only via
+        // [`READINESS_OVERRIDE`]. Concurrently-running tokio tests on
+        // other tasks (e.g. `execute_startup_boundary_succeeds_with_no_mounts`)
+        // do not see the override — they fall through to the default
+        // stub `Ok(())`. This eliminates the previous process-global
+        // race that made the test suite non-deterministic under
+        // `cargo test`'s default parallel scheduler.
+        let fail_fn: ReadinessOverrideFn = std::sync::Arc::new(|_| {
+            anyhow::bail!("service readiness check failed (test-injected)")
+        });
         let tmp = tempfile::tempdir().expect("tempdir");
         let cancel = CancellationToken::new();
         let sink = RecordingActivitySink::new();
-        let result = execute_task_run_startup_boundary(
-            tmp.path(),
-            &cancel,
-            Some("t-readiness-fail"),
-            &sink,
-        )
-        .await;
+        let result = READINESS_OVERRIDE
+            .scope(fail_fn, async {
+                execute_task_run_startup_boundary(
+                    tmp.path(),
+                    &cancel,
+                    Some("t-readiness-fail"),
+                    &sink,
+                )
+                .await
+            })
+            .await;
         assert!(
             result.is_err(),
             "startup boundary must fail when readiness check fails: {result:?}"
