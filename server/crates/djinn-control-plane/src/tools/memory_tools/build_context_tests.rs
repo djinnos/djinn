@@ -1091,6 +1091,35 @@ mod tests {
             .await
             .unwrap();
 
+        // `repo.create` records content but does not implicitly refresh
+        // note_links in this in-memory helper. Seed the explicit wikilink
+        // edge directly so L1 discovery exercises wikilink precedence.
+        sqlx::query(
+            "INSERT INTO note_links (id, source_id, target_id, target_raw, display_text)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&wikilinked.id)
+        .bind(&seed.id)
+        .bind("Precedence BC Seed")
+        .bind(Option::<String>::None)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let (wikilink_edge_count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM note_links WHERE source_id = $1 AND target_id = $2",
+        )
+        .bind(&wikilinked.id)
+        .bind(&seed.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            wikilink_edge_count, 1,
+            "explicit wikilink edge must be seeded before L1 assertion"
+        );
+
         // Embedding-only note: connected to seed via embedding_related only.
         // Content intentionally unrelated to seed's FTS query so it does
         // NOT appear through text matching — only through graph expansion.

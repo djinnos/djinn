@@ -1310,13 +1310,13 @@ mod tests {
             .unwrap();
 
         // Co-access note: connected via co_access (Hebbian) to seed.
-        // Shares FTS terms ("architecture") with the query so it's a
-        // candidate. Verifies co-access behavior is not demoted.
+        // Shares the exact query terms so it's a deterministic FTS candidate.
+        // Verifies co-access behavior is not demoted.
         let co_access_note = repo
             .create(
                 &project.id,
                 "Co Access Note",
-                "architecture system patterns distributed computing design",
+                "precedence testing architecture system patterns distributed computing design",
                 "reference",
                 "[]",
             )
