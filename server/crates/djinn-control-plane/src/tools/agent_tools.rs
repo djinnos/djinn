@@ -110,15 +110,13 @@ pub struct AgentUpdateParams {
     pub model_preference: Option<String>,
     pub mcp_servers: Option<Vec<AnyJson>>,
     pub skills: Option<Vec<AnyJson>>,
-    /// Deprecated: direct setting of learned_prompt bypasses history and evaluator
-    /// semantics. Use `agent_amend_prompt` (Planner) or the clear endpoint instead.
+    /// Deprecated: direct setting of learned_prompt is no longer supported.
     /// If provided, the update will be rejected with an error.
     #[schemars(skip)]
     #[serde(default, deserialize_with = "learned_prompt_was_supplied")]
     pub learned_prompt: bool,
     /// Set to true to clear machine-managed learned_prompt back to NULL.
-    /// Admin/operator reset path; learned_prompt is otherwise managed through
-    /// agent_amend_prompt and the evaluator loop.
+    /// Admin/operator reset path.
     pub clear_learned_prompt: Option<bool>,
 }
 
@@ -244,8 +242,7 @@ impl DjinnMcpServer {
     }
 
     /// Update a non-default agent's fields. Cannot modify is_default.
-    /// learned_prompt is machine-managed: use agent_amend_prompt (Planner) or
-    /// the clear endpoint; direct setting via agent_update is rejected.
+    /// learned_prompt is machine-managed; direct setting via agent_update is rejected.
     #[tool(
         description = "Update a specialist agent (name, description, system_prompt_extensions, model_preference, mcp_servers, skills). Cannot modify default agents' is_default flag. Accepts agent UUID or name. learned_prompt is machine-managed and cannot be set directly here."
     )]
@@ -351,14 +348,13 @@ impl DjinnMcpServer {
                 error: Some(e),
             });
         }
-        // Reject direct learned_prompt setting before any clear/update side
-        // effect — it bypasses history/evaluator semantics, and mixed
-        // learned_prompt + clear_learned_prompt requests must be atomic errors.
+        // Reject direct learned_prompt setting — it bypasses history semantics,
+        // and mixed learned_prompt + clear_learned_prompt requests must be atomic errors.
         if p.learned_prompt {
             return Json(AgentSingleResponse {
                 agent: None,
                 error: Some(
-                    "Direct learned_prompt setting is deprecated. Use agent_amend_prompt (Planner) or the clear endpoint instead."
+                    "Direct learned_prompt setting is no longer supported. Use the clear endpoint instead."
                         .to_string(),
                 ),
             });

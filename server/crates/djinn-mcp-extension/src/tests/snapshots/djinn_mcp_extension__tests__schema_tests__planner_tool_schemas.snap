@@ -1535,40 +1535,6 @@ expression: tool_schemas_planner()
     "concurrent_safe": false
   },
   {
-    "name": "agent_amend_prompt",
-    "description": "Planner-owned, evidence-based amendment path for machine-managed learned_prompt updates; not a general prompt editor. Use only after agent-effectiveness evidence (agent_metrics, repeated reviewer/lead feedback, or repeated task failures) shows a stable specialist-agent pattern; this is audited in learned_prompt_history and is not a substitute for human/project system_prompt_extensions. Only specialist worker/reviewer agents are eligible; default roles and non-worker/reviewer roles must not be amended. Append concise observed-pattern + behavioral-correction text; provide metrics_snapshot when available so the evaluator can compare before/after outcomes.",
-    "inputSchema": {
-      "type": "object",
-      "required": [
-        "agent_id",
-        "amendment"
-      ],
-      "properties": {
-        "project": {
-          "type": "string",
-          "description": "Absolute project path"
-        },
-        "agent_id": {
-          "type": "string",
-          "description": "Specialist worker/reviewer agent UUID or name to amend; defaults and non-worker/reviewer roles are rejected"
-        },
-        "amendment": {
-          "type": "string",
-          "description": "Concise observed-pattern and behavioral-correction text to append to the machine-managed learned_prompt"
-        },
-        "metrics_snapshot": {
-          "type": "string",
-          "description": "Optional JSON string of current agent_metrics or equivalent evidence for the audit history record; Planner should provide it when available"
-        }
-      }
-    },
-    "readOnly": false,
-    "destructive": true,
-    "idempotent": false,
-    "openWorld": false,
-    "concurrent_safe": false
-  },
-  {
     "name": "submit_grooming",
     "description": "Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.",
     "inputSchema": {

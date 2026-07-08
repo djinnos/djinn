@@ -76,8 +76,7 @@ struct AgentResponse {
     skills: Vec<String>,
     model_preference: Option<String>,
     is_default: bool,
-    /// Machine-managed prompt learning state. Read-only in public surfaces;
-    /// mutations flow through agent_amend_prompt (Planner) and the evaluator loop.
+    /// Machine-managed prompt learning state. Read-only in public surfaces.
     learned_prompt: Option<String>,
     created_at: String,
     updated_at: String,
@@ -239,7 +238,7 @@ async fn update_agent(
     {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Direct learned_prompt setting is deprecated. Use agent_amend_prompt (Planner) or the clear endpoint instead."
+            "Direct learned_prompt setting is no longer supported. Use the clear endpoint instead."
                 .to_string(),
         ));
     }
