@@ -172,7 +172,10 @@ describe("UserConfigDialog", () => {
     expect(screen.getByText("ChatGPT / Codex")).toBeInTheDocument();
 
     expect(screen.getByLabelText(/provider/i)).toBeInTheDocument();
-    expect(await screen.findByRole("option", { name: "Anthropic" })).toBeInTheDocument();
+    // The Base UI Combobox renders options only when opened; we verify
+    // the input and placeholder are present (option content is tested in
+    // the "stores an API key" test below).
+    expect(screen.getByLabelText(/provider/i)).toHaveAttribute("placeholder", "Select a provider…");
     expect(screen.getByLabelText(/api key/i)).toBeDisabled();
     expect(screen.getByText(/Stored encrypted and owned by this user/i)).toBeInTheDocument();
 
@@ -194,10 +197,14 @@ describe("UserConfigDialog", () => {
     renderDialog();
     const user = userEvent.setup();
 
-    const providerSelect = await screen.findByLabelText(/provider/i);
-    await screen.findByRole("option", { name: "Anthropic" });
-    await user.selectOptions(providerSelect, "anthropic");
+    const providerInput = await screen.findByLabelText(/provider/i);
+    // Open the Base UI Combobox and select "Anthropic" by clicking.
+    await user.click(providerInput);
+    await user.click(await screen.findByText("Anthropic"));
 
+    await waitFor(() => {
+      expect(screen.getByLabelText(/api key \(ANTHROPIC_API_KEY\)/i)).not.toBeDisabled();
+    });
     const apiKeyInput = screen.getByLabelText(/api key \(ANTHROPIC_API_KEY\)/i);
     await user.type(apiKeyInput, "  sk-ant-test-key  ");
     await user.click(screen.getByRole("button", { name: /^connect$/i }));
@@ -214,7 +221,7 @@ describe("UserConfigDialog", () => {
     expect(showToast.success).toHaveBeenCalledWith("Provider connected", {
       description: "Anthropic key stored for this user.",
     });
-    await waitFor(() => expect(providerSelect).toHaveValue(""));
+    await waitFor(() => expect(providerInput).toHaveValue(""));
     expect(screen.getByLabelText(/^api key/i)).toHaveValue("");
   });
 

@@ -192,4 +192,42 @@ describe("TaskDetailPanel", () => {
 
     expect(screen.queryByText(/CI Status/i)).not.toBeInTheDocument();
   });
+
+  // ── m116 forward-compatibility ────────────────────────────────────────────
+  //
+  // The backend CiGateSnapshot now includes additive nullable reconciliation
+  // fields (mirror_head_sha, github_head_sha, heads_diverged,
+  // head_observation_error) that the UI's TypeScript interface does not
+  // declare.  At runtime these arrive as extra JSON keys that are never
+  // accessed by the component.  This test simulates the real wire shape
+  // (JSON.parse of a backend payload with the extra keys) and confirms the
+  // UI renders existing fields — head_sha, status, gate_state — correctly
+  // while the additive fields do not break consumers.
+  it("renders head_sha and status correctly when CI payload carries additive m116 reconciliation fields", () => {
+    const ciWithM116Fields = JSON.parse(
+      JSON.stringify({
+        ...mockCiPassing,
+        mirror_head_sha: "mirror1234567890abcdef",
+        github_head_sha: "github9876543210fedcba",
+        heads_diverged: true,
+        head_observation_error: "push failed",
+      }),
+    );
+
+    const task = {
+      ...mockTaskA,
+      short_id: "ci-m116",
+      title: "CI with m116 fields",
+      status: "in_progress",
+      ci: ciWithM116Fields,
+    };
+
+    render(<TaskDetailPanel task={task} epic={mockEpicA} open onClose={() => {}} />);
+
+    expect(screen.getByText(/CI Status/i)).toBeInTheDocument();
+    expect(screen.getByText("Passing")).toBeInTheDocument();
+    // head_sha is sliced to 8 chars in the UI
+    expect(screen.getByText("abc12345")).toBeInTheDocument();
+    expect(screen.getByText(/#42/)).toBeInTheDocument();
+  });
 });
