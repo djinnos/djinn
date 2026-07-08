@@ -101,8 +101,22 @@ pub struct NoteSearchParams<'a> {
     pub limit: usize,
     pub semantic_scores: Option<Vec<(String, f64)>>,
     /// Optional list of edge kinds to include in graph proximity scoring.
+    ///
     /// When `Some`, only edges whose `kind` matches participate in spreading
-    /// activation. `None` means all kinds.
+    /// activation. `None` means all kinds (including `embedding_related`).
+    ///
+    /// Known edge kinds:
+    /// - `co_access` — Hebbian co-access (symmetric, `HOP_DECAY * weight`).
+    /// - `derived_from` — provenance (`HOP_DECAY * weight`).
+    /// - `builds_on` — dependency (`HOP_DECAY * 0.8 * weight`).
+    /// - `exemplifies` — example link (`HOP_DECAY * 0.7 * weight`).
+    /// - `embedding_related` — **machine-minted** embedding similarity edges.
+    ///   Lower/medium strength (`HOP_DECAY * 0.5 * weight`); provenance-
+    ///   filterable via this parameter.  Included by default when no filter
+    ///   is provided, but never exceeds wikilink or authored/co-access edges.
+    /// - `authored` — manually curated edge.
+    /// - `contradicts` — generates a `ContradictionWarning` but no score.
+    /// - `supersedes` — asymmetric demotion/boost.
     pub edge_kinds: Option<&'a [String]>,
     /// Optional entity-type filter for unified search.
     ///
