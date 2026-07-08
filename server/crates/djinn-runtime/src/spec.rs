@@ -1,3 +1,4 @@
+// djinn:allow-oversize — runtime spec types over size-guard threshold; split when touched substantively.
 //! Wire-capable task-run spec + outcome types.
 //!
 //! These types were previously `djinn_agent::supervisor::{spec, flow}`; Phase
