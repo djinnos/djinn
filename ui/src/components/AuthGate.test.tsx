@@ -31,6 +31,11 @@ describe("AuthGate", () => {
       needsAppInstall: true,
       appCredentialsConfigured: false,
       orgLogin: null,
+      credentialSource: null,
+      setupState: "unconfigured",
+      setupError: null,
+      setupRetryable: false,
+      credentialsUnrecoverable: false,
     });
     render(
       <AuthGate>
@@ -49,6 +54,11 @@ describe("AuthGate", () => {
       needsAppInstall: true,
       appCredentialsConfigured: true,
       orgLogin: null,
+      credentialSource: null,
+      setupState: null,
+      setupError: null,
+      setupRetryable: false,
+      credentialsUnrecoverable: false,
     });
     vi.mocked(fetchInstallations).mockResolvedValue([
       {
@@ -79,6 +89,11 @@ describe("AuthGate", () => {
       needsAppInstall: false,
       appCredentialsConfigured: true,
       orgLogin: "acme",
+      credentialSource: null,
+      setupState: null,
+      setupError: null,
+      setupRetryable: false,
+      credentialsUnrecoverable: false,
     });
     render(
       <AuthGate>
@@ -105,6 +120,11 @@ describe("AuthGate", () => {
       needsAppInstall: false,
       appCredentialsConfigured: true,
       orgLogin: "acme",
+      credentialSource: null,
+      setupState: null,
+      setupError: null,
+      setupRetryable: false,
+      credentialsUnrecoverable: false,
     });
     render(
       <AuthGate>

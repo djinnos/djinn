@@ -353,6 +353,35 @@ pub struct CiGateSnapshot {
     /// GitHub PR number the CI snapshot belongs to, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_number: Option<i64>,
+    // ── CI head reconciliation (m116) ──────────────────────────────────
+    //
+    // These additive fields expose the mirror-vs-GitHub head reconciliation
+    // data sourced from the latest task-attempt evidence.  They are entirely
+    // nullable and omitted from the payload when no evidence exists, so
+    // existing `head_sha` consumers are unaffected.
+    //
+    // Scope boundary with proposal `ivek`: m116 owns branch-publication and
+    // head-visibility mechanics (these fields) plus stale-head false-strike
+    // suppression for unpublished mirror commits.  Proposal `ivek` remains
+    // responsible for broader strike classification (typed reopen
+    // classification, quality-strike guards, park-guard semantics) and
+    // submission-integrity fingerprints.  See
+    // `server/docs/ci-head-reconciliation/m116-consumer-compatibility.md`.
+    /// Head SHA of the internal mirror branch, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror_head_sha: Option<String>,
+    /// Head SHA of the GitHub PR branch, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_head_sha: Option<String>,
+    /// `true` only when both heads are known and differ; `false` only when
+    /// both are known and equal; absent/null-compatible when either side is
+    /// unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heads_diverged: Option<bool>,
+    /// Concise error string from the most recent publication/observation
+    /// failure, when one is recorded.  Absent when no error is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_observation_error: Option<String>,
 }
 
 /// Derived CI gate state combining raw CI status with task lifecycle.
@@ -414,6 +443,13 @@ fn derive_gate_state(ci_status: CiStatus, task_status: &str) -> CiGateState {
 /// Returns `None` when no snapshot exists (signalled by an absent `head_sha`),
 /// preserving backward-compatible optional/null behavior for tasks without a
 /// PR snapshot.
+///
+/// The four m116 reconciliation fields (`mirror_head_sha`, `github_head_sha`,
+/// `heads_diverged`, `head_observation_error`) are additive and nullable;
+/// their presence does not break consumers that only read `head_sha` or other
+/// pre-existing fields.  See
+/// `server/docs/ci-head-reconciliation/m116-consumer-compatibility.md` for
+/// the full consumer-compatibility and `ivek`-boundary evidence.
 pub fn task_ci_gate_snapshot(t: &Task) -> Option<CiGateSnapshot> {
     let head_sha = t.ci_head_sha.as_deref()?;
     let status = task_ci_status(t);
@@ -468,6 +504,10 @@ pub fn task_ci_gate_snapshot(t: &Task) -> Option<CiGateSnapshot> {
         same_signature_count: t.ci_same_signature_count,
         last_remediation_base_sha: t.ci_last_remediation_base_sha.clone(),
         pr_number: t.ci_pr_number,
+        mirror_head_sha: t.ci_mirror_head_sha.clone(),
+        github_head_sha: t.ci_github_head_sha.clone(),
+        heads_diverged: t.ci_heads_diverged,
+        head_observation_error: t.ci_head_observation_error.clone(),
     })
 }
 

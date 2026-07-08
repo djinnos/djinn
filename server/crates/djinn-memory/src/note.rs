@@ -257,7 +257,25 @@ pub struct GitLogEntry {
 pub struct HealthReport {
     pub total_notes: i64,
     pub broken_link_count: i64,
+    /// Backward-compatible alias for [`authored_orphan_count`].
+    /// Retained so existing MCP callers continue to see the field without
+    /// breaking schema changes.
     pub orphan_note_count: i64,
+    /// Notes with zero inbound authored wikilink or explicit authored
+    /// association edges.  Machine-minted edges (`embedding_related`,
+    /// `co_access`) do *not* hide authored-link debt.
+    pub authored_orphan_count: i64,
+    /// Notes with no retrieval-effective edges at all — the strictest
+    /// connectivity metric.  Considers resolved wikilinks, authored/manual
+    /// associations, co-access, and threshold-qualified
+    /// `embedding_related` edges.
+    pub isolated_count: i64,
+    /// `isolated_count` as a percentage of non-singleton notes.
+    pub isolated_pct: f64,
+    /// Authored-orphan notes that are *not* graph-isolated because at
+    /// least one non-authored retrieval edge (e.g. `embedding_related`,
+    /// `co_access`) connects them.
+    pub machine_connected_orphan_count: i64,
     pub low_confidence_note_count: i64,
     pub stale_note_count: i64,
     pub stale_notes_by_folder: Vec<StaleFolder>,

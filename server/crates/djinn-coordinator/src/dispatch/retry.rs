@@ -793,11 +793,23 @@ impl CoordinatorActor {
                 .unwrap_or(attempt.outcome.as_str());
             let id8: String = attempt.id.chars().take(8).collect();
             let is_infra = attempt.outcome_enum().is_ok_and(|o| o.is_infra());
+            // Emit infra-delta observability: total classified attempts,
+            // distinguished by infra-exempt vs quality-strike class.
+            djinn_telemetry::infra_delta::increment(
+                djinn_telemetry::infra_delta::OUTCOME_TOTAL,
+                is_infra,
+            );
             if is_infra {
                 // Infra: diagnostic-only; excluded from park escalation.
                 infra_session_labels.push(format!("attempt {id8} ({model_label})"));
                 continue;
             }
+            // Non-infra pre-submission terminal: counts toward park threshold
+            // and quality-strike classification.
+            djinn_telemetry::infra_delta::increment(
+                djinn_telemetry::infra_delta::OUTCOME_QUALITY_STRIKE,
+                false,
+            );
             non_attempt_session_labels.push(format!("attempt {id8} ({model_label})"));
             if !non_attempt_models.contains(&model_label.to_string()) {
                 non_attempt_models.push(model_label.to_string());
@@ -1796,12 +1808,13 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
         quality_strikes_hint: i64,
     ) {
-        let (quality, merge_conflict, superseded) =
+        let (quality, merge_conflict, superseded, has_infra) =
             match self.task_repo().recent_reopen_ledger(&task.id, 200).await {
                 Ok(ledger) => {
                     let mut quality: i64 = 0;
                     let mut merge_conflict: i64 = 0;
                     let mut superseded: i64 = 0;
+                    let mut has_infra = false;
                     for entry in &ledger {
                         match entry.reopen_class {
                             ReopenClass::MergeConflict => merge_conflict += 1,
@@ -1813,6 +1826,7 @@ impl CoordinatorActor {
                                 // escalation thresholds. It still appears in
                                 // diagnostic park/retry reasons via
                                 // most_recent_reopen_class.
+                                has_infra = true;
                             }
                             _ => {
                                 // review_rejected, merge_queue_failed, other
@@ -1821,7 +1835,7 @@ impl CoordinatorActor {
                             }
                         }
                     }
-                    (quality, merge_conflict, superseded)
+                    (quality, merge_conflict, superseded, has_infra)
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1830,7 +1844,7 @@ impl CoordinatorActor {
                         "CoordinatorActor: recent_reopen_ledger failed for park telemetry; \
                          using passed quality_strikes hint"
                     );
-                    (quality_strikes_hint, 0i64, 0i64)
+                    (quality_strikes_hint, 0i64, 0i64, false)
                 }
             };
 
@@ -1839,6 +1853,15 @@ impl CoordinatorActor {
             merge_conflict,
             superseded,
             task.reopen_count,
+        );
+
+        // Emit infra-delta park observability: was this park decision
+        // influenced by infra-classified failures? When `has_infra` is true
+        // and quality == 0, the park was infra-only (all failures were infra);
+        // otherwise it was driven by quality strikes.
+        djinn_telemetry::infra_delta::increment(
+            djinn_telemetry::infra_delta::OUTCOME_PARK,
+            has_infra && quality == 0,
         );
     }
 

@@ -454,3 +454,246 @@ fn regression_advisory_failures_do_not_block_when_required_ci_passes() {
             || serialized["ci_merge_blocked_reason"].is_null()
     );
 }
+
+// ── CI head reconciliation fields (m116) ─────────────────────────────
+
+/// Helper: a task with a basic CI snapshot (so `task_ci_gate_snapshot`
+/// returns `Some`), no reconciliation fields set yet.
+fn task_with_ci_snapshot_for_reconciliation() -> Task {
+    let mut task = task_with_merge_commit_sha(None);
+    task.ci_status = "failing".into();
+    task.ci_head_sha = Some("deadbeefcafebabe00000000000000000000ffff".into());
+    task.ci_pr_number = Some(42);
+    task.ci_blocking_required_check_names = r#"["clippy"]"#.into();
+    task
+}
+
+#[test]
+fn ci_snapshot_without_reconciliation_fields_is_backwards_compatible() {
+    // No mirror/github/divergence/error fields set — payload must look
+    // identical to the pre-m116 shape for existing `head_sha` consumers.
+    let task = task_with_ci_snapshot_for_reconciliation();
+    let response = task_to_response(&task);
+    let serialized = serde_json::to_value(&response).unwrap();
+    let ci = serialized["ci"]
+        .as_object()
+        .expect("ci should be an object");
+
+    // Existing head_sha consumer contract preserved.
+    assert_eq!(ci["head_sha"], "deadbeefcafebabe00000000000000000000ffff");
+
+    // New additive fields are absent (skip_serializing_if Option::is_none).
+    assert!(
+        ci.get("mirror_head_sha").is_none(),
+        "mirror_head_sha must be absent when None"
+    );
+    assert!(
+        ci.get("github_head_sha").is_none(),
+        "github_head_sha must be absent when None"
+    );
+    assert!(
+        ci.get("heads_diverged").is_none(),
+        "heads_diverged must be absent when None"
+    );
+    assert!(
+        ci.get("head_observation_error").is_none(),
+        "head_observation_error must be absent when None"
+    );
+}
+
+#[test]
+fn ci_snapshot_equal_heads_serialize_diverged_false() {
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    task.ci_mirror_head_sha = Some("abc123abc123abc123abc123abc123abc123abcd".into());
+    task.ci_github_head_sha = Some("abc123abc123abc123abc123abc123abc123abcd".into());
+    task.ci_heads_diverged = Some(false);
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+    let ci = &serialized["ci"];
+
+    assert_eq!(
+        ci["mirror_head_sha"],
+        "abc123abc123abc123abc123abc123abc123abcd"
+    );
+    assert_eq!(
+        ci["github_head_sha"],
+        "abc123abc123abc123abc123abc123abc123abcd"
+    );
+    assert_eq!(ci["heads_diverged"], false);
+    // No observation error.
+    assert!(ci.get("head_observation_error").is_none());
+}
+
+#[test]
+fn ci_snapshot_diverged_heads_serialize_diverged_true() {
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    task.ci_mirror_head_sha = Some("mirror111111111111111111111111111111111111".into());
+    task.ci_github_head_sha = Some("github222222222222222222222222222222222222".into());
+    task.ci_heads_diverged = Some(true);
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+    let ci = &serialized["ci"];
+
+    assert_eq!(
+        ci["mirror_head_sha"],
+        "mirror111111111111111111111111111111111111"
+    );
+    assert_eq!(
+        ci["github_head_sha"],
+        "github222222222222222222222222222222222222"
+    );
+    assert_eq!(ci["heads_diverged"], true);
+}
+
+#[test]
+fn ci_snapshot_unknown_mirror_head_leaves_diverged_absent() {
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    // GitHub head known but mirror head unknown.
+    task.ci_mirror_head_sha = None;
+    task.ci_github_head_sha = Some("github222222222222222222222222222222222222".into());
+    task.ci_heads_diverged = None; // cannot determine divergence
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+    let ci = &serialized["ci"];
+
+    assert!(ci.get("mirror_head_sha").is_none());
+    assert_eq!(
+        ci["github_head_sha"],
+        "github222222222222222222222222222222222222"
+    );
+    // heads_diverged must be absent/null-compatible.
+    assert!(
+        ci.get("heads_diverged").is_none(),
+        "heads_diverged must be absent when mirror head is unknown"
+    );
+}
+
+#[test]
+fn ci_snapshot_unknown_github_head_leaves_diverged_absent() {
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    // Mirror head known but GitHub head unknown (e.g. no open PR branch).
+    task.ci_mirror_head_sha = Some("mirror111111111111111111111111111111111111".into());
+    task.ci_github_head_sha = None;
+    task.ci_heads_diverged = None;
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+    let ci = &serialized["ci"];
+
+    assert_eq!(
+        ci["mirror_head_sha"],
+        "mirror111111111111111111111111111111111111"
+    );
+    assert!(ci.get("github_head_sha").is_none());
+    assert!(
+        ci.get("heads_diverged").is_none(),
+        "heads_diverged must be absent when github head is unknown"
+    );
+}
+
+#[test]
+fn ci_snapshot_head_observation_error_serializes_when_present() {
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    task.ci_mirror_head_sha = Some("mirror111111111111111111111111111111111111".into());
+    task.ci_github_head_sha = None;
+    task.ci_heads_diverged = None;
+    task.ci_head_observation_error = Some("GitHub push failed: 422 Validation Failed".into());
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+    let ci = &serialized["ci"];
+
+    assert_eq!(
+        ci["head_observation_error"],
+        "GitHub push failed: 422 Validation Failed"
+    );
+}
+
+#[test]
+fn ci_snapshot_reconciliation_fields_in_list_item() {
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    task.ci_mirror_head_sha = Some("aaaabbbbccccddddeeeeffff000011112222".into());
+    task.ci_github_head_sha = Some("1111222233334444555566667777888899990".into());
+    task.ci_heads_diverged = Some(true);
+
+    let list_item = task_to_list_item(&task, None, 0);
+    let serialized = serde_json::to_value(&list_item).unwrap();
+    let ci = &serialized["ci"];
+
+    assert_eq!(
+        ci["mirror_head_sha"],
+        "aaaabbbbccccddddeeeeffff000011112222"
+    );
+    assert_eq!(
+        ci["github_head_sha"],
+        "1111222233334444555566667777888899990"
+    );
+    assert_eq!(ci["heads_diverged"], true);
+}
+
+// ── Forward-compatible consumer simulation (m116) ──────────────────────
+
+/// Simulates a consumer that only knows about pre-m116 `CiGateSnapshot`
+/// fields.  When the JSON payload contains the new m116 reconciliation
+/// fields, the consumer's partial deserialization must succeed and the
+/// old `head_sha` value must be intact.  This is the durability contract:
+/// additive nullable fields do not break existing consumers.
+#[test]
+fn forward_compatible_consumer_ignores_new_reconciliation_fields() {
+    // A struct representing a pre-m116 consumer's view of the CI payload.
+    // It only knows about `head_sha` and `status`.
+    #[derive(serde::Deserialize)]
+    struct LegacyCiConsumer {
+        head_sha: String,
+        status: String,
+    }
+
+    // Build a task with ALL reconciliation fields populated.
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    task.ci_mirror_head_sha = Some("mirror111111111111111111111111111111111111".into());
+    task.ci_github_head_sha = Some("github222222222222222222222222222222222222".into());
+    task.ci_heads_diverged = Some(true);
+    task.ci_head_observation_error = Some("push failed".into());
+
+    let response = task_to_response(&task);
+    let serialized = serde_json::to_value(&response).unwrap();
+    let ci_value = &serialized["ci"];
+
+    // A legacy consumer deserializes only the fields it knows about.
+    let legacy: LegacyCiConsumer =
+        serde_json::from_value(ci_value.clone()).expect("legacy consumer must parse");
+
+    assert_eq!(
+        legacy.head_sha, "deadbeefcafebabe00000000000000000000ffff",
+        "head_sha must be preserved for legacy consumers"
+    );
+    assert_eq!(legacy.status, "failing");
+
+    // The full payload still has the new fields — they coexist.
+    assert_eq!(ci_value["heads_diverged"], true);
+    assert_eq!(ci_value["head_observation_error"], "push failed");
+}
+
+/// Same forward-compatibility check via `task_list_item`, confirming the
+/// list path also carries new fields without breaking legacy consumers.
+#[test]
+fn forward_compatible_list_consumer_ignores_new_reconciliation_fields() {
+    #[derive(serde::Deserialize)]
+    struct LegacyListItemCi {
+        head_sha: String,
+    }
+
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    task.ci_mirror_head_sha = Some("m1".into());
+    task.ci_github_head_sha = Some("g1".into());
+    task.ci_heads_diverged = Some(true);
+    task.ci_head_observation_error = Some("err".into());
+
+    let list_item = task_to_list_item(&task, None, 0);
+    let serialized = serde_json::to_value(&list_item).unwrap();
+    let ci_value = &serialized["ci"];
+
+    let legacy: LegacyListItemCi =
+        serde_json::from_value(ci_value.clone()).expect("legacy list consumer must parse");
+
+    assert_eq!(legacy.head_sha, "deadbeefcafebabe00000000000000000000ffff");
+    assert_eq!(ci_value["heads_diverged"], true);
+}

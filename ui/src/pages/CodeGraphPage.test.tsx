@@ -19,6 +19,12 @@ vi.mock("sigma", () => ({
   },
 }));
 
+// sigma 3.x ships a separate rendering CJS module that references
+// WebGL contexts at import time. Mock it so jsdom doesn't need WebGL.
+vi.mock("sigma/rendering", () => ({
+  EdgeRectangleProgram: class MockEdgeRectangleProgram {},
+}));
+
 // `@sigma/edge-curve` ships an ES module that does some immediate
 // WebGL probing on import; mock it out so jsdom doesn't blow up.
 vi.mock("@sigma/edge-curve", () => ({
@@ -45,7 +51,7 @@ vi.mock("graphology-layout-forceatlas2/worker", () => ({
 // snapshots (iter 30: with cognitive complexity for the heatmap tests).
 type SnapshotResponse = { snapshot: Record<string, unknown> };
 const fetchSnapshotMock = vi.fn<
-  (project: string, nodeCap?: number) => Promise<SnapshotResponse>
+  (project: string, nodeCap?: number, level?: string) => Promise<SnapshotResponse>
 >();
 const fetchWorkspacesMock = vi.fn<
   (project: string) => Promise<CodeGraphWorkspace[]>
@@ -57,7 +63,7 @@ vi.mock("@/api/codeGraph", async () => {
   );
   return {
     ...actual,
-    fetchSnapshot: (...args: [string, number?]) => fetchSnapshotMock(...args),
+    fetchSnapshot: (...args: [string, number?, string?]) => fetchSnapshotMock(...args),
     fetchWorkspaces: (project: string) => fetchWorkspacesMock(project),
   };
 });
@@ -79,7 +85,7 @@ const projectsFixture: Project[] = [
 
 describe("CodeGraphPage", () => {
   beforeEach(() => {
-    localStorage.clear();
+    localStorage?.clear?.();
     fetchSnapshotMock.mockReset();
     fetchWorkspacesMock.mockReset();
     useCodeGraphStore.getState().reset();
@@ -128,7 +134,7 @@ describe("CodeGraphPage", () => {
     expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
     // No local project picker — the shared chrome selector drives project context.
     await waitFor(() => {
-      expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000);
+      expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000, "symbol");
     });
   });
 
@@ -209,7 +215,7 @@ describe("CodeGraphPage", () => {
     fireEvent.change(selector, { target: { value: "api" } });
     expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("api");
     expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
-    expect(fetchSnapshotMock).toHaveBeenLastCalledWith("project-a", 10_000);
+    expect(fetchSnapshotMock).toHaveBeenLastCalledWith("project-a", 10_000, "symbol");
 
     fireEvent.change(selector, { target: { value: "" } });
     expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
@@ -449,7 +455,7 @@ describe("CodeGraphPage", () => {
 
     expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
     await waitFor(() => {
-      expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000);
+      expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000, "symbol");
     });
     expect(screen.getAllByTestId("graph-toolbar")).toHaveLength(1);
   });
