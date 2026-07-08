@@ -3,8 +3,15 @@
 //! Focused unit tests for the unchanged-head red-CI remediation rejection
 //! guard. The pure predicate [`unchanged_head_rejection_reason`] is tested
 //! directly — it does not require a database.
+//!
+//! m116 / `llvt` — also tests the publication-failure / mirror-divergence
+//! short-circuit ([`super::unpublished_mirror_publication_reason`]) that
+//! suppresses the false-strike unchanged-head rejection when the mirror
+//! produced a commit but GitHub never received it.
 
-use super::unchanged_head_rejection_reason;
+use super::{
+    UnchangedHeadContext, unchanged_head_rejection_reason, unpublished_mirror_publication_reason,
+};
 
 // ── Unchanged-head remediation rejection predicate ──────────────────────────
 
@@ -216,4 +223,295 @@ fn rejection_reason_is_deterministic() {
     );
 
     assert_eq!(reason1, reason2, "rejection reason must be deterministic");
+}
+
+// ── m116 / llvt: publication-failure / mirror-divergence short-circuit predicate ─
+//
+// These tests verify the m116 behavior that suppresses the misleading
+// unchanged-head escalation when mirror↔GitHub reconciliation evidence
+// indicates a GitHub publication failure or head divergence. They are pure
+// predicate tests (no DB), mirroring the AC#3 invariant:
+//   "Coordinator tests cover the publication-failure stale-head false-strike
+//    case and at least one non-diverged unchanged-head case that still
+//    escalates normally."
+//
+// The "non-diverged unchanged-head case" is covered above by
+// `unchanged_head_rejects_when_sha_matches_baseline` /
+// `unchanged_head_preserves_remediation_state` — those remain green, proving
+// that the publication-failure path does not swallow legitimate no-progress
+// escalations.
+
+/// Build a minimal `UnchangedHeadContext` for the publication-failure tests.
+#[allow(clippy::too_many_arguments)]
+fn pub_failure_ctx<'a>(
+    head_sha: &'a str,
+    remediation_base_sha: Option<&'a str>,
+    mirror_head_sha: Option<&'a str>,
+    github_head_sha: Option<&'a str>,
+    heads_diverged: Option<bool>,
+    head_observation_error: Option<&'a str>,
+    pr_number: Option<i64>,
+    short_id: &'a str,
+) -> UnchangedHeadContext<'a> {
+    UnchangedHeadContext {
+        head_sha,
+        remediation_base_sha,
+        mirror_head_sha,
+        github_head_sha,
+        heads_diverged,
+        head_observation_error,
+        pr_number,
+        short_id,
+    }
+}
+
+#[test]
+fn pub_failure_returns_none_without_remediation_baseline() {
+    // No durable remediation baseline → cannot trigger the guard at all,
+    // publication evidence or not.
+    let ctx = pub_failure_ctx(
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        None,
+        Some("mirror-newer-sha"),
+        Some("github-older-sha"),
+        Some(true),
+        Some("auth failed"),
+        Some(7),
+        "itmo",
+    );
+
+    let result = unpublished_mirror_publication_reason(&ctx);
+    assert!(
+        result.is_none(),
+        "no remediation baseline must not produce a publication-failure reason"
+    );
+}
+
+#[test]
+fn pub_failure_returns_none_when_head_sha_advanced() {
+    // Worker DID push a new local mirror head → no publication failure.
+    // This proves a legitimate progress round still allows the unchanged-head
+    // rejection logic to fall through (it won't fire here either since the
+    // head advanced, but the publication predicate must agree).
+    let new_sha = "newly-pushed-sha";
+    let old_sha = "old-remediation-base";
+    let ctx = pub_failure_ctx(
+        new_sha,
+        Some(old_sha),
+        Some(new_sha),
+        Some(new_sha),
+        Some(false),
+        None,
+        Some(42),
+        "itmo",
+    );
+
+    assert!(
+        unpublished_mirror_publication_reason(&ctx).is_none(),
+        "an advanced head must not produce a publication-failure reason"
+    );
+}
+
+#[test]
+fn pub_failure_suppresses_when_mirror_advanced_and_github_lagging() {
+    // The vy47 / aah4 shape:
+    //  - remediation baseline = old failing GitHub PR head
+    //  - freshly-pushed local head == baseline (push could not reach GitHub)
+    //  - latest attempt evidence: mirror advanced past the baseline
+    //  - latest attempt evidence: GitHub head == baseline (no advance)
+    //  - heads_diverged = true
+    // Expectation: predicate returns Some(reason) identifying divergence,
+    // NOT "no new commit was produced".
+    let baseline = "github-old-sha-failing-baseline";
+    let mirror_advanced = "mirror-newly-pushed-sha";
+    let ctx = pub_failure_ctx(
+        baseline,
+        Some(baseline),
+        Some(mirror_advanced),
+        Some(baseline),
+        Some(true),
+        None,
+        Some(99),
+        "itmo",
+    );
+
+    let reason = unpublished_mirror_publication_reason(&ctx)
+        .expect("mirror-advanced + github-lagging + divergence flag → publication-failure reason");
+
+    assert!(
+        reason.contains("diverged") || reason.contains("divergence"),
+        "reason must identify the divergence: {reason}"
+    );
+    assert!(
+        reason.contains(mirror_advanced) || reason.contains("mirror"),
+        "reason must reference the mirror head evidence: {reason}"
+    );
+    assert!(
+        reason.contains(baseline),
+        "reason must reference the failing remediation baseline: {reason}"
+    );
+    assert!(
+        reason.contains("PR #99"),
+        "reason must contain the PR number: {reason}"
+    );
+    assert!(
+        reason.contains("itmo"),
+        "reason must contain the task short_id: {reason}"
+    );
+    // Crucially: this MUST NOT look like a worker-no-commit rejection.
+    assert!(
+        !reason.contains("no new commit was produced"),
+        "publication-failure reason must NOT borrow the no-commit-strike text: {reason}"
+    );
+    // And it must explicitly say the strike is suppressed.
+    assert!(
+        reason.contains("NOT") || reason.to_lowercase().contains("suppress"),
+        "reason must make clear the unchanged-head strike is suppressed: {reason}"
+    );
+}
+
+#[test]
+fn pub_failure_suppresses_when_publication_error_recorded() {
+    // Worker may not have an explicit mirror_head_sha yet, but the latest
+    // attempt carried a publication observation error. Together with
+    // freshly-pushed local head matching the durable baseline this is a
+    // clear publication-failure signal.
+    let baseline = "auth-rejected-baseline";
+    let ctx = pub_failure_ctx(
+        baseline,
+        Some(baseline),
+        None,
+        Some(baseline),
+        None,
+        Some("HTTP 403: app installation suspended"),
+        Some(123),
+        "vy47",
+    );
+
+    let reason = unpublished_mirror_publication_reason(&ctx)
+        .expect("head_observation_error alone (with github_lagging) must trigger");
+
+    assert!(
+        reason.contains("auth-rejected-baseline"),
+        "reason must reference the failing remediation baseline: {reason}"
+    );
+    assert!(
+        reason.contains("HTTP 403") || reason.contains("publication"),
+        "reason must surface the publication error context: {reason}"
+    );
+    assert!(
+        reason.contains("PR #123"),
+        "reason must contain the PR number"
+    );
+    assert!(
+        reason.contains("vy47"),
+        "reason must contain the task short_id"
+    );
+}
+
+#[test]
+fn pub_failure_returns_none_when_no_divergence_or_publication_error() {
+    // The mirror head == remediation baseline, github head == remediation
+    // baseline, and nothing else. This is the *legitimate* unchanged-head
+    // case where the worker truly produced no new commit. Publication
+    // predicate must NOT swallow this — the unchanged-head rejection must
+    // still fire.
+    let baseline = "truly-unchanged-sha";
+    let ctx = pub_failure_ctx(
+        baseline,
+        Some(baseline),
+        Some(baseline),
+        Some(baseline),
+        Some(false),
+        None,
+        Some(7),
+        "itmo",
+    );
+
+    assert!(
+        unpublished_mirror_publication_reason(&ctx).is_none(),
+        "no divergence / publication-error evidence → predicate must NOT suppress"
+    );
+}
+
+#[test]
+fn pub_failure_returns_none_without_active_worker_signal() {
+    // Heads_diverged is Some(true) but `mirror_advanced` is false (mirror head
+    // equals the baseline coincidentally), and no publication error. The
+    // divergent flag alone isn't strong enough — we still need at least one
+    // active signal (mirror advanced OR publication-error) to confirm the
+    // worker did something GitHub didn't see.
+    let baseline = "baseline-sha";
+    let ctx = pub_failure_ctx(
+        baseline,
+        Some(baseline),
+        Some(baseline),
+        Some("some-other-github-head"),
+        Some(true),
+        None,
+        Some(8),
+        "itmo",
+    );
+
+    assert!(
+        unpublished_mirror_publication_reason(&ctx).is_none(),
+        "divergence flag without active worker signal must NOT trigger suppression"
+    );
+}
+
+#[test]
+fn pub_failure_returns_none_without_divergent_signal() {
+    // Mirror advanced, but no divergence flag AND github head is unknown.
+    // Without at least one divergent signal (heads_diverged, github_lagging,
+    // or pub_error), the predicate must remain conservative and let the
+    // unchanged-head rejection fire.
+    let baseline = "baseline-sha";
+    let ctx = pub_failure_ctx(
+        baseline,
+        Some(baseline),
+        Some("mirror-newer-sha"),
+        None,
+        None,
+        None,
+        Some(8),
+        "itmo",
+    );
+
+    assert!(
+        unpublished_mirror_publication_reason(&ctx).is_none(),
+        "without divergence / lagging / pub_error, suppression must not trigger"
+    );
+}
+
+#[test]
+fn pub_failure_combines_mirror_advanced_with_publication_error() {
+    // Both signals active (mirror advanced AND a publication error). The
+    // reason must surface both pieces of evidence for operators.
+    let baseline = "baseline-sha";
+    let ctx = pub_failure_ctx(
+        baseline,
+        Some(baseline),
+        Some("mirror-newer-sha"),
+        Some(baseline),
+        Some(true),
+        Some("TLS handshake failed"),
+        Some(11),
+        "llvt",
+    );
+
+    let reason = unpublished_mirror_publication_reason(&ctx)
+        .expect("both signals active → suppression must trigger");
+
+    assert!(
+        reason.contains("TLS handshake failed") || reason.contains("publication"),
+        "reason must surface the publication error: {reason}"
+    );
+    assert!(
+        reason.contains("mirror") || reason.contains("diverged"),
+        "reason must surface the divergence evidence: {reason}"
+    );
+    assert!(
+        !reason.contains("no new commit was produced"),
+        "reason must NOT borrow the no-commit-strike text: {reason}"
+    );
 }

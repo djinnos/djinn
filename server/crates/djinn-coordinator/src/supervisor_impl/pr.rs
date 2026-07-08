@@ -1005,11 +1005,143 @@ pub(super) async fn close_noop(
 /// baseline. Consumed by the activity log as a blocking system event.
 pub(crate) const UNCHANGED_HEAD_EVENT: &str = "unchanged_remediation_head";
 
+/// Event type emitted when the supervisor recognizes that a mirror commit
+/// exists locally but failed to publish to GitHub (or otherwise diverged from
+/// the GitHub PR head). Suppresses the misleading unchanged-head escalation
+/// in favor of a divergence-aware reason.
+pub(crate) const UNPUBLISHED_MIRROR_EVENT: &str = "unpublished_mirror_publication";
+
+/// Inputs feeding the unchanged-head remediation decision for m116: gives the
+/// pure predicate access to mirror↔GitHub head reconciliation evidence surfaced
+/// on `Task` by sibling task `siya`.  All four fields are additive and
+/// backward-compatible (pre-m116 tasks report `None` for every field).
+#[derive(Debug, Clone, Default)]
+pub(super) struct UnchangedHeadContext<'a> {
+    /// The freshly-pushed local mirror branch head (`head_sha` passed into
+    /// `check_unchanged_remediation_head`).  Same value used to compare
+    /// against the remediation baseline.
+    pub head_sha: &'a str,
+    /// Durable red-CI remediation baseline (last failing head). `None` when
+    /// the task has never failed required CI.
+    pub remediation_base_sha: Option<&'a str>,
+    /// Latest known mirror task_branch head recorded by a task attempt.
+    pub mirror_head_sha: Option<&'a str>,
+    /// Latest known GitHub PR branch head recorded by a task attempt. `None`
+    /// when no open PR branch has been observed yet, or when observation
+    /// failed.
+    pub github_head_sha: Option<&'a str>,
+    /// `Some(true)` when the two heads are known to differ, `Some(false)`
+    /// when both heads are known and equal, `None` when either side is
+    /// unknown.  Mirrors `Task::ci_heads_diverged`.
+    pub heads_diverged: Option<bool>,
+    /// Concise error from the most recent GitHub publication / branch-head
+    /// observation failure. Mirrors `Task::ci_head_observation_error`.
+    pub head_observation_error: Option<&'a str>,
+    /// PR number for operator-facing text.
+    pub pr_number: Option<i64>,
+    /// Task short_id for operator-facing text.
+    pub short_id: &'a str,
+}
+
+/// Pure predicate: was the freshly-pushed head SHA unchanged AND does mirror↔
+/// GitHub reconciliation evidence suggest the real cause was a publication
+/// failure (mirror has a new commit, GitHub did not receive it) rather than
+/// "the worker produced no new commit at all"?
+///
+/// Returns `Some(reason)` only when **all** of the following hold:
+/// 1. A durable remediation baseline is present.
+/// 2. The freshly-pushed head SHA equals the remediation baseline (i.e.
+///    either GitHub didn't move or no progress was made locally).
+/// 3. `Task::ci_mirror_head_sha` (latest attempt evidence) is known and
+///    differs from the pushed head / remediation baseline — the mirror
+///    produced something the durable snapshot hasn't captured yet.
+/// 4. `Task::ci_github_head_sha` (latest attempt evidence) is known and
+///    matches the remediation baseline — GitHub's PR branch head hasn't
+///    advanced alongside the mirror, OR
+///    `Task::ci_head_observation_error` is set, indicating the publication
+///    failed.
+///
+/// The reason text explicitly points operators at the divergence /
+/// publication failure so they don't chase a false "unchanged-head strike".
+/// Returns `None` when no publication-failure evidence can be derived — the
+/// caller may then apply the legacy unchanged-head rejection or proceed.
+pub(super) fn unpublished_mirror_publication_reason(
+    ctx: &UnchangedHeadContext<'_>,
+) -> Option<String> {
+    let remediation_base = ctx.remediation_base_sha?;
+
+    if ctx.head_sha != remediation_base {
+        return None;
+    }
+
+    // Three independent signals for a publication failure / mirror↔GitHub
+    // divergence. The freshly-pushed local mirror head (and GitHub-side
+    // observation error) are the *only* sources of "the commit never made
+    // it to GitHub" evidence.
+    let has_pub_error = ctx.head_observation_error.is_some();
+    // Mirror has a commit that is NOT the remediation baseline: the worker
+    // produced something but the durable CI snapshot still tracks the old
+    // failing head. This is the strongest divergence signal.
+    let mirror_advanced = matches!(ctx.mirror_head_sha, Some(m) if m != remediation_base);
+    // GitHub PR head is recorded as equal to the failing baseline: the PR
+    // branch never advanced alongside the mirror.
+    let github_lagging = matches!(ctx.github_head_sha, Some(g) if g == remediation_base);
+    // Operator-recorded heads_diverged flag (true when both sides are known
+    // and differ). Useful when mirror_advanced hasn't fired (e.g. mirror
+    // head coincidentally equals the remediation baseline but the divergent
+    // flag was set by an earlier round).
+    let explicit_divergence = ctx.heads_diverged == Some(true);
+
+    // Need at least one publication-failure / divergence signal AND at least
+    // one "the worker was active" signal. Otherwise the predicate is
+    // indistinguishable from a legitimate no-progress case and we leave the
+    // unchanged-head rejection in place.
+    let divergent = explicit_divergence || github_lagging;
+    let active_signal = mirror_advanced || has_pub_error;
+    if !divergent || !active_signal {
+        return None;
+    }
+
+    let pr_label = ctx
+        .pr_number
+        .map(|n| format!("PR #{n}"))
+        .unwrap_or_else(|| "PR (unknown number)".to_string());
+
+    let detail = if has_pub_error {
+        format!(
+            "GitHub publication/observation error recorded: {}",
+            ctx.head_observation_error.unwrap_or("(no message)")
+        )
+    } else {
+        format!(
+            "mirror task branch head (mirror={} vs GitHub={}) has diverged from the failing GitHub PR head `{}`",
+            ctx.mirror_head_sha.unwrap_or("?"),
+            ctx.github_head_sha.unwrap_or("?"),
+            remediation_base,
+        )
+    };
+
+    Some(format!(
+        "Submit held: {pr_label} head SHA `{head}` is unchanged from the red required-CI remediation baseline \
+         `{base}`, but mirror↔GitHub publication evidence indicates the worker's commit did not reach the GitHub \
+         PR branch ({detail}, task {task}). A GitHub re-publication is required before this submit can advance; \
+         this is NOT a no-commit-strike and will not be counted as a same-GitHub-head signature escalation.",
+        head = ctx.head_sha,
+        base = remediation_base,
+        detail = detail,
+        task = ctx.short_id,
+    ))
+}
+
 /// Pure predicate: should the submit be rejected because the PR head SHA is
 /// unchanged from the durable red-CI remediation baseline?
 ///
 /// Returns `Some(reason)` when the head SHA matches the baseline (unchanged →
-/// reject). Returns `None` when the SHA changed or no baseline is active.
+/// reject). Returns `None` when the SHA changed or no baseline is active, OR
+/// when m116 publication-evidence indicates the cause is a GitHub
+/// publication failure / mirror divergence instead (in which case
+/// [`unpublished_mirror_publication_reason`] is expected to be consulted
+/// first by the caller).
 ///
 /// Factored out so the decision is unit-testable without a database; the
 /// async wrapper [`check_unchanged_remediation_head`] performs the side
@@ -1047,6 +1179,17 @@ pub(super) fn unchanged_head_rejection_reason(
 /// short-circuits the PR-open path. Returns `None` when the SHA changed or when
 /// no remediation baseline is active — the caller proceeds normally.
 ///
+/// # m116 publication-failure short-circuit
+///
+/// When the freshly-pushed head SHA equals the durable remediation baseline,
+/// the next check is whether m116 reconciliation evidence (mirror / GitHub
+/// head divergence OR publication error) explains the unchanged GitHub head.
+/// If yes, the supervisor emits an `unpublished_mirror_publication` event for
+/// operator visibility, records a divergence-aware comment, and returns
+/// `None` so the caller proceeds normally.  This suppresses the misleading
+/// "no new commit" rejection / strike that would otherwise fire on a publish
+/// that never reached GitHub.
+///
 /// This cooperates with (does not replace) the existing zero-diff guard
 /// (`task_branch_commits_ahead == 0`) and the scope-inversion / cycle-cap
 /// protections: those run earlier or downstream and operate on independent
@@ -1059,6 +1202,98 @@ pub(crate) async fn check_unchanged_remediation_head(
     head_sha: &str,
 ) -> Option<TaskRunOutcome> {
     let remediation_base = task.ci_last_remediation_base_sha.as_deref()?;
+
+    // ── m116: publication-failure / mirror-divergence short-circuit ─────────
+    // If the freshly-pushed head matches the durable remediation baseline
+    // BUT mirror↔GitHub reconciliation evidence says the mirror produced a
+    // commit that never reached GitHub, the unchanged-GitHub-head signal is
+    // misleading.  In that case emit a divergent-cause event instead of the
+    // false-strike unchanged-head rejection, and short-circuit by returning
+    // `None` so the caller proceeds (the divergence / publication-failure
+    // is logged separately for operator action).
+    let pub_failure_ctx = UnchangedHeadContext {
+        head_sha,
+        remediation_base_sha: task.ci_last_remediation_base_sha.as_deref(),
+        mirror_head_sha: task.ci_mirror_head_sha.as_deref(),
+        github_head_sha: task.ci_github_head_sha.as_deref(),
+        heads_diverged: task.ci_heads_diverged,
+        head_observation_error: task.ci_head_observation_error.as_deref(),
+        pr_number: task.ci_pr_number,
+        short_id: &task.short_id,
+    };
+    if let Some(divergence_reason) = unpublished_mirror_publication_reason(&pub_failure_ctx) {
+        // Emit a non-strike event that identifies the divergence / publication
+        // failure so operators act on the real cause (re-push to GitHub) and
+        // so audit trails do not log a misleading "no-commit" strike.
+        let payload = serde_json::json!({
+            "task_id": task.id,
+            "short_id": task.short_id,
+            "pr_number": task.ci_pr_number,
+            "head_sha": head_sha,
+            "remediation_base_sha": remediation_base,
+            "mirror_head_sha": task.ci_mirror_head_sha,
+            "github_head_sha": task.ci_github_head_sha,
+            "heads_diverged": task.ci_heads_diverged,
+            "head_observation_error": task.ci_head_observation_error,
+            "reason": "mirror commit failed to publish to GitHub — unchanged-head strike suppressed",
+            "divergence_reason": divergence_reason,
+        });
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                UNPUBLISHED_MIRROR_EVENT,
+                &payload.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "supervisor PR-open: failed to emit unpublished-mirror publication-failure event"
+            );
+        }
+        // Also emit a human-readable comment so operators see the divergence
+        // context in the task activity stream.
+        let comment_payload = serde_json::json!({
+            "body": format!(
+                "**⚠ Mirror↔GitHub publication divergence detected**\n\n{divergence_reason}\n\n\
+                 The task has a new commit on the internal mirror that did not reach the GitHub PR \
+                 branch. The unchanged-GitHub-head remediation strike is SUPPRESSED for this round; \
+                 re-publication (or human intervention) is required to advance.",
+            )
+        });
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                "comment",
+                &comment_payload.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "supervisor PR-open: failed to emit unpublished-mirror publication-failure comment"
+            );
+        }
+        tracing::warn!(
+            task_id = %task.short_id,
+            head_sha = %head_sha,
+            remediation_base_sha = %remediation_base,
+            mirror_head_sha = ?task.ci_mirror_head_sha.as_deref(),
+            github_head_sha = ?task.ci_github_head_sha.as_deref(),
+            heads_diverged = ?task.ci_heads_diverged,
+            "supervisor PR-open: unchanged head SHA from mirror↔GitHub publication divergence — \
+             unchanged-head strike suppressed, PR-open path proceeds"
+        );
+        // Return None so the caller proceeds through the normal PR-open path
+        // instead of being escalated.
+        return None;
+    }
 
     let reason = unchanged_head_rejection_reason(
         task.ci_last_remediation_base_sha.as_deref(),

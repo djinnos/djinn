@@ -148,37 +148,71 @@ impl CoordinatorActor {
         // fingerprint. If the fingerprint changed (different failures =
         // progress), we also restart the count here. This makes escalation
         // independent of `reopen_count`.
+        //
+        // m116: when the task carries mirror↔GitHub head divergence evidence
+        // (`ci_heads_diverged == Some(true)`) or a recent publication
+        // observation error, the same-GitHub-head observation is NOT a
+        // worker-stuck signal — the worker's commit never reached GitHub, so
+        // GitHub just keeps re-evaluating the same old failing head. Treat the
+        // observation as a publication-failure evidence, do NOT carry forward
+        // the prior same-signature count, do NOT bump the counter, and emit a
+        // divergence-aware activity event so operators investigate re-push
+        // instead of seeing a misleading same-GitHub-head escalation.
         let fingerprint = compute_ci_failure_fingerprint(&blocking, &ci_failure_sections);
 
         let task_repo = self.task_repo();
-        let prior_same_sig_count = match task_repo
+        let (prior_same_sig_count, same_signature_strike_suppressed) = match task_repo
             .get_ci_snapshot_for_task_pr(task_id, pull_number as i64)
             .await
         {
             Ok(Some(snap)) => {
-                // Only carry forward the count when the fingerprint matches
-                // (same failures on the same head). A head change already
-                // reset the snapshot via `reset_ci_snapshot_for_head` in the
-                // `record_ci_snapshot` path; a fingerprint change means the
-                // worker made progress, so we restart the count.
-                if snap.failure_fingerprint.as_deref() == Some(&fingerprint) {
-                    snap.same_signature_count
+                let divergence_observed = task.ci_heads_diverged == Some(true);
+                let publication_error_observed = task.ci_head_observation_error.is_some();
+                let same_fingerprint_as_persisted =
+                    snap.failure_fingerprint.as_deref() == Some(&fingerprint);
+
+                if divergence_observed || publication_error_observed {
+                    // Reset the counter to zero and clear the fingerprint so
+                    // a future legit worker-stuck count starts from scratch.
+                    // Do NOT increment to a strike — this observation is a
+                    // publication-failure false-positive.
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        pr = pull_number,
+                        sha = %current_sha,
+                        heads_diverged = ?task.ci_heads_diverged,
+                        publication_error = ?task.ci_head_observation_error,
+                        mirror_head = ?task.ci_mirror_head_sha.as_deref(),
+                        github_head = ?task.ci_github_head_sha.as_deref(),
+                        "PR poller: same-GitHub-head observation suppressed — mirror↔GitHub \
+                         publication divergence recorded; not counting this as a same-signature strike"
+                    );
+                    (0i64, true)
+                } else if same_fingerprint_as_persisted {
+                    (snap.same_signature_count, false)
                 } else {
-                    0
+                    (0i64, false)
                 }
             }
-            Ok(None) => 0,
+            Ok(None) => (0i64, false),
             Err(e) => {
                 tracing::warn!(
                     task_id = %task_short_id,
                     error = %e,
                     "PR poller: failed to read CI snapshot for same-signature count; assuming 0"
                 );
-                0
+                (0i64, false)
             }
         };
-        // The current failure is the (prior + 1)th identical fingerprint.
-        let total_consecutive = prior_same_sig_count + 1;
+        // The current failure is the (prior + 1)th identical fingerprint,
+        // EXCEPT when m116 publication-failure evidence suppresses the
+        // strike — in that case we hold the counter at zero and let the
+        // next real worker round (after re-publish) restart the count.
+        let total_consecutive = if same_signature_strike_suppressed {
+            0
+        } else {
+            prior_same_sig_count + 1
+        };
 
         // Persist the failing CI snapshot before checking escalation thresholds.
         // Set last_remediation_base_sha to the current failing head so later
@@ -195,6 +229,45 @@ impl CoordinatorActor {
             Some(current_sha.to_owned()),
         )
         .await;
+
+        // ── Emit divergence-aware activity event when strike is suppressed ────
+        // Operators see this alongside the structured CI snapshot so they
+        // understand why an otherwise same-GitHub-head observation did not
+        // produce a same-signature strike. The payload surfaces the same
+        // reconciliation fields used by the supervisor path so audit trails
+        // correlate supervisor-side and pr_poller-side events.
+        if same_signature_strike_suppressed {
+            let payload = serde_json::json!({
+                "task_id": task_id,
+                "short_id": task_short_id,
+                "pr_number": pull_number,
+                "current_sha": current_sha,
+                "fingerprint": fingerprint,
+                "mirror_head_sha": task.ci_mirror_head_sha,
+                "github_head_sha": task.ci_github_head_sha,
+                "heads_diverged": task.ci_heads_diverged,
+                "head_observation_error": task.ci_head_observation_error,
+                "reason": "same-GitHub-head CI failure suppressed — mirror↔GitHub publication divergence; no same-signature strike counted",
+            })
+            .to_string();
+            if let Err(e) = task_repo
+                .log_activity(
+                    Some(task_id),
+                    "coordinator",
+                    "system",
+                    "same_signature_strike_suppressed_unpublished_mirror",
+                    &payload,
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    error = %e,
+                    "PR poller: failed to log same-signature strike suppression activity"
+                );
+            }
+        }
 
         if total_consecutive >= SAME_CI_SIGNATURE_THRESHOLD as i64 {
             let blocking_names: Vec<&str> = blocking.iter().map(|cr| cr.name.as_str()).collect();
