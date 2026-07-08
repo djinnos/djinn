@@ -1809,8 +1809,10 @@ async fn reap_stale_task_runs_with_threshold(
 ///
 /// State-driven off DB truth and idempotent: `advance_to_terminal` is
 /// forward-only, so a row concurrently advanced by the normal lifecycle is
-/// left untouched. Deliberately restricted to `pending` rows — `submitted`
-/// rows are owned by the PR poller's adoption/terminalization flow.
+/// left untouched. `pending` orphans finalize to `crashed`. The same sweep also
+/// finalizes `submitted` orphans **whose task carries no open PR** to
+/// `reopened` (the ylme orphan): `submitted`-with-PR rows stay owned by the PR
+/// poller's adoption/terminalization flow and are strictly untouched.
 async fn reap_orphaned_pending_attempts(db: &djinn_db::Database) {
     reap_orphaned_pending_attempts_with_threshold(
         db,
@@ -1910,6 +1912,79 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
                     error = %e,
                     reason = reason,
                     "CoordinatorActor: failed to reap orphaned pending task_attempt"
+                );
+            }
+        }
+    }
+
+    // Also finalize orphaned `submitted` attempts whose task carries no open PR.
+    // The PR poller can only own `submitted` attempts that HAVE a PR (it drives
+    // adoption/terminalization off `tasks.pr_url`); a `submitted` attempt with
+    // NO PR — e.g. an internal task-review rejection that reopened the task
+    // without terminalizing the worker's `submitted` row (the ylme orphan) —
+    // can never be advanced by the poller and hard-blocks the respawn guard's
+    // step-2 dedup forever. Finalize it to `reopened` (submitted work existed):
+    // that also makes the guard's latest-attempt gate treat the task as rework,
+    // so a fresh worker dispatches to redo it. `submitted`-with-PR rows are
+    // strictly untouched (excluded by the query). Forward-only + idempotent.
+    let submitted_orphans = match repo.list_orphaned_submitted_no_pr(&threshold_iso).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                reason = reason,
+                "CoordinatorActor: reap_orphaned_submitted_no_pr lookup failed"
+            );
+            return;
+        }
+    };
+
+    for orphan in submitted_orphans {
+        let summary_json = serde_json::json!({
+            "recovery_classifier": "orphaned_submitted_no_pr_reaper",
+            "reason": reason,
+            "threshold_secs": threshold_secs,
+            "failure_class": "orphaned_submitted_no_pr",
+        })
+        .to_string();
+        match repo
+            .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
+                id: &orphan.id,
+                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Reopened,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some(
+                    "orphaned submitted attempt (no PR) reaped: reopened for a fresh worker",
+                ),
+                summary_json: Some(&summary_json),
+                log_tail: None,
+            })
+            .await
+        {
+            Ok(updated) => {
+                tracing::warn!(
+                    attempt_id = %orphan.id,
+                    task_id = %orphan.task_id,
+                    role = %orphan.role,
+                    dispatch_key = %orphan.dispatch_key,
+                    attempt_created_at = %orphan.created_at,
+                    threshold = %threshold_iso,
+                    outcome = %updated.outcome,
+                    reason = reason,
+                    "CoordinatorActor: reaped orphaned no-PR submitted task_attempt to reopened"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    attempt_id = %orphan.id,
+                    task_id = %orphan.task_id,
+                    role = %orphan.role,
+                    error = %e,
+                    reason = reason,
+                    "CoordinatorActor: failed to reap orphaned no-PR submitted task_attempt"
                 );
             }
         }

@@ -7,8 +7,8 @@
 
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
 use djinn_db::{
-    CreateTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
-    TerminalTaskAttemptParams,
+    CreateTaskAttemptParams, ReworkMarkerTaskAttemptParams, SubmitTaskAttemptParams,
+    TaskAttemptRepository, TerminalTaskAttemptParams,
 };
 
 /// Record the start of a dispatch attempt.
@@ -261,6 +261,149 @@ pub async fn advance_latest_to_terminal(
             );
         }
     }
+}
+
+/// Deterministic dispatch key for a rework-marker attempt row.
+///
+/// Mirrors the `open_pr_adoption` key convention so repeated marker inserts for
+/// the same (task, role) resolve to one row via `ON CONFLICT DO NOTHING`.
+pub fn rework_marker_dispatch_key(task_id: &str, role: &str) -> String {
+    format!("{task_id}:{role}:rework_marker")
+}
+
+/// Guarantee a durable `reopened` signal for `(task, role)` after a rework
+/// reopen, inserting an idempotent terminal `reopened` marker row when there is
+/// nothing live to terminalize.
+///
+/// Ordering (all best-effort; errors are logged, never propagated):
+/// 1. If an in-flight `pending`/`submitted` attempt still exists, the caller's
+///    normal terminalization owns the `reopened` signal — no marker needed.
+/// 2. Else if the latest non-guard attempt for the pair is already `reopened`
+///    (an in-flight attempt was just terminalized, or a marker already exists),
+///    this is an idempotent no-op.
+/// 3. Else insert a synthetic terminal `reopened` marker row so the respawn
+///    guard's latest-attempt gate treats the task as rework and dispatches a
+///    worker instead of adopting the still-open PR.  This closes the kv6i
+///    invisible-reopen gap (reopens that leave no live attempt behind).
+pub async fn ensure_rework_marker(
+    db: &djinn_db::Database,
+    task_id: &str,
+    role: &str,
+    summary: Option<&str>,
+) {
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // 1. A live attempt is present → its terminalization carries the signal.
+    match repo.latest_pending_or_submitted(task_id, Some(role)).await {
+        Ok(Some(_)) => return,
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                role = %role,
+                error = %e,
+                "attempt_lifecycle: rework-marker in-flight lookup failed; skipping marker"
+            );
+            return;
+        }
+    }
+
+    // 2. Latest non-guard attempt already `reopened` → idempotent no-op.
+    match repo.list_for_task(task_id).await {
+        Ok(attempts) => {
+            let latest_non_guard = attempts.iter().filter(|a| a.role == role).find(|a| {
+                a.outcome != TaskAttemptOutcome::Deferred.as_str()
+                    && a.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
+            });
+            if latest_non_guard
+                .is_some_and(|latest| latest.outcome == TaskAttemptOutcome::Reopened.as_str())
+            {
+                return;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                role = %role,
+                error = %e,
+                "attempt_lifecycle: rework-marker latest-attempt lookup failed; skipping marker"
+            );
+            return;
+        }
+    }
+
+    // 3. Insert the idempotent marker.
+    let dispatch_key = rework_marker_dispatch_key(task_id, role);
+    let id = uuid::Uuid::now_v7().to_string();
+    let summary_json = r#"{"source":"rework_reopen_marker"}"#;
+    match repo
+        .insert_rework_marker(ReworkMarkerTaskAttemptParams {
+            id: &id,
+            task_id,
+            role,
+            dispatch_key: &dispatch_key,
+            summary,
+            summary_json: Some(summary_json),
+        })
+        .await
+    {
+        Ok(attempt) => {
+            tracing::info!(
+                task_id = %task_id,
+                role = %role,
+                attempt_id = %attempt.id,
+                dispatch_key = %attempt.dispatch_key,
+                "attempt_lifecycle: durable rework-reopen marker recorded (no in-flight attempt to terminalize)"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                role = %role,
+                error = %e,
+                "attempt_lifecycle: failed to record rework-reopen marker (best-effort)"
+            );
+        }
+    }
+}
+
+/// Record a rework reopen for `(task, role)`: terminalize any in-flight
+/// `pending`/`submitted` attempt to `reopened`, and — when nothing was
+/// in-flight — insert a durable `reopened` marker (see [`ensure_rework_marker`]).
+///
+/// This is the single entry point for rework transitions that the PR poller's
+/// `apply_pr_transition` does NOT own (the supervisor-driven
+/// `task_review_reject*` / `lead_approve_conflict` paths — the ylme bug, where
+/// the worker's `submitted` attempt was never terminalized).  Best-effort.
+pub async fn record_rework_reopen(
+    db: &djinn_db::Database,
+    task_id: &str,
+    role: &str,
+    pr_url: Option<&str>,
+    summary: Option<&str>,
+    summary_json: Option<&str>,
+) {
+    // Terminalize any in-flight pending/submitted attempt to `reopened` (no-op
+    // if none is live).
+    advance_latest_to_terminal(
+        db,
+        TerminalAdvancementParams {
+            task_id,
+            role,
+            outcome: TaskAttemptOutcome::Reopened,
+            pr_url,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary,
+            summary_json,
+            log_tail: None,
+        },
+    )
+    .await;
+    // Guarantee a durable `reopened` signal even when nothing was in-flight.
+    ensure_rework_marker(db, task_id, role, summary).await;
 }
 
 /// Generate a stable dispatch key for a new dispatch event.

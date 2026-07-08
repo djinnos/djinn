@@ -586,4 +586,209 @@ mod tests {
             "data key must match mount filename"
         );
     }
+
+    // ---- hgd0 Wave 1 transport regression tests ----------------------------
+
+    /// AC1: The legacy `build_task_run_secret` entry-point does NOT include
+    /// `environment.json` or `service_metadata.json` keys.  Old Secrets that
+    /// predate hgd0 Wave 1 are therefore backward-compatible: the Job's
+    /// `optional: true` on the Secret volume lets the Pod start without these
+    /// keys, and the worker defaults to `EnvironmentConfig::empty()` (empty
+    /// `lifecycle.pre_task`).
+    #[test]
+    fn legacy_secret_omits_environment_json_key() {
+        let spec = test_spec();
+        let credentials = test_credentials();
+        let task_run_id = Uuid::now_v7();
+
+        let secret = build_task_run_secret("djinn", &task_run_id, &spec, &credentials).unwrap();
+
+        let data = secret.data.as_ref().unwrap();
+        // Legacy path: only spec.bin + credentials.bin.
+        assert_eq!(data.len(), 2);
+        assert!(data.contains_key(SPEC_DATA_KEY));
+        assert!(data.contains_key(CREDENTIALS_DATA_KEY));
+        // No environment.json — the worker defaults to EnvironmentConfig::empty()
+        // which has schema_version 1 and empty lifecycle.pre_task.
+        assert!(
+            !data.contains_key(ENV_CONFIG_SECRET_DATA_KEY),
+            "legacy secret must not include environment.json"
+        );
+        assert!(
+            !data.contains_key(SERVICE_METADATA_SECRET_DATA_KEY),
+            "legacy secret must not include service_metadata.json"
+        );
+    }
+
+    /// AC1: The builder with `with_default_environment_config()` produces a
+    /// Secret whose `environment.json` key decodes to an `EnvironmentConfig`
+    /// with `schema_version: 1` and an empty `lifecycle.pre_task`.  This is
+    /// the same config the worker mounts for projects with no explicit
+    /// environment config, proving the "no config" path defaults cleanly.
+    #[test]
+    fn builder_default_config_mounts_schema_version_one_and_empty_pretask() {
+        let spec = test_spec();
+        let credentials = test_credentials();
+        let task_run_id = Uuid::now_v7();
+
+        let secret = TaskRunSecretBuilder::new("djinn", &task_run_id, &spec, &credentials)
+            .with_default_environment_config()
+            .build()
+            .unwrap();
+
+        let data = secret.data.as_ref().unwrap();
+        assert!(data.contains_key(ENV_CONFIG_SECRET_DATA_KEY));
+
+        let env_bytes = &data.get(ENV_CONFIG_SECRET_DATA_KEY).unwrap().0;
+        let json_str = std::str::from_utf8(env_bytes).expect("valid UTF-8");
+        let cfg: EnvironmentConfig =
+            serde_json::from_str(json_str).expect("valid EnvironmentConfig");
+
+        // The mounted effective config is schema_version 1 with empty pre_task —
+        // the worker treats this as "no pre-task lifecycle".
+        assert_eq!(cfg.schema_version, 1);
+        assert!(
+            cfg.lifecycle.pre_task.is_empty(),
+            "default config must have empty lifecycle.pre_task, got: {:?}",
+            cfg.lifecycle.pre_task
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    /// AC2: A non-empty `lifecycle.pre_task` config round-trips exactly through
+    /// the Secret transport as JSON.  The worker reads the same bytes from
+    /// `/var/run/djinn/environment.json` and deserializes the exact commands.
+    #[test]
+    fn builder_with_nonempty_pretask_preserves_exact_commands_in_json() {
+        use djinn_stack::environment::{LifecycleHooks, PreTaskCommand, PreTaskFailurePolicy};
+
+        let spec = test_spec();
+        let credentials = test_credentials();
+        let task_run_id = Uuid::now_v7();
+
+        let cfg = EnvironmentConfig {
+            schema_version: 1,
+            lifecycle: LifecycleHooks {
+                pre_task: vec![
+                    PreTaskCommand {
+                        name: Some("install-deps".into()),
+                        command: "pip install -e .".into(),
+                        timeout_seconds: 120,
+                        failure_policy: PreTaskFailurePolicy::default(),
+                    },
+                    PreTaskCommand {
+                        name: None,
+                        command: "npm ci".into(),
+                        timeout_seconds: 300,
+                        failure_policy: PreTaskFailurePolicy::default(),
+                    },
+                ],
+                ..LifecycleHooks::default()
+            },
+            ..EnvironmentConfig::empty()
+        };
+
+        let secret = TaskRunSecretBuilder::new("djinn", &task_run_id, &spec, &credentials)
+            .environment_config(&cfg)
+            .build()
+            .unwrap();
+
+        let data = secret.data.as_ref().unwrap();
+        let env_bytes = &data.get(ENV_CONFIG_SECRET_DATA_KEY).unwrap().0;
+        let json_str = std::str::from_utf8(env_bytes).expect("valid UTF-8");
+        let round_tripped: EnvironmentConfig =
+            serde_json::from_str(json_str).expect("valid EnvironmentConfig");
+
+        // Exact preservation of the pre_task commands.
+        assert_eq!(round_tripped.lifecycle.pre_task.len(), 2);
+        assert_eq!(
+            round_tripped.lifecycle.pre_task[0].name.as_deref(),
+            Some("install-deps")
+        );
+        assert_eq!(
+            round_tripped.lifecycle.pre_task[0].command,
+            "pip install -e ."
+        );
+        assert_eq!(round_tripped.lifecycle.pre_task[0].timeout_seconds, 120);
+        assert_eq!(round_tripped.lifecycle.pre_task[1].name, None);
+        assert_eq!(round_tripped.lifecycle.pre_task[1].command, "npm ci");
+        assert_eq!(round_tripped.lifecycle.pre_task[1].timeout_seconds, 300);
+
+        // The config still validates.
+        assert!(round_tripped.validate().is_ok());
+    }
+
+    /// AC3: The full `ImageServiceResolution` round-trips through the Secret
+    /// builder preserving `requested_preset_ids`, `injected`, and `skipped`
+    /// — the same semantics the runtime logs as `task_run_services_resolved`.
+    #[test]
+    fn builder_service_metadata_round_trips_requested_injected_skipped() {
+        use crate::sidecar::{
+            ImageServiceResolution, InjectedServiceMetadata, ResolvedImageMetadata,
+            SkippedServicePreset,
+        };
+
+        let spec = test_spec();
+        let credentials = test_credentials();
+        let task_run_id = Uuid::now_v7();
+
+        let resolution = ImageServiceResolution {
+            image: Some(ResolvedImageMetadata {
+                id: "img-pg".into(),
+                name: "postgres-image".into(),
+                tag: Some("v1".into()),
+            }),
+            requested_preset_ids: vec!["preset-postgres-18".into(), "preset-redis-7".into()],
+            injected: vec![InjectedServiceMetadata {
+                preset_id: "preset-postgres-18".into(),
+                service_type: "postgres".into(),
+                port: 5432,
+                conn_env_var: "DATABASE_URL,TEST_POSTGRES_URL".into(),
+            }],
+            skipped: vec![SkippedServicePreset {
+                preset_id: "preset-redis-7".into(),
+                reason: "unknown service preset".into(),
+            }],
+            lookup_error: None,
+            services: Vec::new(), // serde(skip)
+        };
+
+        let secret = TaskRunSecretBuilder::new("djinn", &task_run_id, &spec, &credentials)
+            .service_metadata(&resolution)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let data = secret.data.as_ref().unwrap();
+        let meta_bytes = &data.get(SERVICE_METADATA_SECRET_DATA_KEY).unwrap().0;
+        let json_str = std::str::from_utf8(meta_bytes).expect("valid UTF-8");
+        let round_tripped: ImageServiceResolution =
+            serde_json::from_str(json_str).expect("valid ImageServiceResolution");
+
+        // requested_preset_ids preserved.
+        assert_eq!(
+            round_tripped.requested_preset_ids,
+            vec!["preset-postgres-18", "preset-redis-7"]
+        );
+        // injected preserved.
+        assert_eq!(round_tripped.injected.len(), 1);
+        assert_eq!(round_tripped.injected[0].preset_id, "preset-postgres-18");
+        assert_eq!(round_tripped.injected[0].service_type, "postgres");
+        assert_eq!(round_tripped.injected[0].port, 5432);
+        assert_eq!(
+            round_tripped.injected[0].conn_env_var,
+            "DATABASE_URL,TEST_POSTGRES_URL"
+        );
+        // skipped preserved.
+        assert_eq!(round_tripped.skipped.len(), 1);
+        assert_eq!(round_tripped.skipped[0].preset_id, "preset-redis-7");
+        assert!(round_tripped.skipped[0].reason.contains("unknown"));
+        // lookup_error absent.
+        assert!(round_tripped.lookup_error.is_none());
+        // image metadata preserved.
+        let img = round_tripped.image.as_ref().expect("image present");
+        assert_eq!(img.id, "img-pg");
+        assert_eq!(img.name, "postgres-image");
+        assert_eq!(img.tag.as_deref(), Some("v1"));
+    }
 }

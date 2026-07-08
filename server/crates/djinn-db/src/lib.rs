@@ -137,7 +137,8 @@ pub use repositories::{
     task_attempt::{
         CompletedParentSummary, CreateTaskAttemptParams, FillTaskAttemptParams,
         GuardAdoptedPrTaskAttemptParams, GuardDeferTaskAttemptParams, OrphanedPendingAttempt,
-        SubmitTaskAttemptParams, TaskAttemptRepository, TerminalTaskAttemptParams,
+        ReworkMarkerTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
+        TerminalTaskAttemptParams,
     },
     task_run::{CreateTaskRunParams, TaskRunRepository},
     usage_analytics::{
