@@ -22,17 +22,18 @@
 //! [`design/nptj-roadmap`] for the enforcement follow-on.
 
 pub mod activity_payloads;
+pub mod engine;
 pub mod policy;
 pub mod reason_codes;
 
 // ─── Re-exports for sibling tripwire modules ─────────────────────────────────
 //
-// Sibling modules (engine, rules — added by follow-on tasks `gl0p`, `imb4`,
-// `na0w`) reach contract types via `use crate::tripwires::*`. The re-exports
-// below are intentionally additive: this wave-1 task introduces the
-// contract skeleton but does not yet consume it from another module.
-// Downstream tasks reference these names; suppress the unused-import
-// warning until those consumers land.
+// Sibling modules (rules — added by follow-on tasks `imb4`, `na0w`) reach
+// contract types via `use crate::tripwires::*`. The re-exports below are
+// intentionally additive: this wave-1 task introduces the contract skeleton
+// and engine primitives but does not yet consume them from another module.
+// Downstream tasks reference these names; suppress the unused-import warning
+// until those consumers land.
 
 #[allow(unused_imports)]
 pub use activity_payloads::{
@@ -41,6 +42,12 @@ pub use activity_payloads::{
     TRIPWIRE_EVENT_TAMPER_LABEL_REMOVED, TripwireBreakGlassPayload, TripwireEvidenceSpan,
     TripwireFindingSummary, TripwireGateDecisionPayload, TripwireHoldReleasedPayload,
     TripwirePolicyChangedPayload, TripwireSeverity, TripwireTamperPayload,
+};
+#[allow(unused_imports)]
+pub use engine::{
+    ChangedFile, ChangedFileStatus, DiffHunk, EvidenceSpan, GateOutcome, RawFinding,
+    TripwireEvaluationInput, TripwireFinding, TripwireFindingSeverity, TripwireGateDecision,
+    build_finding_idempotency_key, build_gate_idempotency_key, evaluate, sort_findings,
 };
 #[allow(unused_imports)]
 pub use policy::{
