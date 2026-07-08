@@ -1313,6 +1313,20 @@ impl SupervisorServices for DirectServices {
         spec: &TaskRunSpec,
         _task: &Task,
     ) -> BranchPublicationResult {
+        // Push the task branch to GitHub for a task with an existing open PR,
+        // so that GitHub Actions evaluates the worker's latest commit instead
+        // of a stale PR head (the aah4 stale-head condition).
+        //
+        // This explicitly reuses `push_task_branch_to_github` and its
+        // concurrent-push race guard (`is_concurrent_push_race`) rather than
+        // creating a second GitHub writer — consistent push semantics and
+        // race handling across the codebase.
+        //
+        // Cross-references: epic vy47, proposal icoe acceptance criteria 4
+        // (open-PR WorkerDone mirror commits pushed to GitHub immediately),
+        // 5 (GitHub push failure structured activity), 7 (supervisor-level
+        // junk-free alignment regression), 8 (branch-publication policy
+        // approval + helper reuse evidence).
         use crate::supervisor_impl::pr::push_task_branch_to_github;
         use crate::task_merge::build_app_push_url;
         use djinn_db::ProjectRepository;
