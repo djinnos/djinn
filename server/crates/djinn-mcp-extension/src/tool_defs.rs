@@ -459,6 +459,9 @@ pub fn tool_schemas_worker() -> Vec<serde_json::Value> {
         mutation(),
     ));
     tool_values.push(serialize_tool(tool_request_lead(), mutation()));
+    // request_planner is the intended planner-escalation path for workers;
+    // request_lead is retained during the drain window for stale sessions.
+    tool_values.push(serialize_tool(tool_request_planner(), mutation()));
     tool_values.push(serialize_tool(
         crate::finalize_tools::tool_submit_work(),
         mutation(),
@@ -466,7 +469,7 @@ pub fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for Reviewer: base + submit_review finalize tool.
+/// Tool schemas for Reviewer: base + submit_review finalize tool + request_planner escalation.
 /// task_update_ac is excluded — submit_review sets AC atomically.
 pub fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
@@ -474,6 +477,8 @@ pub fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
         shared_schemas::tool_memory_build_context(),
         read_only(),
     ));
+    // request_planner is the intended planner-escalation path for reviewers.
+    tool_values.push(serialize_tool(tool_request_planner(), mutation()));
     tool_values.push(serialize_tool(
         crate::finalize_tools::tool_submit_review(),
         mutation(),

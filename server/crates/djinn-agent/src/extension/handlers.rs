@@ -74,7 +74,7 @@ pub(crate) use workspace::{
 };
 
 // Re-export task_epic functions used by the local fallback dispatch.
-use task_epic::{call_request_lead, call_request_planner};
+pub(crate) use task_epic::{call_request_lead, call_request_planner};
 // Re-export task_admin functions used by the local fallback dispatch.
 use task_admin::{call_task_delete_branch, call_task_transition};
 
