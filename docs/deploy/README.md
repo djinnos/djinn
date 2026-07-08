@@ -60,6 +60,13 @@ alternative one value away:
 
 The full knob-by-knob reference lives in **[Configuration](configuration.md)**.
 
+**Pre-task lifecycle hooks** — projects can declare shell commands (database
+migrations, dependency installs, fixture seeds) that run in the task-run Pod
+before the agent starts.  See
+**[lifecycle-pre-task.md](lifecycle-pre-task.md)** for examples (Rails, Django,
+Prisma, raw SQL), validation constraints, failure policies, and the
+`task_run_pretask_ran` activity event contract.
+
 ## How installs and upgrades work
 
 ```bash
