@@ -1277,7 +1277,9 @@ mod tests {
                 | TaskStatus::Open
                 | TaskStatus::NeedsTaskReview
                 | TaskStatus::InTaskReview
-                | TaskStatus::Approved,
+                | TaskStatus::Approved
+                | TaskStatus::NeedsLeadIntervention
+                | TaskStatus::InLeadIntervention,
             ) => Some(TaskStatus::Open),
             (TransitionAction::PreApprovalVerifyRejected, TaskStatus::Approved) => {
                 Some(TaskStatus::Open)
