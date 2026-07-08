@@ -77,10 +77,7 @@ impl MockNoteVectorStore {
     /// Register the embedding-hash → note-id mapping so the mock can
     /// recover the query note's identity from the raw embedding vector.
     fn register_embedding(&self, hash: u32, note_id: String) {
-        self.hash_to_note_id
-            .lock()
-            .unwrap()
-            .insert(hash, note_id);
+        self.hash_to_note_id.lock().unwrap().insert(hash, note_id);
     }
 
     /// Configure the mock to return `candidates` when
@@ -367,36 +364,15 @@ async fn refresh_threshold_filtering() {
 
     let repo = make_repo_with_mock(&db, mock.clone(), &tx);
 
-    let note_a = make_note_with_mock_embedding(
-        &db,
-        &repo,
-        &mock,
-        &project.id,
-        "Note A",
-        "test-model",
-        384,
-    )
-    .await;
-    let note_b = make_note_with_mock_embedding(
-        &db,
-        &repo,
-        &mock,
-        &project.id,
-        "Note B",
-        "test-model",
-        384,
-    )
-    .await;
-    let note_c = make_note_with_mock_embedding(
-        &db,
-        &repo,
-        &mock,
-        &project.id,
-        "Note C",
-        "test-model",
-        384,
-    )
-    .await;
+    let note_a =
+        make_note_with_mock_embedding(&db, &repo, &mock, &project.id, "Note A", "test-model", 384)
+            .await;
+    let note_b =
+        make_note_with_mock_embedding(&db, &repo, &mock, &project.id, "Note B", "test-model", 384)
+            .await;
+    let note_c =
+        make_note_with_mock_embedding(&db, &repo, &mock, &project.id, "Note C", "test-model", 384)
+            .await;
 
     // note_a → note_b: above threshold (0.85)
     // note_a → note_c: below threshold (0.70)
@@ -537,7 +513,10 @@ async fn refresh_top_k_cap() {
     mock.set_candidates(&hub, candidates);
 
     // Empty candidates for all candidate notes.
-    for nid in tier1_ids.iter().chain(tier2_ids.iter()).chain(tier3_ids.iter())
+    for nid in tier1_ids
+        .iter()
+        .chain(tier2_ids.iter())
+        .chain(tier3_ids.iter())
     {
         mock.set_candidates(nid, vec![]);
     }
@@ -550,8 +529,7 @@ async fn refresh_top_k_cap() {
     // Assert EXACTLY 8 edges for the hub.
     let edge_count = count_embedding_edges(&db, &hub).await;
     assert_eq!(
-        edge_count,
-        EMBEDDING_ASSOCIATION_TOP_K as i64,
+        edge_count, EMBEDDING_ASSOCIATION_TOP_K as i64,
         "hub should have exactly {} edges, got {edge_count}",
         EMBEDDING_ASSOCIATION_TOP_K,
     );
@@ -719,10 +697,7 @@ async fn refresh_weight_formula_correctness() {
     let row_078 = rows
         .iter()
         .find(|r| (r.confidence.unwrap() - 0.78).abs() < 1e-6);
-    assert!(
-        row_078.is_some(),
-        "must have an edge with confidence 0.78"
-    );
+    assert!(row_078.is_some(), "must have an edge with confidence 0.78");
     let row_078 = row_078.unwrap();
     assert!(
         (row_078.weight - 0.05).abs() < 1e-6,
@@ -757,10 +732,7 @@ async fn refresh_weight_formula_correctness() {
     let row_100 = rows
         .iter()
         .find(|r| (r.confidence.unwrap() - 1.00).abs() < 1e-6);
-    assert!(
-        row_100.is_some(),
-        "must have an edge with confidence 1.00"
-    );
+    assert!(row_100.is_some(), "must have an edge with confidence 1.00");
     let row_100 = row_100.unwrap();
     assert!(
         (row_100.weight - 0.35).abs() < 1e-6,
@@ -1109,8 +1081,7 @@ async fn prune_top_k_overflow() {
 
     let remaining = count_embedding_edges(&db, &hub).await;
     assert_eq!(
-        remaining,
-        EMBEDDING_ASSOCIATION_TOP_K as i64,
+        remaining, EMBEDDING_ASSOCIATION_TOP_K as i64,
         "expected exactly {} edges after overflow prune, got {remaining}",
         EMBEDDING_ASSOCIATION_TOP_K,
     );
@@ -1147,26 +1118,12 @@ async fn refresh_idempotence() {
 
     let repo = make_repo_with_mock(&db, mock.clone(), &tx);
 
-    let note_a = make_note_with_mock_embedding(
-        &db,
-        &repo,
-        &mock,
-        &project.id,
-        "Idem A",
-        "test-model",
-        384,
-    )
-    .await;
-    let note_b = make_note_with_mock_embedding(
-        &db,
-        &repo,
-        &mock,
-        &project.id,
-        "Idem B",
-        "test-model",
-        384,
-    )
-    .await;
+    let note_a =
+        make_note_with_mock_embedding(&db, &repo, &mock, &project.id, "Idem A", "test-model", 384)
+            .await;
+    let note_b =
+        make_note_with_mock_embedding(&db, &repo, &mock, &project.id, "Idem B", "test-model", 384)
+            .await;
 
     mock.set_candidates(&note_a, vec![(&note_b, 0.90)]);
     mock.set_candidates(&note_b, vec![(&note_a, 0.90)]);
