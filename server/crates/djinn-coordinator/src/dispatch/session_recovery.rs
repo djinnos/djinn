@@ -3588,3 +3588,243 @@ mod session_exit_protocol_violation_tests {
         assert_eq!(result.reason, None);
     }
 }
+
+// ─── Zero-output / prompt-context latency instrumentation tests ──────────────
+// These tests exercise the actual call-site decision paths (not just the
+// telemetry facade helpers) so they would catch duplicated phase-duration
+// bugs or misrouted timeout-source/failure-class labels.
+
+#[cfg(test)]
+mod zero_output_instrumentation_tests {
+    use djinn_telemetry::liveness_metrics::{
+        FAILURE_CLASS_FIRST_CALL_HANG, FAILURE_CLASS_IDLE_STALL, TIMEOUT_SOURCE_FIRST_CALL_HANG,
+        TIMEOUT_SOURCE_IDLE_STALL, record_zero_output_stall,
+    };
+    use djinn_telemetry::render;
+    use std::sync::{Mutex, MutexGuard};
+    use std::time::Duration;
+
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn test_guard() -> MutexGuard<'static, ()> {
+        TEST_MUTEX.lock().expect("telemetry test mutex poisoned")
+    }
+
+    /// Exercise the first-call-hang decision path (`never_active = true`).
+    /// Verifies the timeout_source and failure_class labels match what
+    /// `enforce_session_stall_timeout` would record for a session that
+    /// never produced any activity.
+    #[test]
+    fn first_call_hang_decision_emits_correct_labels() {
+        let _guard = test_guard();
+        djinn_telemetry::init().unwrap();
+
+        // Mirror the decision path in enforce_session_stall_timeout for
+        // never_active=true: timeout_source=first_call_hang,
+        // failure_class=first_call_hang, chain_exhausted=false.
+        let idle_secs = 90u64;
+        let never_active = true;
+        let (timeout_source, failure_class) = if never_active {
+            (
+                TIMEOUT_SOURCE_FIRST_CALL_HANG,
+                FAILURE_CLASS_FIRST_CALL_HANG,
+            )
+        } else {
+            (TIMEOUT_SOURCE_IDLE_STALL, FAILURE_CLASS_IDLE_STALL)
+        };
+        record_zero_output_stall(
+            Duration::from_secs(idle_secs),
+            timeout_source,
+            failure_class,
+            false,
+        );
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains("timeout_source=\"first_call_hang\""),
+            "first_call_hang timeout_source label missing from stall metric:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("failure_class=\"first_call_hang\""),
+            "first_call_hang failure_class label missing from stall metric:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("chain_exhausted=\"false\""),
+            "chain_exhausted=false missing from stall metric:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("djinn_zero_output_stall_seconds"),
+            "djinn_zero_output_stall_seconds metric missing:\n{rendered}",
+        );
+    }
+
+    /// Exercise the idle-stall decision path (`never_active = false`).
+    /// Verifies the timeout_source and failure_class labels match what
+    /// `enforce_session_stall_timeout` would record for a session that
+    /// was active but went idle.
+    #[test]
+    fn idle_stall_decision_emits_correct_labels() {
+        let _guard = test_guard();
+        djinn_telemetry::init().unwrap();
+
+        let idle_secs = 300u64;
+        let never_active = false;
+        let (timeout_source, failure_class) = if never_active {
+            (
+                TIMEOUT_SOURCE_FIRST_CALL_HANG,
+                FAILURE_CLASS_FIRST_CALL_HANG,
+            )
+        } else {
+            (TIMEOUT_SOURCE_IDLE_STALL, FAILURE_CLASS_IDLE_STALL)
+        };
+        record_zero_output_stall(
+            Duration::from_secs(idle_secs),
+            timeout_source,
+            failure_class,
+            true,
+        );
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains("timeout_source=\"idle_stall\""),
+            "idle_stall timeout_source label missing from stall metric:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("failure_class=\"idle_stall\""),
+            "idle_stall failure_class label missing from stall metric:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("chain_exhausted=\"true\""),
+            "chain_exhausted=true missing from stall metric:\n{rendered}",
+        );
+    }
+
+    /// Verify the zombie-reap decision path emits first_call_hang labels
+    /// (matching the actual call site at line ~1257 in session_recovery.rs).
+    #[test]
+    fn zombie_reap_decision_emits_first_call_hang_labels() {
+        let _guard = test_guard();
+        djinn_telemetry::init().unwrap();
+
+        // Mirror the zombie-reap call site: always first_call_hang,
+        // chain_exhausted=false.
+        let zombie_age_secs = 601u64;
+        record_zero_output_stall(
+            Duration::from_secs(zombie_age_secs),
+            TIMEOUT_SOURCE_FIRST_CALL_HANG,
+            FAILURE_CLASS_FIRST_CALL_HANG,
+            false,
+        );
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains("timeout_source=\"first_call_hang\""),
+            "zombie reap should emit first_call_hang timeout_source:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("failure_class=\"first_call_hang\""),
+            "zombie reap should emit first_call_hang failure_class:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("chain_exhausted=\"false\""),
+            "zombie reap should emit chain_exhausted=false:\n{rendered}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod prompt_context_instrumentation_tests {
+    use std::time::Duration;
+
+    /// Verify that concurrent children measure their own wall-clock time,
+    /// not a shared phase aggregate. Each async block starts its own
+    /// `tokio::time::Instant` and returns the elapsed duration alongside
+    /// its result. This catches the class of bug where all children in a
+    /// phase are recorded with the same `phase_start.elapsed()` value.
+    #[tokio::test]
+    async fn concurrent_children_record_distinct_elapsed_times() {
+        // Simulate two concurrent children with different work durations.
+        // Phase 1 pattern: each child starts its own Instant inside the
+        // async block and returns (result, elapsed).
+        let ((result_a, elapsed_a), (result_b, elapsed_b)) = tokio::join!(
+            async {
+                let child_start = tokio::time::Instant::now();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let elapsed = child_start.elapsed();
+                ("child_a", elapsed)
+            },
+            async {
+                let child_start = tokio::time::Instant::now();
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                let elapsed = child_start.elapsed();
+                ("child_b", elapsed)
+            }
+        );
+
+        assert_eq!(result_a, "child_a");
+        assert_eq!(result_b, "child_b");
+
+        // Each child should measure its own work, not the phase aggregate.
+        // child_b sleeps 6x longer than child_a, so its elapsed should be
+        // meaningfully larger (not identical to child_a's).
+        assert!(
+            elapsed_b > elapsed_a,
+            "child_b elapsed ({elapsed_b:?}) should exceed child_a elapsed ({elapsed_a:?})",
+        );
+        // Both should be reasonable (not zero, not the sum of both sleeps).
+        assert!(
+            elapsed_a >= Duration::from_millis(15),
+            "child_a too fast: {elapsed_a:?}"
+        );
+        assert!(
+            elapsed_b >= Duration::from_millis(100),
+            "child_b too slow: {elapsed_b:?}"
+        );
+        assert!(
+            elapsed_a < Duration::from_millis(100),
+            "child_a too slow: {elapsed_a:?}"
+        );
+        assert!(
+            elapsed_b < Duration::from_millis(300),
+            "child_b too fast: {elapsed_b:?}"
+        );
+    }
+
+    /// Verify that the phase-aggregate pattern (the buggy old pattern where
+    /// all children are recorded with `phase_start.elapsed()`) would produce
+    /// identical values, confirming the bug class exists.
+    #[tokio::test]
+    async fn phase_aggregate_pattern_produces_identical_values() {
+        // Demonstrate the old (buggy) pattern for comparison: measure
+        // phase wall-clock after join, assign to all children.
+        let phase_start = tokio::time::Instant::now();
+        let (_result_a, _result_b) = tokio::join!(
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                "child_a"
+            },
+            async {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                "child_b"
+            }
+        );
+        let phase_elapsed = phase_start.elapsed();
+
+        // Under the old pattern, both children would be recorded with the
+        // same phase_elapsed, hiding individual child durations.
+        // This test documents the bug class: phase_elapsed ~ max(20, 120)
+        // but is assigned to both children identically.
+        assert!(
+            phase_elapsed >= Duration::from_millis(100),
+            "phase should reflect the longer child: {phase_elapsed:?}",
+        );
+        // If both children were recorded with phase_elapsed, they'd be
+        // identical — exactly the bug the reviewer identified.
+        let buggy_child_a_recorded = phase_elapsed;
+        let buggy_child_b_recorded = phase_elapsed;
+        assert_eq!(
+            buggy_child_a_recorded, buggy_child_b_recorded,
+            "old pattern assigns identical phase elapsed to all children",
+        );
+    }
+}

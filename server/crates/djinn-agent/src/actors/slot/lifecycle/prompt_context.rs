@@ -448,20 +448,28 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     let role_name = runtime_role.config().name;
 
     // ── Phase 1: activity + epic context concurrently ──
-    let phase1_start = tokio::time::Instant::now();
-    let ((activity_text, worker_summary, worker_concerns), epic_context) = tokio::join!(
+    // Each child measures its own wall-clock time so the child-span
+    // metric reports per-child duration, not the phase aggregate.
+    let (
+        ((activity_text, worker_summary, worker_concerns), _activity_elapsed),
+        (epic_context, _epic_elapsed),
+    ) = tokio::join!(
         {
             let span = tracing::info_span!(
                 "prompt_ctx::activity_db",
                 task_id = %task.short_id,
             );
             async {
+                let child_start = tokio::time::Instant::now();
                 let task_repo =
                     TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
                 let activity_entries = task_repo.list_activity(&task.id).await.ok();
                 let activity_text = format_activity_text(&activity_entries, 3);
                 let (worker_summary, worker_concerns) = extract_worker_context(&activity_entries);
-                (activity_text, worker_summary, worker_concerns)
+                (
+                    (activity_text, worker_summary, worker_concerns),
+                    child_start.elapsed(),
+                )
             }
             .instrument(span)
         },
@@ -470,17 +478,21 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                 "prompt_ctx::epic_context",
                 task_id = %task.short_id,
             );
-            load_epic_context(task, needs_epic_context, app_state).instrument(span)
+            async move {
+                let child_start = tokio::time::Instant::now();
+                let result = load_epic_context(task, needs_epic_context, app_state).await;
+                (result, child_start.elapsed())
+            }
+            .instrument(span)
         }
     );
-    let phase1_elapsed = phase1_start.elapsed();
     djinn_telemetry::prompt_context_metrics::record_child_span(
         djinn_telemetry::prompt_context_metrics::SPAN_ACTIVITY_DB,
-        phase1_elapsed,
+        _activity_elapsed,
     );
     djinn_telemetry::prompt_context_metrics::record_child_span(
         djinn_telemetry::prompt_context_metrics::SPAN_EPIC_CONTEXT,
-        phase1_elapsed,
+        _epic_elapsed,
     );
 
     // ── Phase 2: knowledge, attempt history, code-graph, and reviewer-diff
@@ -488,13 +500,15 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     //    from phase 1).  Attempt-history lookups are independent of epic_context
     //    but must complete before prompt rendering.  Reviewer-diff is fully
     //    independent once role_name is known. ──
-    let phase2_start = tokio::time::Instant::now();
-    let task_paths_for_code_graph = derive_task_scope_paths(task, epic_context.as_deref());
+    // Each child measures its own wall-clock time so the child-span
+    // metric reports per-child duration, not the phase aggregate.
+    let epic_context_ref = epic_context.as_deref();
+    let task_paths_for_code_graph = derive_task_scope_paths(task, epic_context_ref);
     let (
-        knowledge_context,
-        (prior_attempts, completed_dependency_parents, activity_text),
-        code_graph_context,
-        reviewer_diff_context,
+        (knowledge_context, _knowledge_elapsed),
+        ((prior_attempts, completed_dependency_parents, activity_text), _attempt_elapsed),
+        (code_graph_context, _code_graph_elapsed),
+        (reviewer_diff_context, _reviewer_elapsed),
     ) = tokio::join!(
         // Knowledge context (depends on epic_context)
         {
@@ -502,7 +516,12 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                 "prompt_ctx::knowledge_context",
                 task_id = %task.short_id,
             );
-            load_knowledge_context(task, epic_context.as_deref(), app_state).instrument(span)
+            async move {
+                let child_start = tokio::time::Instant::now();
+                let result = load_knowledge_context(task, epic_context_ref, app_state).await;
+                (result, child_start.elapsed())
+            }
+            .instrument(span)
         },
         // Attempt-history lookups + formatting (depends on activity_text for budget)
         {
@@ -511,6 +530,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                 task_id = %task.short_id,
             );
             async {
+                let child_start = tokio::time::Instant::now();
                 let task_attempt_repo = djinn_db::TaskAttemptRepository::new(app_state.db.clone());
                 let prior_attempts =
                     attempt_context::load_prior_attempts(task, &task_attempt_repo).await;
@@ -542,7 +562,10 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                         (None, None) => None,
                     }
                 };
-                (prior_attempts, completed_dependency_parents, activity_text)
+                (
+                    (prior_attempts, completed_dependency_parents, activity_text),
+                    child_start.elapsed(),
+                )
             }
             .instrument(span)
         },
@@ -552,13 +575,18 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                 "prompt_ctx::code_graph",
                 task_id = %task.short_id,
             );
-            build_role_code_graph_context(
-                role_name,
-                task,
-                app_state,
-                project_path,
-                &task_paths_for_code_graph,
-            )
+            async move {
+                let child_start = tokio::time::Instant::now();
+                let result = build_role_code_graph_context(
+                    role_name,
+                    task,
+                    app_state,
+                    project_path,
+                    &task_paths_for_code_graph,
+                )
+                .await;
+                (result, child_start.elapsed())
+            }
             .instrument(span)
         },
         // Reviewer-diff / git context (depends only on role_name)
@@ -568,46 +596,48 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                 task_id = %task.short_id,
             );
             async move {
-                if crate::actors::slot::helpers::is_role_auto_code_context_enabled(role_name) {
-                    let (from_sha, to_sha) =
-                        resolve_reviewer_diff_shas(worktree_path, &task.project_id, app_state)
-                            .await;
-                    if from_sha.is_some() || to_sha.is_some() {
-                        build_reviewer_diff_context(
-                            role_name,
-                            task,
-                            app_state,
-                            project_path,
-                            from_sha.as_deref(),
-                            to_sha.as_deref(),
-                        )
-                        .await
+                let child_start = tokio::time::Instant::now();
+                let result =
+                    if crate::actors::slot::helpers::is_role_auto_code_context_enabled(role_name) {
+                        let (from_sha, to_sha) =
+                            resolve_reviewer_diff_shas(worktree_path, &task.project_id, app_state)
+                                .await;
+                        if from_sha.is_some() || to_sha.is_some() {
+                            build_reviewer_diff_context(
+                                role_name,
+                                task,
+                                app_state,
+                                project_path,
+                                from_sha.as_deref(),
+                                to_sha.as_deref(),
+                            )
+                            .await
+                        } else {
+                            None
+                        }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                }
+                    };
+                (result, child_start.elapsed())
             }
             .instrument(span)
         }
     );
-    let phase2_elapsed = phase2_start.elapsed();
     djinn_telemetry::prompt_context_metrics::record_child_span(
         djinn_telemetry::prompt_context_metrics::SPAN_KNOWLEDGE_CONTEXT,
-        phase2_elapsed,
+        _knowledge_elapsed,
     );
     djinn_telemetry::prompt_context_metrics::record_child_span(
         djinn_telemetry::prompt_context_metrics::SPAN_ATTEMPT_HISTORY,
-        phase2_elapsed,
+        _attempt_elapsed,
     );
     djinn_telemetry::prompt_context_metrics::record_child_span(
         djinn_telemetry::prompt_context_metrics::SPAN_CODE_GRAPH,
-        phase2_elapsed,
+        _code_graph_elapsed,
     );
     djinn_telemetry::prompt_context_metrics::record_child_span(
         djinn_telemetry::prompt_context_metrics::SPAN_REVIEWER_DIFF,
-        phase2_elapsed,
+        _reviewer_elapsed,
     );
 
     // ── Phase 3: prompt rendering (depends on all prior results) ──
