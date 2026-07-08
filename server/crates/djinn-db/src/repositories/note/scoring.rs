@@ -68,12 +68,26 @@ pub fn bayesian_update(prior: f64, signal: f64) -> f64 {
 /// in both directions. For `contradicts`, returns 0.0 (no score contribution).
 /// For `supersedes`, returns the source→target demotion (-0.5); the reverse
 /// direction (target→source +0.2) is handled by [`supersedes_reverse_multiplier`].
+///
+/// `embedding_related` uses a dedicated `0.5×` per-kind factor so that
+/// machine-minted edges are a provably lower/medium-strength signal that never
+/// exceeds wikilink `HOP_DECAY`, authored/manual edges, or Hebbian co-access
+/// semantics.  The stored bounded weights from the 9sx6 refresh are typically
+/// `0.05..=0.35`, so the effective single-hop contribution is roughly
+/// `HOP_DECAY * 0.5 * 0.05..=0.35` ≈ `0.018..=0.12` — well below the
+/// `HOP_DECAY` (0.7) floor wikilinks enjoy.
 pub(crate) fn multiplier_for_kind(kind: &str, weight: f64) -> f64 {
     match kind {
         "co_access" => HOP_DECAY * weight,
         "derived_from" => HOP_DECAY * 1.0 * weight,
         "builds_on" => HOP_DECAY * 0.8 * weight,
         "exemplifies" => HOP_DECAY * 0.7 * weight,
+        // Machine-minted embedding similarity edges: lower/medium strength.
+        // The 0.5× factor ensures these never dominate authored or Hebbian
+        // edges.  Edge-kind filtering via `edge_kinds` allows callers to
+        // opt-in/out explicitly; when no filter is provided the default
+        // all-kinds path includes `embedding_related` at this bounded weight.
+        "embedding_related" => HOP_DECAY * 0.5 * weight,
         "contradicts" => 0.0,
         "supersedes" => -0.5,    // source→target; asymmetry is at the caller
         _ => HOP_DECAY * weight, // unknown kinds default to co_access behavior
@@ -222,7 +236,8 @@ impl NoteRepository {
     /// Kind-aware graph proximity scoring with optional edge-kind filtering.
     ///
     /// When `edge_kinds` is `Some`, only edges whose `kind` appears in the list
-    /// participate in spreading activation. `None` means all kinds.
+    /// participate in spreading activation. `None` means all kinds, including
+    /// `embedding_related` (machine-minted edges at `HOP_DECAY * 0.5 * weight`).
     ///
     /// Returns `(scores, warnings)` where `warnings` contains `ContradictionWarning`
     /// entries for any `contradicts` edges encountered during traversal.
@@ -579,6 +594,41 @@ mod tests {
         assert!(
             (result - expected).abs() < 1e-12,
             "unknown kind: expected {expected}, got {result}"
+        );
+    }
+
+    #[test]
+    fn multiplier_embedding_related_uses_0_5_factor() {
+        let weight = 0.2;
+        let result = multiplier_for_kind("embedding_related", weight);
+        let expected = HOP_DECAY * 0.5 * weight;
+        assert!(
+            (result - expected).abs() < 1e-12,
+            "embedding_related: expected {expected}, got {result}"
+        );
+    }
+
+    #[test]
+    fn multiplier_embedding_related_never_exceeds_wikilink_hop_decay() {
+        // Even at the upper bound of stored weights (0.35), embedding_related
+        // must stay below the bare wikilink HOP_DECAY.
+        let weight = 0.35;
+        let result = multiplier_for_kind("embedding_related", weight);
+        assert!(
+            result < HOP_DECAY,
+            "embedding_related ({result}) must be less than wikilink HOP_DECAY ({HOP_DECAY})"
+        );
+    }
+
+    #[test]
+    fn multiplier_embedding_related_never_exceeds_co_access() {
+        // At equal stored weight, embedding_related is strictly weaker.
+        let weight = 0.5;
+        let embedding = multiplier_for_kind("embedding_related", weight);
+        let co_access = multiplier_for_kind("co_access", weight);
+        assert!(
+            embedding < co_access,
+            "embedding_related ({embedding}) must be less than co_access ({co_access})"
         );
     }
 }
