@@ -819,4 +819,193 @@ mod tests {
             "dependent task should become dispatchable once inherited blocker closes"
         );
     }
+
+    // ---- additive event compatibility regressions (4hx2 AC10) ---------
+    //
+    // Proves the control-plane activity rendering path handles unknown/
+    // additive event types (such as `task_run_pretask_ran`) safely: it
+    // does not crash, reject, or produce unbounded output.  The rendering
+    // falls back gracefully to using the event_type as the `kind`, with
+    // `details` = None and `summary` = None when the payload lacks the
+    // expected top-level keys.
+
+    /// `render_activity_metadata` handles the additive
+    /// `task_run_pretask_ran` event type without crashing.
+    ///
+    /// The `kind` defaults to the raw event_type when the payload has no
+    /// `kind` field.  `details` and `summary` are absent because the
+    /// pretask payload uses a flat field set (not the `{kind, details,
+    /// body}` shape the generic renderer expects).
+    #[test]
+    fn render_activity_metadata_handles_additive_pretask_event_safely() {
+        let payload = serde_json::json!({
+            "name": "prepare-test-db",
+            "index": 0,
+            "command": "sh prepare-test-db.sh",
+            "failure_policy": "blocking",
+            "started_at": "2026-07-08T12:00:00.000Z",
+            "duration_ms": 1500,
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "blocked": false,
+            "output_tail": "",
+            "output_truncated": false
+        });
+
+        let (kind, details, summary) = render_activity_metadata("task_run_pretask_ran", &payload);
+
+        // kind falls back to the event_type string.
+        assert_eq!(kind, "task_run_pretask_ran");
+        // details is None (payload has no "details" key).
+        assert!(details.is_none(), "pretask payload has no details key");
+        // summary is None (payload has no "body" key).
+        assert!(summary.is_none(), "pretask payload has no body key");
+    }
+
+    /// A blocked/failed `task_run_pretask_ran` payload (with
+    /// `failure_class: "environmental"`) also renders safely.
+    #[test]
+    fn render_activity_metadata_handles_blocked_pretask_event_safely() {
+        let payload = serde_json::json!({
+            "name": "prepare-test-db",
+            "index": 0,
+            "command": "sh prepare-test-db.sh",
+            "failure_policy": "blocking",
+            "started_at": "2026-07-08T12:00:00.000Z",
+            "duration_ms": 200,
+            "exit_code": 1,
+            "timed_out": false,
+            "cancelled": false,
+            "blocked": true,
+            "failure_class": "environmental",
+            "output_tail": "FATAL: relation does not exist\n[REDACTED]",
+            "output_truncated": false
+        });
+
+        let (kind, details, summary) = render_activity_metadata("task_run_pretask_ran", &payload);
+
+        assert_eq!(kind, "task_run_pretask_ran");
+        assert!(details.is_none());
+        assert!(summary.is_none());
+
+        // The payload is a bounded JSON object (not unbounded growth).
+        let serialized = serde_json::to_string(&payload).expect("must serialize");
+        assert!(
+            serialized.len() < 2048,
+            "payload must be bounded, got {} bytes",
+            serialized.len()
+        );
+    }
+
+    /// `activity_entry_response` produces a well-formed response for an
+    /// additive `task_run_pretask_ran` activity entry.  The response has
+    /// `kind = "task_run_pretask_ran"`, the full payload is included as
+    /// `payload`, and `details`/`summary` are absent (graceful fallback
+    /// for the flat payload shape).
+    ///
+    /// This is the path a generic activity-feed or timeline renderer
+    /// takes when surfacing an unknown event type — it must not crash or
+    /// reject the entry.
+    #[test]
+    fn activity_entry_response_safely_surfaces_additive_pretask_payload() {
+        let entry = ActivityEntry {
+            id: "act-compat-001".to_owned(),
+            task_id: Some("t-compat".to_owned()),
+            actor_id: "system".to_owned(),
+            actor_role: "system".to_owned(),
+            event_type: "task_run_pretask_ran".to_owned(),
+            payload: serde_json::json!({
+                "name": "apply-schema",
+                "index": 0,
+                "command": "psql -f schema.sql",
+                "failure_policy": "blocking",
+                "started_at": "2026-07-08T12:00:00.000Z",
+                "duration_ms": 3000,
+                "exit_code": 0,
+                "timed_out": false,
+                "cancelled": false,
+                "blocked": false,
+                "output_tail": "CREATE TABLE\n",
+                "output_truncated": false
+            })
+            .to_string(),
+            created_at: "2026-07-08T12:00:03.000Z".to_owned(),
+        };
+
+        let response = activity_entry_response(entry);
+
+        assert_eq!(response.id, "act-compat-001");
+        assert_eq!(response.event_type, "task_run_pretask_ran");
+        assert_eq!(response.kind, "task_run_pretask_ran");
+        assert!(response.details.is_none());
+        assert!(response.summary.is_none());
+
+        // The response itself is bounded (no unbounded growth from
+        // rendering the additive event).
+        let serialized = serde_json::to_string(&response).expect("response must serialize");
+        assert!(
+            serialized.len() < 4096,
+            "response must be bounded, got {} bytes",
+            serialized.len()
+        );
+
+        // The full payload is surfaced for the UI/renderer.
+        let payload = &response.payload.0;
+        assert_eq!(payload["name"], "apply-schema");
+        assert_eq!(payload["exit_code"], 0);
+        assert_eq!(payload["blocked"], false);
+    }
+
+    /// A blocked `task_run_pretask_ran` entry with `failure_class` and
+    /// redacted output is surfaced safely through
+    /// `activity_entry_response`.  The redacted `output_tail` containing
+    /// `[REDACTED]` markers is included in the payload without being
+    /// stripped or mangled by the rendering path.
+    #[test]
+    fn activity_entry_response_preserves_redacted_pretask_output() {
+        let entry = ActivityEntry {
+            id: "act-compat-002".to_owned(),
+            task_id: Some("t-compat-2".to_owned()),
+            actor_id: "system".to_owned(),
+            actor_role: "system".to_owned(),
+            event_type: "task_run_pretask_ran".to_owned(),
+            payload: serde_json::json!({
+                "name": "migrate-db",
+                "index": 0,
+                "command": "psql [REDACTED]",
+                "failure_policy": "blocking",
+                "started_at": "2026-07-08T12:00:00.000Z",
+                "duration_ms": 500,
+                "exit_code": 1,
+                "timed_out": false,
+                "cancelled": false,
+                "blocked": true,
+                "failure_class": "environmental",
+                "output_tail": "FATAL: password auth failed for user [REDACTED]\n[REDACTED]",
+                "output_truncated": false
+            })
+            .to_string(),
+            created_at: "2026-07-08T12:00:00.500Z".to_owned(),
+        };
+
+        let response = activity_entry_response(entry);
+        let payload = &response.payload.0;
+
+        // Redaction markers are preserved — the rendering path does not
+        // strip or transform the payload.
+        let output_tail = payload["output_tail"].as_str().unwrap();
+        assert!(
+            output_tail.contains("[REDACTED]"),
+            "redaction markers must be preserved by the rendering path"
+        );
+        assert_eq!(payload["failure_class"], "environmental");
+        assert_eq!(payload["blocked"], true);
+
+        // Bounded output — even with redaction markers, the payload is small.
+        assert!(
+            output_tail.len() < 2048,
+            "redacted output_tail must be bounded"
+        );
+    }
 }

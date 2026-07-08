@@ -201,9 +201,13 @@ systemctl restart k3s     # picks up registries.yaml; running pods are unaffecte
 Open `https://djinn.example.com`:
 
 1. **Sign in with GitHub** — the first user to sign in becomes the admin.
-2. No GitHub App yet? Click **"Create Djinn GitHub App"** on the sign-in
-   screen — the manifest flow creates the App, stores its credentials in the
-   encrypted vault, and takes you to the install page to grant repo access
+2. **GitHub App setup:** With `env.enableSelfSetup: true` (set in
+   `values.local.yaml`), the server prints a one-time manifest setup URL to
+   its boot log on first startup with no credentials present. Open that URL in
+   your browser to create the App, install it on your repos, and complete the
+   OAuth callback — two GitHub clicks, zero manual credential entry. For
+   production deployments (self-setup disabled), provide credentials via
+   `secrets.githubApp.*` before deploying
    ([details](../GITHUB_APP_SETUP.md)).
 3. Connect a model under **Settings → Models** if you didn't bootstrap keys.
 4. Add a project from GitHub, watch its devcontainer image build, and write

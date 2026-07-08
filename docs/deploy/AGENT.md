@@ -39,8 +39,11 @@ Ask (in one message, not a drip-feed):
 3. **LLM keys now or later?** Later is fine — users connect providers through
    the UI after login (including ChatGPT/Codex and Copilot OAuth). If now,
    have them place keys in a file you'll read, don't paste into chat.
-4. **GitHub App now or later?** Recommend later — Djinn's sign-in screen has a
-   one-click "Create Djinn GitHub App" flow that's easier than manual setup.
+4. **GitHub App now or later?** Recommend later — with `env.enableSelfSetup: true`
+   (the local/Tilt default), the server prints a one-time manifest setup URL to
+   its boot log on first startup with no GitHub App credentials. Open that URL
+   to create the App in two browser clicks. For production, provide credentials
+   via `secrets.githubApp.*` in Helm values.
 
 Then confirm your plan in two sentences and start.
 
@@ -173,9 +176,15 @@ managed registry vs in-cluster Zot, and which node pool task-runs land on.
 
 1. `https://<domain>` loads the Djinn UI.
 2. Have the user **sign in with GitHub** — the **first sign-in becomes the
-   admin**. If no GitHub App exists yet, walk them through the sign-in
-   screen's **"Create Djinn GitHub App"** one-click flow, then install the App
-   on their repos.
+   admin**. If no GitHub App exists yet, the setup path depends on the
+   deployment:
+   - **Self-setup enabled** (`env.enableSelfSetup: true`): The server boot log
+     contains a one-time setup URL. Walk the operator through opening that URL,
+     clicking "Create GitHub App" on GitHub, installing the App on their repos,
+     and completing the OAuth callback.
+   - **Production Secret** (self-setup disabled): Credentials must be provided
+     via `secrets.githubApp.*` in Helm values or an `existingSecret` before the
+     App is usable. See [GitHub App setup](../GITHUB_APP_SETUP.md).
 3. Have them connect a model under **Settings → Models** (skip if keys were
    bootstrapped), then add a project from GitHub.
 4. Watch the project's devcontainer image build complete
