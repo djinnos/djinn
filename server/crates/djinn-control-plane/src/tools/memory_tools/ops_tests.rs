@@ -17,7 +17,8 @@ mod tests {
     };
     use crate::tools::memory_tools::ops;
     use crate::tools::memory_tools::{
-        BrokenLinksParams, BuildContextParams, ListParams, OrphansParams, ReadParams, SearchParams,
+        BrokenLinksParams, BuildContextParams, HealthParams, ListParams, OrphansParams, ReadParams,
+        SearchParams,
     };
 
     struct SemanticRuntimeOps {
@@ -923,6 +924,14 @@ mod tests {
         let health = repo.health(&project_id).await.unwrap();
         assert_eq!(health.low_confidence_note_count, 0);
         assert_eq!(health.stale_note_count, 0);
+        // Verify split orphan/isolation metrics from HealthReport
+        assert_eq!(
+            health.orphan_note_count, health.authored_orphan_count,
+            "orphan_note_count must be a backward-compatible alias for authored_orphan_count"
+        );
+        // No machine-minted edges exist in this test, so authored orphans
+        // are fully isolated.
+        assert_eq!(health.machine_connected_orphan_count, 0);
 
         let broken_links = ops::memory_broken_links(
             &setup.server,
@@ -948,5 +957,101 @@ mod tests {
         .await;
         assert!(orphans.error.is_none(), "{:?}", orphans.error);
         assert_eq!(orphans.orphans.len() as i64, health.orphan_note_count);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_health_response_exposes_split_orphan_and_isolation_metrics() {
+        let setup = setup_server().await;
+        let project_id = ProjectRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        )
+        .resolve(&setup.project)
+        .await
+        .unwrap()
+        .expect("project id");
+        let repo = NoteRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        );
+
+        // Create a note with a broken wikilink and an orphan
+        repo.create(
+            &project_id,
+            "Broken Source",
+            "See [[Missing Memory Target]].",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.create(
+            &project_id,
+            "Standalone Orphan",
+            "no inbound links",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        // Exercise the MCP-level memory_health op
+        let response = ops::memory_health(
+            &setup.server,
+            HealthParams {
+                project: Some(setup.project.clone()),
+            },
+        )
+        .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert!(response.total_notes.is_some());
+        assert!(response.broken_link_count.is_some());
+        assert!(response.orphan_note_count.is_some());
+        // New split metrics must be present on success
+        assert!(response.authored_orphan_count.is_some());
+        assert!(response.isolated_count.is_some());
+        assert!(response.isolated_pct.is_some());
+        assert!(response.machine_connected_orphan_count.is_some());
+
+        // orphan_note_count is a backward-compatible alias
+        assert_eq!(response.orphan_note_count, response.authored_orphan_count);
+
+        // No machine-minted edges in this test environment
+        assert_eq!(response.machine_connected_orphan_count.unwrap(), 0);
+
+        // isolated_pct should be a valid percentage
+        let pct = response.isolated_pct.unwrap();
+        assert!(
+            (0.0..=100.0).contains(&pct),
+            "isolated_pct out of range: {pct}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_health_response_returns_none_on_error_paths() {
+        let setup = setup_server().await;
+
+        // Missing project parameter
+        let no_project = ops::memory_health(&setup.server, HealthParams { project: None }).await;
+        assert!(no_project.error.is_some());
+        assert!(no_project.authored_orphan_count.is_none());
+        assert!(no_project.isolated_count.is_none());
+        assert!(no_project.isolated_pct.is_none());
+        assert!(no_project.machine_connected_orphan_count.is_none());
+
+        // Unknown project
+        let bad_project = ops::memory_health(
+            &setup.server,
+            HealthParams {
+                project: Some("nonexistent-project".to_string()),
+            },
+        )
+        .await;
+        assert!(bad_project.error.is_some());
+        assert!(bad_project.authored_orphan_count.is_none());
+        assert!(bad_project.isolated_count.is_none());
+        assert!(bad_project.isolated_pct.is_none());
+        assert!(bad_project.machine_connected_orphan_count.is_none());
     }
 }

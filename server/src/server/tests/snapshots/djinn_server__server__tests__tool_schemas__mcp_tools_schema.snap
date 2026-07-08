@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 642
 expression: signatures
 ---
 [
@@ -7874,6 +7873,14 @@ expression: signatures
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "authored_orphan_count": {
+          "description": "Notes with zero inbound authored wikilink or explicit authored\nassociation edges.  Machine-minted edges do *not* hide authored-link\ndebt.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "broken_link_count": {
           "format": "int64",
           "type": [
@@ -7884,6 +7891,22 @@ expression: signatures
         "error": {
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "isolated_count": {
+          "description": "Notes with no retrieval-effective edges at all — the strictest\nconnectivity metric.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "isolated_pct": {
+          "description": "`isolated_count` as a percentage of non-singleton notes.",
+          "format": "double",
+          "type": [
+            "number",
             "null"
           ]
         },
@@ -7898,6 +7921,14 @@ expression: signatures
           ]
         },
         "low_confidence_note_count": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "machine_connected_orphan_count": {
+          "description": "Authored-orphan notes that are *not* graph-isolated because at\nleast one non-authored retrieval edge connects them.",
           "format": "int64",
           "type": [
             "integer",

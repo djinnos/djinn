@@ -479,6 +479,18 @@ pub struct MemoryHealthResponse {
     pub total_notes: Option<i64>,
     pub broken_link_count: Option<i64>,
     pub orphan_note_count: Option<i64>,
+    /// Notes with zero inbound authored wikilink or explicit authored
+    /// association edges.  Machine-minted edges do *not* hide authored-link
+    /// debt.
+    pub authored_orphan_count: Option<i64>,
+    /// Notes with no retrieval-effective edges at all — the strictest
+    /// connectivity metric.
+    pub isolated_count: Option<i64>,
+    /// `isolated_count` as a percentage of non-singleton notes.
+    pub isolated_pct: Option<f64>,
+    /// Authored-orphan notes that are *not* graph-isolated because at
+    /// least one non-authored retrieval edge connects them.
+    pub machine_connected_orphan_count: Option<i64>,
     pub low_confidence_note_count: Option<i64>,
     pub stale_note_count: Option<i64>,
     pub stale_notes_by_folder: Option<Vec<djinn_memory::StaleFolder>>,
