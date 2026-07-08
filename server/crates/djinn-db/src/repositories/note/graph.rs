@@ -5,6 +5,7 @@ use djinn_memory::{
 };
 use sqlx::Row;
 
+use super::embedding_associations::EMBEDDING_ASSOCIATION_THRESHOLD;
 use super::*;
 use crate::repositories::note::{
     NoteConsolidationRepository, STALE_CITATION, assess_note_quality, looks_task_local,
@@ -236,13 +237,19 @@ impl NoteRepository {
             .collect())
     }
 
-    /// Notes with zero inbound wikilinks (potential dead-ends).
-    /// Singleton types and generated catalog notes are excluded.
+    /// Notes with zero inbound authored edges (wikilinks or explicit
+    /// `authored`/`manual` association edges).  Singleton types and generated
+    /// catalog notes are excluded.  Machine-minted edges (`embedding_related`,
+    /// `co_access`, etc.) do **not** hide authored-link debt.
+    ///
     /// Optionally filtered by `folder`.
     pub async fn orphans(&self, project_id: &str, folder: Option<&str>) -> Result<Vec<OrphanNote>> {
         self.db.ensure_initialized().await?;
 
-        let rows = sqlx::query!(
+        // Runtime (non-macro) query: the added `note_associations` anti-join
+        // for authored edges widens the statement beyond the offline `.sqlx`
+        // cache.
+        let rows = sqlx::query(
             r#"SELECT n.id, n.permalink, n.title, n.note_type, n.folder
              FROM notes n
              WHERE n.project_id = $1
@@ -251,21 +258,26 @@ impl NoteRepository {
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
                )
+               AND NOT EXISTS (
+                   SELECT 1 FROM note_associations na
+                   WHERE (na.note_a_id = n.id OR na.note_b_id = n.id)
+                     AND na.kind = 'authored'
+               )
              ORDER BY n.folder, n.title"#,
-            project_id,
-            folder,
         )
+        .bind(project_id)
+        .bind(folder)
         .fetch_all(self.db.pool())
         .await?;
 
         Ok(rows
             .into_iter()
             .map(|row| OrphanNote {
-                id: row.id,
-                permalink: row.permalink,
-                title: row.title,
-                note_type: row.note_type,
-                folder: row.folder,
+                id: row.get("id"),
+                permalink: row.get("permalink"),
+                title: row.get("title"),
+                note_type: row.get("note_type"),
+                folder: row.get("folder"),
             })
             .collect())
     }
@@ -292,17 +304,90 @@ impl NoteRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let orphan_note_count: i64 = sqlx::query_scalar!(
-            r#"SELECT COUNT(*) AS "count!: i64" FROM notes n
+        // ── Authored-orphan count ──────────────────────────────────────────
+        // A note is an authored orphan when it has no inbound wikilinks AND
+        // no inbound explicit `authored` association edge.  Machine-minted
+        // edges (embedding_related, co_access, etc.) do not hide debt.
+        let authored_orphan_count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM notes n
              WHERE n.project_id = $1
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM note_associations na
+                   WHERE (na.note_a_id = n.id OR na.note_b_id = n.id)
+                     AND na.kind = 'authored'
                )"#,
-            project_id
         )
+        .bind(project_id)
         .fetch_one(self.db.pool())
         .await?;
+
+        // `orphan_note_count` is the backward-compatible alias.
+        let orphan_note_count = authored_orphan_count;
+
+        // ── Graph-isolation count ─────────────────────────────────────────
+        // A note is graph-isolated when it has *no* retrieval-effective edges
+        // in any direction: no resolved wikilinks, no authored/manual
+        // associations, no co-access, and no threshold-qualified
+        // `embedding_related` edges.
+        let threshold = EMBEDDING_ASSOCIATION_THRESHOLD;
+        let isolated_count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM notes n
+             WHERE n.project_id = $1
+               AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
+               -- No inbound resolved wikilink
+               AND NOT EXISTS (
+                   SELECT 1 FROM note_links l WHERE l.target_id = n.id
+               )
+               -- No outbound resolved wikilink
+               AND NOT EXISTS (
+                   SELECT 1 FROM note_links l
+                   WHERE l.source_id = n.id AND l.target_id IS NOT NULL
+               )
+               -- No non-embedding association of any kind (includes authored,
+               -- co_access, builds_on, contradicts, supersedes, etc.)
+               AND NOT EXISTS (
+                   SELECT 1 FROM note_associations na
+                   WHERE (na.note_a_id = n.id OR na.note_b_id = n.id)
+                     AND na.kind <> 'embedding_related'
+               )
+               -- No threshold-qualified embedding_related edge
+               AND NOT EXISTS (
+                   SELECT 1 FROM note_associations na
+                   WHERE (na.note_a_id = n.id OR na.note_b_id = n.id)
+                     AND na.kind = 'embedding_related'
+                     AND (na.confidence IS NULL OR na.confidence >= $2)
+               )"#,
+        )
+        .bind(project_id)
+        .bind(threshold)
+        .fetch_one(self.db.pool())
+        .await?;
+
+        // Non-singleton note count for percentage computation.
+        let non_singleton_count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM notes n
+             WHERE n.project_id = $1
+               AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+
+        let isolated_pct = if non_singleton_count > 0 {
+            (isolated_count as f64) / (non_singleton_count as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Machine-connected orphans: authored orphans that are NOT isolated.
+        // Since every isolated note is necessarily an authored orphan (no
+        // edges at all ⇒ no inbound authored edges), this is simply the
+        // difference.
+        let machine_connected_orphan_count = authored_orphan_count - isolated_count;
 
         let stale_rows = sqlx::query!(
             r#"SELECT folder, COUNT(*) AS "count!: i64" FROM notes
@@ -400,6 +485,10 @@ impl NoteRepository {
             total_notes,
             broken_link_count,
             orphan_note_count,
+            authored_orphan_count,
+            isolated_count,
+            isolated_pct,
+            machine_connected_orphan_count,
             low_confidence_note_count,
             stale_note_count,
             stale_notes_by_folder,
