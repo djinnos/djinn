@@ -53,8 +53,10 @@
 
 use djinn_core::models::CiStatus;
 use djinn_core::models::task_attempt::{GuardDecision, GuardReason, TaskAttemptOutcome};
+use djinn_core::models::{TaskStatus, TransitionAction};
 use djinn_db::{
     GuardAdoptedPrTaskAttemptParams, GuardDeferTaskAttemptParams, TaskAttemptRepository,
+    TaskRepository,
 };
 
 use super::attempt_lifecycle::make_dispatch_key;
@@ -404,6 +406,104 @@ pub async fn record_adopted_pr_attempt(
                 "respawn_guard: failed to record adopted-PR audit row (best-effort)"
             );
             None
+        }
+    }
+}
+
+// ─── Adoption → PR-poller handoff ────────────────────────────────────────────
+
+/// Actor id recorded on the adoption-handoff transition. The handoff is a
+/// system bookkeeping move (no user), mirroring the PR poller's own
+/// `("system", "pr_poller")` board transitions.
+const HANDOFF_ACTOR_ID: &str = "system";
+/// Actor role recorded on the adoption-handoff transition.
+const HANDOFF_ACTOR_ROLE: &str = "respawn_guard";
+
+/// Hand an adopted open PR off to the PR poller by transitioning the task from
+/// the dispatchable `open` column into the poller-owned `pr_review` column.
+///
+/// This closes the wedge in incident gton: a worker task reopened to `open`
+/// while retaining its `pr_url` (e.g. by the startup reaper after a deploy) was
+/// adopted (skip-dispatch) on every ready pass but polled by NOBODY — the PR
+/// poller only polls `pr_draft`/`pr_review`. Moving the task to `pr_review`
+/// makes the poller advance it to merge, and the task leaves the `open` ready
+/// set so the adoption never re-fires (the 470x/night adoption-log spam stops).
+///
+/// Handoff targets `pr_review` unconditionally rather than calling GitHub to
+/// discover the PR's draft flag: the `pr_review` poller advances a ready PR to
+/// merge, while the `pr_draft` poller's undraft (`mark_pr_ready_for_review`)
+/// errors on an already-ready PR — which is the exact gton shape (open, green,
+/// already undrafted) — so `pr_review` is both simplest and correct for the
+/// incident. A genuinely-still-draft adopted PR degrades to a normal merge-gate
+/// hold in the review poller rather than the adoption-spam wedge.
+///
+/// Idempotent: when the task is already in a poller-owned status
+/// (`pr_draft`/`pr_review`) this is a no-op — the handoff already happened.
+/// Only `open` tasks are handed off; any other status is unexpected for an
+/// adopted worker task and is left untouched with a warning rather than forced
+/// into a status the state machine would reject.
+///
+/// Best-effort: transition errors are logged and never propagated. Returns
+/// `true` when the task was moved to `pr_review`, `false` on no-op/error.
+pub async fn handoff_adopted_pr_to_poller(
+    task_repo: &TaskRepository,
+    task_id: &str,
+    current_status: &str,
+    pr_url: &str,
+) -> bool {
+    // Idempotent no-op: already poller-owned.
+    if current_status == TaskStatus::PrDraft.as_str()
+        || current_status == TaskStatus::PrReview.as_str()
+    {
+        tracing::debug!(
+            task_id = %task_id,
+            current_status = %current_status,
+            "respawn_guard: adopted task already poller-owned — handoff is a no-op"
+        );
+        return false;
+    }
+    // The handoff transition is only legal from `open` (the adoption path only
+    // fires for dispatchable `open` worker tasks). Anything else is unexpected;
+    // don't force a status the state machine would reject.
+    if current_status != TaskStatus::Open.as_str() {
+        tracing::warn!(
+            task_id = %task_id,
+            current_status = %current_status,
+            pr_url = %pr_url,
+            "respawn_guard: adopted task in unexpected status — skipping poller handoff"
+        );
+        return false;
+    }
+    let reason =
+        format!("respawn_guard: adopted open PR {pr_url} — handing off to PR poller (pr_review)");
+    match task_repo
+        .transition(
+            task_id,
+            TransitionAction::AdoptionHandoff,
+            HANDOFF_ACTOR_ID,
+            HANDOFF_ACTOR_ROLE,
+            Some(&reason),
+            None,
+        )
+        .await
+    {
+        Ok(task) => {
+            tracing::info!(
+                task_id = %task_id,
+                pr_url = %pr_url,
+                to_status = %task.status,
+                "respawn_guard: adopted open PR handed off to PR poller (open → pr_review)"
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                pr_url = %pr_url,
+                error = %e,
+                "respawn_guard: failed to hand adopted PR off to PR poller (best-effort)"
+            );
+            false
         }
     }
 }
