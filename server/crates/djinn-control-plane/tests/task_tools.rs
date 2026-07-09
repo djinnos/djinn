@@ -401,6 +401,79 @@ async fn task_list_filters_and_pagination() {
     });
 }
 
+/// The `status=merged` pseudo-filter backs the Kanban Merged column. It expands
+/// to `status='closed' AND (merge_commit_sha IS NOT NULL OR (pr_url IS NOT NULL
+/// AND close_reason='completed'))`, matching the UI's `taskToColumnKey`. This
+/// verifies the merge-commit row and the legacy pr_url+completed row are
+/// included, while a force-closed (unmerged) row is excluded.
+#[tokio::test]
+async fn task_list_status_merged() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let project = common::create_test_project(db).await;
+    let epic = common::create_test_epic(db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+    let mk = async |title: &str| {
+        repo.create_in_project(
+            &project.id,
+            Some(&epic.id),
+            title,
+            "desc",
+            "design",
+            "task",
+            1,
+            "owner",
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+    };
+
+    // Included: closed with a landed merge-commit SHA.
+    let merged_sha = mk("merged via sha").await;
+    repo.set_status_with_reason(&merged_sha.id, "closed", Some("completed"))
+        .await
+        .unwrap();
+    repo.set_merge_commit_sha(&merged_sha.id, "abc123def")
+        .await
+        .unwrap();
+
+    // Included: legacy row closed as completed with a PR URL but no SHA.
+    let merged_legacy = mk("merged legacy pr").await;
+    repo.set_status_with_reason(&merged_legacy.id, "closed", Some("completed"))
+        .await
+        .unwrap();
+    repo.set_pr_url(&merged_legacy.id, "https://github.com/o/r/pull/7")
+        .await
+        .unwrap();
+
+    // Excluded: force-closed without merging (no SHA, no PR URL).
+    let force_closed = mk("force closed unmerged").await;
+    repo.set_status_with_reason(&force_closed.id, "closed", Some("force_closed"))
+        .await
+        .unwrap();
+
+    let merged = harness
+        .call_tool(
+            "task_list",
+            json!({"project": project.slug(), "status": "merged"}),
+        )
+        .await
+        .expect("task_list status=merged should dispatch");
+    assert_eq!(merged["total_count"], 2);
+    let ids: std::collections::BTreeSet<&str> = merged["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(merged_sha.id.as_str()));
+    assert!(ids.contains(merged_legacy.id.as_str()));
+    assert!(!ids.contains(force_closed.id.as_str()));
+}
+
 #[tokio::test]
 async fn task_update_partial_and_error_shape() {
     let harness = McpTestHarness::new().await;

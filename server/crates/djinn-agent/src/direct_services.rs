@@ -85,15 +85,25 @@ impl DirectServices {
     }
 
     /// Execute the arbiter park transaction: persist the decision and dossier
-    /// on the current unconsumed arbitration row, mark it consumed, create a
-    /// `HumanReview` remediation hold with the dossier as the hold description,
-    /// and emit `arbiter_decision` / `arbiter_parked` activity events.
+    /// on the current unconsumed arbitration row, mark it consumed, create an
+    /// autonomous **planner escalation** review task carrying the dossier
+    /// (blocking the source), and emit `arbiter_decision` / `arbiter_parked`
+    /// activity events.
     ///
-    /// Called BEFORE the `ArbiterPark` state transition so the HumanReview
+    /// Djinn has NO human-review holds: `park` no longer strands the source on
+    /// a human. Instead it creates a planner-dispatchable escalation task — the
+    /// same autonomous planner-remediation shape the coordinator's intervention
+    /// path uses — that a Planner SESSION resolves terminally (decompose +
+    /// supersede, close as won't-fix, or re-scope + reopen the source). Closing
+    /// the escalation releases the blocked source exactly like a human hold
+    /// close did (blocker resolution + `human_review_resolved_at` stamp +
+    /// tripwire release when applicable).
+    ///
+    /// Called BEFORE the `ArbiterPark` state transition so the escalation
     /// blocker exists before the source task lands at `open` (the ordering
     /// contract from 7f8u). On any arbitration-row failure, fails closed by
-    /// creating the HumanReview hold with a fallback dossier rather than
-    /// leaving the task stranded.
+    /// creating the escalation with a fallback dossier rather than leaving the
+    /// task stranded.
     async fn execute_arbiter_park_transaction(
         &self,
         task_id: &str,
@@ -211,10 +221,12 @@ impl DirectServices {
             let _ = arb_repo.mark_consumed(task_id, hold_cycle).await;
         }
 
-        // Create a HumanReview remediation task that blocks the source.
-        // Reuses the same semantics as the coordinator's
-        // `create_remediation_task(RemediationKind::HumanReview)` from 7f8u.
-        self.create_arbiter_human_review_hold(
+        // Create an autonomous planner escalation task that blocks the source.
+        // Reuses the same planner-dispatchable shape as the coordinator's
+        // `create_remediation_task(RemediationKind::Planner)` intervention path —
+        // NO human hold. The coordinator's normal dispatch pass routes the open
+        // `review` escalation task to the Planner role.
+        self.create_arbiter_planner_escalation(
             task_id,
             &task.project_id,
             &dossier,
@@ -242,6 +254,10 @@ impl DirectServices {
             "task_id": task.short_id,
             "hold_cycle": hold_cycle,
             "decision": "park",
+            // Audit: park now escalates to an autonomous Planner session rather
+            // than a human-review hold. No human is required to release the
+            // source.
+            "autonomous_escalation": true,
             "dossier_summary": dossier_summary,
             "mirror_head_sha": mirror_head,
             "github_head_sha": github_head,
@@ -271,6 +287,7 @@ impl DirectServices {
             "task_id": task.short_id,
             "hold_cycle": hold_cycle,
             "decision": "park",
+            "autonomous_escalation": true,
             "dossier_summary": dossier_summary,
         });
         if let Err(e) = task_repo
@@ -316,10 +333,18 @@ impl DirectServices {
         Ok(())
     }
 
-    /// Create a HumanReview remediation task that blocks the source task.
-    /// The dossier content becomes the hold description so humans see the
-    /// structured arbiter analysis rather than a static failure template.
-    async fn create_arbiter_human_review_hold(
+    /// Create an autonomous **planner escalation** review task that blocks the
+    /// source task. The full arbiter dossier becomes the escalation task's
+    /// description so the Planner session has the structured failure analysis,
+    /// attempted decisions, and recommended action as context.
+    ///
+    /// The task is a NORMAL open `review` task carrying the
+    /// `planner-park-escalation` label (NOT `human-review-hold`): the
+    /// coordinator's dispatch pass routes it to the Planner role, and the
+    /// Planner owns terminal resolution. Closing it releases the blocked source
+    /// (blocker resolution + `human_review_resolved_at` stamp + tripwire
+    /// release) via the broadened close path (`releases_source_on_close`).
+    async fn create_arbiter_planner_escalation(
         &self,
         source_task_id: &str,
         project_id: &str,
@@ -332,20 +357,20 @@ impl DirectServices {
         let event_bus = self.callbacks.agent_context.event_bus.clone();
         let task_repo = TaskRepository::new(db.clone(), event_bus);
 
-        // Load the source task for naming the review task.
+        // Load the source task for naming the escalation task.
         let source_task = task_repo.get(source_task_id).await.ok().flatten();
         let source_creator = source_task
             .as_ref()
             .and_then(|t| t.created_by_user_id.clone());
 
         // Idempotency: if the source already has an unresolved blocker
-        // (from a prior park), skip creating a duplicate hold.
+        // (from a prior park), skip creating a duplicate escalation.
         if let Some(ref src) = source_task {
             match task_repo.list_blockers(&src.id).await {
                 Ok(blockers) if blockers.iter().any(|b| b.status != "closed") => {
                     tracing::info!(
                         source_task_id = %src.short_id,
-                        "arbiter_park: human-review hold skipped — source already blocked"
+                        "arbiter_park: planner escalation skipped — source already blocked"
                     );
                     return Ok(());
                 }
@@ -353,9 +378,11 @@ impl DirectServices {
             }
         }
 
-        // Build the HumanReview hold description from the arbiter dossier.
-        let hold_reason = format!(
-            "Arbiter park decision — human review required.\n\n{}",
+        // Build the escalation body from the arbiter dossier. Keep the
+        // "Arbiter park decision" lead-in so the dossier context is unmistakable
+        // in the task feed.
+        let dossier_text = format!(
+            "Arbiter park decision — autonomous planner remediation.\n\n{}",
             serde_json::to_string_pretty(dossier).unwrap_or_else(|_| dossier.to_string())
         );
 
@@ -365,7 +392,7 @@ impl DirectServices {
                 format!("Planner remediation [{}]: {}", t.short_id, name)
             }
             None => format!(
-                "Arbiter park hold: {}",
+                "Arbiter park escalation: {}",
                 &dossier_summary[..dossier_summary.len().min(60)]
             ),
         };
@@ -374,15 +401,20 @@ impl DirectServices {
             .map(|t| format!("{} ({})", t.title, t.short_id))
             .unwrap_or_else(|| source_task_id.to_string());
         let description = format!(
-            "Escalated from task {source_label}. Arbiter decided to park — \
-             this requires HUMAN review.\n\nDo NOT auto-resolve: a human must \
-             close THIS task to release the blocked source task.\n\nReason: {}",
-            hold_reason
+            "Escalated from task {source_label}. The arbiter decided to PARK and \
+             handed you (the Planner) terminal ownership of this task.\n\nYou OWN \
+             the resolution: decompose the source into replacement subtasks and \
+             supersede it, close it as won't-fix with a reason, or re-scope and \
+             reopen it. Do NOT create another escalation and do NOT wait for a \
+             human — closing THIS task releases the blocked source.\n\nReason: {}",
+            dossier_text
         );
-        let instructions = "Arbiter parked this task. Requires human review — do not auto-resolve; \
-             a human must close this task to release the blocked source task.";
+        let instructions = "The arbiter parked this task and handed you terminal ownership. \
+             Resolve it autonomously (decompose + supersede, close as won't-fix, or re-scope + \
+             reopen the source); closing this task releases the blocked source. Do NOT escalate \
+             again and do NOT wait for a human.";
 
-        // Create the review task.
+        // Create the escalation review task.
         let review_task = match djinn_core::auth_context::SESSION_USER_ID
             .scope(
                 source_creator,
@@ -403,11 +435,13 @@ impl DirectServices {
         {
             Ok(t) => t,
             Err(e) => {
-                return Err(format!("arbiter_park: failed to create review task: {e}"));
+                return Err(format!(
+                    "arbiter_park: failed to create planner escalation task: {e}"
+                ));
             }
         };
 
-        // Block the source on the review task.
+        // Block the source on the escalation task.
         if let Some(ref src) = source_task
             && let Err(e) = task_repo.add_blocker(&src.id, &review_task.id).await
         {
@@ -415,19 +449,22 @@ impl DirectServices {
                 error = %e,
                 source_task_id = %src.short_id,
                 review_task_id = %review_task.short_id,
-                "arbiter_park: failed to block source on review task"
+                "arbiter_park: failed to block source on planner escalation task"
             );
         }
 
-        // Label the hold for UI visibility.
+        // Label the escalation so the close path runs the source-release
+        // semantics (`releases_source_on_close`). This is deliberately NOT
+        // `human-review-hold`: the task must stay planner-dispatchable and
+        // planner-closable.
         if let Err(e) = task_repo
-            .update_labels(&review_task.id, r#"["human-review-hold"]"#)
+            .update_labels(&review_task.id, r#"["planner-park-escalation"]"#)
             .await
         {
             tracing::warn!(
                 error = %e,
                 review_task_id = %review_task.short_id,
-                "arbiter_park: failed to label hold task"
+                "arbiter_park: failed to label planner escalation task"
             );
         }
 
@@ -1018,8 +1055,8 @@ impl SupervisorServices for DirectServices {
         let mut effective_reason = reason.clone();
 
         // Arbiter park: execute the full park transaction before the state
-        // transition so the HumanReview blocker exists before the task lands
-        // at `open` (the ordering contract from 7f8u).
+        // transition so the planner-escalation blocker exists before the task
+        // lands at `open` (the ordering contract from 7f8u).
         if matches!(parsed, TransitionAction::ArbiterPark) {
             self.execute_arbiter_park_transaction(&task_id, reason.as_deref())
                 .await?;
@@ -1599,6 +1636,7 @@ impl SupervisorServices for DirectServices {
                 "event": "arbiter_decision",
                 "task_id": task.short_id,
                 "decision": "park",
+                "autonomous_escalation": true,
                 "reason": "decision_failure_cap",
                 "hold_cycle": record.hold_cycle,
                 "decision_failure_count": new_count,
@@ -1624,15 +1662,17 @@ impl SupervisorServices for DirectServices {
                 );
             }
 
-            // Create the HumanReview remediation hold (reuses the existing
-            // arbiter-park hold creation logic so the task is blocked before
-            // it lands at `open`).
+            // Create the autonomous planner escalation (reuses the arbiter-park
+            // escalation creation logic so the source is blocked before it
+            // lands at `open`). The arbiter capping out on decision failures is
+            // NOT a reason to strand the task on a human — the Planner takes
+            // terminal ownership exactly as it does for an explicit park.
             let dossier_summary = dossier
                 .get("summary")
                 .and_then(|v| v.as_str())
                 .unwrap_or("arbiter decision-failure cap reached");
             if let Err(e) = self
-                .create_arbiter_human_review_hold(
+                .create_arbiter_planner_escalation(
                     &task_id,
                     &task.project_id,
                     &dossier,
@@ -1643,7 +1683,7 @@ impl SupervisorServices for DirectServices {
                 tracing::warn!(
                     task_id = %task.short_id,
                     error = %e,
-                    "record_arbiter_session_termination: failed to create HumanReview hold"
+                    "record_arbiter_session_termination: failed to create planner escalation"
                 );
             }
 

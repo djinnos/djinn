@@ -499,8 +499,13 @@ export async function fetchActiveSnapshot(
 }
 
 /**
- * Fetch a single page of closed tasks for a project (sorted newest-closed
+ * Fetch a single page of MERGED tasks for a project (sorted newest-closed
  * first) and record the pagination cursor in {@link mergedColumnStore}.
+ *
+ * Uses the backend `status=merged` pseudo-filter (closed AND actually merged),
+ * so every returned row lands in the Merged column and `total_count` is the
+ * exact merged total. Closed-but-not-merged tasks (force-closed / review /
+ * spike) are never fetched — `taskToColumnKey` hid them anyway.
  */
 async function fetchClosedPageForProject(
   slug: string,
@@ -509,7 +514,7 @@ async function fetchClosedPageForProject(
   const projectId = projectIdForSlug(slug);
   const page = await callMcpTool("task_list", {
     project: slug,
-    status: "closed",
+    status: "merged",
     sort: "closed",
     limit: KANBAN_PAGE_SIZE,
     offset,
@@ -523,16 +528,16 @@ async function fetchClosedPageForProject(
     projectId,
     loaded: offset + tasks.length,
     hasMore: page.has_more,
-    totalClosed: page.total_count,
+    totalMerged: page.total_count,
   });
   return tasks;
 }
 
 /**
- * Phase 2 of Kanban hydration: fetch the FIRST page of closed/merged tasks for
- * every project. Resets the merged-column pagination cursors first, so a
- * reconnect re-hydration cleanly drops any extra pages that were previously
- * loaded (the task store is keyed by id, so re-adding page 1 is idempotent).
+ * Phase 2 of Kanban hydration: fetch the FIRST page of merged tasks for every
+ * project. Resets the merged-column pagination cursors first, so a reconnect
+ * re-hydration cleanly drops any extra pages that were previously loaded (the
+ * task store is keyed by id, so re-adding page 1 is idempotent).
  */
 export async function fetchClosedFirstPage(slugs: string[]): Promise<Task[]> {
   mergedColumnStore.getState().reset();
