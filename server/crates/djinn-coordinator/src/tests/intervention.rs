@@ -5677,21 +5677,12 @@ async fn second_strike_arbiter_dispatch_atomic_marker_status_and_outbox() {
     );
 }
 
-/// AC2: Read/write failure parking — when `resolve_current_hold_cycle` returns
-/// `Err`, the park rung fails closed with an `arbiter_failure_dossier`.  The
-/// `Err` path is only reachable via actual DB errors (connection pool failures,
-/// schema corruption) which cannot be simulated without raw sqlx access.
-///
-/// This test instead proves the related fail-closed path: when the arbitration
-/// state is corrupted (via `force_state_for_testing` with an invalid state
-/// string), `resolve_current_hold_cycle` sees the invalid state through the
-/// catch-all `_` arm and advances to the next hold cycle.  The park rung then
-/// creates a fresh arbitration at the advanced cycle — proving the system
-/// recovers from state corruption rather than looping or crashing.
-///
-/// The `arbiter_failure_dossier` structure used by the `Err(e)` path is
-/// asserted indirectly through the decision-failure-cap and deadline-auto-park
-/// tests, which exercise sibling fail-closed dossier variants.
+/// AC2a: State-corruption recovery — when the arbitration state is corrupted
+/// (via `force_state_for_testing` with an invalid state string),
+/// `resolve_current_hold_cycle` sees the invalid state through the catch-all
+/// `_` arm and advances to the next hold cycle.  The park rung then creates a
+/// fresh arbitration at the advanced cycle — proving the system recovers from
+/// state corruption rather than looping or crashing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn corrupted_arbitration_state_advances_to_next_cycle() {
     let db = test_helpers::create_test_db();
@@ -5785,6 +5776,181 @@ async fn corrupted_arbitration_state_advances_to_next_cycle() {
     assert!(
         dossier_text.contains("post_intervention_history"),
         "fresh dossier must contain post_intervention_history; got: {dossier_text}"
+    );
+}
+
+/// AC2b: Read/write failure parking — when `resolve_current_hold_cycle` returns
+/// a real `Err` (DB-level failure), the park rung fails closed to human review
+/// with an `arbiter_failure_dossier` carrying the typed qk8b evidence fields.
+///
+/// The test drops the `task_arbitrations` table after setup so the repository
+/// query fails with "no such table", exercising the `Err(e)` branch at
+/// `dispatch/retry.rs` lines 1448–1471.  The resulting human-review hold's
+/// description is asserted to contain every key from `arbiter_failure_dossier`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arbiter_failure_dossier_on_db_error_parks_with_evidence_fields() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // Set up a task at the park-rung threshold.
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+        repo.set_status(&task.id, "closed").await.unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+    }
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
+    // Drop the arbitration table so resolve_current_hold_cycle fails with
+    // a real DB error ("no such table").
+    sqlx::query("DROP TABLE IF EXISTS task_arbitrations")
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    // Act: route the park rung — must fail closed to human review.
+    let handled = actor
+        .route_planner_intervention(&task, "worker", "db error test", None, 5)
+        .await;
+    assert!(handled, "db error must park (fail-closed)");
+
+    // Task is parked to open (human review hold).
+    let after = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        after.status, "open",
+        "db error must park the task to open (human review)"
+    );
+
+    // A human-review blocker was created.
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert!(
+        !blockers.is_empty(),
+        "db error must create a human-review blocker"
+    );
+    let hold_task = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
+    assert_eq!(hold_task.issue_type, "review");
+    assert!(
+        hold_task.labels.contains("human-review-hold"),
+        "hold must carry human-review-hold label"
+    );
+
+    // The hold description contains the arbiter_failure_dossier with all
+    // typed qk8b evidence fields.
+    let desc = &hold_task.description;
+    assert!(
+        desc.contains("arbiter_failure_dossier"),
+        "hold must contain arbiter_failure_dossier kind; got: {desc}"
+    );
+    assert!(
+        desc.contains("\"kind\": \"arbiter_failure_dossier\""),
+        "hold must contain the dossier kind field; got: {desc}"
+    );
+    assert!(
+        desc.contains("\"mirror_head_sha\""),
+        "hold dossier must contain mirror_head_sha evidence field; got: {desc}"
+    );
+    assert!(
+        desc.contains("\"github_head_sha\""),
+        "hold dossier must contain github_head_sha evidence field; got: {desc}"
+    );
+    assert!(
+        desc.contains("\"pr_url\""),
+        "hold dossier must contain pr_url evidence field; got: {desc}"
+    );
+    assert!(
+        desc.contains("\"failing_ci_job_ids\""),
+        "hold dossier must contain failing_ci_job_ids evidence field; got: {desc}"
+    );
+    assert!(
+        desc.contains("post_intervention_history"),
+        "hold dossier must contain post_intervention_history; got: {desc}"
+    );
+    assert!(
+        desc.contains(&task.short_id),
+        "hold must reference the source task; got: {desc}"
+    );
+}
+
+/// AC2c: Read/write failure parking via `try_create` error — when
+/// `try_create` itself fails with a DB error after `resolve_current_hold_cycle`
+/// succeeds, the park rung still fails closed with an `arbiter_failure_dossier`.
+///
+/// This test seeds a valid unconsumed arbitration first, then drops the
+/// `task_arbitrations` table so the `try_create` INSERT fails while the
+/// (already-loaded) `resolve_current_hold_cycle` result was valid.  The test
+/// verifies the fail-closed park with evidence fields.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn try_create_db_error_parks_with_failure_dossier() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // Set up a task at the park-rung threshold.
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+        repo.set_status(&task.id, "closed").await.unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+    }
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
+    // Seed an existing consumed arbitration so resolve_current_hold_cycle
+    // returns (1, None) — i.e. a new cycle can be created.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &serde_json::json!([]),
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &serde_json::json!([]),
+        })
+        .await
+        .unwrap();
+    arb_repo.mark_consumed(&task.id, 0).await.unwrap();
+
+    // Now drop the table so try_create at cycle 1 fails with a DB error
+    // while resolve_current_hold_cycle already returned (1, None) from the
+    // consumed cycle 0 row.
+    sqlx::query("DROP TABLE IF EXISTS task_arbitrations")
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    // Act: route the park rung — try_create will fail, must park.
+    let handled = actor
+        .route_planner_intervention(&task, "worker", "try_create error test", None, 5)
+        .await;
+    assert!(handled, "try_create error must park (fail-closed)");
+
+    // Task is parked to open with failure dossier.
+    let after = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(after.status, "open");
+
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert!(!blockers.is_empty());
+    let hold_task = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
+    let desc = &hold_task.description;
+    assert!(
+        desc.contains("arbiter_failure_dossier"),
+        "hold must contain arbiter_failure_dossier; got: {desc}"
+    );
+    assert!(
+        desc.contains("\"failing_ci_job_ids\""),
+        "hold dossier must contain failing_ci_job_ids evidence field; got: {desc}"
     );
 }
 
@@ -5961,6 +6127,25 @@ async fn decision_failure_cap_parks_and_infra_only_increments_infra_count() {
         "hold must reference the source task; got: {}",
         hold_task.description
     );
+    // Assert qk8b typed evidence fields are present in the dossier embedded
+    // in the hold description.
+    let desc = &hold_task.description;
+    assert!(
+        desc.contains("\"mirror_head_sha\""),
+        "decision-failure cap dossier must contain mirror_head_sha; got: {desc}"
+    );
+    assert!(
+        desc.contains("\"github_head_sha\""),
+        "decision-failure cap dossier must contain github_head_sha; got: {desc}"
+    );
+    assert!(
+        desc.contains("\"pr_url\""),
+        "decision-failure cap dossier must contain pr_url; got: {desc}"
+    );
+    assert!(
+        desc.contains("\"failing_ci_job_ids\""),
+        "decision-failure cap dossier must contain failing_ci_job_ids; got: {desc}"
+    );
 }
 
 /// AC2: Wall-clock deadline auto-park via `enforce_expired_arbiter_deadline_before_dispatch`.
@@ -6083,10 +6268,11 @@ async fn enforce_expired_deadline_before_dispatch_auto_parks_with_dossier() {
     );
 }
 
-/// AC3: Hold release/reset regression — prove that resolving/releasing a
-/// HumanReview hold archives or resets the current arbitration row/hold-cycle
-/// state so a later strike cycle receives exactly one fresh arbitration
-/// rather than reusing a stale dossier.
+/// AC3: Hold release/reset regression — prove that closing a HumanReview
+/// blocker task (the actual hold-release path) archives the current arbitration
+/// row/hold-cycle state via `mark_human_review_resolved` so a later strike
+/// cycle receives exactly one fresh arbitration rather than reusing a stale
+/// dossier.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hold_release_yields_fresh_arbitration_on_next_strike() {
     let db = test_helpers::create_test_db();
@@ -6095,7 +6281,7 @@ async fn hold_release_yields_fresh_arbitration_on_next_strike() {
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let arb_repo = TaskArbitrationRepository::new(db.clone());
 
-    // Phase 1: Set up a task at the park-rung threshold and dispatch the arbiter.
+    // ── Phase 1: Set up a task and dispatch the arbiter (cycle 0) ──────
     let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
     repo.reset_intervention_counters(&task.id).await.unwrap();
     for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
@@ -6118,8 +6304,8 @@ async fn hold_release_yields_fresh_arbitration_on_next_strike() {
     assert_eq!(cycle0, 0);
     assert!(unconsumed0.is_some(), "cycle 0 must be unconsumed");
 
-    // Phase 2: Simulate the arbiter park decision — update dossier, mark consumed,
-    // create HumanReview hold, and park the source.
+    // ── Phase 2: Arbiter completes — mark consumed + create hold ──────
+    // Update the dossier with a stale value that must not be reused.
     let stale_dossier = serde_json::json!({
         "hold_description": "Stale: OAuth bypass analysis",
         "failure_analysis": "This dossier should NOT be reused after hold release",
@@ -6153,11 +6339,80 @@ async fn hold_release_yields_fresh_arbitration_on_next_strike() {
         Some(djinn_db::repositories::task_arbitration::ArbitrationState::Consumed)
     );
 
-    // Phase 3: Release the hold — close the HumanReview blocker task.
-    // The arbitration row at cycle 0 remains consumed in the DB (archived);
-    // the hold release does not delete it but advances the hold cycle.
-    // Simulate the next strike cycle.  Since cycle 0 is consumed,
-    // resolve_current_hold_cycle must return (1, None) — a fresh cycle.
+    // Create a HumanReview remediation blocker task — this is what the
+    // park_source_human_review path does when the arbiter parks.
+    let project_id = repo.get(&task.id).await.unwrap().unwrap().project_id;
+    let hold_task = repo
+        .create_in_project(
+            &project_id,
+            None,
+            &format!("HumanReview hold for {}", task.short_id),
+            &format!(
+                "Arbiter park decision for task {}. Dossier: {}",
+                task.short_id, stale_dossier
+            ),
+            "Requires human review — do not auto-resolve.",
+            "review",
+            0,
+            "system",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    repo.update_labels(&hold_task.id, r#"["human-review-hold"]"#)
+        .await
+        .unwrap();
+    repo.add_blocker(&task.id, &hold_task.id).await.unwrap();
+    // Park the source to open (simulates park_source_open).
+    repo.set_status(&task.id, "open").await.unwrap();
+
+    // Verify: source is blocked.
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(blockers.len(), 1, "source must have one blocker");
+    assert_eq!(blockers[0].task_id, hold_task.id);
+
+    // human_review_resolved_at must NOT be set yet.
+    let resolved_before = repo.human_review_resolved_at(&task.id).await.unwrap();
+    assert!(
+        resolved_before.is_none(),
+        "human_review_resolved_at must be None before hold release"
+    );
+
+    // ── Phase 3: Close the HumanReview blocker — actual hold release ──
+    // This is the real hold-release path: `transition(Close)` on a task
+    // carrying the "human-review-hold" label triggers
+    // mark_human_review_resolved, which stamps human_review_resolved_at on
+    // every source task the hold was blocking.  Using `set_status` would NOT
+    // trigger this path — `transition(Close)` is the production code path
+    // that exercises the full uv3p Part C lifecycle.
+    repo.transition(
+        &hold_task.id,
+        TransitionAction::Close,
+        "system",
+        "coordinator",
+        Some("human resolved the hold"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Verify: human_review_resolved_at was stamped on the source.
+    let resolved_after = repo.human_review_resolved_at(&task.id).await.unwrap();
+    assert!(
+        resolved_after.is_some(),
+        "human_review_resolved_at must be stamped after closing the HumanReview hold"
+    );
+
+    // Verify: source is unblocked (blockers are all closed).
+    let blockers_after = repo.list_blockers(&task.id).await.unwrap();
+    assert!(
+        blockers_after.iter().all(|b| b.status == "closed"),
+        "all blockers must be closed after hold release"
+    );
+
+    // ── Phase 4: Second strike — must create a fresh arbitration ──────
+    // resolve_current_hold_cycle sees cycle 0 as consumed → (1, None).
     let (cycle1, unconsumed1) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
     assert_eq!(
         cycle1, 1,
@@ -6168,12 +6423,11 @@ async fn hold_release_yields_fresh_arbitration_on_next_strike() {
         "cycle 1 must have no unconsumed row yet"
     );
 
-    // Phase 4: Re-seed post-intervention sessions for the new cycle and trigger
-    // the park rung again.  Must create exactly one fresh arbitration at cycle 1
-    // with a new structured dossier, NOT reuse the stale cycle-0 dossier.
-    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-c", "m-d"]).await;
-    // Reset counters so the park rung threshold is met again.
+    // Re-seed post-intervention sessions for the new cycle and trigger
+    // the park rung again.  Reset FIRST (sets last_intervention_at as the
+    // evidence floor), THEN seed sessions after the floor.
     repo.reset_intervention_counters(&task.id).await.unwrap();
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-c", "m-d"]).await;
     for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
         repo.set_status(&task.id, "closed").await.unwrap();
         repo.set_status(&task.id, "open").await.unwrap();
