@@ -454,6 +454,7 @@ CREATE TABLE IF NOT EXISTS agents (
     mcp_servers              JSONB        NOT NULL,
     skills                   JSONB        NOT NULL,
     is_default               BOOLEAN      NOT NULL DEFAULT FALSE,
+    learned_prompt           TEXT         NULL,
     created_at               VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     updated_at               VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     CONSTRAINT uq_agents_project_name UNIQUE (project_id, name),
@@ -468,6 +469,20 @@ CREATE INDEX agents_is_default          ON agents(project_id, is_default);
 -- Postgres supports partial indexes natively, no generated column needed.
 CREATE UNIQUE INDEX uq_agents_one_default_per_base_role
     ON agents(project_id, base_role) WHERE is_default = TRUE;
+
+-- ── learned_prompt_history (architect improvement-loop audit trail) ────────
+CREATE TABLE IF NOT EXISTS learned_prompt_history (
+    id              VARCHAR(36)  NOT NULL PRIMARY KEY,
+    agent_id        VARCHAR(36)  NOT NULL,
+    proposed_text   TEXT         NOT NULL,
+    action          VARCHAR(32)  NOT NULL,
+    metrics_before  JSONB        NULL,
+    metrics_after   JSONB        NULL,
+    created_at      VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    CONSTRAINT fk_learned_prompt_history_agent FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+);
+
+CREATE INDEX learned_prompt_history_agent_id ON learned_prompt_history(agent_id);
 
 CREATE TABLE IF NOT EXISTS user_auth_sessions (
     token               VARCHAR(64)   NOT NULL PRIMARY KEY,
