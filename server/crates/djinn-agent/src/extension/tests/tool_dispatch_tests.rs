@@ -670,6 +670,199 @@ async fn read_detects_binary_file() {
     assert!(err.contains("binary file"), "got: {err}");
 }
 
+// ─── ReadCoverage: accurate coverage metadata from call_read ──────────────
+
+/// A small file read from offset 0 with no budget truncation must record
+/// full-file coverage.
+#[tokio::test]
+async fn read_full_file_records_full_coverage() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-cov-full-");
+    let file = worktree.path().join("small.txt");
+    // 5 lines, well under the default limit of 2000.
+    tokio::fs::write(&file, "line 0\nline 1\nline 2\nline 3\nline 4\n")
+        .await
+        .expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": "small.txt", "offset": 0, "limit": 2000 })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let result = call_read(&state, &args, worktree.path())
+        .await
+        .expect("full-file read should succeed");
+
+    assert_eq!(
+        result.get("has_more").and_then(|v| v.as_bool()),
+        Some(false),
+        "full-file read must have has_more=false"
+    );
+
+    // Inspect the recorded coverage.
+    let worktree_key = worktree.path().display().to_string();
+    let path = worktree.path().join("small.txt");
+    let rec = state
+        .file_time
+        .latest_record(&worktree_key, &path)
+        .await
+        .expect("read record should exist");
+    assert!(
+        rec.is_full(),
+        "full-file read should record ReadCoverage::Full, got {:?}",
+        rec.coverage
+    );
+    assert!(
+        !rec.truncated,
+        "small-file read must not be marked truncated"
+    );
+}
+
+/// A read with offset > 0 and limit < remaining lines must record partial
+/// (Range) coverage with accurate byte boundaries.
+#[tokio::test]
+async fn read_offset_limit_records_range_coverage() {
+    use crate::file_time::ReadCoverage;
+
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-cov-range-");
+    let file = worktree.path().join("lines.txt");
+
+    // Build a file with known line lengths. Each line is "NNN\n" = 4 bytes.
+    let mut contents = String::new();
+    for i in 0..50 {
+        contents.push_str(&format!("{:03}\n", i));
+    }
+    tokio::fs::write(&file, &contents).await.expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    // Read lines [10, 15) — offset=10, limit=5.
+    let args = Some(
+        serde_json::json!({ "file_path": "lines.txt", "offset": 10, "limit": 5 })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let result = call_read(&state, &args, worktree.path())
+        .await
+        .expect("windowed read should succeed");
+
+    assert_eq!(
+        result.get("has_more").and_then(|v| v.as_bool()),
+        Some(true),
+        "windowed read with remaining content must have has_more=true"
+    );
+
+    let worktree_key = worktree.path().display().to_string();
+    let path = worktree.path().join("lines.txt");
+    let rec = state
+        .file_time
+        .latest_record(&worktree_key, &path)
+        .await
+        .expect("read record should exist");
+
+    match rec.coverage {
+        ReadCoverage::Range { start, end } => {
+            // Each line is 4 bytes ("NNN\n"). Lines 0–9 precede our window,
+            // so the window starts at byte 40.
+            assert_eq!(start, 40, "range should start at line 10's byte offset");
+            // Window is lines 10–14 inclusive. Line 14 ends at byte 60
+            // (15 lines × 4 bytes). The exclusive end is the byte offset
+            // after line 14, which is 15 * 4 = 60.
+            assert_eq!(
+                end,
+                Some(60),
+                "range should end at byte offset after line 14"
+            );
+        }
+        other => panic!("expected Range coverage, got {other:?}"),
+    }
+    assert!(
+        !rec.truncated,
+        "offset/limit read within budget must not be truncated"
+    );
+}
+
+/// A large file exceeding the byte budget must record truncated=true and
+/// must NOT record full-file coverage.
+#[tokio::test]
+async fn read_budget_truncated_records_truncated_coverage() {
+    use crate::file_time::ReadCoverage;
+
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-cov-trunc-");
+    let file = worktree.path().join("huge.txt");
+
+    // Long lines (~6 KiB each) so the default limit=2000 window crosses the
+    // 8 MiB byte budget.
+    let line = "x".repeat(6 * 1024 - 1); // line + '\n' = 6 KiB/line
+    let mut contents = String::with_capacity(9 * 1024 * 1024 + 1024);
+    let target = 9 * 1024 * 1024;
+    while contents.len() < target {
+        contents.push_str(&line);
+        contents.push('\n');
+    }
+    tokio::fs::write(&file, contents.as_bytes())
+        .await
+        .expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": "huge.txt", "offset": 0, "limit": 2000 })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let result = call_read(&state, &args, worktree.path())
+        .await
+        .expect("over-budget read should succeed with truncation signal");
+
+    let content = result
+        .get("content")
+        .and_then(|v| v.as_str())
+        .expect("content");
+    assert!(
+        content.contains("file too large"),
+        "expected truncation signal"
+    );
+
+    let worktree_key = worktree.path().display().to_string();
+    let path = worktree.path().join("huge.txt");
+    let rec = state
+        .file_time
+        .latest_record(&worktree_key, &path)
+        .await
+        .expect("read record should exist");
+
+    assert!(
+        rec.truncated,
+        "budget-truncated read must have truncated=true"
+    );
+    assert!(
+        !rec.is_full(),
+        "budget-truncated read must not be recorded as full-file coverage"
+    );
+    // The coverage must be a Range (not Full).
+    assert!(
+        matches!(rec.coverage, ReadCoverage::Range { .. }),
+        "budget-truncated read should record Range coverage, got {:?}",
+        rec.coverage
+    );
+    // The range start should be 0 since offset=0.
+    if let ReadCoverage::Range { start, end } = rec.coverage {
+        assert_eq!(start, 0, "range should start at byte 0 for offset=0 read");
+        assert!(
+            end.is_some(),
+            "range should have a concrete end for a truncated read"
+        );
+    }
+}
+
 // ─── F2: just-in-time pitfall retrieval on first write (gated) ────────────
 
 /// Env-lock for the `DJINN_JIT_PITFALLS_ROLLOUT` rollout gate. Held across `.await` on

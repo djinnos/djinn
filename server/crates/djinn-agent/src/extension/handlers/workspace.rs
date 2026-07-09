@@ -342,7 +342,11 @@ pub(crate) async fn call_read(
     let scan_target = want_lines.saturating_add(1);
 
     let mut reader = tokio::io::BufReader::new(file);
-    let mut all_lines: Vec<String> = Vec::new();
+    // Each entry is (line_text, byte_offset_after_line). We track the byte
+    // offset where each line starts separately in `line_byte_offsets` so we
+    // can compute accurate `ReadCoverage::Range` metadata after slicing.
+    let mut all_lines: Vec<(String, u64)> = Vec::new();
+    let mut line_byte_offsets: Vec<u64> = Vec::new();
     let mut scanned_bytes: usize = 0;
     let mut has_more_beyond_window = false;
     let mut truncated_by_budget = false;
@@ -356,6 +360,7 @@ pub(crate) async fn call_read(
         }
 
         let mut buf: Vec<u8> = Vec::new();
+        let line_start = scanned_bytes as u64;
         let n = reader
             .read_until(b'\n', &mut buf)
             .await
@@ -363,6 +368,7 @@ pub(crate) async fn call_read(
         if n == 0 {
             break; // EOF — no more lines
         }
+        let line_byte_len = n;
         scanned_bytes = scanned_bytes.saturating_add(n);
 
         // Binary detection from the streamed chunk: a NUL byte means this is
@@ -380,7 +386,8 @@ pub(crate) async fn call_read(
         if line.chars().count() > 2000 {
             line = line.chars().take(2000).collect::<String>();
         }
-        all_lines.push(line);
+        line_byte_offsets.push(line_start);
+        all_lines.push((line, line_start + line_byte_len as u64));
 
         // Byte budget: stop scanning once we've consumed the cap. If there's
         // still content on disk, surface it as truncation rather than
@@ -405,7 +412,7 @@ pub(crate) async fn call_read(
     let end = start.saturating_add(limit).min(total_scanned);
 
     let mut numbered = String::new();
-    for (i, line) in all_lines[start..end].iter().enumerate() {
+    for (i, (line, _byte_end)) in all_lines[start..end].iter().enumerate() {
         let line_no = start + i + 1;
         numbered.push_str(&format!("{:>6}\t{}\n", line_no, line));
     }
@@ -420,9 +427,39 @@ pub(crate) async fn call_read(
     // requested window didn't reach the end of what we scanned.
     let has_more = has_more_beyond_window || end < total_scanned;
 
+    // Compute read coverage metadata from the actual arguments and result.
+    // A read is full-file coverage only when the worker received all content
+    // from the start (offset 0), there are no remaining pages, and no
+    // byte-budget truncation occurred.
+    let coverage = if offset == 0 && !has_more && !truncated_by_budget {
+        crate::file_time::ReadCoverage::Full
+    } else {
+        // Record the byte range of the window actually returned.
+        let cov_start = if start < end {
+            line_byte_offsets[start]
+        } else {
+            // Empty window: point at EOF offset.
+            scanned_bytes as u64
+        };
+        let cov_end = if start < end {
+            Some(all_lines[end - 1].1)
+        } else {
+            None
+        };
+        crate::file_time::ReadCoverage::Range {
+            start: cov_start,
+            end: cov_end,
+        }
+    };
+
     state
         .file_time
-        .read(&worktree_path.display().to_string(), &path)
+        .read_with_coverage(
+            &worktree_path.display().to_string(),
+            &path,
+            coverage,
+            truncated_by_budget,
+        )
         .await?;
 
     Ok(serde_json::json!({
