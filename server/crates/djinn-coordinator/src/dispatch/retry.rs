@@ -578,6 +578,51 @@ impl CoordinatorActor {
             .await
     }
 
+    /// True when the newest non-guard attempt for `(task, role)` terminalized as
+    /// an ENVIRONMENTAL interruption (`TaskAttemptOutcome::Interrupted`) — i.e.
+    /// the prior session was killed by infrastructure (a deploy/rollout, a k8s
+    /// pod eviction, or a startup reap of a run that deploy orphaned) rather than
+    /// by any liveness/quality decision.
+    ///
+    /// The dispatch reappearance path uses this to spare an innocent in-flight
+    /// task from a same-role dispatch-failure streak + escalating cooldown after
+    /// a deploy: an environmental interruption is treated "as if the attempt
+    /// never ran". Guard-only rows (`deferred`/`adopted_pr`) are skipped so the
+    /// check reflects the newest REAL attempt. Fail-safe: any lookup error
+    /// returns `false`, preserving the existing failure-counting behavior (never
+    /// silently suppress a genuine failure on a transient DB blip).
+    pub(crate) async fn latest_attempt_was_environmental_interrupt(
+        &self,
+        task_id: &str,
+        role: &str,
+    ) -> bool {
+        let repo = TaskAttemptRepository::new(self.db.clone());
+        let attempts = match repo.list_for_task(task_id).await {
+            Ok(attempts) => attempts,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    role,
+                    error = %e,
+                    "CoordinatorActor: environmental-interrupt attempt lookup failed; \
+                     treating reappearance as a normal failure (fail-safe)"
+                );
+                return false;
+            }
+        };
+        // `list_for_task` is ordered created_at DESC, so the first non-guard row
+        // for this role is the newest real attempt.
+        attempts
+            .iter()
+            .filter(|a| a.role == role)
+            .find(|a| {
+                a.outcome != TaskAttemptOutcome::Deferred.as_str()
+                    && a.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
+            })
+            .and_then(|a| a.outcome_enum().ok())
+            .is_some_and(|o| o.is_environmental_interrupt())
+    }
+
     /// Trigger C: a worker/reviewer run completed degenerate because the
     /// reply-loop guard saw repeated identical behavior. This is not a provider
     /// fault and not a dispatch failure; route it directly to the same Planner
@@ -2755,9 +2800,13 @@ fn outcome_to_reopen_class(outcome: &TaskAttemptOutcome) -> Option<ReopenClass> 
         // park escalation thresholds — while still surfacing in diagnostic
         // park/retry reasons. Sourced from the `7w2i` `task_attempts.outcome`
         // contract; no parallel outcome store is introduced.
+        // `Interrupted` is an environmental infrastructure interruption
+        // (deploy/rollout/reap); classified `Infra` so it never counts as a
+        // worker/task-quality strike or park escalation.
         TaskAttemptOutcome::TimedOut
         | TaskAttemptOutcome::SpawnFailed
-        | TaskAttemptOutcome::Crashed => Some(ReopenClass::Infra),
+        | TaskAttemptOutcome::Crashed
+        | TaskAttemptOutcome::Interrupted => Some(ReopenClass::Infra),
         // Guard-only or not a submission-triggered terminal.
         TaskAttemptOutcome::Deferred
         | TaskAttemptOutcome::AdoptedPr
