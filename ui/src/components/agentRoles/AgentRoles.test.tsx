@@ -43,7 +43,6 @@ const mockRole = (overrides: Partial<agentsApi.Agent> = {}): agentsApi.Agent => 
   skills: ["code-review"],
   model_preference: null,
   is_default: false,
-  learned_prompt: null,
   ...overrides,
 });
 
