@@ -6,6 +6,7 @@ use tokio::sync::broadcast;
 
 use crate::database::Database;
 use crate::repositories::note::NoteRepository;
+use djinn_memory::Note;
 
 // ── Seed helpers for usage-analytics route tests ─────────────────────────
 // These insert rows directly via raw SQL so integration tests outside
@@ -755,4 +756,144 @@ pub async fn corrupt_credential_encrypted_value(db: &Database, key_name: &str, r
         .execute(db.pool())
         .await
         .expect("corrupt_credential_encrypted_value: update failed");
+}
+
+// ── Seed helpers for memory-eval fixture loading ────────────────────────
+// These insert rows with explicit timestamps, status, and confidence for
+// the deterministic memory-eval benchmark.  The eval loader cannot use the
+// standard repository `create` methods because those auto-generate
+// timestamps and trigger wikilink indexing / event emission.
+
+/// Insert an eval note with explicit timestamps, status, and confidence,
+/// then fetch and return the resulting [`Note`] row.
+///
+/// **Not for production use.**  Used only by the memory-eval fixture loader.
+#[allow(clippy::too_many_arguments)]
+pub async fn seed_eval_note(
+    db: &Database,
+    id: &str,
+    project_id: &str,
+    permalink: &str,
+    title: &str,
+    note_type: &str,
+    folder: &str,
+    tags_json: &serde_json::Value,
+    content: &str,
+    retrieval_anchor: Option<&str>,
+    content_hash: &str,
+    created_at: &str,
+    updated_at: &str,
+    last_accessed: &str,
+    status: &str,
+    confidence: f64,
+) -> Note {
+    db.ensure_initialized().await.unwrap();
+    let empty_scope: serde_json::Value = serde_json::json!([]);
+
+    sqlx::query(
+        r#"INSERT INTO notes
+            (id, project_id, permalink, title, file_path,
+             storage, note_type, folder, tags, content, retrieval_anchor,
+             content_hash, scope_paths,
+             created_at, updated_at, last_accessed,
+             status, confidence, abstract, overview, access_count)
+         VALUES ($1, $2, $3, $4, '',
+                 'db', $5, $6, $7, $8, $9,
+                 $10, $11,
+                 $12, $13, $14,
+                 $15, $16, NULL, NULL, 0)"#,
+    )
+    .bind(id)
+    .bind(project_id)
+    .bind(permalink)
+    .bind(title)
+    .bind(note_type)
+    .bind(folder)
+    .bind(tags_json)
+    .bind(content)
+    .bind(retrieval_anchor)
+    .bind(content_hash)
+    .bind(&empty_scope)
+    .bind(created_at)
+    .bind(updated_at)
+    .bind(last_accessed)
+    .bind(status)
+    .bind(confidence)
+    .execute(db.pool())
+    .await
+    .unwrap_or_else(|e| panic!("seed_eval_note: failed to insert note '{permalink}': {e}"));
+
+    // Fetch the note back using the same SELECT projection the rest of
+    // djinn-db uses (mirrors the `note_select_where_id!` macro).
+    sqlx::query_as::<_, Note>(
+        r#"SELECT id, project_id, permalink, title, file_path,
+                  storage, note_type, folder, status, tags::text AS tags, content,
+                  retrieval_anchor, created_at, updated_at, last_accessed,
+                  access_count, confidence, abstract as abstract_, overview,
+                  scope_paths::text AS scope_paths
+           FROM notes WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap_or_else(|e| panic!("seed_eval_note: failed to fetch note '{permalink}': {e}"))
+}
+
+/// Insert an eval epic row and return its id.
+///
+/// **Not for production use.**  Used only by the memory-eval fixture loader.
+pub async fn seed_eval_epic(db: &Database, project_id: &str, title: &str) -> String {
+    db.ensure_initialized().await.unwrap();
+    let epic_id = uuid::Uuid::now_v7().to_string();
+    let short_id = format!("ep-{}", &epic_id[epic_id.len() - 12..]);
+    sqlx::query(
+        "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)\n         VALUES ($1, $2, $3, $4, '', '', '', '', '[]'::jsonb)",
+    )
+    .bind(&epic_id)
+    .bind(project_id)
+    .bind(&short_id)
+    .bind(title)
+    .execute(db.pool())
+    .await
+    .expect("seed_eval_epic: failed to create epic");
+    epic_id
+}
+
+/// Insert an eval task with `memory_refs` pointing to note IDs (for
+/// task-affinity scoring) and return the generated task id.
+///
+/// **Not for production use.**  Used only by the memory-eval fixture loader.
+pub async fn seed_eval_task_with_memory_refs(
+    db: &Database,
+    project_id: &str,
+    epic_id: &str,
+    fixture_task_id: &str,
+    memory_refs_json: &str,
+) -> String {
+    db.ensure_initialized().await.unwrap();
+    let task_id = uuid::Uuid::now_v7().to_string();
+    let short_id = format!(
+        "eval-{}",
+        fixture_task_id.chars().take(8).collect::<String>()
+    );
+
+    sqlx::query(
+        r#"INSERT INTO tasks
+            (id, project_id, short_id, epic_id, title, description, design,
+             issue_type, priority, owner, status, continuation_count, memory_refs)
+         VALUES ($1, $2, $3, $4, $5, '', '', 'task', 0, '', 'open', 0, $6::jsonb)"#,
+    )
+    .bind(&task_id)
+    .bind(project_id)
+    .bind(&short_id)
+    .bind(epic_id)
+    .bind(format!("Eval task {}", fixture_task_id))
+    .bind(memory_refs_json)
+    .execute(db.pool())
+    .await
+    .unwrap_or_else(|e| {
+        panic!("seed_eval_task_with_memory_refs: failed to create task '{fixture_task_id}': {e}")
+    });
+
+    task_id
 }
