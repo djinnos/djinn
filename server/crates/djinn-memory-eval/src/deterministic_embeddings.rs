@@ -16,6 +16,10 @@
 //! deterministic provider is a drop-in when the fixture loader (task qmzw)
 //! bridges the two.
 
+// This is a binary-crate module; these public types are API contracts for
+// downstream modules (qmzw, zd4o) and will be consumed in future tasks.
+#![allow(dead_code)]
+
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
