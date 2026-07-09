@@ -83,7 +83,7 @@ mod pr_review_watcher;
 mod pr_undraft;
 mod pr_watcher;
 mod state;
-mod tripwire_gate;
+pub(crate) mod tripwire_gate;
 mod tripwire_hold;
 
 #[cfg(test)]
