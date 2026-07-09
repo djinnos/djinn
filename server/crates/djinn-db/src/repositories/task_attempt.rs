@@ -116,7 +116,10 @@ pub struct GuardAdoptedPrTaskAttemptParams<'a> {
 /// the respawn guard's latest-attempt gate a durable "this PR needs a worker"
 /// signal even for reopens that leave no live attempt behind (the kv6i
 /// invisible-reopen gap). Idempotent on `dispatch_key`
-/// (`{task_id}:{role}:rework_marker`) via `ON CONFLICT DO NOTHING`.
+/// (`{task_id}:{role}:rework_marker`): on conflict the marker is re-asserted
+/// (its `created_at` refreshed to now) so it becomes the newest attempt again
+/// after a later non-reopened attempt landed — the incident-gton merge-queue
+/// requeue-loop fix.
 #[derive(Clone, Debug)]
 pub struct ReworkMarkerTaskAttemptParams<'a> {
     pub id: &'a str,
@@ -485,8 +488,8 @@ impl TaskAttemptRepository {
         })
     }
 
-    /// Insert a durable `reopened` rework-marker attempt row.  Idempotent on
-    /// `dispatch_key`.
+    /// Insert (or re-assert) a durable `reopened` rework-marker attempt row.
+    /// Idempotent on `dispatch_key` — one marker row per (task, role).
     ///
     /// The row is terminal (`reopened` outcome) with a NULL `session_id` and no
     /// guard decision — it is a synthetic marker, not a real dispatch.  It is
@@ -494,6 +497,22 @@ impl TaskAttemptRepository {
     /// attempt existed to terminalize, so the respawn guard's latest-attempt
     /// gate still sees a `reopened` newest attempt and dispatches a rework
     /// worker instead of adopting the open PR (the kv6i invisible-reopen gap).
+    ///
+    /// **Re-assertable (incident gton):** on conflict the marker is REFRESHED
+    /// (`created_at`/`terminal_at`/`updated_at` bumped to now, summary replaced)
+    /// rather than left untouched.  The fixed dispatch key with the old
+    /// `ON CONFLICT DO NOTHING` could not re-assert the signal after a NEWER
+    /// non-reopened attempt landed (e.g. a rework worker ran and `completed`,
+    /// then the merge queue rejected the PR again with no live attempt to
+    /// terminalize): the stale marker stayed pinned behind the `completed` row
+    /// in `created_at` order, so the respawn guard saw a non-reopened latest
+    /// attempt and re-adopted the open PR — the 13-cycle merge-queue requeue
+    /// loop.  Refreshing `created_at` makes the marker the newest attempt again
+    /// so the guard bypasses adoption and dispatches a rework worker (which then
+    /// reaches the reopen-count intervention gate).  The caller
+    /// (`ensure_rework_marker`) only reaches this insert when the latest
+    /// non-guard attempt is NOT already `reopened`, so a still-pending rework
+    /// never triggers a needless refresh.
     pub async fn insert_rework_marker(
         &self,
         params: ReworkMarkerTaskAttemptParams<'_>,
@@ -514,7 +533,13 @@ impl TaskAttemptRepository {
                  summary, summary_json, terminal_at)
              VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8::text::jsonb,
                      to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
-             ON CONFLICT (dispatch_key) DO NOTHING"#,
+             ON CONFLICT (dispatch_key) DO UPDATE SET
+                 outcome = EXCLUDED.outcome,
+                 summary = EXCLUDED.summary,
+                 summary_json = EXCLUDED.summary_json,
+                 created_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                 terminal_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
         )
         .bind(params.id)
         .bind(params.task_id)
@@ -2032,5 +2057,97 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].log_tail_present);
         assert_eq!(rows[0].log_tail_error_class.as_deref(), Some("timeout"));
+    }
+
+    /// Incident gton: a re-asserted rework marker must refresh its `created_at`
+    /// (so it sorts as the newest attempt again) without stacking a duplicate
+    /// row. Pre-fix the fixed-key `ON CONFLICT DO NOTHING` left the marker
+    /// pinned behind a newer non-reopened attempt, wedging the respawn guard
+    /// into a merge-queue requeue loop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn insert_rework_marker_re_asserts_created_at_on_conflict() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+        let dispatch_key = format!("{task_id}:worker:rework_marker");
+
+        // First insert.
+        let first = repo
+            .insert_rework_marker(ReworkMarkerTaskAttemptParams {
+                id: &new_attempt_id(),
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: &dispatch_key,
+                summary: Some("cycle 1"),
+                summary_json: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.outcome, "reopened");
+
+        // A newer non-reopened terminal attempt lands (a rework worker that ran
+        // and completed).
+        let worker_id = new_attempt_id();
+        repo.create_or_get_pending(CreateTaskAttemptParams {
+            id: &worker_id,
+            task_id: &task_id,
+            role: "worker",
+            dispatch_key: &format!("{task_id}:worker:dispatch-1"),
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+        repo.advance_to_terminal(TerminalTaskAttemptParams {
+            id: &worker_id,
+            outcome: TaskAttemptOutcome::Completed,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some("completed"),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+        let completed = repo.get(&worker_id).await.unwrap().unwrap();
+
+        // Re-assert the marker (second merge-queue reopen, same dispatch key).
+        let second = repo
+            .insert_rework_marker(ReworkMarkerTaskAttemptParams {
+                id: &new_attempt_id(),
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: &dispatch_key,
+                summary: Some("cycle 2"),
+                summary_json: None,
+            })
+            .await
+            .unwrap();
+
+        // Same row (idempotent id), refreshed summary, and `created_at` advanced
+        // to be strictly newer than the completed attempt so it sorts first.
+        assert_eq!(second.id, first.id, "re-assert must reuse the marker row");
+        assert_eq!(second.outcome, "reopened");
+        assert_eq!(second.summary.as_deref(), Some("cycle 2"));
+        assert!(
+            second.created_at >= completed.created_at,
+            "re-asserted marker created_at ({}) must be >= the newer completed \
+             attempt ({}) so the guard sees it as the latest attempt",
+            second.created_at,
+            completed.created_at,
+        );
+
+        // No duplicate marker rows.
+        let markers = repo
+            .list_for_task(&task_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.dispatch_key == dispatch_key)
+            .count();
+        assert_eq!(markers, 1, "re-assert must not stack marker rows");
     }
 }
