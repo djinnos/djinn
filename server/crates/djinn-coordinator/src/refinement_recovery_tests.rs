@@ -54,7 +54,10 @@ async fn interrupted_stop_count(db: &djinn_db::Database, proposal_id: &str) -> u
             r.event_metadata
                 .as_deref()
                 .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-                .and_then(|v| v.get("reason_tag").and_then(|t| t.as_str().map(String::from)))
+                .and_then(|v| {
+                    v.get("reason_tag")
+                        .and_then(|t| t.as_str().map(String::from))
+                })
                 .as_deref()
                 == Some("interrupted")
         })
@@ -174,7 +177,10 @@ async fn recover_stamps_interrupted_when_parked_spec_moved_on() {
         .unwrap()
         .unwrap()
         .latest_revision_seq;
-    assert!(new_head > parked_seq, "head must advance past the parked seq");
+    assert!(
+        new_head > parked_seq,
+        "head must advance past the parked seq"
+    );
 
     actor.recover_interrupted_refinements().await;
 

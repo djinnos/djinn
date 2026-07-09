@@ -313,11 +313,34 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // ── Tripwire gate: deterministic pre-undraft evaluation ──────
-            // Evaluate the PR diff against the tripwire policy before the
-            // PR can proceed to undraft/auto-merge. This is a pure
-            // deterministic gate — no LLM or provider call.
-            let tripwire_result = match super::tripwire_gate::evaluate_tripwire_gate(
+            // ── Tripwire gate: rollout-aware deterministic evaluation ──
+            //
+            // Query activity entries to determine rollout mode:
+            // - No prior gate events → Backfill (report-only, no hold).
+            // - Prior events for different head SHA → Enforce (live policy).
+            // - Prior events for same head SHA → Idempotent skip.
+            //
+            // This implements the rollout boundary: existing open PRs are
+            // backfilled report-only; enforcement starts for new heads
+            // after policy publication.  Direct label removal is tamper,
+            // not a release path.
+            let tripwire_entries = match self.task_repo().list_activity(&task.id).await {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "PR poller: failed to query activity for tripwire rollout mode — skipping gate this tick"
+                    );
+                    continue;
+                }
+            };
+            let tripwire_entry_refs: Vec<crate::tripwires::ActivityEntryRef> = tripwire_entries
+                .iter()
+                .map(crate::tripwires::ActivityEntryRef::from_entry)
+                .collect();
+
+            let tripwire_result = match super::tripwire_gate::evaluate_tripwire_gate_with_rollout(
                 gh_client,
                 &owner,
                 &repo,
@@ -325,10 +348,32 @@ impl CoordinatorActor {
                 &task.id,
                 &task.project_id,
                 &pr.head.sha,
+                &tripwire_entry_refs,
             )
             .await
             {
-                Ok(result) => result,
+                Ok(Some((result, mode))) => {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        head_sha = %pr.head.sha,
+                        mode = ?mode,
+                        outcome = ?result.decision.outcome,
+                        "PR poller: tripwire gate evaluated"
+                    );
+                    Some((result, mode))
+                }
+                Ok(None) => {
+                    // AlreadyEvaluated — idempotent skip.  Proceed to
+                    // undraft without emitting a duplicate gate event.
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        head_sha = %pr.head.sha,
+                        "PR poller: tripwire gate already evaluated for this head SHA — skipping"
+                    );
+                    None
+                }
                 Err(e) => {
                     tracing::warn!(
                         task_id = %task.short_id,
@@ -342,104 +387,128 @@ impl CoordinatorActor {
                 }
             };
 
-            // Log the gate activity event (held, passed, or report-only).
-            let activity_payload =
-                serde_json::to_string(&tripwire_result.payload).unwrap_or_default();
-            if let Err(e) = self
-                .task_repo()
-                .log_activity(
-                    Some(&task.id),
-                    "coordinator",
-                    "system",
-                    tripwire_result.event_type,
-                    &activity_payload,
-                )
-                .await
-            {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    pr = pull_number,
-                    error = %e,
-                    "PR poller: failed to log tripwire gate activity"
-                );
-            }
-
-            match tripwire_result.decision.outcome {
-                crate::tripwires::GateOutcome::Held => {
-                    // Enforcement findings exist — apply human-review-hold
-                    // idempotently and park the source task so it cannot be
-                    // dispatched until the hold is resolved.
-                    tracing::info!(
+            if let Some((ref result, mode)) = tripwire_result {
+                // Log the gate activity event (held, passed, or report-only).
+                let activity_payload = serde_json::to_string(&result.payload).unwrap_or_default();
+                if let Err(e) = self
+                    .task_repo()
+                    .log_activity(
+                        Some(&task.id),
+                        "coordinator",
+                        "system",
+                        result.event_type,
+                        &activity_payload,
+                    )
+                    .await
+                {
+                    tracing::warn!(
                         task_id = %task.short_id,
                         pr = pull_number,
-                        head_sha = %pr.head.sha,
-                        enforcement_count = tripwire_result.decision.enforcement_finding_count,
-                        "PR poller: tripwire gate HELD — creating human-review hold"
+                        error = %e,
+                        "PR poller: failed to log tripwire gate activity"
                     );
-
-                    let findings_summary = tripwire_result
-                        .decision
-                        .findings
-                        .iter()
-                        .map(|f| {
-                            format!(
-                                "- `{}` ({}) — {}",
-                                f.rule_id.as_str(),
-                                f.reason_code,
-                                f.evidence.path,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    let hold_reason = format!(
-                        "Tripwire gate held for PR head `{}`.\n\n\
-                         Policy revision: `{}`\n\
-                         Enforcement findings ({}):\n{}",
-                        &pr.head.sha[..12.min(pr.head.sha.len())],
-                        tripwire_result.decision.policy_revision,
-                        tripwire_result.decision.enforcement_finding_count,
-                        findings_summary,
-                    );
-
-                    // Create a human-review remediation task (idempotent —
-                    // skips if the source is already held by an unresolved
-                    // blocker).
-                    self.create_remediation_task(
-                        &task.id,
-                        &hold_reason,
-                        &task.project_id,
-                        crate::dispatch::RemediationKind::HumanReview,
-                    )
-                    .await;
-
-                    // Park the source so it stops being re-dispatched.
-                    self.park_source_open(&task.id, &hold_reason).await;
-                    self.pr_status_cache.remove(&task.id);
-                    self.pr_draft_first_seen.remove(&task.id);
-                    self.review_stuck_sha_first_seen.remove(&task.id);
-                    continue;
                 }
-                crate::tripwires::GateOutcome::Passed
-                | crate::tripwires::GateOutcome::ReportOnly => {
-                    // Gate passed (with optional advisory findings) —
-                    // proceed to undraft.
-                    if tripwire_result.decision.outcome == crate::tripwires::GateOutcome::ReportOnly
-                    {
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            pr = pull_number,
-                            head_sha = %pr.head.sha,
-                            report_only_count = tripwire_result.decision.report_only_finding_count,
-                            "PR poller: tripwire gate PASSED with report-only findings"
-                        );
-                    } else {
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            pr = pull_number,
-                            head_sha = %pr.head.sha,
-                            "PR poller: tripwire gate PASSED"
-                        );
+
+                match result.decision.outcome {
+                    crate::tripwires::GateOutcome::Held => {
+                        // In backfill mode, findings are report-only — the
+                        // engine still produces Held because the underlying
+                        // diff matched enforcement rules, but the backfill
+                        // policy overrides all findings to report-only so
+                        // the outcome will be ReportOnly, not Held.
+                        // However, if we're in Enforce mode and the outcome
+                        // is Held, apply the human-review-hold.
+                        if mode == super::tripwire_gate::RolloutMode::Backfill {
+                            // Backfill mode should never produce Held
+                            // (the make_report_only policy forces all
+                            // findings to report-only), but guard defensively.
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                head_sha = %pr.head.sha,
+                                "PR poller: unexpected Held outcome in backfill mode — logging but not blocking"
+                            );
+                        } else {
+                            // Enforcement findings exist — apply
+                            // human-review-hold idempotently and park the
+                            // source task so it cannot be dispatched until
+                            // the hold is resolved.
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                head_sha = %pr.head.sha,
+                                enforcement_count = result.decision.enforcement_finding_count,
+                                "PR poller: tripwire gate HELD — creating human-review hold"
+                            );
+
+                            let findings_summary = result
+                                .decision
+                                .findings
+                                .iter()
+                                .map(|f| {
+                                    format!(
+                                        "- `{}` ({}) — {}",
+                                        f.rule_id.as_str(),
+                                        f.reason_code,
+                                        f.evidence.path,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+
+                            let hold_reason = format!(
+                                "Tripwire gate held for PR head `{}`.\n\n\
+                                 Policy revision: `{}`\n\
+                                 Enforcement findings ({}):\n{}",
+                                &pr.head.sha[..12.min(pr.head.sha.len())],
+                                result.decision.policy_revision,
+                                result.decision.enforcement_finding_count,
+                                findings_summary,
+                            );
+
+                            // Create a human-review remediation task (idempotent —
+                            // skips if the source is already held by an unresolved
+                            // blocker).
+                            self.create_remediation_task(
+                                &task.id,
+                                &hold_reason,
+                                &task.project_id,
+                                crate::dispatch::RemediationKind::HumanReview,
+                            )
+                            .await;
+
+                            // Park the source so it stops being re-dispatched.
+                            self.park_source_open(&task.id, &hold_reason).await;
+                            self.pr_status_cache.remove(&task.id);
+                            self.pr_draft_first_seen.remove(&task.id);
+                            self.review_stuck_sha_first_seen.remove(&task.id);
+                            continue;
+                        }
+                    }
+                    crate::tripwires::GateOutcome::Passed
+                    | crate::tripwires::GateOutcome::ReportOnly => {
+                        // Gate passed (with optional advisory findings) —
+                        // proceed to undraft.  In backfill mode the findings
+                        // are always report-only; in enforce mode they are
+                        // per the live policy.
+                        if result.decision.outcome == crate::tripwires::GateOutcome::ReportOnly {
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                head_sha = %pr.head.sha,
+                                mode = ?mode,
+                                report_only_count = result.decision.report_only_finding_count,
+                                "PR poller: tripwire gate PASSED with report-only findings"
+                            );
+                        } else {
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                head_sha = %pr.head.sha,
+                                mode = ?mode,
+                                "PR poller: tripwire gate PASSED"
+                            );
+                        }
                     }
                 }
             }

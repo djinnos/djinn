@@ -541,6 +541,27 @@ impl TripwirePolicy {
     pub fn reason_code_for(&self, rule: super::reason_codes::TripwireRuleId) -> &'static str {
         super::reason_codes::reason_code_for_rule(rule)
     }
+
+    /// Return a clone of this policy with every rule set to `report_only =
+    /// true`.  The returned policy preserves all other tuning knobs
+    /// (enabled, path globs, thresholds, etc.) so the engine still
+    /// produces findings — they just land as advisory rather than
+    /// enforcement.
+    ///
+    /// This is used for **report-only backfill** of existing open PRs:
+    /// findings are emitted and logged for visibility, but no
+    /// `human-review-hold` label is applied and the PR is not blocked.
+    pub fn make_report_only(&self) -> Self {
+        let mut clone = self.clone();
+        clone.migration.report_only = true;
+        clone.dependency_identity.report_only = true;
+        clone.network_egress.report_only = true;
+        clone.unsafe_code.report_only = true;
+        clone.boundary_path.report_only = true;
+        clone.large_delete_rewrite.report_only = true;
+        clone.ci_workflow.report_only = true;
+        clone
+    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

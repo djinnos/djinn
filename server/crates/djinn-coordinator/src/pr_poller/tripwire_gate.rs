@@ -8,15 +8,44 @@
 //!
 //! This module is additive plumbing — it does not redefine any tripwire
 //! contract types (policy, reason codes, activity payloads, idempotency keys).
+//!
+//! # Rollout / backfill semantics
+//!
+//! The tripwire enforcement rollout has two phases:
+//!
+//! 1. **Backfill (report-only):** When the tripwire system first evaluates an
+//!    existing open PR head — i.e. the task has no prior tripwire gate
+//!    activity — all findings are evaluated in report-only mode regardless of
+//!    per-rule `report_only` flags.  A `tripwire.gate.report_only` activity
+//!    event is logged with full findings, evidence, revisions, and
+//!    idempotency keys.  No `human-review-hold` label is applied and the PR
+//!    is not blocked by this evaluation alone.
+//!
+//! 2. **Enforcement (new heads):** When a PR gets a new head SHA (developer
+//!    pushes after policy publication), the gate evaluates under the live
+//!    policy and may produce a `tripwire.gate.held` event and
+//!    `human-review-hold` label.  This uses the same delivered
+//!    engine/policy/active-hold contracts.
+//!
+//! The distinction is derived from the task's activity log:
+//!
+//! - No prior gate events → **Backfill** (existing PR, first evaluation).
+//! - Prior gate events exist for a *different* head SHA → **Enforce**
+//!   (new push after policy was enabled).
+//! - Prior gate events exist for the *same* head SHA → **Idempotent**
+//!   (duplicate poll; no new event emitted).
+//!
+//! Direct removal of the `human-review-hold` label is tamper, not a
+//! release path — the reconciliation tick re-applies it.
 
 use anyhow::Result;
 use djinn_provider::github_api::{GitHubApiClient, PrFile};
 
 use crate::tripwires::{
-    ChangedFile, ChangedFileStatus, DiffHunk, GateOutcome, TRIPWIRE_EVENT_GATE_HELD,
-    TRIPWIRE_EVENT_GATE_PASSED, TRIPWIRE_EVENT_GATE_REPORT_ONLY, TripwireEvaluationInput,
-    TripwireFindingSummary, TripwireGateDecision, TripwireGateDecisionPayload, TripwirePolicy,
-    all_rule_evaluators, evaluate,
+    ActivityEntryRef, ChangedFile, ChangedFileStatus, DiffHunk, GateOutcome,
+    TRIPWIRE_EVENT_GATE_HELD, TRIPWIRE_EVENT_GATE_PASSED, TRIPWIRE_EVENT_GATE_REPORT_ONLY,
+    TripwireEvaluationInput, TripwireFindingSummary, TripwireGateDecision,
+    TripwireGateDecisionPayload, TripwirePolicy, all_rule_evaluators, evaluate,
 };
 
 // ─── PrFile → ChangedFile conversion ─────────────────────────────────────
@@ -238,6 +267,7 @@ fn run_gate(input: &TripwireEvaluationInput) -> TripwireGateResult {
 /// * `task_id` — task UUID for idempotency key derivation.
 /// * `project_id` — project UUID for the activity payload.
 /// * `head_sha` — current head SHA of the PR.
+#[allow(dead_code)] // Superseded by `evaluate_tripwire_gate_with_rollout`; kept for direct callers.
 pub async fn evaluate_tripwire_gate(
     gh_client: &GitHubApiClient,
     owner: &str,
@@ -266,6 +296,168 @@ pub async fn evaluate_tripwire_gate(
 
     // 4. Evaluate with all seven rule families.
     Ok(run_gate(&input))
+}
+
+// ─── Rollout / backfill mode ───────────────────────────────────────────────
+
+/// Determines how the tripwire gate should evaluate a PR head.
+///
+/// During the enforcement rollout, existing open PRs are backfilled in
+/// report-only mode so findings are logged without blocking the PR.  A new
+/// head SHA (developer push after policy publication) switches to full
+/// enforcement per the active policy.  See the module-level documentation
+/// for the full operational boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RolloutMode {
+    /// First evaluation of this task — existing open PR head being
+    /// backfilled.  All findings are forced to report-only; no
+    /// `human-review-hold` label is applied.
+    Backfill,
+    /// New head SHA for a task that already has prior gate activity.
+    /// Evaluate under the live policy (enforcement-on per rule config).
+    Enforce,
+    /// This exact `(task_id, head_sha)` was already evaluated with the
+    /// current policy revision.  The caller must skip the evaluation to
+    /// avoid duplicate activity events.
+    AlreadyEvaluated,
+}
+
+/// Determine the [`RolloutMode`] for a PR head by examining the task's
+/// tripwire gate activity log.
+///
+/// The logic:
+///
+/// 1. If a gate event already exists for this exact `head_sha` →
+///    [`RolloutMode::AlreadyEvaluated`] (idempotent skip).
+/// 2. If any gate event exists for this task but for a different head SHA →
+///    [`RolloutMode::Enforce`] (new push after policy publication).
+/// 3. If no gate events exist for this task at all →
+///    [`RolloutMode::Backfill`] (existing PR, first evaluation).
+///
+/// # Arguments
+///
+/// * `entries` — tripwire-related activity entries for the task.
+/// * `head_sha` — the current PR head SHA being evaluated.
+pub fn determine_rollout_mode<'a, I>(entries: I, head_sha: &str) -> RolloutMode
+where
+    I: IntoIterator<Item = &'a ActivityEntryRef>,
+{
+    let mut has_prior_event = false;
+
+    for entry in entries {
+        if !is_tripwire_gate_event(&entry.event_type) {
+            continue;
+        }
+
+        // Try to extract head_sha from the payload.
+        if let Ok(payload) = serde_json::from_str::<TripwireGateDecisionPayload>(&entry.payload) {
+            if payload.head_sha == head_sha {
+                // Same head SHA already evaluated — idempotent.
+                return RolloutMode::AlreadyEvaluated;
+            }
+            has_prior_event = true;
+        }
+    }
+
+    if has_prior_event {
+        RolloutMode::Enforce
+    } else {
+        RolloutMode::Backfill
+    }
+}
+
+/// Returns `true` when the event type is one of the three tripwire gate
+/// decision events (`tripwire.gate.held`, `tripwire.gate.passed`,
+/// `tripwire.gate.report_only`).
+pub fn is_tripwire_gate_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        TRIPWIRE_EVENT_GATE_HELD | TRIPWIRE_EVENT_GATE_PASSED | TRIPWIRE_EVENT_GATE_REPORT_ONLY
+    )
+}
+
+/// Evaluate the tripwire gate with rollout-aware policy selection.
+///
+/// This is the primary entry point for the PR poller's tripwire
+/// integration.  It determines the [`RolloutMode`] from the task's
+/// activity log, applies report-only policy override for backfill
+/// evaluations, and delegates to [`run_gate`].
+///
+/// Returns `Ok(None)` when the mode is [`RolloutMode::AlreadyEvaluated`]
+/// (idempotent skip — no new event should be emitted).
+///
+/// # Arguments
+///
+/// * `gh_client` — authenticated GitHub API client for the installation.
+/// * `owner`, `repo` — repository owner/name.
+/// * `pull_number` — PR number.
+/// * `task_id` — task UUID for idempotency key derivation.
+/// * `project_id` — project UUID for the activity payload.
+/// * `head_sha` — current head SHA of the PR.
+/// * `entries` — tripwire-related activity entries for the task (used to
+///   determine the rollout mode).
+#[allow(clippy::too_many_arguments)]
+pub async fn evaluate_tripwire_gate_with_rollout(
+    gh_client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    pull_number: u64,
+    task_id: &str,
+    project_id: &str,
+    head_sha: &str,
+    entries: &[ActivityEntryRef],
+) -> Result<Option<(TripwireGateResult, RolloutMode)>> {
+    let mode = determine_rollout_mode(entries, head_sha);
+
+    match mode {
+        RolloutMode::AlreadyEvaluated => {
+            tracing::debug!(
+                task_id,
+                head_sha,
+                "Tripwire gate: head SHA already evaluated — skipping (idempotent)"
+            );
+            return Ok(None);
+        }
+        RolloutMode::Backfill => {
+            tracing::info!(
+                task_id,
+                head_sha,
+                "Tripwire gate: backfill mode — evaluating in report-only"
+            );
+        }
+        RolloutMode::Enforce => {
+            tracing::info!(
+                task_id,
+                head_sha,
+                "Tripwire gate: enforce mode — evaluating under live policy"
+            );
+        }
+    }
+
+    // 1. Fetch changed files from GitHub.
+    let pr_files = gh_client.get_pr_files(owner, repo, pull_number).await?;
+
+    // 2. Convert to engine types.
+    let changed_files = convert_pr_files(&pr_files);
+
+    // 3. Build evaluation input — backfill uses report-only policy.
+    let policy = match mode {
+        RolloutMode::Backfill => TripwirePolicy::default().make_report_only(),
+        _ => TripwirePolicy::default(),
+    };
+
+    let input = TripwireEvaluationInput {
+        task_id: task_id.to_owned(),
+        project_id: project_id.to_owned(),
+        pr_number: Some(pull_number),
+        head_sha: head_sha.to_owned(),
+        policy,
+        allowlist_revision: None,
+        changed_files,
+    };
+
+    // 4. Evaluate with all seven rule families.
+    Ok(Some((run_gate(&input), mode)))
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────
@@ -812,5 +1004,326 @@ mod tests {
         let decision = &result.decision;
         assert_eq!(decision.outcome, GateOutcome::Passed);
         assert!(decision.findings.is_empty());
+    }
+
+    // ── Rollout mode: determine_rollout_mode ─────────────────────────────
+
+    /// Helper: build an `ActivityEntryRef` with a gate event payload.
+    fn gate_activity_entry(
+        event_type: &str,
+        head_sha: &str,
+        idempotency_key: &str,
+        created_at: &str,
+    ) -> ActivityEntryRef {
+        let payload = TripwireGateDecisionPayload {
+            event_type: event_type.to_owned(),
+            task_id: "task-001".to_owned(),
+            project_id: "proj-001".to_owned(),
+            pr_number: Some(42),
+            head_sha: head_sha.to_owned(),
+            base_sha: None,
+            policy_revision: "default".to_owned(),
+            allowlist_revision: None,
+            findings: vec![],
+            enforcement_finding_count: 0,
+            report_only_finding_count: 0,
+            idempotency_key: idempotency_key.to_owned(),
+            decided_at: Some(created_at.to_owned()),
+        };
+        ActivityEntryRef {
+            event_type: event_type.to_owned(),
+            payload: serde_json::to_string(&payload).unwrap_or_default(),
+            created_at: created_at.to_owned(),
+        }
+    }
+
+    // AC: No prior gate events → Backfill.
+    #[test]
+    fn determine_rollout_mode_no_prior_events_is_backfill() {
+        let entries: Vec<ActivityEntryRef> = vec![];
+        let mode = determine_rollout_mode(&entries, "sha-aaa");
+        assert_eq!(mode, RolloutMode::Backfill);
+    }
+
+    // AC: Prior events for same head SHA → AlreadyEvaluated (idempotent).
+    #[test]
+    fn determine_rollout_mode_same_head_sha_is_already_evaluated() {
+        let entries = vec![gate_activity_entry(
+            TRIPWIRE_EVENT_GATE_REPORT_ONLY,
+            "sha-aaa",
+            "key-1",
+            "2026-01-01T00:00:00Z",
+        )];
+        let mode = determine_rollout_mode(&entries, "sha-aaa");
+        assert_eq!(mode, RolloutMode::AlreadyEvaluated);
+    }
+
+    // AC: Prior events for different head SHA → Enforce (new push).
+    #[test]
+    fn determine_rollout_mode_different_head_sha_is_enforce() {
+        let entries = vec![gate_activity_entry(
+            TRIPWIRE_EVENT_GATE_REPORT_ONLY,
+            "sha-old",
+            "key-old",
+            "2026-01-01T00:00:00Z",
+        )];
+        let mode = determine_rollout_mode(&entries, "sha-new");
+        assert_eq!(mode, RolloutMode::Enforce);
+    }
+
+    // AC: Non-gate events are ignored; backfill when no gate events exist.
+    #[test]
+    fn determine_rollout_mode_ignores_non_gate_events() {
+        let entries = vec![ActivityEntryRef {
+            event_type: "unrelated.event".to_owned(),
+            payload: "{}".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        }];
+        let mode = determine_rollout_mode(&entries, "sha-aaa");
+        assert_eq!(mode, RolloutMode::Backfill);
+    }
+
+    // AC: Mixed events — gate event for different SHA dominates → Enforce.
+    #[test]
+    fn determine_rollout_mode_mixed_events_different_sha_is_enforce() {
+        let entries = vec![
+            ActivityEntryRef {
+                event_type: "unrelated.event".to_owned(),
+                payload: "{}".to_owned(),
+                created_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+            gate_activity_entry(
+                TRIPWIRE_EVENT_GATE_HELD,
+                "sha-old",
+                "key-old",
+                "2026-01-02T00:00:00Z",
+            ),
+        ];
+        let mode = determine_rollout_mode(&entries, "sha-new");
+        assert_eq!(mode, RolloutMode::Enforce);
+    }
+
+    // AC: Multiple gate events for different SHAs, then same SHA →
+    // AlreadyEvaluated (same SHA takes precedence).
+    #[test]
+    fn determine_rollout_mode_multiple_events_same_sha_is_already_evaluated() {
+        let entries = vec![
+            gate_activity_entry(
+                TRIPWIRE_EVENT_GATE_REPORT_ONLY,
+                "sha-old",
+                "key-old",
+                "2026-01-01T00:00:00Z",
+            ),
+            gate_activity_entry(
+                TRIPWIRE_EVENT_GATE_HELD,
+                "sha-mid",
+                "key-mid",
+                "2026-01-02T00:00:00Z",
+            ),
+            gate_activity_entry(
+                TRIPWIRE_EVENT_GATE_PASSED,
+                "sha-aaa",
+                "key-cur",
+                "2026-01-03T00:00:00Z",
+            ),
+        ];
+        let mode = determine_rollout_mode(&entries, "sha-aaa");
+        assert_eq!(mode, RolloutMode::AlreadyEvaluated);
+    }
+
+    // ── Rollout mode: is_tripwire_gate_event ─────────────────────────────
+
+    #[test]
+    fn is_tripwire_gate_event_recognizes_all_three_types() {
+        assert!(is_tripwire_gate_event(TRIPWIRE_EVENT_GATE_HELD));
+        assert!(is_tripwire_gate_event(TRIPWIRE_EVENT_GATE_PASSED));
+        assert!(is_tripwire_gate_event(TRIPWIRE_EVENT_GATE_REPORT_ONLY));
+    }
+
+    #[test]
+    fn is_tripwire_gate_event_rejects_non_gate_types() {
+        assert!(!is_tripwire_gate_event("tripwire.hold.released"));
+        assert!(!is_tripwire_gate_event("tripwire.tamper.label_removed"));
+        assert!(!is_tripwire_gate_event("unrelated.event"));
+    }
+
+    // ── Rollout mode: policy report-only override ────────────────────────
+
+    /// Backfill policy must force all findings to report-only.
+    #[test]
+    fn make_report_only_forces_all_rules_to_report_only() {
+        let policy = TripwirePolicy::default();
+        let report_only = policy.make_report_only();
+
+        assert!(report_only.migration.report_only);
+        assert!(report_only.dependency_identity.report_only);
+        assert!(report_only.network_egress.report_only);
+        assert!(report_only.unsafe_code.report_only);
+        assert!(report_only.boundary_path.report_only);
+        assert!(report_only.large_delete_rewrite.report_only);
+        assert!(report_only.ci_workflow.report_only);
+
+        // All rules must still be enabled.
+        assert!(report_only.migration.enabled);
+        assert!(report_only.dependency_identity.enabled);
+        assert!(report_only.network_egress.enabled);
+        assert!(report_only.unsafe_code.enabled);
+        assert!(report_only.boundary_path.enabled);
+        assert!(report_only.large_delete_rewrite.enabled);
+        assert!(report_only.ci_workflow.enabled);
+    }
+
+    /// Backfill evaluation of migration change must produce ReportOnly
+    /// (not Held).
+    #[test]
+    fn backfill_migration_change_produces_report_only() {
+        let policy = TripwirePolicy::default().make_report_only();
+        let files = vec![pr_file(
+            "migrations/20260101_create_users.sql",
+            "added",
+            20,
+            0,
+        )];
+        let decision = evaluate_from_pr_files_with_policy(files, policy);
+        assert_eq!(decision.outcome, GateOutcome::ReportOnly);
+        assert_eq!(decision.enforcement_finding_count, 0);
+        assert!(decision.report_only_finding_count > 0);
+        // Event type must be report-only.
+        assert_eq!(event_type_for(&decision), TRIPWIRE_EVENT_GATE_REPORT_ONLY);
+    }
+
+    /// Backfill evaluation of CI workflow change must produce ReportOnly.
+    #[test]
+    fn backfill_ci_workflow_change_produces_report_only() {
+        let policy = TripwirePolicy::default().make_report_only();
+        let files = vec![pr_file(".github/workflows/ci.yml", "modified", 15, 5)];
+        let decision = evaluate_from_pr_files_with_policy(files, policy);
+        assert_eq!(decision.outcome, GateOutcome::ReportOnly);
+    }
+
+    /// Backfill evaluation of all seven rule families must produce
+    /// ReportOnly (not Held) even though every rule trips.
+    #[test]
+    fn backfill_all_seven_rules_produce_report_only() {
+        let policy = TripwirePolicy::default().make_report_only();
+        let files = vec![
+            pr_file("migrations/001.sql", "added", 10, 0),
+            pr_file("Cargo.toml", "modified", 2, 1),
+            pr_file_with_patch(
+                "src/webhook.rs",
+                "modified",
+                2,
+                0,
+                "@@ -1,0 +1,2 @@\n+Webhook::register(endpoint);\n+notify(payload);\n",
+            ),
+            pr_file_with_patch(
+                "src/ffi.rs",
+                "modified",
+                2,
+                0,
+                "@@ -1,0 +1,2 @@\n+unsafe {\n+    ptr::read_volatile(addr);\n",
+            ),
+            pr_file("src/auth/mod.rs", "added", 50, 0),
+            pr_file("src/legacy.rs", "modified", 5, 600),
+            pr_file(".github/workflows/ci.yml", "modified", 10, 5),
+        ];
+
+        let decision = evaluate_from_pr_files_with_policy(files, policy);
+        assert_eq!(decision.outcome, GateOutcome::ReportOnly);
+        assert_eq!(decision.enforcement_finding_count, 0);
+        assert!(decision.report_only_finding_count > 0);
+        assert_eq!(event_type_for(&decision), TRIPWIRE_EVENT_GATE_REPORT_ONLY);
+
+        // All findings must be report-only severity.
+        for f in &decision.findings {
+            assert_eq!(f.severity, TripwireFindingSeverity::ReportOnly);
+        }
+    }
+
+    // ── Rollout mode: idempotency keys change with head SHA / policy ────
+
+    /// Idempotency key must change when head SHA changes (same policy).
+    #[test]
+    fn idempotency_key_changes_with_head_sha() {
+        let files = vec![pr_file("migrations/001.sql", "added", 10, 0)];
+
+        let changed = convert_pr_files(&files);
+        let input_a = TripwireEvaluationInput {
+            task_id: "task-001".to_owned(),
+            project_id: "proj-001".to_owned(),
+            pr_number: Some(42),
+            head_sha: "sha-aaa".to_owned(),
+            policy: TripwirePolicy::default(),
+            allowlist_revision: None,
+            changed_files: changed.clone(),
+        };
+        let input_b = TripwireEvaluationInput {
+            task_id: "task-001".to_owned(),
+            project_id: "proj-001".to_owned(),
+            pr_number: Some(42),
+            head_sha: "sha-bbb".to_owned(),
+            policy: TripwirePolicy::default(),
+            allowlist_revision: None,
+            changed_files: changed,
+        };
+
+        let d_a = run_gate(&input_a).decision;
+        let d_b = run_gate(&input_b).decision;
+        assert_ne!(
+            d_a.idempotency_key, d_b.idempotency_key,
+            "idempotency key must change when head SHA changes"
+        );
+    }
+
+    /// Idempotency key must change when policy revision changes (same
+    /// head SHA).
+    #[test]
+    fn idempotency_key_changes_with_policy_revision() {
+        let files = vec![pr_file("migrations/001.sql", "added", 10, 0)];
+
+        let changed = convert_pr_files(&files);
+
+        let mut policy_v1 = TripwirePolicy::default();
+        policy_v1.policy_revision = "org-policy:1".to_owned();
+
+        let mut policy_v2 = TripwirePolicy::default();
+        policy_v2.policy_revision = "org-policy:2".to_owned();
+
+        let input_v1 = TripwireEvaluationInput {
+            task_id: "task-001".to_owned(),
+            project_id: "proj-001".to_owned(),
+            pr_number: Some(42),
+            head_sha: "sha-aaa".to_owned(),
+            policy: policy_v1,
+            allowlist_revision: None,
+            changed_files: changed.clone(),
+        };
+        let input_v2 = TripwireEvaluationInput {
+            task_id: "task-001".to_owned(),
+            project_id: "proj-001".to_owned(),
+            pr_number: Some(42),
+            head_sha: "sha-aaa".to_owned(),
+            policy: policy_v2,
+            allowlist_revision: None,
+            changed_files: changed,
+        };
+
+        let d_v1 = run_gate(&input_v1).decision;
+        let d_v2 = run_gate(&input_v2).decision;
+        assert_ne!(
+            d_v1.idempotency_key, d_v2.idempotency_key,
+            "idempotency key must change when policy revision changes"
+        );
+    }
+
+    /// Duplicate backfill for same task/head/policy is idempotent — the
+    /// same gate decision idempotency key is produced.
+    #[test]
+    fn duplicate_backfill_same_key() {
+        let files = vec![pr_file("migrations/001.sql", "added", 10, 0)];
+        let d1 = evaluate_from_pr_files(files.clone());
+        let d2 = evaluate_from_pr_files(files);
+        assert_eq!(d1.idempotency_key, d2.idempotency_key);
+        assert_eq!(d1.outcome, d2.outcome);
     }
 }

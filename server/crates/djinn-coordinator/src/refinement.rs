@@ -1079,9 +1079,9 @@ mod tests {
     fn restored_awaiting_review_rebuilds_parked_state() {
         let state = RefinementLoopState::restored_awaiting_review(
             "p1",
-            5,               // refined revision seq
-            2,               // snapshot revision seq
-            3,               // current round
+            5, // refined revision seq
+            2, // snapshot revision seq
+            3, // current round
             Some("user-9".to_owned()),
             Some(StopReason::RoundCap),
         );
@@ -1099,9 +1099,7 @@ mod tests {
 
     #[test]
     fn restored_awaiting_review_resolves_like_a_live_park() {
-        let mut state = RefinementLoopState::restored_awaiting_review(
-            "p1", 4, 1, 2, None, None,
-        );
+        let mut state = RefinementLoopState::restored_awaiting_review("p1", 4, 1, 2, None, None);
         // The human accepts: the loop completes exactly as a non-restarted park.
         state.resolve_human_review(true, false);
         assert!(state.is_complete());
