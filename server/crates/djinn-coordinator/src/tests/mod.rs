@@ -1390,3 +1390,9 @@ mod operator_explanation_tests;
 
 #[cfg(test)]
 mod raw_signal_bypass_guard;
+
+#[cfg(test)]
+mod tripwire_planner_escalation;
+
+#[cfg(test)]
+mod escalation_ceiling;

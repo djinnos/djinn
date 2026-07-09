@@ -320,6 +320,40 @@ pub(super) const REOPEN_INTERVENTION_THRESHOLD: i64 = 3;
 /// scoped task against the existing branch) can finish it.
 pub(super) const MAX_PLANNER_INTERVENTIONS: i64 = 1;
 
+/// Autonomous-escalation ceiling: the maximum number of held-remediation
+/// escalations (`planner-park-escalation` or legacy `human-review-hold`
+/// blockers) the board will spend on a single source task before it gives up
+/// LOUDLY instead of parking it for a person.
+///
+/// Every loop-breaker rung (second-strike, CI-loop, arbiter-deadline park) now
+/// routes to an autonomous planner-park escalation rather than a human-review
+/// hold. To keep that ladder FINITE — the operator directive is zero human
+/// holds, but the board must not escalate forever — the coordinator counts the
+/// held-remediation blockers already created for the source (see
+/// `planner_escalation_count`). Once that count reaches this ceiling, the next
+/// loop-breaker terminally fails (ForceClose) the source with a reason
+/// documenting the exhausted ladder rather than creating another escalation. A
+/// planner can always resurrect the work from the epic level.
+pub(super) const MAX_AUTONOMOUS_ESCALATIONS: i64 = 3;
+
+/// Same-signature CI dead-end threshold: the number of consecutive identical
+/// required-CI failures (same failure fingerprint) on a PR whose head has NOT
+/// advanced since the last CI-loop remediation ran against it, after which the
+/// coordinator escalates the source instead of deferring worker dispatch
+/// forever.
+///
+/// Incident ay3d: an `open` worker task with a failing required-CI PR whose
+/// `last_remediation_base_sha` equals the current head (a remediation already
+/// ran against that exact head and produced no new push) is deferred by the
+/// respawn guard on EVERY ready pass — indefinitely, with no escalation and no
+/// strike accrual, and no manual state-machine lever exists from `open`. This
+/// is a dispatch-time dead-end class alongside the second-strike / CI-loop /
+/// tripwire rungs. Once the durable `same_signature_count` reaches this
+/// threshold the coordinator routes the source into the autonomous escalation
+/// ladder (planner-park escalation below the ceiling, terminal-fail at it)
+/// rather than deferring the worker forever.
+pub(super) const CI_SAME_SIGNATURE_ESCALATION_THRESHOLD: i64 = 3;
+
 /// Number of CONSECUTIVE stall-cancelled sessions (with no durable task-status
 /// progress between them) after which the coordinator routes the task to a
 /// Planner intervention instead of blindly redispatching it again.
