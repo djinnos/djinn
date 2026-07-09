@@ -468,7 +468,7 @@ pub(crate) async fn call_write(
     worktree_path: &Path,
     project_id: Option<&str>,
     #[allow(unused_variables)] session_task_id: Option<&str>,
-    #[allow(unused_variables)] session_role: Option<&str>,
+    session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: WriteParams = parse_args(arguments)?;
     let path = resolve_path(&p.path, worktree_path);
@@ -507,14 +507,30 @@ pub(crate) async fn call_write(
                         }
                         _ => e,
                     })?;
-            }
 
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| format!("create dirs failed: {e}"))?;
-            }
-            tokio::fs::write(&path, &p.content)
+                    // GateGuard: enforce worker read-coverage gate before
+                    // mutation. call_write overwrites the entire file, so the
+                    // mutation span is 0..file_size.
+                    let file_size = tokio::fs::metadata(&path)
+                        .await
+                        .map(|m| m.len() as usize)
+                        .unwrap_or(0);
+                    gate_guard_edit_check(
+                        state,
+                        session_role,
+                        &worktree_path.display().to_string(),
+                        &path,
+                        0..file_size,
+                    )
+                    .await?;
+                }
+
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| format!("create dirs failed: {e}"))?;
+                }
+                tokio::fs::write(&path, &p.content)
                 .await
                 .map_err(|e| format!("write failed: {e}"))?;
 
@@ -874,7 +890,7 @@ pub(crate) async fn call_apply_patch(
     worktree_path: &Path,
     project_id: Option<&str>,
     #[allow(unused_variables)] session_task_id: Option<&str>,
-    #[allow(unused_variables)] session_role: Option<&str>,
+    session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: ApplyPatchParams = parse_args(arguments)?;
 
@@ -914,6 +930,13 @@ pub(crate) async fn call_apply_patch(
                             e
                         }
                     })?;
+
+                // GateGuard: enforce worker read-coverage gate before
+                // mutation. Conservative: require full-file coverage for
+                // update/delete since exact touched spans are not proven
+                // from the patch parser.
+                gate_guard_edit_check(state, session_role, &worktree_key, &resolved, 0..usize::MAX)
+                    .await?;
             }
             crate::patch::FileOp::Add { .. } => {
                 // New files don't need FileTime assertion
