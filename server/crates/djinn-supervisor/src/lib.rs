@@ -5595,6 +5595,10 @@ mod tests {
         /// zkk9: records task_ids passed to `complete_monitored_reopen` so
         /// terminal-outcome tests can assert the monitored attempt was closed.
         complete_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        /// mshn: records (task_id, decision, evidence_json) passed to
+        /// `record_arbiter_decision` so approve evidence tests can assert
+        /// the decision payload was recorded on the arbitration row.
+        recorded_decisions: std::sync::Arc<std::sync::Mutex<Vec<RecordedDecisionCall>>>,
         /// zkk9: expected role for `execute_stage`.  Defaults to `Lead` for
         /// arbiter gate tests; set to `Worker` for monitored-reopen completion
         /// tests that simulate a worker task-run.
@@ -5609,6 +5613,15 @@ mod tests {
         directive: String,
         verification_command: String,
         exclude_models: Vec<String>,
+    }
+
+    /// Recorded `record_arbiter_decision` call for assertion.
+    #[derive(Clone, Debug)]
+    #[allow(dead_code)]
+    struct RecordedDecisionCall {
+        task_id: String,
+        decision: String,
+        evidence_json: String,
     }
 
     #[async_trait]
@@ -5784,10 +5797,18 @@ mod tests {
 
         async fn record_arbiter_decision(
             &self,
-            _task_id: String,
-            _decision: String,
-            _evidence_json: String,
+            task_id: String,
+            decision: String,
+            evidence_json: String,
         ) -> Result<(), String> {
+            self.recorded_decisions
+                .lock()
+                .expect("recorded_decisions mutex poisoned")
+                .push(RecordedDecisionCall {
+                    task_id,
+                    decision,
+                    evidence_json,
+                });
             Ok(())
         }
 
@@ -5841,14 +5862,22 @@ mod tests {
         std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
-        let (root, supervisor, spec, transition_calls, open_pr_called, _reopen, _complete) =
-            build_arbiter_gate_test_env_with_reopen(
-                task_id,
-                project_id,
-                stage_outcome,
-                gate_result,
-            )
-            .await;
+        let (
+            root,
+            supervisor,
+            spec,
+            transition_calls,
+            open_pr_called,
+            _reopen,
+            _complete,
+            _decisions,
+        ) = build_arbiter_gate_test_env_with_reopen(
+            task_id,
+            project_id,
+            stage_outcome,
+            gate_result,
+        )
+        .await;
         (root, supervisor, spec, transition_calls, open_pr_called)
     }
 
@@ -5867,6 +5896,7 @@ mod tests {
         std::sync::Arc<std::sync::atomic::AtomicBool>,
         std::sync::Arc<std::sync::Mutex<Vec<MonitoredReopenCall>>>,
         std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<RecordedDecisionCall>>>,
     ) {
         let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
             .expect("temp test root");
@@ -5886,6 +5916,8 @@ mod tests {
         > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let complete_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_decisions: std::sync::Arc<std::sync::Mutex<Vec<RecordedDecisionCall>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let services: std::sync::Arc<dyn SupervisorServices> =
             std::sync::Arc::new(ArbiterGateTestServices {
@@ -5897,6 +5929,7 @@ mod tests {
                 open_pr_called: open_pr_called.clone(),
                 start_monitored_reopen_calls: start_monitored_reopen_calls.clone(),
                 complete_monitored_reopen_calls: complete_monitored_reopen_calls.clone(),
+                recorded_decisions: recorded_decisions.clone(),
                 expected_role: RoleKind::Lead,
             });
 
@@ -5927,6 +5960,7 @@ mod tests {
             open_pr_called,
             start_monitored_reopen_calls,
             complete_monitored_reopen_calls,
+            recorded_decisions,
         )
     }
 
@@ -5966,6 +6000,8 @@ mod tests {
         > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let complete_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_decisions: std::sync::Arc<std::sync::Mutex<Vec<RecordedDecisionCall>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let services: std::sync::Arc<dyn SupervisorServices> =
             std::sync::Arc::new(ArbiterGateTestServices {
@@ -5977,6 +6013,7 @@ mod tests {
                 open_pr_called: open_pr_called.clone(),
                 start_monitored_reopen_calls: start_monitored_reopen_calls.clone(),
                 complete_monitored_reopen_calls: complete_monitored_reopen_calls.clone(),
+                recorded_decisions: recorded_decisions.clone(),
                 expected_role: RoleKind::Worker,
             });
 
@@ -6233,20 +6270,27 @@ mod tests {
         //    command / excluded models and mark the attempt start.
         // 2. Fire `lead_intervention_complete` to return the task to `open`.
         // 3. NOT call open_pr (reopen is terminal for this run).
-        let (_root, supervisor, spec, transition_calls, _open_pr, reopen_calls, complete_calls) =
-            build_arbiter_gate_test_env_with_reopen(
-                "T-reopen-persist",
-                "proj-reopen",
-                StageOutcome::LeadReopen {
-                    reason: "needs different approach".into(),
-                    directive: "Fix the retry loop in dispatch.rs by adding a circuit breaker"
-                        .into(),
-                    verification_command: "cargo test -p djinn-coordinator".into(),
-                    exclude_models: vec!["gpt-4o-mini".into()],
-                },
-                Ok(ArbiterGateResult::Pass),
-            )
-            .await;
+        let (
+            _root,
+            supervisor,
+            spec,
+            transition_calls,
+            _open_pr,
+            reopen_calls,
+            complete_calls,
+            _decisions,
+        ) = build_arbiter_gate_test_env_with_reopen(
+            "T-reopen-persist",
+            "proj-reopen",
+            StageOutcome::LeadReopen {
+                reason: "needs different approach".into(),
+                directive: "Fix the retry loop in dispatch.rs by adding a circuit breaker".into(),
+                verification_command: "cargo test -p djinn-coordinator".into(),
+                exclude_models: vec!["gpt-4o-mini".into()],
+            },
+            Ok(ArbiterGateResult::Pass),
+        )
+        .await;
 
         let report = supervisor.run(spec).await.expect("supervisor run");
 
@@ -6367,19 +6411,27 @@ mod tests {
     async fn arbiter_reopen_does_not_call_open_pr() {
         // Reopen must NOT fall through to open_pr — it returns the task to
         // `open` for a fresh worker dispatch.
-        let (_root, supervisor, spec, _transition_calls, open_pr_called, _reopen_calls, _complete) =
-            build_arbiter_gate_test_env_with_reopen(
-                "T-reopen-no-pr",
-                "proj-reopen",
-                StageOutcome::LeadReopen {
-                    reason: "blocked on deps".into(),
-                    directive: "Update the API client to use the new endpoint".into(),
-                    verification_command: "cargo test".into(),
-                    exclude_models: vec![],
-                },
-                Ok(ArbiterGateResult::Pass),
-            )
-            .await;
+        let (
+            _root,
+            supervisor,
+            spec,
+            _transition_calls,
+            open_pr_called,
+            _reopen_calls,
+            _complete,
+            _decisions,
+        ) = build_arbiter_gate_test_env_with_reopen(
+            "T-reopen-no-pr",
+            "proj-reopen",
+            StageOutcome::LeadReopen {
+                reason: "blocked on deps".into(),
+                directive: "Update the API client to use the new endpoint".into(),
+                verification_command: "cargo test".into(),
+                exclude_models: vec![],
+            },
+            Ok(ArbiterGateResult::Pass),
+        )
+        .await;
 
         let _report = supervisor.run(spec).await.expect("supervisor run");
 
@@ -6488,6 +6540,731 @@ mod tests {
             1,
             "complete_monitored_reopen must be called once for loop-guard trip, got: {complete:?}"
         );
+    }
+
+    // ── mshn: submit_decision contract regression tests ─────────────────────
+    //
+    // Hardened regressions for the externally visible decision contract:
+    // park dossiers, one-shot monitored reopen directives, no-eligible-model
+    // parking, approve gate behavior, and attempt markers.
+
+    /// Build a reviewer-flow test environment for monitored-reopen
+    /// completion tests.  Returns the same trackers as
+    /// [`build_worker_flow_test_env`] but configures the spec for
+    /// `SupervisorFlow::ReviewResume` (reviewer-only) and sets `expected_role`
+    /// to `Reviewer`.
+    async fn build_reviewer_flow_test_env(
+        task_id: &str,
+        project_id: &str,
+        stage_outcome: StageOutcome,
+    ) -> (
+        tempfile::TempDir,
+        TaskRunSupervisor,
+        TaskRunSpec,
+        std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::Arc<std::sync::Mutex<Vec<MonitoredReopenCall>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let mirror = std::sync::Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let transition_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let open_pr_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let start_monitored_reopen_calls: std::sync::Arc<
+            std::sync::Mutex<Vec<MonitoredReopenCall>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let complete_monitored_reopen_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_decisions: std::sync::Arc<std::sync::Mutex<Vec<RecordedDecisionCall>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let services: std::sync::Arc<dyn SupervisorServices> =
+            std::sync::Arc::new(ArbiterGateTestServices {
+                cancel: CancellationToken::new(),
+                task: fixture_task(task_id, project_id),
+                stage_outcome,
+                gate_result: Ok(ArbiterGateResult::Pass),
+                transition_calls: transition_calls.clone(),
+                open_pr_called: open_pr_called.clone(),
+                start_monitored_reopen_calls: start_monitored_reopen_calls.clone(),
+                complete_monitored_reopen_calls: complete_monitored_reopen_calls.clone(),
+                recorded_decisions: recorded_decisions.clone(),
+                expected_role: RoleKind::Reviewer,
+            });
+
+        let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
+        let spec = TaskRunSpec {
+            task_run_id: format!("run-reviewer-{task_id}"),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: format!("djinn/{task_id}"),
+            flow: SupervisorFlow::ReviewResume,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        };
+
+        (
+            root,
+            supervisor,
+            spec,
+            transition_calls,
+            open_pr_called,
+            start_monitored_reopen_calls,
+            complete_monitored_reopen_calls,
+        )
+    }
+
+    // ── AC1: submit_decision(park) regression tests ─────────────────────────
+
+    /// A valid arbiter `park` must fire exactly one `arbiter_park` transition
+    /// carrying the park dossier JSON, produce a `Closed` outcome, and NOT
+    /// fall through to `open_pr`.
+    #[tokio::test]
+    async fn arbiter_park_persists_dossier_and_emits_closed_outcome() {
+        let (_root, supervisor, spec, transition_calls, open_pr_called) =
+            build_arbiter_gate_test_env(
+                "T-park-dossier",
+                "proj-park",
+                StageOutcome::LeadParked {
+                    park_dossier_json: r#"{"attempted":"fixed retry loop","root_cause":"race condition in dispatch","recommended_fix":"add mutex guard","git_evidence":{"mirror_head_sha":"abc123","github_head_sha":"def456","pr_url":"https://github.com/test/repo/pull/42","failing_ci_job_ids":["job-1","job-2"]}}"#.into(),
+                },
+                Ok(ArbiterGateResult::Pass),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // arbiter_park transition fired with the dossier as reason.
+        let calls = transition_calls.lock().unwrap();
+        let park_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.action == "arbiter_park")
+            .collect();
+        assert_eq!(
+            park_calls.len(),
+            1,
+            "park must fire exactly one arbiter_park transition, got: {calls:?}"
+        );
+        let reason = park_calls[0]
+            .reason
+            .as_deref()
+            .expect("arbiter_park transition must carry a reason (the dossier)");
+        assert!(
+            reason.contains("attempted") && reason.contains("root_cause"),
+            "park dossier must contain structured fields, got: {reason}"
+        );
+        assert!(
+            reason.contains("recommended_fix") && reason.contains("git_evidence"),
+            "park dossier must contain recommended_fix and git_evidence, got: {reason}"
+        );
+        assert!(
+            reason.contains("mirror_head_sha") && reason.contains("github_head_sha"),
+            "park dossier git_evidence must contain mirror/github SHAs from qk8b, got: {reason}"
+        );
+        assert!(
+            reason.contains("pr_url"),
+            "park dossier git_evidence must contain pr_url, got: {reason}"
+        );
+        assert!(
+            reason.contains("failing_ci_job_ids"),
+            "park dossier git_evidence must contain failing_ci_job_ids, got: {reason}"
+        );
+
+        // Park is terminal — produces Closed.
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Closed { .. }),
+            "park must produce Closed, got: {:?}",
+            report.outcome
+        );
+
+        // Park must NOT fall through to open_pr.
+        assert!(
+            !open_pr_called.load(std::sync::atomic::Ordering::SeqCst),
+            "park must NOT fall through to open_pr"
+        );
+
+        // Park must NOT fire lead_approve or other decision transitions.
+        assert!(
+            !calls.iter().any(|c| c.action == "lead_approve"),
+            "park must NOT fire lead_approve, got: {calls:?}"
+        );
+    }
+
+    /// Park dossier with all required structured evidence fields must round-trip
+    /// through the supervisor's `arbiter_park` transition path unchanged.
+    #[tokio::test]
+    async fn arbiter_park_dossier_structured_evidence_fields_preserved() {
+        let dossier = serde_json::json!({
+            "attempted": "implemented circuit breaker in dispatch.rs",
+            "root_cause": "unbounded retry loop when provider returns 429",
+            "recommended_fix": "add exponential backoff with max_retries=3",
+            "git_evidence": {
+                "mirror_head_sha": "aabbccdd11223344",
+                "github_head_sha": "eeff001122334455",
+                "pr_url": "https://github.com/test/repo/pull/99",
+                "failing_ci_job_ids": ["ci-job-789"]
+            }
+        });
+        let dossier_json = dossier.to_string();
+
+        let (_root, supervisor, spec, transition_calls, _open_pr) = build_arbiter_gate_test_env(
+            "T-park-evidence",
+            "proj-park",
+            StageOutcome::LeadParked {
+                park_dossier_json: dossier_json.clone(),
+            },
+            Ok(ArbiterGateResult::Pass),
+        )
+        .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        let calls = transition_calls.lock().unwrap();
+        let park_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.action == "arbiter_park")
+            .collect();
+        assert_eq!(park_calls.len(), 1);
+
+        // The reason must be the exact dossier JSON (no transformation).
+        let reason = park_calls[0].reason.as_deref().unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(reason).expect("park reason must be valid JSON");
+        assert_eq!(
+            parsed["attempted"].as_str().unwrap(),
+            "implemented circuit breaker in dispatch.rs"
+        );
+        assert_eq!(
+            parsed["root_cause"].as_str().unwrap(),
+            "unbounded retry loop when provider returns 429"
+        );
+        assert_eq!(
+            parsed["recommended_fix"].as_str().unwrap(),
+            "add exponential backoff with max_retries=3"
+        );
+        assert_eq!(
+            parsed["git_evidence"]["mirror_head_sha"].as_str().unwrap(),
+            "aabbccdd11223344"
+        );
+        assert_eq!(
+            parsed["git_evidence"]["github_head_sha"].as_str().unwrap(),
+            "eeff001122334455"
+        );
+        assert_eq!(
+            parsed["git_evidence"]["pr_url"].as_str().unwrap(),
+            "https://github.com/test/repo/pull/99"
+        );
+        assert_eq!(
+            parsed["git_evidence"]["failing_ci_job_ids"][0]
+                .as_str()
+                .unwrap(),
+            "ci-job-789"
+        );
+
+        // Closed outcome with arbiter_parked prefix.
+        match &report.outcome {
+            TaskRunOutcome::Closed { reason } => {
+                assert!(
+                    reason.starts_with("arbiter_parked:"),
+                    "Closed reason must start with 'arbiter_parked:', got: {reason}"
+                );
+            }
+            other => panic!("park must produce Closed, got: {other:?}"),
+        }
+    }
+
+    /// Park must emit a typed `arbiter_park` transition that the host-side
+    /// interception uses to create a HumanReview hold. Verify that the
+    /// transition action is exactly `arbiter_park` (not `force_close` or
+    /// any other transition).
+    #[tokio::test]
+    async fn arbiter_park_transition_is_exactly_arbiter_park_for_human_review_hold() {
+        let (_root, supervisor, spec, transition_calls, _open_pr) =
+            build_arbiter_gate_test_env(
+                "T-park-hold-type",
+                "proj-park",
+                StageOutcome::LeadParked {
+                    park_dossier_json: r#"{"attempted":"tried X","root_cause":"Y","recommended_fix":"Z","git_evidence":{}}"#.into(),
+                },
+                Ok(ArbiterGateResult::Pass),
+            )
+            .await;
+
+        let _report = supervisor.run(spec).await.expect("supervisor run");
+
+        let calls = transition_calls.lock().unwrap();
+        // The only transition must be `arbiter_park` (plus the pre-stage transitions).
+        // No `force_close`, `lead_approve`, or `lead_intervention_complete`.
+        assert!(
+            !calls.iter().any(|c| c.action == "force_close"),
+            "park must NOT fire force_close — that would skip the HumanReview hold, got: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.action == "lead_approve"),
+            "park must NOT fire lead_approve, got: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.action == "arbiter_park"),
+            "park must fire arbiter_park transition for HumanReview hold creation, got: {calls:?}"
+        );
+    }
+
+    /// A cancellation-gated park must NOT fire the `arbiter_park` transition
+    /// when the run is cancelled, leaving the task in `in_lead_intervention`.
+    #[tokio::test]
+    async fn arbiter_park_skipped_on_cancellation() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let mirror = std::sync::Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(
+                "proj-park-cancel",
+                &format!("file://{}", source_dir.display()),
+            )
+            .await
+            .expect("install fixture mirror");
+
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // Pre-cancel.
+
+        let transition_calls =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+        let services: std::sync::Arc<dyn SupervisorServices> =
+            std::sync::Arc::new(ArbiterGateTestServices {
+                cancel,
+                task: fixture_task("T-park-cancel", "proj-park-cancel"),
+                stage_outcome: StageOutcome::LeadParked {
+                    park_dossier_json: r#"{"attempted":"x","root_cause":"y","recommended_fix":"z","git_evidence":{}}"#.into(),
+                },
+                gate_result: Ok(ArbiterGateResult::Pass),
+                transition_calls: transition_calls.clone(),
+                open_pr_called: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                start_monitored_reopen_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                complete_monitored_reopen_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                recorded_decisions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                expected_role: RoleKind::Lead,
+            });
+
+        let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
+        let spec = TaskRunSpec {
+            task_run_id: "run-park-cancel".into(),
+            task_id: "T-park-cancel".into(),
+            project_id: "proj-park-cancel".into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/park-cancel".into(),
+            flow: SupervisorFlow::Lead,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        };
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // Cancelled run produces Interrupted.
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Interrupted),
+            "cancelled park must produce Interrupted, got: {:?}",
+            report.outcome
+        );
+
+        // arbiter_park must NOT be fired on a cancelled run.
+        let calls = transition_calls.lock().unwrap();
+        assert!(
+            !calls.iter().any(|c| c.action == "arbiter_park"),
+            "cancelled park must NOT fire arbiter_park transition, got: {calls:?}"
+        );
+    }
+
+    // ── AC2: submit_decision(reopen) — additional regression tests ──────────
+
+    /// Reopen with empty `exclude_models` must still persist the directive
+    /// and fire the transition. The empty vec is a valid one-shot reopen.
+    #[tokio::test]
+    async fn arbiter_reopen_empty_exclude_models_still_persists_directive() {
+        let (
+            _root,
+            supervisor,
+            spec,
+            _transition_calls,
+            _open_pr,
+            reopen_calls,
+            complete_calls,
+            _decisions,
+        ) = build_arbiter_gate_test_env_with_reopen(
+            "T-reopen-empty-excl",
+            "proj-reopen",
+            StageOutcome::LeadReopen {
+                reason: "rescope needed".into(),
+                directive: "Refactor the auth middleware to use the new session API".into(),
+                verification_command: "cargo test -p djinn-auth".into(),
+                exclude_models: vec![],
+            },
+            Ok(ArbiterGateResult::Pass),
+        )
+        .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // Directive persisted with empty exclude_models.
+        let reopen = reopen_calls.lock().unwrap();
+        assert_eq!(reopen.len(), 1);
+        assert_eq!(
+            reopen[0].directive,
+            "Refactor the auth middleware to use the new session API"
+        );
+        assert!(
+            reopen[0].exclude_models.is_empty(),
+            "empty exclude_models must be preserved, got: {:?}",
+            reopen[0].exclude_models
+        );
+
+        // Terminal Closed.
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Closed { .. }),
+            "reopen must produce Closed, got: {:?}",
+            report.outcome
+        );
+
+        // complete_monitored_reopen must NOT be called on the arbiter run.
+        let complete = complete_calls.lock().unwrap();
+        assert_eq!(
+            complete.len(),
+            0,
+            "arbiter reopen run must NOT complete the monitored reopen"
+        );
+    }
+
+    /// Reopen with multiple `exclude_models` must persist them all.
+    #[tokio::test]
+    async fn arbiter_reopen_multiple_exclude_models_all_persisted() {
+        let (
+            _root,
+            supervisor,
+            spec,
+            _transition_calls,
+            _open_pr,
+            reopen_calls,
+            _complete,
+            _decisions,
+        ) = build_arbiter_gate_test_env_with_reopen(
+            "T-reopen-multi-excl",
+            "proj-reopen",
+            StageOutcome::LeadReopen {
+                reason: "model was wrong choice".into(),
+                directive: "Use the database-backed approach instead of file-based".into(),
+                verification_command: "cargo test --workspace".into(),
+                exclude_models: vec![
+                    "gpt-4o-mini".into(),
+                    "claude-3-haiku".into(),
+                    "deepseek-v3".into(),
+                ],
+            },
+            Ok(ArbiterGateResult::Pass),
+        )
+        .await;
+
+        let _report = supervisor.run(spec).await.expect("supervisor run");
+
+        let reopen = reopen_calls.lock().unwrap();
+        assert_eq!(reopen.len(), 1);
+        assert_eq!(
+            reopen[0].exclude_models,
+            vec![
+                "gpt-4o-mini".to_string(),
+                "claude-3-haiku".to_string(),
+                "deepseek-v3".to_string(),
+            ],
+            "all exclude_models must be persisted verbatim"
+        );
+    }
+
+    // ── AC3: Monitored reopen attempt markers ──────────────────────────────
+
+    /// A reviewer rejection in a review task-run must call
+    /// `complete_monitored_reopen` — the reviewer's rejection is a terminal
+    /// outcome that closes the monitored attempt cycle.
+    #[tokio::test]
+    async fn reviewer_rejection_completes_monitored_reopen() {
+        let (_root, supervisor, spec, _transition_calls, _open_pr, _reopen, complete_calls) =
+            build_reviewer_flow_test_env(
+                "T-reviewer-reject-complete",
+                "proj-rr",
+                StageOutcome::ReviewerRejected {
+                    feedback: "the fix introduces a new race condition".into(),
+                },
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Failed { .. }),
+            "reviewer rejection must produce Failed, got: {:?}",
+            report.outcome
+        );
+
+        // The post-loop completion hook must fire for reviewer rejection
+        // (terminal outcome in a separate task-run).
+        let complete = complete_calls.lock().unwrap();
+        assert_eq!(
+            complete.len(),
+            1,
+            "complete_monitored_reopen must be called once for reviewer rejection, got: {complete:?}"
+        );
+    }
+
+    /// An Interrupted run must NOT call `complete_monitored_reopen` —
+    /// cancellation is not a genuine terminal outcome of the attempt.
+    #[tokio::test]
+    async fn interrupted_run_does_not_complete_monitored_reopen() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let mirror = std::sync::Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(
+                "proj-interrupted",
+                &format!("file://{}", source_dir.display()),
+            )
+            .await
+            .expect("install fixture mirror");
+
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // Pre-cancel.
+
+        let complete_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let services: std::sync::Arc<dyn SupervisorServices> =
+            std::sync::Arc::new(ArbiterGateTestServices {
+                cancel,
+                task: fixture_task("T-interrupted", "proj-interrupted"),
+                stage_outcome: StageOutcome::WorkerDone,
+                gate_result: Ok(ArbiterGateResult::Pass),
+                transition_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                open_pr_called: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                start_monitored_reopen_calls: std::sync::Arc::new(
+                    std::sync::Mutex::new(Vec::new()),
+                ),
+                complete_monitored_reopen_calls: complete_calls.clone(),
+                recorded_decisions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                expected_role: RoleKind::Worker,
+            });
+
+        let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
+        let spec = TaskRunSpec {
+            task_run_id: "run-interrupted".into(),
+            task_id: "T-interrupted".into(),
+            project_id: "proj-interrupted".into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/interrupted".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        };
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Interrupted),
+            "cancelled run must produce Interrupted, got: {:?}",
+            report.outcome
+        );
+
+        // complete_monitored_reopen must NOT be called on Interrupted.
+        let complete = complete_calls.lock().unwrap();
+        assert_eq!(
+            complete.len(),
+            0,
+            "complete_monitored_reopen must NOT be called on Interrupted, got: {complete:?}"
+        );
+    }
+
+    // ── AC4: submit_decision(approve) — evidence recording regression ──────
+
+    /// A green-gate approve must call `record_arbiter_decision` with
+    /// decision="approve" and the evidence JSON passed through unchanged.
+    #[tokio::test]
+    async fn arbiter_approve_green_records_evidence_on_arbitration_row() {
+        let evidence =
+            r#"{"summary":"code compiles and tests pass","reviewer_notes":"looks correct"}"#;
+        let (_root, supervisor, spec, _transition_calls, _open_pr, _reopen, _complete, decisions) =
+            build_arbiter_gate_test_env_with_reopen(
+                "T-approve-evidence",
+                "proj-approve",
+                StageOutcome::LeadApproved {
+                    evidence: evidence.to_string(),
+                },
+                Ok(ArbiterGateResult::Pass),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::PrOpened { .. }),
+            "green approve must produce PrOpened, got: {:?}",
+            report.outcome
+        );
+
+        // record_arbiter_decision was called with the correct decision and evidence.
+        let decs = decisions.lock().unwrap();
+        assert_eq!(
+            decs.len(),
+            1,
+            "record_arbiter_decision must be called exactly once for approve, got: {decs:?}"
+        );
+        assert_eq!(
+            decs[0].decision, "approve",
+            "decision must be 'approve', got: {}",
+            decs[0].decision
+        );
+        assert_eq!(
+            decs[0].evidence_json, evidence,
+            "evidence must be passed through unchanged, got: {}",
+            decs[0].evidence_json
+        );
+    }
+
+    /// A green-gate approve_conflict must call `record_arbiter_decision`
+    /// with decision="approve_conflict" and the evidence JSON.
+    #[tokio::test]
+    async fn arbiter_approve_conflict_green_records_evidence_on_arbitration_row() {
+        let evidence =
+            r#"{"summary":"approved despite merge conflict","conflict_files":["src/main.rs"]}"#;
+        let (_root, supervisor, spec, _transition_calls, _open_pr, _reopen, _complete, decisions) =
+            build_arbiter_gate_test_env_with_reopen(
+                "T-conflict-evidence",
+                "proj-approve",
+                StageOutcome::LeadApproveConflict {
+                    reason: "merge conflict detected".into(),
+                    evidence: evidence.to_string(),
+                },
+                Ok(ArbiterGateResult::Pass),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Closed { .. }),
+            "approve_conflict must produce Closed, got: {:?}",
+            report.outcome
+        );
+
+        let decs = decisions.lock().unwrap();
+        assert_eq!(
+            decs.len(),
+            1,
+            "record_arbiter_decision must be called exactly once for approve_conflict, got: {decs:?}"
+        );
+        assert_eq!(
+            decs[0].decision, "approve_conflict",
+            "decision must be 'approve_conflict', got: {}",
+            decs[0].decision
+        );
+        assert_eq!(
+            decs[0].evidence_json, evidence,
+            "evidence must be passed through unchanged, got: {}",
+            decs[0].evidence_json
+        );
+    }
+
+    /// A red-gate approve must NOT call `record_arbiter_decision` — the
+    /// arbitration row must remain unconsumed so the task can be
+    /// re-dispatched to the arbiter.
+    #[tokio::test]
+    async fn arbiter_approve_red_does_not_record_decision() {
+        let (_root, supervisor, spec, _transition_calls, _open_pr, _reopen, _complete, decisions) =
+            build_arbiter_gate_test_env_with_reopen(
+                "T-approve-red-no-record",
+                "proj-approve",
+                StageOutcome::LeadApproved {
+                    evidence: r#"{"summary":"should not be recorded"}"#.into(),
+                },
+                Ok(ArbiterGateResult::Blocked {
+                    feedback: "clippy failed with 3 errors".into(),
+                }),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Escalated { .. }),
+            "red gate must produce Escalated, got: {:?}",
+            report.outcome
+        );
+
+        // record_arbiter_decision must NOT be called on red gate.
+        let decs = decisions.lock().unwrap();
+        assert_eq!(
+            decs.len(),
+            0,
+            "red gate must NOT record decision (arbitration row stays unconsumed), got: {decs:?}"
+        );
+    }
+
+    /// An infra-error gate must still call `record_arbiter_decision`
+    /// (fail-open proceeds with the approval and records the evidence).
+    #[tokio::test]
+    async fn arbiter_approve_infra_error_records_decision_fail_open() {
+        let evidence = r#"{"summary":"approve on infra fail-open"}"#;
+        let (_root, supervisor, spec, _transition_calls, _open_pr, _reopen, _complete, decisions) =
+            build_arbiter_gate_test_env_with_reopen(
+                "T-approve-infra-record",
+                "proj-approve",
+                StageOutcome::LeadApproved {
+                    evidence: evidence.to_string(),
+                },
+                Err("database connection pool exhausted".into()),
+            )
+            .await;
+
+        let _report = supervisor.run(spec).await.expect("supervisor run");
+
+        // Infra error → fail-open → approve proceeds → record_arbiter_decision called.
+        let decs = decisions.lock().unwrap();
+        assert_eq!(
+            decs.len(),
+            1,
+            "infra fail-open must still record decision, got: {decs:?}"
+        );
+        assert_eq!(decs[0].decision, "approve");
+        assert_eq!(decs[0].evidence_json, evidence);
     }
 
     // ── CommitOutcome excluded-path propagation tests ─────────────────────
