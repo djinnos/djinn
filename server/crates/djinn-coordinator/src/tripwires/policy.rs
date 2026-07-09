@@ -84,7 +84,7 @@ pub enum PolicySource {
 
 /// Migration change detection: files created, changed, or deleted under the
 /// repository's migration directories (e.g. `migrations/`, `db/migrations/`,
-/// `prisma/migrations/`).
+/// `prisma/migrations/`, `migrations_postgres/`, database crate SQL paths).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MigrationRuleConfig {
     /// Master switch. `false` → rule is skipped entirely.
@@ -93,7 +93,7 @@ pub struct MigrationRuleConfig {
     /// not block the gate.
     pub report_only: bool,
     /// Glob patterns identifying migration files (e.g. `["migrations/**",
-    /// "db/migrations/**"]`).
+    /// "db/migrations/**", "migrations_postgres/**", "crates/*/migrations/**"]`).
     pub path_globs: Vec<String>,
 }
 
@@ -103,9 +103,19 @@ impl Default for MigrationRuleConfig {
             enabled: true,
             report_only: false,
             path_globs: vec![
+                // Standard migration directories
                 "migrations/**".to_owned(),
                 "db/migrations/**".to_owned(),
                 "prisma/migrations/**".to_owned(),
+                // Postgres-specific migration directories
+                "migrations_postgres/**".to_owned(),
+                "**/migrations_postgres/**".to_owned(),
+                // SQL files under database-related directories
+                "**/db/**/*.sql".to_owned(),
+                "**/database/**/*.sql".to_owned(),
+                // Database crate migrations (e.g., crates/db-core/migrations/**)
+                "crates/*/migrations/**".to_owned(),
+                "crates/*/migrations/**/*.sql".to_owned(),
             ],
         }
     }
@@ -141,19 +151,19 @@ impl Default for DependencyIdentityRuleConfig {
             major_version_bump_blocks: true,
             lockfile_change_blocks: false,
             manifest_paths: vec![
-                "Cargo.toml".to_owned(),
-                "package.json".to_owned(),
-                "pyproject.toml".to_owned(),
-                "go.mod".to_owned(),
+                "**/Cargo.toml".to_owned(),
+                "**/package.json".to_owned(),
+                "**/pyproject.toml".to_owned(),
+                "**/go.mod".to_owned(),
             ],
             lockfile_paths: vec![
-                "Cargo.lock".to_owned(),
-                "package-lock.json".to_owned(),
-                "pnpm-lock.yaml".to_owned(),
-                "yarn.lock".to_owned(),
-                "uv.lock".to_owned(),
-                "poetry.lock".to_owned(),
-                "go.sum".to_owned(),
+                "**/Cargo.lock".to_owned(),
+                "**/package-lock.json".to_owned(),
+                "**/pnpm-lock.yaml".to_owned(),
+                "**/yarn.lock".to_owned(),
+                "**/uv.lock".to_owned(),
+                "**/poetry.lock".to_owned(),
+                "**/go.sum".to_owned(),
             ],
         }
     }
