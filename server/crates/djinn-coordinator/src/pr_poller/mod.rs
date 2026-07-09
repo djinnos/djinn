@@ -84,6 +84,7 @@ mod pr_undraft;
 mod pr_watcher;
 mod state;
 mod tripwire_gate;
+mod tripwire_hold;
 
 #[cfg(test)]
 mod tests;

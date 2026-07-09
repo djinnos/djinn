@@ -33,6 +33,8 @@ fn enforcement_finding(rule_id: &str, path: &str, key: &str) -> TripwireFindingS
         severity: TripwireSeverity::HumanReviewRequired,
         evidence: TripwireEvidenceSpan::file(path),
         idempotency_key: key.to_owned(),
+        content_fingerprint: format!("fp:{key}"),
+        downgrade_reason: None,
     }
 }
 
@@ -43,6 +45,8 @@ fn report_only_finding(rule_id: &str, path: &str, key: &str) -> TripwireFindingS
         severity: TripwireSeverity::ReportOnly,
         evidence: TripwireEvidenceSpan::file(path),
         idempotency_key: key.to_owned(),
+        content_fingerprint: format!("fp:{key}"),
+        downgrade_reason: None,
     }
 }
 
@@ -104,6 +108,7 @@ fn hold_released_entry(
         released_by_role: "lead".to_owned(),
         rationale: "approved after review".to_owned(),
         released_findings,
+        carried_forward: false,
         idempotency_key: format!("sha256:release:{head_sha}"),
         released_at: Some(created_at.to_owned()),
     };

@@ -194,6 +194,33 @@ where
     }
 }
 
+/// Distinct head SHAs that carry at least one `tripwire.gate.held` event in
+/// `entries`, in first-seen order.
+///
+/// The hold-release producer iterates these to release **every** head that
+/// may still be held, not just the task row's current `github_head_sha`. The
+/// merge-boundary gate and the release emitter must not disagree on "current
+/// head": a hold pinned to an earlier CI-snapshot head must still be released
+/// when the hold is resolved, even though the task row's head has since
+/// advanced (incident: task `7tmi` — gate saw head `fd3d3670`, emitter used
+/// row head `e4e0ccb8`, release was a silent no-op).
+pub fn gate_held_head_shas<'a, I>(entries: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a ActivityEntryRef>,
+{
+    let mut seen: Vec<String> = Vec::new();
+    let mut set: HashSet<String> = HashSet::new();
+    for entry in entries {
+        if entry.event_type == TRIPWIRE_EVENT_GATE_HELD
+            && let Ok(payload) = serde_json::from_str::<TripwireGateDecisionPayload>(&entry.payload)
+            && set.insert(payload.head_sha.clone())
+        {
+            seen.push(payload.head_sha);
+        }
+    }
+    seen
+}
+
 // ─── Label tamper reconciliation ───────────────────────────────────────────
 
 /// Result of a label-tamper reconciliation check.
@@ -362,6 +389,8 @@ mod tests {
             severity: TripwireSeverity::HumanReviewRequired,
             evidence: TripwireEvidenceSpan::file(path),
             idempotency_key: key.to_owned(),
+            content_fingerprint: format!("fp:{key}"),
+            downgrade_reason: None,
         }
     }
 
@@ -372,6 +401,8 @@ mod tests {
             severity: TripwireSeverity::ReportOnly,
             evidence: TripwireEvidenceSpan::file(path),
             idempotency_key: key.to_owned(),
+            content_fingerprint: format!("fp:{key}"),
+            downgrade_reason: None,
         }
     }
 
@@ -428,6 +459,7 @@ mod tests {
             released_by_role: "lead".to_owned(),
             rationale: "approved after review".to_owned(),
             released_findings,
+            carried_forward: false,
             idempotency_key: format!("sha256:release:{head_sha}"),
             released_at: Some(created_at.to_owned()),
         };
@@ -829,6 +861,33 @@ mod tests {
         assert_eq!(refs.event_type, TRIPWIRE_EVENT_GATE_HELD);
         assert_eq!(refs.created_at, "2026-01-01T00:00:00Z");
         assert!(refs.payload.contains("tripwire.gate.held"));
+    }
+
+    // ── gate_held_head_shas ───────────────────────────────────────────────
+
+    /// Distinct held heads are returned in first-seen order (the release
+    /// producer iterates these to release every held head, not just the row's
+    /// current head — incident 7tmi).
+    #[test]
+    fn gate_held_head_shas_returns_distinct_heads() {
+        let f = enforcement_finding("migration_change", "migrations/001.sql", "k");
+        let entries = vec![
+            gate_held_entry("sha-a", vec![f.clone()], "2026-01-01T00:00:00Z"),
+            gate_held_entry("sha-b", vec![f.clone()], "2026-01-02T00:00:00Z"),
+            // Duplicate head must not repeat.
+            gate_held_entry("sha-a", vec![f.clone()], "2026-01-03T00:00:00Z"),
+            // Releases are not gate.held events and must be ignored here.
+            hold_released_entry("sha-a", vec![f], "2026-01-04T00:00:00Z"),
+        ];
+        let heads = gate_held_head_shas(&entries);
+        assert_eq!(heads, vec!["sha-a".to_owned(), "sha-b".to_owned()]);
+    }
+
+    /// No gate.held events → empty head list.
+    #[test]
+    fn gate_held_head_shas_empty_without_held() {
+        let entries: Vec<ActivityEntryRef> = Vec::new();
+        assert!(gate_held_head_shas(&entries).is_empty());
     }
 
     // ── Empty entries ─────────────────────────────────────────────────────

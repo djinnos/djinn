@@ -23,6 +23,7 @@
 
 pub mod active_hold;
 pub mod activity_payloads;
+pub mod carry_forward;
 pub mod engine;
 pub mod hold_release;
 pub mod policy;
@@ -41,7 +42,7 @@ pub mod rules;
 #[allow(unused_imports)]
 pub use active_hold::{
     ActiveHoldState, ActivityEntryRef, TamperReconciliation, build_tamper_reconciliation_key,
-    check_label_tamper, compute_active_hold_state,
+    check_label_tamper, compute_active_hold_state, gate_held_head_shas,
 };
 #[allow(unused_imports)]
 pub use activity_payloads::{
@@ -52,10 +53,13 @@ pub use activity_payloads::{
     TripwirePolicyChangedPayload, TripwireSeverity, TripwireTamperPayload,
 };
 #[allow(unused_imports)]
+pub use carry_forward::{CarryForwardRelease, build_carry_forward_releases};
+#[allow(unused_imports)]
 pub use engine::{
     ChangedFile, ChangedFileStatus, DiffHunk, EvidenceSpan, GateOutcome, RawFinding,
-    TripwireEvaluationInput, TripwireFinding, TripwireFindingSeverity, TripwireGateDecision,
-    build_finding_idempotency_key, build_gate_idempotency_key, evaluate, sort_findings,
+    TEST_PATH_DOWNGRADE_REASON, TripwireEvaluationInput, TripwireFinding, TripwireFindingSeverity,
+    TripwireGateDecision, build_finding_content_fingerprint, build_finding_idempotency_key,
+    build_gate_idempotency_key, evaluate, sort_findings,
 };
 #[allow(unused_imports)]
 pub use hold_release::{
@@ -64,7 +68,7 @@ pub use hold_release::{
 };
 #[allow(unused_imports)]
 pub use policy::{
-    BoundaryAllowlistRef, BoundaryPathRuleConfig, CIWorkflowRuleConfig,
+    Adjudication, BoundaryAllowlistRef, BoundaryPathRuleConfig, CIWorkflowRuleConfig,
     DependencyIdentityRuleConfig, GeneratedExclusions, LargeDeleteRewriteRuleConfig,
     MigrationRuleConfig, NetworkEgressRuleConfig, PolicySource, TripwirePolicy,
     UnsafeCodeRuleConfig, VendorExclusions,
