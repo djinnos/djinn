@@ -12,6 +12,15 @@ tags: ["adr","architecture","agents","roles","specialists","auto-improvement","p
 
 Date: 2026-03-19
 
+> **Superseded sections (proposal z5f9 — 2026-07-09):** The Phase 38d auto-improvement
+> loop, the `learned_prompt` field, and the `agent_amend_prompt` tool described in §4 and
+> the Phase 38d phasing entry below were **removed** by proposal
+> [[z5f9 — Remove the learned-prompt auto-coaching subsystem]].
+> The `agent_metrics` surface (Phase 38c) remains active. Phases 38a–38c and the
+> configurable-role/specialist data model are **not** affected by this removal.
+> This ADR is preserved as historical design context; the auto-improvement engine is
+> **not current architecture**.
+
 Extends: ADR-034 (Agent Role Hierarchy), ADR-023 (Cognitive Memory Architecture)
 
 ## Context
@@ -227,12 +236,17 @@ This ADR builds on ADR-023 and ADR-034. Implementation follows their completion:
 - Expose metrics via MCP tool (`role_metrics`)
 - This is the "results.tsv" equivalent
 
-**Phase 38d: Auto-Improvement Loop** (after 38c + ADR-023 17d session reflection)
-- Architect patrol analyzes agent metrics
-- Calls `build_context` for domain-relevant cases/patterns/pitfalls
-- Proposes `learned_prompt` amendments
-- Keep/discard based on metric deltas
-- Agent improvement history log
+**Phase 38d: Auto-Improvement Loop** (after 38c + ADR-023 17d session reflection) — **REMOVED by proposal z5f9**
+> The entire auto-improvement loop, `learned_prompt` field, `learned_prompt_history` table,
+> `agent_amend_prompt` tool, and `prompt_eval` evaluator were removed by proposal z5f9
+> (2026-07-09). The subsystem was implemented but the per-project self-tuning engine proved
+> to be the wrong abstraction; specialist role prompts are now hand-authored in static `.md`
+> files. `agent_metrics` (Phase 38c) remains active for monitoring.
+- ~~Architect patrol analyzes agent metrics~~
+- ~~Calls `build_context` for domain-relevant cases/patterns/pitfalls~~
+- ~~Proposes `learned_prompt` amendments~~
+- ~~Keep/discard based on metric deltas~~
+- ~~Agent improvement history log~~
 
 ### Critical path
 

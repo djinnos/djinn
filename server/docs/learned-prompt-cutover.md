@@ -119,3 +119,32 @@ grep -rn 'learned_prompt\|learned-prompt\|learned_prompt_history\|agent_amend_pr
 ### No code changes required
 
 The sibling tasks nqcn, xij7, and kutw fully cleaned all UI/generated/test artifacts. This sweep confirms the final state and records the evidence above. Only this documentation update was made.
+
+---
+
+## Proposal supersession — design record annotations (this task)
+
+**Date:** 2026-07-09
+**Task:** 1hqf — Annotate ADRs and proposal supersession documentation for learned-prompt removal
+
+### Proposals superseded by z5f9
+
+Proposal **z5f9** ("Remove the learned-prompt auto-coaching subsystem: hand-author specialist role prompts, drop the per-project self-tuning engine") supersedes the following proposals:
+
+| Proposal | Title | Why superseded |
+|---|---|---|
+| **2fd1** | "The Trial Room: a live cockpit for coaching your AI colleagues — watch each prompt experiment gather evidence and overrule the machine's verdict" | Proposed a UI cockpit over the `learned_prompt_history` eval engine (`prompt_eval.rs`, `resolve_pending_amendment`, `agent_metrics` decision math). The entire engine and its database tables were removed by z5f9; the Trial Room UI has no substrate to operate on. |
+| **dsa0** | "Make per-project default-role prompts editable in the UI (and revive/remove the dormant learned_prompt loop)" | Shipped `LearnedPromptSection.tsx` rendering settled `learned_prompt_history` rows and editable default-role prompts. The `learned_prompt_history` table and `learned_prompt` column were dropped by z5f9; the LearnedPromptSection UI was removed by epic 3sle. The editable-default-role-prompts portion (hand-authored `system_prompt_extensions`) was preserved independently. |
+
+### ADR annotations applied
+
+| ADR | What was annotated |
+|---|---|
+| **ADR-038** (`.djinn/decisions/adr-038-*.md`) | Added top-level supersession blockquote marking Phase 38d, `learned_prompt`, and `agent_amend_prompt` as removed by z5f9. Phase 38d bullet list struck through with explanatory blockquote. |
+| **ADR-051** (both variants in `.djinn/decisions/`) | Added top-level historical note blockquote explaining `agent_amend_prompt` was removed by z5f9. Inline `agent_amend_prompt` references on migration step 4 and test-update lines struck through with `> z5f9 note:` annotations. |
+
+### Worker-accessible metadata path
+
+Proposals 2fd1 and dsa0 are stored as proposal entities in the project memory system (Dolt-backed). Worker sessions can search proposals via `memory_search(entity_types=["proposal"])` but **cannot read or edit proposal metadata** — `memory_read` and `memory_edit` return "note not found" for proposal permalinks. The supersession metadata action (setting `superseded_by: z5f9` on proposals 2fd1 and dsa0) remains **planner/operator-only** and must be performed through the planner's proposal-management surface or a direct Dolt commit.
+
+This documentation record is the worker-accessible supersession evidence. The file is referenced by the cutover sweep table above and by the ADR annotations.
