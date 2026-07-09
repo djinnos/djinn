@@ -6,8 +6,7 @@ use crate::tripwires::engine::{ChangedFile, ChangedFileStatus};
 use crate::tripwires::policy::TripwirePolicy;
 use crate::tripwires::reason_codes::TripwireRuleId;
 use crate::tripwires::rules::{
-    all_rule_evaluators, evaluate_ci_workflow_changes,
-    evaluate_large_delete_or_rewrite,
+    all_rule_evaluators, evaluate_ci_workflow_changes, evaluate_large_delete_or_rewrite,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

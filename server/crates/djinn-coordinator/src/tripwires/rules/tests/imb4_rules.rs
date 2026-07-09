@@ -4,13 +4,11 @@
 
 use super::helpers::*;
 use crate::tripwires::engine::{ChangedFile, ChangedFileStatus, DiffHunk, RawFinding};
-use crate::tripwires::policy::TripwirePolicy;
 use crate::tripwires::reason_codes::TripwireRuleId;
 use crate::tripwires::rules::{
-    all_rule_evaluators, evaluate_boundary_path_changes,
-    evaluate_ci_workflow_changes, evaluate_dependency_identity_changes,
-    evaluate_large_delete_or_rewrite, evaluate_migration_changes,
-    evaluate_network_egress_changes, evaluate_unsafe_code_changes,
+    all_rule_evaluators, evaluate_boundary_path_changes, evaluate_ci_workflow_changes,
+    evaluate_dependency_identity_changes, evaluate_large_delete_or_rewrite,
+    evaluate_migration_changes, evaluate_network_egress_changes, evaluate_unsafe_code_changes,
     file_extension, path_matches_any_glob,
 };
 
