@@ -5,7 +5,6 @@ use djinn_db::{
     AgentRepository, CreateUserAuthSession, ProjectRepository, SessionAuthRepository,
     UserRepository,
 };
-use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use crate::events::EventBus;
@@ -46,10 +45,10 @@ fn rand_github_id() -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn put_update_rejects_direct_learned_prompt_set() {
+async fn put_update_succeeds_for_valid_fields() {
     let db = test_helpers::create_test_db();
     let project = ProjectRepository::new(db.clone(), EventBus::noop())
-        .create("agents-rest-lp-reject", "djinn", "agents-rest-lp-reject")
+        .create("agents-rest-update", "djinn", "agents-rest-update")
         .await
         .unwrap();
     let admin_cookie = seed_admin_session(&db).await;
@@ -60,19 +59,10 @@ async fn put_update_rejects_direct_learned_prompt_set() {
         .await
         .unwrap()
         .expect("project creation should seed an architect default agent");
-    agent_repo
-        .append_learned_prompt(
-            &default_agent.id,
-            "Prefer bounded-context design notes.",
-            Some(r#"{"success_rate":0.9}"#),
-        )
-        .await
-        .unwrap();
 
     let app = test_helpers::create_test_app_with_db(db.clone());
     let payload = serde_json::json!({
         "system_prompt_extensions": ["Human-authored architect instructions"],
-        "learned_prompt": "Direct override attempt",
     });
     let request = Request::builder()
         .method("PUT")
@@ -83,62 +73,5 @@ async fn put_update_rejects_direct_learned_prompt_set() {
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let body = String::from_utf8(body.to_vec()).unwrap();
-    assert!(body.contains("Direct learned_prompt setting is no longer supported"));
-
-    let persisted = AgentRepository::new(db, EventBus::noop())
-        .get(&default_agent.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        persisted.learned_prompt.as_deref(),
-        Some("Prefer bounded-context design notes.")
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn delete_clear_learned_prompt_clears_derived_state() {
-    let db = test_helpers::create_test_db();
-    let project = ProjectRepository::new(db.clone(), EventBus::noop())
-        .create("agents-rest-lp-clear", "djinn", "agents-rest-lp-clear")
-        .await
-        .unwrap();
-    let admin_cookie = seed_admin_session(&db).await;
-
-    let agent_repo = AgentRepository::new(db.clone(), EventBus::noop());
-    let default_agent = agent_repo
-        .get_default_for_base_role(&project.id, "architect")
-        .await
-        .unwrap()
-        .expect("project creation should seed an architect default agent");
-    agent_repo
-        .append_learned_prompt(
-            &default_agent.id,
-            "Prefer bounded-context design notes.",
-            Some(r#"{"success_rate":0.9}"#),
-        )
-        .await
-        .unwrap();
-
-    let app = test_helpers::create_test_app_with_db(db.clone());
-    let request = Request::builder()
-        .method("DELETE")
-        .uri(format!("/api/agents/{}/learned-prompt", default_agent.id))
-        .header("cookie", format!("djinn_session={admin_cookie}"))
-        .body(Body::empty())
-        .unwrap();
-
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-    let persisted = AgentRepository::new(db, EventBus::noop())
-        .get(&default_agent.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(persisted.learned_prompt.is_none());
+    assert_eq!(response.status(), StatusCode::OK);
 }

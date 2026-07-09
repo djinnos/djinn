@@ -114,13 +114,6 @@
         "is_default": {
           "type": "boolean"
         },
-        "learned_prompt": {
-          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "created_at": {
           "type": "string"
         },
@@ -222,13 +215,6 @@
             },
             "is_default": {
               "type": "boolean"
-            },
-            "learned_prompt": {
-              "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
-              "type": [
-                "string",
-                "null"
-              ]
             },
             "created_at": {
               "type": "string"
@@ -347,12 +333,6 @@
             },
             "base_role": {
               "type": "string"
-            },
-            "learned_prompt": {
-              "type": [
-                "string",
-                "null"
-              ]
             },
             "success_rate": {
               "type": "number",
@@ -527,13 +507,6 @@
         "is_default": {
           "type": "boolean"
         },
-        "learned_prompt": {
-          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "created_at": {
           "type": "string"
         },
@@ -613,13 +586,6 @@
           "items": {
             "$ref": "#/$defs/AnyJson"
           }
-        },
-        "clear_learned_prompt": {
-          "description": "Set to true to clear machine-managed learned_prompt back to NULL.\nAdmin/operator reset path.",
-          "type": [
-            "boolean",
-            "null"
-          ]
         }
       },
       "required": [
@@ -672,13 +638,6 @@
         },
         "is_default": {
           "type": "boolean"
-        },
-        "learned_prompt": {
-          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "created_at": {
           "type": "string"

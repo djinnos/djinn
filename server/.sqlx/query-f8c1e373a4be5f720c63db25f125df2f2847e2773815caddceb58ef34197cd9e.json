@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id AS \"id!\", project_id AS \"project_id!\",\n                name AS \"name!\", base_role AS \"base_role!\",\n                description AS \"description!\",\n                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'\n                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS \"system_prompt_extensions!\",\n                model_preference,\n                mcp_servers::text AS \"mcp_servers!\", skills::text AS \"skills!\",\n                is_default AS \"is_default!: bool\",\n                (SELECT string_agg(h.proposed_text, E'\\n\\n---\\n\\n' ORDER BY h.created_at ASC)\n                 FROM learned_prompt_history h\n                 WHERE h.agent_id = agents.id\n                   AND h.action IN ('keep','confirmed')\n                ) AS learned_prompt,\n                created_at AS \"created_at!\", updated_at AS \"updated_at!\"\n             FROM agents\n             WHERE project_id = $1 AND base_role = $2 AND is_default = TRUE LIMIT 1",
+  "query": "SELECT id AS \"id!\", project_id AS \"project_id!\",\n                name AS \"name!\", base_role AS \"base_role!\",\n                description AS \"description!\",\n                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'\n                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS \"system_prompt_extensions!\",\n                model_preference,\n                mcp_servers::text AS \"mcp_servers!\", skills::text AS \"skills!\",\n                is_default AS \"is_default!: bool\",\n                created_at AS \"created_at!\", updated_at AS \"updated_at!\"\n             FROM agents\n             WHERE project_id = $1 AND base_role = $2 AND is_default = TRUE LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -55,16 +55,11 @@
       },
       {
         "ordinal": 10,
-        "name": "learned_prompt",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 11,
         "name": "created_at!",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 12,
+        "ordinal": 11,
         "name": "updated_at!",
         "type_info": "Varchar"
       }
@@ -86,10 +81,9 @@
       null,
       null,
       false,
-      null,
       false,
       false
     ]
   },
-  "hash": "26aab27fc4161a7e171b0e43257d5a93617b4e2981be57012354d4f2176a5133"
+  "hash": "f8c1e373a4be5f720c63db25f125df2f2847e2773815caddceb58ef34197cd9e"
 }

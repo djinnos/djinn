@@ -31,8 +31,7 @@ pub use error::{DbError as Error, DbResult as Result};
 pub use repositories::{
     agent::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,
-        AgentUpdateInput, LearnedPromptHistoryEntry, PendingAmendmentEvaluation, VALID_BASE_ROLES,
-        WindowedRoleMetrics,
+        AgentUpdateInput, VALID_BASE_ROLES,
     },
     code_chunk::{
         ChunkAndEmbedReport, CodeChunk, CodeChunkEmbeddingProvider, CodeChunkRepairEmbeddingRow,
