@@ -25,6 +25,7 @@ pub mod activity_payloads;
 pub mod engine;
 pub mod policy;
 pub mod reason_codes;
+pub mod rules;
 
 // ─── Re-exports for sibling tripwire modules ─────────────────────────────────
 //
@@ -61,4 +62,9 @@ pub use reason_codes::{
     REASON_CI_WORKFLOW_CHANGE, REASON_DEPENDENCY_IDENTITY_CHANGED, REASON_LARGE_DELETE_OR_REWRITE,
     REASON_MIGRATION_CHANGE, REASON_NETWORK_EGRESS_CHANGE, REASON_PATH_BOUNDARY_CHANGE,
     REASON_UNSAFE_CODE_CHANGE, TripwireRuleId, reason_code_for_rule,
+};
+#[allow(unused_imports)]
+pub use rules::{
+    all_rule_evaluators, evaluate_boundary_path_changes, evaluate_dependency_identity_changes,
+    evaluate_migration_changes, evaluate_network_egress_changes, evaluate_unsafe_code_changes,
 };
