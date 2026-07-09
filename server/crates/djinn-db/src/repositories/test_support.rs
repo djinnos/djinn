@@ -177,6 +177,25 @@ pub async fn drop_table_for_test(db: &Database, table_name: &str) {
         .unwrap();
 }
 
+/// Add a test-only constraint that leaves existing `task_arbitrations` rows
+/// readable but makes subsequent INSERTs fail.  This lets coordinator
+/// regressions exercise the real `TaskArbitrationRepository::try_create` error
+/// branch after `resolve_current_hold_cycle` has succeeded, without dropping the
+/// table and turning the scenario into a read/hold-cycle-resolution failure.
+///
+/// **Not for production use.**  Panics on SQL errors.
+pub async fn reject_new_task_arbitrations_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "ALTER TABLE task_arbitrations \
+         ADD CONSTRAINT task_arbitrations_reject_insert_for_test \
+         CHECK (false) NOT VALID",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to add task_arbitrations reject-insert constraint");
+}
+
 /// Backdate a task's `updated_at` by a PostgreSQL `interval` string
 /// (e.g. `'20 minutes'`).
 ///

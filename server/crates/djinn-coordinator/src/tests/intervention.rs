@@ -5876,10 +5876,12 @@ async fn arbiter_failure_dossier_on_db_error_parks_with_evidence_fields() {
 /// `try_create` itself fails with a DB error after `resolve_current_hold_cycle`
 /// succeeds, the park rung still fails closed with an `arbiter_failure_dossier`.
 ///
-/// This test seeds a valid unconsumed arbitration first, then drops the
-/// `task_arbitrations` table so the `try_create` INSERT fails while the
-/// (already-loaded) `resolve_current_hold_cycle` result was valid.  The test
-/// verifies the fail-closed park with evidence fields.
+/// This test seeds a valid consumed arbitration first, then installs a
+/// `djinn-db` test-support constraint that leaves reads intact while rejecting
+/// subsequent `task_arbitrations` INSERTs.  That means the
+/// `route_planner_intervention` call below successfully re-runs
+/// `resolve_current_hold_cycle` as `(1, None)` and only fails when the real
+/// `TaskArbitrationRepository::try_create` call attempts to create cycle 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn try_create_db_error_parks_with_failure_dossier() {
     let db = test_helpers::create_test_db();
@@ -5919,10 +5921,28 @@ async fn try_create_db_error_parks_with_failure_dossier() {
         .unwrap();
     arb_repo.mark_consumed(&task.id, 0).await.unwrap();
 
-    // Now drop the table so try_create at cycle 1 fails with a DB error
-    // while resolve_current_hold_cycle already returned (1, None) from the
-    // consumed cycle 0 row.
-    djinn_db::test_support::drop_table_for_test(&db, "task_arbitrations").await;
+    let (cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert_eq!(cycle, 1, "consumed cycle 0 must advance to cycle 1");
+    assert!(
+        existing.is_none(),
+        "advanced cycle must have no unconsumed arbitration"
+    );
+
+    // Make only the create/write fail. The table and consumed cycle-0 row remain
+    // readable, so the route call below reaches the `try_create(...).await`
+    // error arm instead of the hold-cycle-resolution error arm.
+    djinn_db::test_support::reject_new_task_arbitrations_for_test(&db).await;
+
+    let (cycle_after_injection, existing_after_injection) =
+        arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert_eq!(
+        cycle_after_injection, 1,
+        "failure injection must not break hold-cycle resolution"
+    );
+    assert!(
+        existing_after_injection.is_none(),
+        "failure injection must leave the next cycle creatable in principle"
+    );
 
     // Act: route the park rung — try_create will fail, must park.
     let handled = actor
@@ -5938,14 +5958,20 @@ async fn try_create_db_error_parks_with_failure_dossier() {
     assert!(!blockers.is_empty());
     let hold_task = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
     let desc = &hold_task.description;
-    assert!(
-        desc.contains("arbiter_failure_dossier"),
-        "hold must contain arbiter_failure_dossier; got: {desc}"
-    );
-    assert!(
-        desc.contains("\"failing_ci_job_ids\""),
-        "hold dossier must contain failing_ci_job_ids evidence field; got: {desc}"
-    );
+    for expected in [
+        "arbiter_failure_dossier",
+        "\"kind\": \"arbiter_failure_dossier\"",
+        "\"mirror_head_sha\"",
+        "\"github_head_sha\"",
+        "\"pr_url\"",
+        "\"failing_ci_job_ids\"",
+        "post_intervention_history",
+    ] {
+        assert!(
+            desc.contains(expected),
+            "hold dossier must contain {expected}; got: {desc}"
+        );
+    }
 }
 
 /// AC2: Decision-failure vs infra termination classification —
