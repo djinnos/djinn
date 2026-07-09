@@ -8,7 +8,7 @@
 //! and task-affinity/memory_refs rows. Missing fixture data for any claimed
 //! `expected_signal_coverage` is a hard error.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -40,6 +40,31 @@ pub struct LoadedFixtureState {
     /// Epic ID used for all task rows (required FK).
     #[allow(dead_code)]
     pub epic_id: String,
+}
+
+fn task_memory_ref_note_ids(
+    fixtures: &Phase1Fixtures,
+    fixture_task_id: &str,
+    note_id_by_permalink: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut memory_ref_permalinks: BTreeSet<&str> = BTreeSet::new();
+
+    for query in &fixtures.memory_ref_queries {
+        if query.task_id.as_deref() == Some(fixture_task_id) {
+            memory_ref_permalinks.extend(query.memory_refs.iter().map(String::as_str));
+        }
+    }
+
+    for case in &fixtures.bad_cases {
+        if case.expected_signals.task_affinity && case.task_id.as_deref() == Some(fixture_task_id) {
+            memory_ref_permalinks.extend(case.relevant_note_permalinks.iter().map(String::as_str));
+        }
+    }
+
+    memory_ref_permalinks
+        .into_iter()
+        .filter_map(|permalink| note_id_by_permalink.get(permalink).cloned())
+        .collect()
 }
 
 // ── Fixture validation ────────────────────────────────────────────────────
@@ -368,8 +393,10 @@ pub async fn load_fixtures(db: &Database, fixtures: &Phase1Fixtures) -> Result<L
     // ── Phase 5: Create task rows for task-affinity ───────────────────────
     let mut task_id_map: HashMap<String, String> = HashMap::new();
 
-    // Collect all unique task_ids from queries and bad cases
-    let mut all_task_ids: HashSet<String> = HashSet::new();
+    // Collect all unique task_ids from queries and bad cases. Keep ordering
+    // deterministic so seeded task rows and their memory_refs are byte-stable
+    // across repeated eval runs.
+    let mut all_task_ids: BTreeSet<String> = BTreeSet::new();
     for query in &fixtures.memory_ref_queries {
         if let Some(ref task_id) = query.task_id {
             all_task_ids.insert(task_id.clone());
@@ -382,18 +409,13 @@ pub async fn load_fixtures(db: &Database, fixtures: &Phase1Fixtures) -> Result<L
     }
 
     for fixture_task_id in &all_task_ids {
-        // Determine which notes this task references via memory_refs
-        let mut memory_refs: Vec<String> = Vec::new();
-        for query in &fixtures.memory_ref_queries {
-            if query.task_id.as_deref() == Some(fixture_task_id.as_str()) {
-                // Resolve permalinks to database note IDs
-                for permalink in &query.memory_refs {
-                    if let Some(note_id) = note_id_by_permalink.get(permalink) {
-                        memory_refs.push(note_id.clone());
-                    }
-                }
-            }
-        }
+        // Determine which notes this task references via memory_refs. Task
+        // affinity is claimed by both mined memory-ref query rows and bad-case
+        // rows; bad-case-only task-affinity fixtures must seed the task refs
+        // too, otherwise the eval can claim coverage while creating an empty
+        // `tasks.memory_refs` array.
+        let memory_refs =
+            task_memory_ref_note_ids(fixtures, fixture_task_id, &note_id_by_permalink);
 
         // Create the task with memory_refs pointing to note IDs
         let db_task_id =
@@ -594,6 +616,57 @@ mod tests {
     fn validate_fixtures_passes_for_valid_fixture_set() {
         let fixtures = make_test_fixtures();
         validate_fixtures(&fixtures).expect("validation should pass");
+    }
+
+    #[test]
+    fn task_affinity_bad_case_only_task_seeds_memory_refs_from_relevant_notes() {
+        let mut fixtures = make_test_fixtures();
+        fixtures.memory_ref_queries.clear();
+        fixtures.bad_cases.retain(|case| case.case_id == "bc-003");
+
+        validate_fixtures(&fixtures).expect("bad-case-only task-affinity fixture should validate");
+
+        let note_id_by_permalink = HashMap::from([
+            (
+                "cases/slot-lifecycle-race".to_string(),
+                "note-id-slot-race".to_string(),
+            ),
+            (
+                "patterns/supervisor-guard".to_string(),
+                "note-id-supervisor-guard".to_string(),
+            ),
+        ]);
+
+        let memory_refs = task_memory_ref_note_ids(&fixtures, "xyz", &note_id_by_permalink);
+
+        assert_eq!(memory_refs, vec!["note-id-slot-race".to_string()]);
+    }
+
+    #[test]
+    fn task_memory_refs_union_mined_queries_and_task_affinity_bad_cases_deterministically() {
+        let fixtures = make_test_fixtures();
+        let note_id_by_permalink = HashMap::from([
+            (
+                "cases/slot-lifecycle-race".to_string(),
+                "note-id-slot-race".to_string(),
+            ),
+            (
+                "patterns/supervisor-guard".to_string(),
+                "note-id-supervisor-guard".to_string(),
+            ),
+        ]);
+
+        let mined_refs = task_memory_ref_note_ids(&fixtures, "abc123", &note_id_by_permalink);
+        let bad_case_refs = task_memory_ref_note_ids(&fixtures, "xyz", &note_id_by_permalink);
+
+        assert_eq!(
+            mined_refs,
+            vec![
+                "note-id-slot-race".to_string(),
+                "note-id-supervisor-guard".to_string()
+            ]
+        );
+        assert_eq!(bad_case_refs, vec!["note-id-slot-race".to_string()]);
     }
 
     #[test]
