@@ -44,6 +44,7 @@ uuid = { version = "1", features = ["v7"] }
 async-trait = "0.1"
 sha2 = "0.10"
 hex = "0.4"
+globset = { workspace = true }
 libc = "0.2"
 workspace-hack.workspace = true
 
