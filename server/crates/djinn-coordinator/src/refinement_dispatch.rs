@@ -22,6 +22,7 @@
 //     `ProposalRepository::add_debate_trail_entry()` with `kind = "verdict"`.
 //   - Stop metadata: persisted via `record_refinement_lifecycle`.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant as StdInstant};
 
 use super::evidence_lifecycle_state::EvidenceLifecycleState;
@@ -58,9 +59,48 @@ impl CoordinatorActor {
     /// Drive all active refinement loops. Called from `run_tick()`.
     pub(super) async fn drive_active_refinements(&mut self) {
         let proposal_ids: Vec<String> = self.active_refinements.keys().cloned().collect();
+        if proposal_ids.is_empty() {
+            return;
+        }
+
+        // Fetch the pool's running-task set ONCE per tick and check membership
+        // in memory, instead of issuing one `pool.has_session(...)` ask per
+        // active refinement. During the 2026-07-09 freeze ~12 active refinements
+        // meant ~12 un-timed pool round-trips every tick, amplifying the single
+        // stalled ask into a per-tick pile-up on the coordinator's mailbox. One
+        // `get_status()` (already the primitive used by the in-flight-ledger
+        // reconciler) is O(1) in pool round-trips regardless of refinement count.
+        //
+        // On a pool error (including the new `PoolError::Timeout`) liveness is
+        // unknown this tick → `None`. `drive_one_refinement` then DEFERS only the
+        // in-flight liveness check (it must not misclassify a possibly-running
+        // session as finished and prematurely process its outcome / burn a
+        // round) while still driving refinements that have no in-flight session,
+        // where `dispatch_next_refinement_phase` already handles pool failures.
+        // This preserves the pre-existing per-refinement behavior for the
+        // no-session path while staying conservative for the stall case.
+        let running_tasks: Option<HashSet<String>> = match self.pool.get_status().await {
+            Ok(status) => Some(
+                status
+                    .running_tasks
+                    .into_iter()
+                    .map(|t| t.task_id)
+                    .collect(),
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "CoordinatorActor: pool get_status failed while driving refinements; \
+                     in-flight liveness unknown this tick (those refinements deferred; \
+                     new dispatches still attempted)"
+                );
+                None
+            }
+        };
 
         for proposal_id in proposal_ids {
-            self.drive_one_refinement(&proposal_id).await;
+            self.drive_one_refinement(&proposal_id, running_tasks.as_ref())
+                .await;
         }
 
         // Clean up completed refinements.
@@ -68,8 +108,17 @@ impl CoordinatorActor {
             .retain(|_, state| !state.is_complete());
     }
 
-    /// Drive a single refinement loop.
-    async fn drive_one_refinement(&mut self, proposal_id: &str) {
+    /// Drive a single refinement loop. `running_tasks` is the pool's running
+    /// task-id set, fetched once by the caller so this method issues no
+    /// per-refinement pool round-trip for the liveness check. `None` means the
+    /// pool status was unavailable this tick (see `drive_active_refinements`):
+    /// the in-flight liveness check is deferred, but a refinement with no
+    /// in-flight session is still driven to dispatch.
+    async fn drive_one_refinement(
+        &mut self,
+        proposal_id: &str,
+        running_tasks: Option<&HashSet<String>>,
+    ) {
         let Some(state) = self.active_refinements.get(proposal_id).cloned() else {
             return;
         };
@@ -79,11 +128,13 @@ impl CoordinatorActor {
 
         // Check if there's an in-flight session for this refinement.
         if let Some(session) = self.refinement_sessions.get(proposal_id).cloned() {
-            let still_running = self
-                .pool
-                .has_session(&session.task_id)
-                .await
-                .unwrap_or(false);
+            let Some(running_tasks) = running_tasks else {
+                // Pool liveness unknown this tick (get_status errored). Do NOT
+                // treat a possibly-running session as finished — defer to the
+                // next tick rather than risk prematurely processing its outcome.
+                return;
+            };
+            let still_running = running_tasks.contains(&session.task_id);
 
             if still_running {
                 if session.dispatched_at.elapsed() > REFINEMENT_SESSION_TIMEOUT {
@@ -669,6 +720,10 @@ impl CoordinatorActor {
 #[cfg(test)]
 #[path = "refinement_cap_tests.rs"]
 pub(crate) mod refinement_cap_tests;
+
+#[cfg(test)]
+#[path = "refinement_pool_watchdog_tests.rs"]
+mod refinement_pool_watchdog_tests;
 
 #[cfg(test)]
 #[path = "refinement_dor_status_tests.rs"]
