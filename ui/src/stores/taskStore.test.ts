@@ -40,6 +40,37 @@ describe("taskStore", () => {
     expect(taskStore.getState().getTask(mockTaskB.id)).toEqual(mockTaskB);
   });
 
+  it("upsertTasks merges additively without dropping existing tasks", () => {
+    taskStore.getState().setTasks([mockTaskA]);
+
+    taskStore.getState().upsertTasks([mockTaskB, mockTaskC]);
+
+    // Unlike setTasks, the previously-present task survives the merge.
+    expect(taskStore.getState().getAllTasks()).toHaveLength(3);
+    expect(taskStore.getState().getTask(mockTaskA.id)).toEqual(mockTaskA);
+    expect(taskStore.getState().getTask(mockTaskB.id)).toEqual(mockTaskB);
+    expect(taskStore.getState().getTask(mockTaskC.id)).toEqual(mockTaskC);
+  });
+
+  it("upsertTasks overwrites tasks with the same id (idempotent)", () => {
+    taskStore.getState().setTasks([mockTaskA]);
+    const updated = { ...mockTaskA, title: "Upserted" };
+
+    taskStore.getState().upsertTasks([updated]);
+
+    expect(taskStore.getState().getAllTasks()).toHaveLength(1);
+    expect(taskStore.getState().getTask(mockTaskA.id)?.title).toBe("Upserted");
+  });
+
+  it("upsertTasks is a no-op for an empty list and preserves the map reference", () => {
+    taskStore.getState().setTasks([mockTaskA]);
+    const before = taskStore.getState().tasks;
+
+    taskStore.getState().upsertTasks([]);
+
+    expect(taskStore.getState().tasks).toBe(before);
+  });
+
   it("clearTasks empties the task map", () => {
     taskStore.getState().setTasks([mockTaskA, mockTaskB]);
 

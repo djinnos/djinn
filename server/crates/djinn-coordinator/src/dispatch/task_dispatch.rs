@@ -1703,7 +1703,7 @@ impl CoordinatorActor {
                         task_id = %task.short_id,
                         role,
                         pr_url = %pr_url,
-                        "CoordinatorActor: respawn guard adopting existing open PR — skipping dispatch"
+                        "CoordinatorActor: respawn guard adopting existing open PR — handing off to PR poller"
                     );
                     super::respawn_guard::record_adopted_pr_attempt(
                         &self.db,
@@ -1711,6 +1711,18 @@ impl CoordinatorActor {
                         role,
                         &pr_url,
                         Some("respawn_guard: adopted existing open PR"),
+                    )
+                    .await;
+                    // Adoption must imply ownership: move the task out of the
+                    // dispatchable `open` column into the poller-owned
+                    // `pr_review` column so the PR poller advances it (incident
+                    // gton — an adopted `open` task was polled by nobody and
+                    // wedged 9h). Idempotent: a no-op if already poller-owned.
+                    super::respawn_guard::handoff_adopted_pr_to_poller(
+                        &self.task_repo(),
+                        &task.id,
+                        &task.status,
+                        &pr_url,
                     )
                     .await;
                     continue;
@@ -2128,6 +2140,24 @@ impl CoordinatorActor {
                         task_id = %task.short_id,
                         "zkk9: monitored reopen exclude_models left no eligible worker model — parking with dossier"
                     );
+                    // Persist the dossier on the arbitration row so the
+                    // externally visible contract carries the explicit
+                    // `monitored_reopen_no_eligible_model` evidence.
+                    use djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams;
+                    let _ = arb_repo
+                        .update_dispatch_ledger(UpdateDispatchLedgerParams {
+                            task_id: &task.id,
+                            hold_cycle,
+                            mirror_head_sha: None,
+                            github_head_sha: None,
+                            pr_url: None,
+                            failing_ci_job_ids: None,
+                            dossier: Some(&dossier),
+                            directive: None,
+                            verification_command: None,
+                            excluded_models: None,
+                        })
+                        .await;
                     // Complete the monitored attempt so re-entry cannot retry.
                     let _ = arb_repo
                         .complete_monitored_reopen(&task.id, hold_cycle)
@@ -6295,5 +6325,369 @@ mod failover_chain_tests {
         );
         assert_eq!(map_model_rotation_reason("completely-unknown-reason"), None);
         assert_eq!(map_model_rotation_reason(""), None);
+    }
+}
+
+/// mshn (AC2): No-eligible-worker-model parking for monitored reopen.
+///
+/// When an arbiter's `exclude_models` eliminates all worker models for a
+/// monitored-reopen worker dispatch, the coordinator parks the task with a
+/// `monitored_reopen_no_eligible_model` dossier and completes the monitored
+/// attempt so re-entry cannot trigger a second cycle.  These tests exercise
+/// the code path at lines 2104-2148 via the real `dispatch_ready_tasks`
+/// dispatch loop.
+#[cfg(test)]
+mod monitored_reopen_no_eligible_model_tests {
+    use super::*;
+    use djinn_db::repositories::task_arbitration::{
+        CreateArbitrationParams, TaskArbitrationRepository,
+    };
+    use std::collections::HashMap;
+
+    /// Build a CoordinatorActor with a pool configured for `test/mock`
+    /// (the DEFAULT_MODEL_ID in test builds).  Mirrors the `failover_actor`
+    /// helper but returns a bare actor without the release map since the
+    /// no-eligible-model path parks before reaching the pool.
+    fn park_test_actor(
+        db: &djinn_db::Database,
+        events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+    ) -> (CoordinatorActor, tokio_util::sync::CancellationToken) {
+        use djinn_slot::{ModelSlotConfig, SlotPoolConfig};
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let pool_config = SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: DEFAULT_MODEL_ID.to_owned(),
+                max_slots: 1,
+                roles: ["worker".to_owned()].into_iter().collect(),
+            }],
+            role_priorities: HashMap::new(),
+        };
+
+        let app_state = crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+        let pool = djinn_slot::SlotPoolHandle::spawn_with_factory(
+            app_state,
+            cancel.clone(),
+            pool_config,
+            // Controlled slot runner: if the no-eligible-model park does NOT
+            // fire (a bug), the slot runner blocks until killed so the pool
+            // dispatch is accepted but no real work happens.
+            std::sync::Arc::new(|_slot_id, _model_id, _event_tx, _app_state, kill| {
+                let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
+                    move |_task_id, _project_path, _model_id, _app_state, kill, _pause, _resume| {
+                        Box::pin(async move {
+                            let _ = kill.cancelled().await;
+                            Ok(())
+                        })
+                    },
+                );
+                djinn_slot::SlotHandle::spawn_with_test_runner(
+                    0,
+                    DEFAULT_MODEL_ID.to_owned(),
+                    _event_tx,
+                    _app_state,
+                    kill,
+                    runner,
+                )
+            }),
+        );
+
+        let (status_tx, _status_rx) = tokio::sync::watch::channel(SharedCoordinatorState {
+            dispatched: 0,
+            recovered: 0,
+            epic_throughput: HashMap::new(),
+            pr_errors: HashMap::new(),
+            rate_limited_until: None,
+        });
+
+        let actor = CoordinatorActor {
+            receiver: tokio::sync::mpsc::channel(1).1,
+            events: events_tx.subscribe(),
+            cancel: cancel.clone(),
+            tick: tokio::time::interval(std::time::Duration::from_secs(60)),
+            db: db.clone(),
+            events_tx: events_tx.clone(),
+            pool,
+            catalog: CatalogService::new(),
+            health: djinn_provider::catalog::health::HealthTracker::new(),
+            role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
+            lsp: djinn_lsp::LspManager::new(),
+            self_sender: tokio::sync::mpsc::channel(1).0,
+            status_tx,
+            dispatch_limit: 50,
+            model_priorities: HashMap::new(),
+            pr_errors: HashMap::new(),
+            last_dispatched: HashMap::new(),
+            inflight_dispatches: HashMap::new(),
+            provisional_admissions: HashMap::new(),
+            dispatch_cooldowns: HashMap::new(),
+            dispatch_failure_streak: HashMap::new(),
+            background_work_tracker: BackgroundWorkTracker::default(),
+            stranded_ready_source: None,
+            auto_merge_tracker: AutoMergeTracker::default(),
+            consolidation_runner: std::sync::Arc::new(
+                crate::consolidation::DbConsolidationRunner::new(db.clone()),
+            ),
+            last_stale_sweep: StdInstant::now(),
+            last_auto_dispatch_sweep: StdInstant::now(),
+            last_proposal_review_sweep: StdInstant::now(),
+            last_graph_refresh: StdInstant::now(),
+            graph_warmer: None,
+            mirror: None,
+            runtime_ops: None,
+            rpc_registry: None,
+            prune_tick_counter: 0,
+            throughput_events: HashMap::new(),
+            pr_status_cache: HashMap::new(),
+            pr_draft_first_seen: HashMap::new(),
+            review_stuck_sha_first_seen: HashMap::new(),
+            merge_fail_count: HashMap::new(),
+            auto_approve_attempted: HashMap::new(),
+            delegated_to_github: HashMap::new(),
+            conversations_resolved: HashMap::new(),
+            handled_dequeues: HashMap::new(),
+            stall_killed: std::collections::HashSet::new(),
+            stall_progress_watermark: HashMap::new(),
+            stall_cancel_streak: HashMap::new(),
+            stall_extension_count: HashMap::new(),
+            provider_failure_streak: HashMap::new(),
+            last_idle_consolidation: None,
+            idle_consolidation_cancel: None,
+            idle_consolidation_handle: None,
+            pr_cleanup_config: PrCleanupConfig::default(),
+            worker_lifecycle_config: crate::WorkerLifecycleConfig::default(),
+            active_refinements: HashMap::new(),
+            refinement_sessions: HashMap::new(),
+            dispatched: 0,
+            recovered: 0,
+        };
+
+        (actor, cancel)
+    }
+
+    /// Seed an open worker task in the DB and return its id.
+    async fn seed_open_worker_task(db: &djinn_db::Database, project_id: &str) -> String {
+        let task_repo =
+            djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let task = task_repo
+            .create_in_project(
+                project_id,
+                None,
+                "No-eligible-model test",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+                None,
+            )
+            .await
+            .expect("seed task");
+        task.id
+    }
+
+    /// Seed a monitored-reopen arbitration row with the given `excluded_models`.
+    /// Sets `monitored_reopen_count = 1` and `directive_injected = false` so the
+    /// monitored-reopen exclude path triggers on the next worker dispatch.
+    async fn seed_monitored_reopen_arbitration(
+        db: &djinn_db::Database,
+        task_id: &str,
+        excluded_models: &serde_json::Value,
+    ) {
+        let repo = TaskArbitrationRepository::new(db.clone());
+        repo.try_create(CreateArbitrationParams {
+            task_id,
+            hold_cycle: 1,
+            deadline_at: Some("2026-12-31T23:59:59.000Z"),
+            mirror_head_sha: Some("abc123"),
+            github_head_sha: Some("def456"),
+            pr_url: Some("https://github.com/test/repo/pull/1"),
+            failing_ci_job_ids: &serde_json::json!([]),
+            dossier: None,
+            directive: Some(&serde_json::json!({"decision": "reopen", "directive": "fix the bug"})),
+            verification_command: Some("cargo test"),
+            excluded_models,
+        })
+        .await
+        .expect("create arbitration row");
+        // Record the monitored reopen attempt start (sets monitored_reopen_count = 1).
+        repo.record_monitored_reopen(task_id, 1)
+            .await
+            .expect("record monitored reopen");
+    }
+
+    /// AC2: When an arbiter's `exclude_models` eliminates all worker models
+    /// for a monitored-reopen dispatch, the coordinator must:
+    /// 1. Park the source task with a human-review hold.
+    /// 2. Complete the monitored reopen attempt (arbitration row → consumed).
+    /// 3. Emit a dossier with `kind = monitored_reopen_no_eligible_model`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn monitored_reopen_parks_when_exclude_models_eliminates_all_workers() {
+        let _ = djinn_telemetry::init();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        // Create a project with readiness satisfied.
+        let project = crate::test_helpers::create_test_project(&db).await;
+
+        // Seed an open worker task.
+        let task_id = seed_open_worker_task(&db, &project.id).await;
+
+        // Seed a monitored-reopen arbitration row where `excluded_models`
+        // contains DEFAULT_MODEL_ID ("test/mock") — the only model the
+        // test-build resolve_dispatch_models_for_role returns for "worker".
+        let excluded = serde_json::json!([DEFAULT_MODEL_ID]);
+        seed_monitored_reopen_arbitration(&db, &task_id, &excluded).await;
+
+        let (mut actor, cancel) = park_test_actor(&db, &events_tx);
+
+        // Run a dispatch pass — the monitored-reopen exclude path should
+        // eliminate the only model, triggering the no-eligible-model park.
+        actor.dispatch_ready_tasks(Some(&project.id)).await;
+
+        // Assert: the arbitration row was completed (consumed).
+        let arb_repo = TaskArbitrationRepository::new(db.clone());
+        let (_, record) = arb_repo
+            .resolve_current_hold_cycle(&task_id)
+            .await
+            .expect("resolve hold cycle");
+        assert!(
+            record.is_none(),
+            "arbitration row must be consumed (terminal) after no-eligible-model park, \
+             got: {record:?}"
+        );
+
+        // Assert: the dossier on the arbitration row was updated with the
+        // `monitored_reopen_no_eligible_model` kind.
+        let raw_row = arb_repo
+            .get_by_task_and_cycle(&task_id, 1)
+            .await
+            .expect("get arbitration row")
+            .expect("arbitration row must exist");
+        let dossier = raw_row.dossier.unwrap_or_else(|| serde_json::json!({}));
+        assert_eq!(
+            dossier["kind"], "monitored_reopen_no_eligible_model",
+            "dossier kind must be 'monitored_reopen_no_eligible_model', got: {dossier}"
+        );
+        assert_eq!(
+            dossier["excluded_models"], excluded,
+            "dossier must carry the excluded models, got: {dossier}"
+        );
+
+        // Assert: the task was parked — it now has an unresolved blocker
+        // (the human-review-hold remediation task).
+        let task_repo =
+            djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let blockers = task_repo
+            .list_blockers(&task_id)
+            .await
+            .expect("list blockers");
+        assert!(
+            blockers.iter().any(|b| b.status != "closed"),
+            "task must have an unresolved human-review-hold blocker after park, got: {blockers:?}"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC2 (negative): When the arbiter's `exclude_models` does NOT eliminate
+    /// all models (e.g. only excludes a model not in the worker pool), the
+    /// task must dispatch normally and NOT park.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn monitored_reopen_dispatches_when_exclude_models_leaves_eligible_model() {
+        let _ = djinn_telemetry::init();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let task_id = seed_open_worker_task(&db, &project.id).await;
+
+        // Exclude a model NOT in the pool — DEFAULT_MODEL_ID remains eligible.
+        let excluded = serde_json::json!(["nonexistent/model"]);
+        seed_monitored_reopen_arbitration(&db, &task_id, &excluded).await;
+
+        let (mut actor, cancel) = park_test_actor(&db, &events_tx);
+
+        // The dispatch should proceed normally (not park).
+        actor.dispatch_ready_tasks(Some(&project.id)).await;
+
+        // The arbitration row must NOT be consumed — the task dispatched
+        // to a worker, so the monitored reopen is still in progress.
+        let arb_repo = TaskArbitrationRepository::new(db.clone());
+        let (_, record) = arb_repo
+            .resolve_current_hold_cycle(&task_id)
+            .await
+            .expect("resolve hold cycle");
+        assert!(
+            record.is_some(),
+            "arbitration row must remain unconsumed when an eligible model remains — \
+             the no-eligible-model park must NOT fire"
+        );
+
+        // No human-review-hold blocker should exist.
+        let task_repo =
+            djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let blockers = task_repo
+            .list_blockers(&task_id)
+            .await
+            .expect("list blockers");
+        assert!(
+            blockers.iter().all(|b| b.status == "closed"),
+            "task must NOT have an unresolved human-review-hold blocker when a model remains eligible, \
+             got: {blockers:?}"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC2: When there is NO monitored reopen (monitored_reopen_count == 0),
+    /// the no-eligible-model park must NOT fire even if models are empty.
+    /// The empty-model path must fall through to the general no-model handling.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_eligible_model_does_not_park_without_monitored_reopen() {
+        let _ = djinn_telemetry::init();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let task_id = seed_open_worker_task(&db, &project.id).await;
+
+        // Create an arbitration row but do NOT call record_monitored_reopen —
+        // monitored_reopen_count stays at 0.
+        let repo = TaskArbitrationRepository::new(db.clone());
+        repo.try_create(CreateArbitrationParams {
+            task_id: &task_id,
+            hold_cycle: 1,
+            deadline_at: Some("2026-12-31T23:59:59.000Z"),
+            mirror_head_sha: Some("abc123"),
+            github_head_sha: Some("def456"),
+            pr_url: Some("https://github.com/test/repo/pull/1"),
+            failing_ci_job_ids: &serde_json::json!([]),
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &serde_json::json!([DEFAULT_MODEL_ID]),
+        })
+        .await
+        .expect("create arbitration row");
+
+        let (mut actor, cancel) = park_test_actor(&db, &events_tx);
+        actor.dispatch_ready_tasks(Some(&project.id)).await;
+
+        // The no-eligible-model park must NOT have fired — the arbitration row
+        // must remain unconsumed.
+        let (_, record) = repo
+            .resolve_current_hold_cycle(&task_id)
+            .await
+            .expect("resolve hold cycle");
+        assert!(
+            record.is_some(),
+            "arbitration row must remain unconsumed — no-eligible-model park \
+             must NOT fire without a monitored reopen"
+        );
+
+        cancel.cancel();
     }
 }

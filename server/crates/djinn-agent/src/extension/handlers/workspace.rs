@@ -50,13 +50,8 @@ fn effective_shell_timeout_ms(requested: Option<u64>, command: &str) -> u64 {
     }
 }
 
-/// Message returned to a code-executing role (worker or reviewer) that tries to
-/// type-check with `cargo check`/`cargo build`. Clippy hits the warm cargo cache
-/// (the warm base plus CI compile through clippy-driver under a distinct
-/// fingerprint), whereas `cargo check` produces DIFFERENT artifacts that are NOT
-/// in the warm base, so it cold-builds the whole workspace (~12min observed on
-/// the reviewer path). Steering both roles to clippy is what makes the warm-cache
-/// fast path actually pay off.
+/// Denial message for `cargo check`/`cargo build` by worker/reviewer roles.
+/// These cold-build the whole workspace (~12min); clippy reuses the warm cache.
 const CARGO_CHECK_DENIED_MSG: &str = "cargo check / cargo build (for type-checking) is disabled for the worker and reviewer roles: it produces different artifacts than the warm cargo cache and cold-builds the workspace. Use `cargo clippy -p <crate>` instead (it reuses the warm cache and also lints). `cargo test`/`cargo nextest`, `cargo tree`, `cargo metadata`, and `cargo fmt` are allowed.";
 
 /// Does this shell command, run by a code-executing role (worker or reviewer),
@@ -137,11 +132,8 @@ pub(crate) async fn call_shell(
 ) -> Result<serde_json::Value, String> {
     let p: ShellParams = parse_args(arguments)?;
 
-    // Worker AND reviewer roles: steer type-checks to clippy (which reuses the
-    // warm cargo cache). `cargo check`/`cargo build` cold-build the workspace —
-    // the reviewer's `cargo check` was a ~12min cold full-workspace recompile on
-    // every reviewed task before this steer (different fingerprint than the warm
-    // clippy base). Other roles (planner/architect) don't run cargo.
+    // Worker AND reviewer roles: steer `cargo check`/`cargo build` to clippy
+    // (warm cache). Other roles (planner/architect) don't run cargo.
     if matches!(session_role, Some("worker") | Some("reviewer"))
         && let Some(msg) = cargo_check_denied(&p.command)
     {
@@ -150,10 +142,8 @@ pub(crate) async fn call_shell(
 
     let timeout_ms = effective_shell_timeout_ms(p.timeout_ms, &p.command);
 
-    // Cross-repo shell: when `project` names a DIFFERENT registered project,
-    // lazily check that repo out (read-only, cached per run) into the worktree
-    // and run there. The sandbox root stays the task worktree, so the checkout
-    // (under `.djinn/read-sources/`) is reachable while writes can't escape.
+    // Cross-repo shell: when `project` names a different registered project,
+    // check it out read-only into `.djinn/read-sources/` and run there.
     let run_dir: std::path::PathBuf =
         if let Some(proj) = p.project.as_deref().filter(|s| !s.is_empty()) {
             let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
@@ -342,7 +332,11 @@ pub(crate) async fn call_read(
     let scan_target = want_lines.saturating_add(1);
 
     let mut reader = tokio::io::BufReader::new(file);
-    let mut all_lines: Vec<String> = Vec::new();
+    // Each entry is (line_text, byte_offset_after_line). We track the byte
+    // offset where each line starts separately in `line_byte_offsets` so we
+    // can compute accurate `ReadCoverage::Range` metadata after slicing.
+    let mut all_lines: Vec<(String, u64)> = Vec::new();
+    let mut line_byte_offsets: Vec<u64> = Vec::new();
     let mut scanned_bytes: usize = 0;
     let mut has_more_beyond_window = false;
     let mut truncated_by_budget = false;
@@ -356,6 +350,7 @@ pub(crate) async fn call_read(
         }
 
         let mut buf: Vec<u8> = Vec::new();
+        let line_start = scanned_bytes as u64;
         let n = reader
             .read_until(b'\n', &mut buf)
             .await
@@ -363,6 +358,7 @@ pub(crate) async fn call_read(
         if n == 0 {
             break; // EOF — no more lines
         }
+        let line_byte_len = n;
         scanned_bytes = scanned_bytes.saturating_add(n);
 
         // Binary detection from the streamed chunk: a NUL byte means this is
@@ -380,7 +376,8 @@ pub(crate) async fn call_read(
         if line.chars().count() > 2000 {
             line = line.chars().take(2000).collect::<String>();
         }
-        all_lines.push(line);
+        line_byte_offsets.push(line_start);
+        all_lines.push((line, line_start + line_byte_len as u64));
 
         // Byte budget: stop scanning once we've consumed the cap. If there's
         // still content on disk, surface it as truncation rather than
@@ -405,7 +402,7 @@ pub(crate) async fn call_read(
     let end = start.saturating_add(limit).min(total_scanned);
 
     let mut numbered = String::new();
-    for (i, line) in all_lines[start..end].iter().enumerate() {
+    for (i, (line, _byte_end)) in all_lines[start..end].iter().enumerate() {
         let line_no = start + i + 1;
         numbered.push_str(&format!("{:>6}\t{}\n", line_no, line));
     }
@@ -420,9 +417,39 @@ pub(crate) async fn call_read(
     // requested window didn't reach the end of what we scanned.
     let has_more = has_more_beyond_window || end < total_scanned;
 
+    // Compute read coverage metadata from the actual arguments and result.
+    // A read is full-file coverage only when the worker received all content
+    // from the start (offset 0), there are no remaining pages, and no
+    // byte-budget truncation occurred.
+    let coverage = if offset == 0 && !has_more && !truncated_by_budget {
+        crate::file_time::ReadCoverage::Full
+    } else {
+        // Record the byte range of the window actually returned.
+        let cov_start = if start < end {
+            line_byte_offsets[start]
+        } else {
+            // Empty window: point at EOF offset.
+            scanned_bytes as u64
+        };
+        let cov_end = if start < end {
+            Some(all_lines[end - 1].1)
+        } else {
+            None
+        };
+        crate::file_time::ReadCoverage::Range {
+            start: cov_start,
+            end: cov_end,
+        }
+    };
+
     state
         .file_time
-        .read(&worktree_path.display().to_string(), &path)
+        .read_with_coverage(
+            &worktree_path.display().to_string(),
+            &path,
+            coverage,
+            truncated_by_budget,
+        )
         .await?;
 
     Ok(serde_json::json!({
@@ -440,6 +467,8 @@ pub(crate) async fn call_write(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
     project_id: Option<&str>,
+    #[allow(unused_variables)] session_task_id: Option<&str>,
+    #[allow(unused_variables)] session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: WriteParams = parse_args(arguments)?;
     let path = resolve_path(&p.path, worktree_path);
@@ -602,6 +631,8 @@ fn emit_edit_match_telemetry(
     }));
 }
 
+use super::gate_guard::gate_guard_edit_check;
+
 pub(crate) async fn call_edit(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -661,6 +692,47 @@ pub(crate) async fn call_edit(
 
             match metadata.outcome {
                 MatchOutcome::Success => {
+                    // Structured edit_match metadata.
+                    let byte_range = metadata.byte_range.expect("success has byte range");
+                    let matched_bytes_val = byte_range.end - byte_range.start;
+                    let edit_match = serde_json::json!({
+                        "strategy": metadata.strategy.as_str(),
+                        "matched_byte_range": [byte_range.start, byte_range.end],
+                        "matched_line_range": metadata.line_range.map(|lr| [lr.start, lr.end]),
+                        "old_bytes": p.old_text.len(),
+                        "new_bytes": p.new_text.len(),
+                        "matched_bytes": matched_bytes_val,
+                        "reindented": metadata.reindented,
+                        "unicode_splice": metadata.unicode_splice.map(|s| match s {
+                            UnicodeSpliceStatus::Clean => "clean",
+                            UnicodeSpliceStatus::Adjusted => "adjusted",
+                        }),
+                        "note": match_note_for(metadata.strategy),
+                    });
+
+                    // Emit telemetry BEFORE GateGuard check so match-outcome
+                    // telemetry is always recorded for successful candidates.
+                    emit_edit_match_telemetry(
+                        &metadata,
+                        session_task_id,
+                        session_task_id,
+                        session_role,
+                        &path_ext,
+                        p.old_text.len(),
+                        p.new_text.len(),
+                        matched_bytes,
+                    );
+
+                    // GateGuard: enforce worker read-coverage gate before mutation.
+                    gate_guard_edit_check(
+                        state,
+                        session_role,
+                        &worktree_path.display().to_string(),
+                        &path,
+                        byte_range.start..byte_range.end,
+                    )
+                    .await?;
+
                     let new_content = apply_match(&content, &p.new_text, &metadata);
                     tokio::fs::write(&path, &new_content)
                         .await
@@ -688,36 +760,7 @@ pub(crate) async fn call_edit(
                         result["match_note"] = serde_json::Value::String(note);
                     }
 
-                    // Structured edit_match metadata.
-                    let byte_range = metadata.byte_range.expect("success has byte range");
-                    let matched_bytes_val = byte_range.end - byte_range.start;
-                    let edit_match = serde_json::json!({
-                        "strategy": metadata.strategy.as_str(),
-                        "matched_byte_range": [byte_range.start, byte_range.end],
-                        "matched_line_range": metadata.line_range.map(|lr| [lr.start, lr.end]),
-                        "old_bytes": p.old_text.len(),
-                        "new_bytes": p.new_text.len(),
-                        "matched_bytes": matched_bytes_val,
-                        "reindented": metadata.reindented,
-                        "unicode_splice": metadata.unicode_splice.map(|s| match s {
-                            UnicodeSpliceStatus::Clean => "clean",
-                            UnicodeSpliceStatus::Adjusted => "adjusted",
-                        }),
-                        "note": match_note_for(metadata.strategy),
-                    });
                     result["edit_match"] = edit_match;
-
-                    // Emit telemetry (edit_match_outcome + edit_match_strategy).
-                    emit_edit_match_telemetry(
-                        &metadata,
-                        session_task_id,
-                        session_task_id,
-                        session_role,
-                        &path_ext,
-                        p.old_text.len(),
-                        p.new_text.len(),
-                        matched_bytes,
-                    );
 
                     let result = match (project_id, touched_rel.as_deref()) {
                         (Some(pid), Some(rel)) => {
@@ -830,6 +873,8 @@ pub(crate) async fn call_apply_patch(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
     project_id: Option<&str>,
+    #[allow(unused_variables)] session_task_id: Option<&str>,
+    #[allow(unused_variables)] session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: ApplyPatchParams = parse_args(arguments)?;
 

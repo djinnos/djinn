@@ -268,9 +268,11 @@ async fn task_count_group_by(#[case] group_by: &str) {
 
 #[rstest]
 #[case("status")]
+#[case("status_negated")]
 #[case("priority")]
 #[case("label")]
 #[case("text")]
+#[case("text_case_insensitive")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_list_filter(#[case] filter_kind: &str) {
     let db = create_test_db();
@@ -309,6 +311,12 @@ async fn task_list_filter(#[case] filter_kind: &str) {
             status: Some("in_progress".to_owned()),
             ..Default::default()
         },
+        // A leading "!" negates the status filter: "!open" matches every task
+        // whose status is not `open`, i.e. only the in_progress `beta` task.
+        "status_negated" => ListQuery {
+            status: Some("!open".to_owned()),
+            ..Default::default()
+        },
         "priority" => ListQuery {
             priority: Some(1),
             ..Default::default()
@@ -319,6 +327,13 @@ async fn task_list_filter(#[case] filter_kind: &str) {
         },
         "text" => ListQuery {
             text: Some("beta".to_owned()),
+            ..Default::default()
+        },
+        // The `text` filter is case-insensitive (ILIKE): an all-caps query still
+        // matches the lower-case "beta feature" title. This backs the Kanban
+        // search box, where matching should not depend on letter case.
+        "text_case_insensitive" => ListQuery {
+            text: Some("BETA".to_owned()),
             ..Default::default()
         },
         _ => unreachable!(),

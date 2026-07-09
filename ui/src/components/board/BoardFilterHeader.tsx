@@ -14,9 +14,11 @@ import { useProjects } from "@/stores/useProjectStore";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   KanbanIcon,
+  Loading02Icon,
   Search01Icon,
   WorkflowSquare06Icon,
 } from "@hugeicons/core-free-icons";
+import { useBoardSearchStore } from "@/stores/useBoardSearchStore";
 import { cn } from "@/lib/utils";
 import {
   Combobox,
@@ -127,6 +129,9 @@ export function BoardFilterHeader() {
     setSearch,
   } = useBoardFilters();
 
+  // A subtle spinner replaces the search glyph while a backend search runs.
+  const searching = useBoardSearchStore((state) => state.searching);
+
   const epicOptions = useMemo(
     () =>
       Array.from(epics.values()).sort((a, b) =>
@@ -231,7 +236,15 @@ export function BoardFilterHeader() {
       <div className="ml-auto flex items-center gap-2">
         <InputGroup className="w-56">
           <InputGroupAddon>
-            <HugeiconsIcon icon={Search01Icon} className="size-3.5" />
+            {searching ? (
+              <HugeiconsIcon
+                icon={Loading02Icon}
+                className="size-3.5 animate-spin text-muted-foreground"
+                aria-label="Searching"
+              />
+            ) : (
+              <HugeiconsIcon icon={Search01Icon} className="size-3.5" />
+            )}
           </InputGroupAddon>
           <InputGroupInput
             value={searchInput}

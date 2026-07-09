@@ -1,116 +1,16 @@
-use super::*;
-use crate::tripwires::engine::{ChangedFile, ChangedFileStatus, DiffHunk};
-use crate::tripwires::policy::TripwirePolicy;
-use crate::tripwires::reason_codes::*;
+//! Tests for the five original tripwire rule families (imb4) plus
+//! deterministic ordering, integration, edge-case, helper, and
+//! multi-hunk tests.
 
-// ── Helpers ──────────────────────────────────────────────────────────────
-
-/// Build a minimal changed file with no diff content.
-fn simple_file(
-    path: &str,
-    status: ChangedFileStatus,
-    additions: u32,
-    deletions: u32,
-) -> ChangedFile {
-    ChangedFile {
-        path: path.to_owned(),
-        old_path: None,
-        status,
-        additions,
-        deletions,
-        hunks: Vec::new(),
-        is_generated: false,
-        is_vendor: false,
-    }
-}
-
-/// Build a changed file with diff hunks containing added lines.
-fn file_with_added_lines(path: &str, added_lines: &[&str]) -> ChangedFile {
-    let diff_lines: Vec<String> = added_lines.iter().map(|l| format!("+{l}")).collect();
-    let hunk = DiffHunk {
-        new_start: 1,
-        new_lines: added_lines.len() as u32,
-        old_start: 0,
-        old_lines: 0,
-        diff_lines,
-    };
-    ChangedFile {
-        path: path.to_owned(),
-        old_path: None,
-        status: ChangedFileStatus::Modified,
-        additions: added_lines.len() as u32,
-        deletions: 0,
-        hunks: vec![hunk],
-        is_generated: false,
-        is_vendor: false,
-    }
-}
-
-/// Build a changed file with diff hunks containing context and added lines.
-fn file_with_mixed_diff(
-    path: &str,
-    new_start: u32,
-    lines: &[(char, &str)], // ('+', '-', ' ' prefix, content)
-) -> ChangedFile {
-    let diff_lines: Vec<String> = lines
-        .iter()
-        .map(|(prefix, content)| format!("{prefix}{content}"))
-        .collect();
-    let new_lines = lines.iter().filter(|(p, _)| *p != '-').count() as u32;
-    let old_lines = lines.iter().filter(|(p, _)| *p != '+').count() as u32;
-    let hunk = DiffHunk {
-        new_start,
-        new_lines,
-        old_start: new_start,
-        old_lines,
-        diff_lines,
-    };
-    let additions = lines.iter().filter(|(p, _)| *p == '+').count() as u32;
-    ChangedFile {
-        path: path.to_owned(),
-        old_path: None,
-        status: ChangedFileStatus::Modified,
-        additions,
-        deletions: 0,
-        hunks: vec![hunk],
-        is_generated: false,
-        is_vendor: false,
-    }
-}
-
-fn default_policy() -> TripwirePolicy {
-    TripwirePolicy::default()
-}
-
-fn policy_with_report_only_migration() -> TripwirePolicy {
-    let mut p = default_policy();
-    p.migration.report_only = true;
-    p
-}
-
-fn policy_with_report_only_dependency() -> TripwirePolicy {
-    let mut p = default_policy();
-    p.dependency_identity.report_only = true;
-    p
-}
-
-fn policy_with_report_only_egress() -> TripwirePolicy {
-    let mut p = default_policy();
-    p.network_egress.report_only = true;
-    p
-}
-
-fn policy_with_report_only_unsafe() -> TripwirePolicy {
-    let mut p = default_policy();
-    p.unsafe_code.report_only = true;
-    p
-}
-
-fn policy_with_report_only_boundary() -> TripwirePolicy {
-    let mut p = default_policy();
-    p.boundary_path.report_only = true;
-    p
-}
+use super::helpers::*;
+use crate::tripwires::engine::{ChangedFile, ChangedFileStatus, DiffHunk, RawFinding};
+use crate::tripwires::reason_codes::TripwireRuleId;
+use crate::tripwires::rules::{
+    all_rule_evaluators, evaluate_boundary_path_changes, evaluate_ci_workflow_changes,
+    evaluate_dependency_identity_changes, evaluate_large_delete_or_rewrite,
+    evaluate_migration_changes, evaluate_network_egress_changes, evaluate_unsafe_code_changes,
+    file_extension, path_matches_any_glob,
+};
 
 // ── migration_change: positive cases ────────────────────────────────────
 
@@ -1013,6 +913,8 @@ fn all_evaluators_produce_deterministic_findings() {
         v.extend(evaluate_network_egress_changes(&policy, &files));
         v.extend(evaluate_unsafe_code_changes(&policy, &files));
         v.extend(evaluate_boundary_path_changes(&policy, &files));
+        v.extend(evaluate_large_delete_or_rewrite(&policy, &files));
+        v.extend(evaluate_ci_workflow_changes(&policy, &files));
         v
     };
 
@@ -1023,6 +925,8 @@ fn all_evaluators_produce_deterministic_findings() {
         v.extend(evaluate_network_egress_changes(&policy, &files));
         v.extend(evaluate_unsafe_code_changes(&policy, &files));
         v.extend(evaluate_boundary_path_changes(&policy, &files));
+        v.extend(evaluate_large_delete_or_rewrite(&policy, &files));
+        v.extend(evaluate_ci_workflow_changes(&policy, &files));
         v
     };
 
@@ -1055,6 +959,12 @@ fn all_evaluators_integrate_with_engine() {
             10,
             5,
         ),
+        simple_file(
+            ".github/workflows/ci.yml",
+            ChangedFileStatus::Modified,
+            5,
+            2,
+        ),
     ];
 
     let input = TripwireEvaluationInput {
@@ -1070,10 +980,12 @@ fn all_evaluators_integrate_with_engine() {
     let evaluators = all_rule_evaluators();
     let decision = evaluate(&input, &evaluators);
 
-    // All five rules should fire.
-    assert_eq!(decision.findings.len(), 5);
+    // All seven rules should fire (six original + ci_workflow).
+    // large_delete_or_rewrite does NOT fire because no files exceed
+    // the default per-file (400) or aggregate (1500) thresholds.
+    assert_eq!(decision.findings.len(), 6);
     assert_eq!(decision.outcome, GateOutcome::Held);
-    assert_eq!(decision.enforcement_finding_count, 5);
+    assert_eq!(decision.enforcement_finding_count, 6);
     assert_eq!(decision.report_only_finding_count, 0);
 
     // Verify each rule family is represented.
@@ -1083,6 +995,7 @@ fn all_evaluators_integrate_with_engine() {
     assert!(rule_ids.contains(&TripwireRuleId::NetworkEgressChange));
     assert!(rule_ids.contains(&TripwireRuleId::UnsafeCodeChange));
     assert!(rule_ids.contains(&TripwireRuleId::BoundaryPathChange));
+    assert!(rule_ids.contains(&TripwireRuleId::CIWorkflowChange));
 }
 
 #[test]
@@ -1101,6 +1014,12 @@ fn all_report_only_produces_report_only_outcome() {
             10,
             5,
         ),
+        simple_file(
+            ".github/workflows/ci.yml",
+            ChangedFileStatus::Modified,
+            5,
+            2,
+        ),
     ];
 
     let mut policy = default_policy();
@@ -1109,6 +1028,7 @@ fn all_report_only_produces_report_only_outcome() {
     policy.network_egress.report_only = true;
     policy.unsafe_code.report_only = true;
     policy.boundary_path.report_only = true;
+    policy.ci_workflow.report_only = true;
 
     let input = TripwireEvaluationInput {
         task_id: "test_task".to_owned(),
@@ -1125,7 +1045,7 @@ fn all_report_only_produces_report_only_outcome() {
 
     assert_eq!(decision.outcome, GateOutcome::ReportOnly);
     assert_eq!(decision.enforcement_finding_count, 0);
-    assert_eq!(decision.report_only_finding_count, 5);
+    assert_eq!(decision.report_only_finding_count, 6);
 }
 
 // ── Edge cases ──────────────────────────────────────────────────────────
@@ -1139,6 +1059,8 @@ fn empty_changed_files_produces_no_findings() {
     assert!(evaluate_network_egress_changes(&policy, &empty).is_empty());
     assert!(evaluate_unsafe_code_changes(&policy, &empty).is_empty());
     assert!(evaluate_boundary_path_changes(&policy, &empty).is_empty());
+    assert!(evaluate_large_delete_or_rewrite(&policy, &empty).is_empty());
+    assert!(evaluate_ci_workflow_changes(&policy, &empty).is_empty());
 }
 
 #[test]
@@ -1149,6 +1071,8 @@ fn all_rules_disabled_produces_no_findings() {
     policy.network_egress.enabled = false;
     policy.unsafe_code.enabled = false;
     policy.boundary_path.enabled = false;
+    policy.large_delete_rewrite.enabled = false;
+    policy.ci_workflow.enabled = false;
 
     let client_line = format!("let client = {}::Client::new();", "reqwest");
     let files = vec![
@@ -1169,6 +1093,8 @@ fn all_rules_disabled_produces_no_findings() {
     assert!(evaluate_network_egress_changes(&policy, &files).is_empty());
     assert!(evaluate_unsafe_code_changes(&policy, &files).is_empty());
     assert!(evaluate_boundary_path_changes(&policy, &files).is_empty());
+    assert!(evaluate_large_delete_or_rewrite(&policy, &files).is_empty());
+    assert!(evaluate_ci_workflow_changes(&policy, &files).is_empty());
 }
 
 // ── helper: file_extension ──────────────────────────────────────────────

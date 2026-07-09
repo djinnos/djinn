@@ -643,10 +643,7 @@ mod tests {
         let mut prev = 0u8;
         for outcome in outcomes {
             let rank = outcome.rank();
-            assert!(
-                rank > prev || rank == prev,
-                "ranks must be non-decreasing after submitted"
-            );
+            assert!(rank >= prev, "ranks must be non-decreasing after submitted");
             prev = rank;
         }
     }

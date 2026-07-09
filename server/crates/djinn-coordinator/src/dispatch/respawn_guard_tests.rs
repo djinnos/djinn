@@ -1160,3 +1160,194 @@ async fn supervisor_rework_reopen_is_noop_for_non_rework_action() {
         "non-rework action must leave the submitted attempt untouched"
     );
 }
+
+// ─── Adoption → PR-poller handoff tests (incident gton) ──────────────
+//
+// The respawn guard's open-PR adoption used to skip dispatch WITHOUT
+// transferring ownership: a worker task reopened to `open` while retaining its
+// `pr_url` (e.g. by the startup reaper after a deploy) was adopted on every
+// ready pass — 470x overnight for task gton — but the PR poller only polls
+// `pr_draft`/`pr_review`, so NOBODY advanced it and it wedged for 9h. The
+// handoff moves the adopted task into the poller-owned `pr_review` column so
+// the poller advances it, and the task leaves the `open` ready set so adoption
+// never re-fires.
+
+/// A `TaskRepository` over the in-memory test DB (noop event bus).
+fn test_task_repo(db: &Database) -> TaskRepository {
+    TaskRepository::new(db.clone(), EventBus::noop())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_moves_open_task_to_pr_review_with_audit_and_activity() {
+    let db = test_db();
+    let task = create_task(&db).await; // status: open
+    let pr = "https://github.example/owner/repo/pull/1765";
+
+    // Full adoption path as the caller runs it: audit row + handoff.
+    record_adopted_pr_attempt(
+        &db,
+        &task.id,
+        "worker",
+        pr,
+        Some("adopted existing open PR"),
+    )
+    .await
+    .expect("adopted_pr audit row inserts");
+    let moved =
+        handoff_adopted_pr_to_poller(&test_task_repo(&db), &task.id, &task.status, pr).await;
+    assert!(
+        moved,
+        "an open adopted task must be handed off to the poller"
+    );
+
+    // Task now lives in the poller-owned column.
+    let repo = test_task_repo(&db);
+    let updated = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        updated.status, "pr_review",
+        "adopted task must land in the poller-owned pr_review column"
+    );
+
+    // The adopted-PR audit row is still recorded (adoption is auditable).
+    let attempts = TaskAttemptRepository::new(db.clone())
+        .list_for_task(&task.id)
+        .await
+        .unwrap();
+    assert!(
+        attempts.iter().any(|a| a.outcome == "adopted_pr"),
+        "adopted_pr audit row must be recorded alongside the handoff"
+    );
+
+    // The handoff emits an auditable activity entry naming the actor and PR.
+    let activity = repo.list_activity(&task.id).await.unwrap();
+    let handoff = activity
+        .iter()
+        .find(|e| e.event_type == "adoption_handoff")
+        .expect("an adoption_handoff activity entry must be recorded");
+    assert_eq!(
+        handoff.actor_role, "respawn_guard",
+        "handoff activity names the respawn-guard system actor"
+    );
+    assert_eq!(handoff.actor_id, "system");
+    assert!(
+        handoff.payload.contains(pr),
+        "handoff activity payload must name the adopted PR url"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_is_one_shot_and_idempotent() {
+    let db = test_db();
+    let task = create_task(&db).await;
+    let pr = "https://github.example/owner/repo/pull/9";
+    let repo = test_task_repo(&db);
+
+    // First handoff moves open → pr_review.
+    assert!(handoff_adopted_pr_to_poller(&repo, &task.id, "open", pr).await);
+    let s1 = repo.get(&task.id).await.unwrap().unwrap().status;
+    assert_eq!(s1, "pr_review");
+
+    // Second call with the now-current (poller-owned) status is a no-op — the
+    // task already left `open`, so adoption cannot re-fire and re-hand it off.
+    assert!(
+        !handoff_adopted_pr_to_poller(&repo, &task.id, &s1, pr).await,
+        "handoff must be one-shot: no re-handoff once the task is poller-owned"
+    );
+    assert_eq!(
+        repo.get(&task.id).await.unwrap().unwrap().status,
+        "pr_review"
+    );
+
+    // Exactly one handoff activity entry exists (the 470x/night spam is gone).
+    let count = repo
+        .list_activity(&task.id)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| e.event_type == "adoption_handoff")
+        .count();
+    assert_eq!(
+        count, 1,
+        "exactly one handoff activity entry — no repeated adoption spam"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopened_task_with_retained_pr_url_is_handed_to_poller_not_wedged() {
+    // Incident gton shape: the startup reaper reopened a task to `open` while
+    // retaining its `pr_url` (open, green PR). Prior behavior: adopted
+    // (skip-dispatch) on every ready pass, polled by nobody, wedged 9h. Now the
+    // guard adopts AND the task is handed to the PR poller.
+    let db = test_db();
+    let task = create_task(&db).await; // open, as the reaper left it
+    let pr = "https://github.example/owner/repo/pull/1765";
+
+    // A healthy open PR (no rework signal) is still adopted by the guard.
+    let decision = run_respawn_guard(&db, &task.id, "worker", Some(pr), None).await;
+    assert_eq!(
+        decision,
+        RespawnGuardDecision::Adopted {
+            pr_url: pr.to_owned()
+        }
+    );
+
+    // The caller records the audit row and hands the task off instead of just
+    // skipping dispatch.
+    record_adopted_pr_attempt(&db, &task.id, "worker", pr, Some("adopted"))
+        .await
+        .expect("audit row inserts");
+    assert!(handoff_adopted_pr_to_poller(&test_task_repo(&db), &task.id, &task.status, pr).await);
+
+    let updated = test_task_repo(&db).get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        updated.status, "pr_review",
+        "reopened-with-pr_url task must be handed to the poller, not left wedged in open"
+    );
+
+    // A subsequent ready pass no longer sees it in `open`, so the handoff is a
+    // no-op and adoption cannot re-fire.
+    assert!(
+        !handoff_adopted_pr_to_poller(&test_task_repo(&db), &updated.id, &updated.status, pr).await
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_is_noop_for_already_poller_owned_status() {
+    // Idempotency: a task already in a poller-owned status must be left alone
+    // (no illegal transition, no duplicate activity).
+    let db = test_db();
+    let task = create_task(&db).await;
+    let repo = test_task_repo(&db);
+    for status in ["pr_draft", "pr_review"] {
+        assert!(
+            !handoff_adopted_pr_to_poller(&repo, &task.id, status, "https://x/pull/1").await,
+            "handoff must no-op for already-poller-owned status {status}"
+        );
+    }
+    // The task itself was never transitioned (still open).
+    assert_eq!(repo.get(&task.id).await.unwrap().unwrap().status, "open");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_is_noop_for_unexpected_non_open_status() {
+    // Defensive: an adopted task observed in a non-open, non-poller status must
+    // not be forced into pr_review (the state machine only permits open →
+    // pr_review); the handoff returns false and leaves the task untouched.
+    let db = test_db();
+    let task = create_task(&db).await;
+    let repo = test_task_repo(&db);
+    // Move to an unexpected status directly (bypass the state machine's Start
+    // AC/blocker gate, which is irrelevant to this handoff no-op assertion).
+    repo.set_status(&task.id, "in_progress")
+        .await
+        .expect("set_status moves the task to in_progress");
+
+    assert!(
+        !handoff_adopted_pr_to_poller(&repo, &task.id, "in_progress", "https://x/pull/1").await
+    );
+    assert_eq!(
+        repo.get(&task.id).await.unwrap().unwrap().status,
+        "in_progress",
+        "unexpected-status task must be left untouched"
+    );
+}

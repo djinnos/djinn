@@ -82,12 +82,16 @@ mod pr_review_handlers;
 mod pr_review_watcher;
 mod pr_watcher;
 mod state;
+mod tripwire_gate;
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod pr_cleanup_tests;
+
+#[cfg(test)]
+mod tripwire_merge_gate_tests;
 
 use crate::ci_preflight_gate::{
     CiPreflightGateKind, CiPreflightGateVerdict, latest_task_workdir,

@@ -556,6 +556,28 @@ pub struct NeedsEvidenceCapStatus {
     pub no_refinement_run: bool,
 }
 
+/// Durable reconstruction of a refinement parked awaiting the human's single
+/// accept/reject review.
+///
+/// When the tribunal converges (or is escalated to the human), the coordinator
+/// writes a `refinement_awaiting_review` lifecycle row into `proposal_revisions`
+/// carrying this metadata. Because the row is durable, the parked state can be
+/// rebuilt after a server restart instead of being wiped as "interrupted".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AwaitingReviewPark {
+    /// The judge's convergence summary text persisted at park time.
+    pub judge_summary: Option<String>,
+    /// The pre-refinement snapshot revision seq — the revert target if the
+    /// human rejects the refined result.
+    pub snapshot_revision_seq: Option<i32>,
+    /// The refined revision seq the tribunal converged on and parked against.
+    pub refined_revision_seq: Option<i32>,
+    /// The parked stop-reason tag, if the park was an escalation (e.g.
+    /// `round_cap`, `repeated_objection`). `None` for a clean judge-ready
+    /// convergence.
+    pub stop_reason: Option<String>,
+}
+
 pub struct ProposalRepository {
     db: Database,
     events: EventBus,
@@ -1464,6 +1486,23 @@ impl ProposalRepository {
         .await?)
     }
 
+    /// Return the `created_at` of the latest `refinement_start` lifecycle event
+    /// for this proposal — the boundary that separates the current refinement
+    /// run's debate-trail entries from any prior (interrupted) run's entries.
+    ///
+    /// Returns `None` when no `refinement_start` exists (no refinement run
+    /// boundary recorded). Callers use this to scope debate-trail reads to the
+    /// current run so a restarted run's round numbers do not collide with a
+    /// prior run's entries (which reuse the same 1-based round counter).
+    pub async fn latest_refinement_start_at(&self, proposal_id: &str) -> Result<Option<String>> {
+        let revisions = self.revisions(proposal_id).await?;
+        Ok(revisions
+            .iter()
+            .rev()
+            .find(|r| r.event_kind == "refinement_start")
+            .map(|r| r.created_at.clone()))
+    }
+
     /// Record a refinement lifecycle event (`refinement_start` or
     /// `refinement_stop`) as a lightweight `proposal_revisions` row. These
     /// events carry `event_metadata` with structured JSON (e.g.
@@ -1633,6 +1672,82 @@ impl ProposalRepository {
         .fetch_all(self.db.pool())
         .await?;
         Ok(ids)
+    }
+
+    /// If the proposal's current refinement run is parked awaiting the human's
+    /// single accept/reject review, return the reconstructed park metadata.
+    ///
+    /// A run is parked awaiting review when the latest `refinement_awaiting_review`
+    /// lifecycle row comes at or after the latest `refinement_start` and is not
+    /// superseded by a later `refinement_stop` — the exact same predicate
+    /// `build_refinement_status` uses to surface the `awaiting_review` flag.
+    ///
+    /// Startup recovery uses this to distinguish a legitimately-converged park
+    /// (which must be restored so the human can still accept/reject it) from a
+    /// refinement genuinely interrupted mid-tribunal (which is stamped
+    /// `refinement_stop` with `Interrupted`). Returns `None` when the proposal
+    /// is mid-tribunal or not in refinement at all.
+    pub async fn parked_awaiting_review(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<AwaitingReviewPark>> {
+        let revisions = self.revisions(proposal_id).await?;
+
+        let Some(latest_start) = revisions
+            .iter()
+            .rev()
+            .find(|r| r.event_kind == "refinement_start")
+        else {
+            return Ok(None);
+        };
+        let latest_awaiting = revisions
+            .iter()
+            .rev()
+            .find(|r| r.event_kind == "refinement_awaiting_review");
+        let latest_stop = revisions
+            .iter()
+            .rev()
+            .find(|r| r.event_kind == "refinement_stop");
+
+        // Mirror `build_refinement_status`'s awaiting-review predicate: the park
+        // must belong to the current run (at/after the latest start) and must
+        // not be superseded by a later stop.
+        let is_parked = match (&latest_awaiting, &latest_stop) {
+            (Some(aw), Some(stop)) => {
+                latest_start.created_at <= aw.created_at && stop.created_at < aw.created_at
+            }
+            (Some(aw), None) => latest_start.created_at <= aw.created_at,
+            _ => false,
+        };
+        if !is_parked {
+            return Ok(None);
+        }
+
+        let meta = latest_awaiting
+            .and_then(|r| r.event_metadata.as_ref())
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok());
+
+        let judge_summary = meta
+            .as_ref()
+            .and_then(|v| v.get("judge_summary")?.as_str().map(String::from));
+        let snapshot_revision_seq = meta
+            .as_ref()
+            .and_then(|v| v.get("snapshot_revision_seq")?.as_i64())
+            .map(|n| n as i32);
+        let refined_revision_seq = meta
+            .as_ref()
+            .and_then(|v| v.get("refined_revision_seq")?.as_i64())
+            .map(|n| n as i32);
+        let stop_reason = meta
+            .as_ref()
+            .and_then(|v| v.get("stop_reason")?.as_str().map(String::from));
+
+        Ok(Some(AwaitingReviewPark {
+            judge_summary,
+            snapshot_revision_seq,
+            refined_revision_seq,
+            stop_reason,
+        }))
     }
 
     /// Find the latest verdict override for a proposal. Returns
@@ -7796,6 +7911,172 @@ mod tests {
             .unwrap();
         assert_eq!(status.count, 1);
         assert!(!status.cap_exceeded);
+    }
+
+    /// `latest_refinement_start_at` returns `None` before any run boundary and
+    /// then tracks the LATEST `refinement_start` across an interrupted-and-
+    /// restarted run, so debate-trail reads can be scoped to the current run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn latest_refinement_start_at_tracks_current_run_boundary() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("StartBoundary")).await.unwrap();
+
+        // No refinement run yet → no boundary.
+        assert_eq!(
+            repo.latest_refinement_start_at(&p.id).await.unwrap(),
+            None,
+            "no refinement_start → None"
+        );
+
+        // Run #1 start.
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+        let start1 = repo
+            .latest_refinement_start_at(&p.id)
+            .await
+            .unwrap()
+            .expect("run #1 boundary");
+
+        // Interrupt + restart (run #2). Delay so created_at advances.
+        repo.record_refinement_lifecycle(&p.id, "refinement_stop", None)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+        let start2 = repo
+            .latest_refinement_start_at(&p.id)
+            .await
+            .unwrap()
+            .expect("run #2 boundary");
+
+        assert!(
+            start2 > start1,
+            "latest boundary must be the newest refinement_start ({start2} > {start1})"
+        );
+    }
+
+    // ── parked_awaiting_review ───────────────────────────────────────────
+
+    fn awaiting_review_meta(
+        judge_summary: &str,
+        snapshot_seq: i32,
+        refined_seq: i32,
+        stop_reason: Option<&str>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "source": "refinement_loop",
+            "event": "refinement_awaiting_review",
+            "judge_summary": judge_summary,
+            "snapshot_revision_seq": snapshot_seq,
+            "refined_revision_seq": refined_seq,
+            "stop_reason": stop_reason,
+        })
+    }
+
+    /// A converged tribunal (start → awaiting_review, no stop) is reported as
+    /// parked, with the snapshot/refined seqs and judge summary reconstructed
+    /// from the durable lifecycle row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parked_awaiting_review_returns_metadata_when_converged() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Parked")).await.unwrap();
+
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let meta = awaiting_review_meta("Converged: spec is ready.", 1, 3, None);
+        repo.record_refinement_lifecycle(&p.id, "refinement_awaiting_review", Some(&meta))
+            .await
+            .unwrap();
+
+        let park = repo
+            .parked_awaiting_review(&p.id)
+            .await
+            .unwrap()
+            .expect("converged run must report parked awaiting review");
+        assert_eq!(
+            park.judge_summary.as_deref(),
+            Some("Converged: spec is ready.")
+        );
+        assert_eq!(park.snapshot_revision_seq, Some(1));
+        assert_eq!(park.refined_revision_seq, Some(3));
+        assert_eq!(park.stop_reason, None);
+    }
+
+    /// An escalation park carries the persisted `stop_reason` tag through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parked_awaiting_review_carries_escalation_stop_reason() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Escalated")).await.unwrap();
+
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let meta = awaiting_review_meta("Round cap reached.", 2, 2, Some("round_cap"));
+        repo.record_refinement_lifecycle(&p.id, "refinement_awaiting_review", Some(&meta))
+            .await
+            .unwrap();
+
+        let park = repo.parked_awaiting_review(&p.id).await.unwrap().unwrap();
+        assert_eq!(park.stop_reason.as_deref(), Some("round_cap"));
+        assert_eq!(park.snapshot_revision_seq, Some(2));
+        assert_eq!(park.refined_revision_seq, Some(2));
+    }
+
+    /// A refinement still mid-tribunal (started, no awaiting_review row yet) is
+    /// NOT parked — recovery must stamp it interrupted, not restore it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parked_awaiting_review_none_mid_tribunal() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("MidTribunal")).await.unwrap();
+
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+
+        assert!(
+            repo.parked_awaiting_review(&p.id).await.unwrap().is_none(),
+            "a mid-tribunal run has no awaiting-review park"
+        );
+    }
+
+    /// Once the human resolves the park (a `refinement_stop` lands after the
+    /// awaiting_review row), the run is no longer parked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parked_awaiting_review_none_after_human_resolved() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Resolved")).await.unwrap();
+
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let meta = awaiting_review_meta("Ready.", 1, 2, None);
+        repo.record_refinement_lifecycle(&p.id, "refinement_awaiting_review", Some(&meta))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        repo.record_refinement_lifecycle(&p.id, "refinement_stop", None)
+            .await
+            .unwrap();
+
+        assert!(
+            repo.parked_awaiting_review(&p.id).await.unwrap().is_none(),
+            "a stop after the awaiting-review row clears the park"
+        );
+    }
+
+    /// A proposal never entered into refinement is not parked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parked_awaiting_review_none_when_no_refinement() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("NoRefinement")).await.unwrap();
+        assert!(repo.parked_awaiting_review(&p.id).await.unwrap().is_none());
     }
 
     /// Malformed/rejected demands that fail validation in

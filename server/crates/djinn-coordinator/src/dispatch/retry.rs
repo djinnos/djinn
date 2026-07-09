@@ -1049,6 +1049,10 @@ impl CoordinatorActor {
             "deadline_at": record.deadline_at,
             "decision_failure_count": record.decision_failure_count,
             "infra_retry_count": record.infra_retry_count,
+            "mirror_head_sha": record.mirror_head_sha,
+            "github_head_sha": record.github_head_sha,
+            "pr_url": record.pr_url,
+            "failing_ci_job_ids": record.failing_ci_job_ids,
         })
     }
 
@@ -1120,6 +1124,12 @@ impl CoordinatorActor {
                 "CoordinatorActor: deadline auto-park — failed to store deadline dossier"
             );
         }
+
+        // Emit arbiter rollout telemetry: deadline auto-park.
+        djinn_telemetry::arbiter::record_park(
+            djinn_telemetry::arbiter::PARK_REASON_DEADLINE_EXPIRED,
+            djinn_telemetry::arbiter::PARK_OUTCOME_SUCCESS,
+        );
 
         let quality_strikes = self
             .task_repo()
@@ -1328,7 +1338,17 @@ impl CoordinatorActor {
                                 "deadline_at": deadline_str,
                                 "decision_failure_count": existing.decision_failure_count,
                                 "infra_retry_count": existing.infra_retry_count,
+                                "mirror_head_sha": existing.mirror_head_sha,
+                                "github_head_sha": existing.github_head_sha,
+                                "pr_url": existing.pr_url,
+                                "failing_ci_job_ids": existing.failing_ci_job_ids,
                             });
+
+                            // Emit arbiter rollout telemetry: deadline park.
+                            djinn_telemetry::arbiter::record_park(
+                                djinn_telemetry::arbiter::PARK_REASON_DEADLINE_EXPIRED,
+                                djinn_telemetry::arbiter::PARK_OUTCOME_SUCCESS,
+                            );
 
                             // Update the arbitration row with the dossier.
                             use djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams;
@@ -1394,7 +1414,17 @@ impl CoordinatorActor {
                             "decision_failure_count": existing.decision_failure_count,
                             "infra_retry_count": existing.infra_retry_count,
                             "deadline_at": existing.deadline_at,
+                            "mirror_head_sha": existing.mirror_head_sha,
+                            "github_head_sha": existing.github_head_sha,
+                            "pr_url": existing.pr_url,
+                            "failing_ci_job_ids": existing.failing_ci_job_ids,
                         });
+
+                        // Emit arbiter rollout telemetry: decision-failure cap park.
+                        djinn_telemetry::arbiter::record_park(
+                            djinn_telemetry::arbiter::PARK_REASON_DECISION_FAILURE_CAP,
+                            djinn_telemetry::arbiter::PARK_OUTCOME_SUCCESS,
+                        );
 
                         return self
                             .park_source_human_review_with_dossier(
@@ -1433,6 +1463,8 @@ impl CoordinatorActor {
                                 task,
                                 &history,
                                 &attempt_ledger,
+                                None,
+                                &serde_json::json!([]),
                             ),
                         )
                         .await;
@@ -1522,6 +1554,8 @@ impl CoordinatorActor {
                                 task,
                                 &history,
                                 &attempt_ledger,
+                                mirror_head_sha.as_deref(),
+                                &failing_ci_job_ids,
                             ),
                         )
                         .await;
@@ -1529,91 +1563,23 @@ impl CoordinatorActor {
             };
 
             match create_result {
-                TryCreateResult::Created(_) | TryCreateResult::AlreadyExistsUnconsumed(_) => {
-                    // Arbiter dispatch path.
-                    tracing::warn!(
-                        task_id = %task.short_id,
+                TryCreateResult::Created(_) => {
+                    // Arbiter dispatch path — fresh arbitration row created.
+                    self.dispatch_arbiter_second_strike(
+                        task,
                         hold_cycle,
-                        intervention_count = task.intervention_count,
-                        total_reopen_count = task.total_reopen_count,
-                        reopen_count = task.reopen_count,
                         quality_strikes,
-                        "CoordinatorActor: second-strike — dispatching Lead arbiter for current hold cycle"
-                    );
-                    // Clear streak/cooldown so the hold isn't shadowed by stale
-                    // backoff state.
-                    self.dispatch_failure_streak.remove(&task.id);
-                    self.dispatch_cooldowns.remove(&task.id);
-                    self.last_dispatched.remove(&task.id);
-                    self.inflight_dispatches.remove(&task.id);
-                    self.clear_durable_dispatch_backoff_state(
-                        &task.id,
-                        Some(&task.short_id),
-                        "planner_second_strike_arbiter_dispatch",
+                        &reason,
+                        role,
+                        &history,
+                        &attempt_ledger,
+                        mirror_head_sha.as_deref(),
+                        &failing_ci_job_ids,
                     )
                     .await;
-                    // Interrupt any running session for this task so parking it
-                    // actually frees the dispatch slot.
-                    let session_repo = djinn_db::SessionRepository::new(
-                        self.db.clone(),
-                        crate::events::event_bus_for(&self.events_tx),
-                    );
-                    if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            error = %e,
-                            "CoordinatorActor: failed to interrupt running sessions while dispatching Lead arbiter"
-                        );
-                    }
-                    // The arbiter entry contract is explicit: the source task
-                    // must be in `needs_lead_intervention` after this path. If
-                    // it is already actively running a Lead intervention, move
-                    // it back to the queued Lead status; otherwise use the
-                    // widened Escalate transition. Fail closed if either
-                    // transition cannot be applied.
-                    if task.status != "needs_lead_intervention" {
-                        let task_repo = self.task_repo();
-                        let transition_action = if task.status == "in_lead_intervention" {
-                            TransitionAction::LeadInterventionRelease
-                        } else {
-                            TransitionAction::Escalate
-                        };
-                        if let Err(e) = task_repo
-                            .transition(
-                                &task.id,
-                                transition_action,
-                                "system",
-                                "coordinator",
-                                Some(&reason),
-                                None,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                task_id = %task.short_id,
-                                error = %e,
-                                status = %task.status,
-                                "CoordinatorActor: failed to transition source to \
-                                 needs_lead_intervention; failing closed to human review"
-                            );
-                            return self
-                                .park_source_human_review_with_dossier(
-                                    task,
-                                    &reason,
-                                    quality_strikes,
-                                    None,
-                                    &Self::arbiter_failure_dossier(
-                                        &reason,
-                                        role,
-                                        task,
-                                        &history,
-                                        &attempt_ledger,
-                                    ),
-                                )
-                                .await;
-                        }
-                    }
-                    // Log the arbiter_dispatched outbox payload.
+                    // Log the arbiter_dispatched outbox payload — only on
+                    // initial creation so outbox replay (AlreadyExistsUnconsumed)
+                    // does not emit a duplicate activity event.
                     let payload = serde_json::json!({
                         "hold_cycle": hold_cycle,
                         "mirror_head_sha": mirror_head_sha,
@@ -1642,12 +1608,73 @@ impl CoordinatorActor {
                     }
                     return true;
                 }
+                TryCreateResult::AlreadyExistsUnconsumed(_) => {
+                    // Outbox replay: arbitration row already exists and is
+                    // unconsumed — the arbiter is already in flight.  Do NOT
+                    // re-run dispatch cleanup or status transition (those were
+                    // done on the initial `Created` path).
+                    //
+                    // Crash-recovery idempotency: if the initial dispatch
+                    // succeeded but the `arbiter_dispatched` activity write
+                    // was lost (best-effort outbox), re-log it.  If the
+                    // activity already exists (normal replay), skip to avoid
+                    // duplicate rows.
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        hold_cycle,
+                        "CoordinatorActor: second-strike — outbox replay; arbiter already in flight"
+                    );
+                    let existing_events = self
+                        .task_repo()
+                        .query_activity(ActivityQuery {
+                            task_id: Some(task.id.clone()),
+                            event_type: Some("arbiter_dispatched".to_string()),
+                            ..ActivityQuery::default()
+                        })
+                        .await
+                        .unwrap_or_default();
+                    if existing_events.is_empty() {
+                        // Crash recovery: the activity was lost. Re-log.
+                        let payload = serde_json::json!({
+                            "hold_cycle": hold_cycle,
+                            "mirror_head_sha": mirror_head_sha,
+                            "github_head_sha": task.ci_head_sha,
+                            "pr_url": task.pr_url,
+                            "failing_ci_job_ids": failing_ci_job_ids,
+                            "reason": reason,
+                            "role": role,
+                        });
+                        let task_repo = self.task_repo();
+                        if let Err(e) = task_repo
+                            .log_activity(
+                                Some(&task.id),
+                                "system",
+                                "coordinator",
+                                "arbiter_dispatched",
+                                &payload.to_string(),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "CoordinatorActor: failed to replay arbiter_dispatched activity"
+                            );
+                        }
+                    }
+                    return true;
+                }
                 TryCreateResult::AlreadyExistsConsumed(record)
                 | TryCreateResult::AlreadyExistsFailed(record) => {
                     tracing::warn!(
                         task_id = %task.short_id,
                         hold_cycle,
                         "CoordinatorActor: second-strike — current hold cycle arbitration already consumed/failed; failing closed to human review"
+                    );
+                    // Emit arbiter rollout telemetry: consumed reentry park.
+                    djinn_telemetry::arbiter::record_park(
+                        djinn_telemetry::arbiter::PARK_REASON_CONSUMED_REENTRY,
+                        djinn_telemetry::arbiter::PARK_OUTCOME_SUCCESS,
                     );
                     let stored_dossier =
                         record.dossier.clone().or_else(|| record.directive.clone());
@@ -1895,12 +1922,124 @@ impl CoordinatorActor {
         }
     }
 
+    /// Shared pre-dispatch logic for the arbiter second-strike path.
+    ///
+    /// Clears in-memory/durable backoff state, interrupts running sessions,
+    /// and transitions the source to `needs_lead_intervention`.  Returns
+    /// `true` on success; fails closed to the human-review park path on any
+    /// status-transition error.
+    ///
+    /// The caller is responsible for the `arbiter_dispatched` outbox event —
+    /// this helper deliberately does NOT emit it so `AlreadyExistsUnconsumed`
+    /// replay callers can skip the duplicate.
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_arbiter_second_strike(
+        &mut self,
+        task: &djinn_core::models::Task,
+        hold_cycle: i32,
+        quality_strikes: i64,
+        reason: &str,
+        role: &str,
+        history: &PostInterventionHistory,
+        attempt_ledger: &[TaskAttemptLedgerRow],
+        mirror_head_sha: Option<&str>,
+        failing_ci_job_ids: &serde_json::Value,
+    ) -> bool {
+        tracing::warn!(
+            task_id = %task.short_id,
+            hold_cycle,
+            intervention_count = task.intervention_count,
+            total_reopen_count = task.total_reopen_count,
+            reopen_count = task.reopen_count,
+            quality_strikes,
+            "CoordinatorActor: second-strike — dispatching Lead arbiter for current hold cycle"
+        );
+        // Clear streak/cooldown so the hold isn't shadowed by stale
+        // backoff state.
+        self.dispatch_failure_streak.remove(&task.id);
+        self.dispatch_cooldowns.remove(&task.id);
+        self.last_dispatched.remove(&task.id);
+        self.inflight_dispatches.remove(&task.id);
+        self.clear_durable_dispatch_backoff_state(
+            &task.id,
+            Some(&task.short_id),
+            "planner_second_strike_arbiter_dispatch",
+        )
+        .await;
+        // Interrupt any running session for this task so parking it
+        // actually frees the dispatch slot.
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "CoordinatorActor: failed to interrupt running sessions while dispatching Lead arbiter"
+            );
+        }
+        // The arbiter entry contract is explicit: the source task
+        // must be in `needs_lead_intervention` after this path. If
+        // it is already actively running a Lead intervention, move
+        // it back to the queued Lead status; otherwise use the
+        // widened Escalate transition. Fail closed if either
+        // transition cannot be applied.
+        if task.status != "needs_lead_intervention" {
+            let task_repo = self.task_repo();
+            let transition_action = if task.status == "in_lead_intervention" {
+                TransitionAction::LeadInterventionRelease
+            } else {
+                TransitionAction::Escalate
+            };
+            if let Err(e) = task_repo
+                .transition(
+                    &task.id,
+                    transition_action,
+                    "system",
+                    "coordinator",
+                    Some(reason),
+                    None,
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    status = %task.status,
+                    "CoordinatorActor: failed to transition source to \
+                     needs_lead_intervention; failing closed to human review"
+                );
+                return self
+                    .park_source_human_review_with_dossier(
+                        task,
+                        reason,
+                        quality_strikes,
+                        None,
+                        &Self::arbiter_failure_dossier(
+                            reason,
+                            role,
+                            task,
+                            history,
+                            attempt_ledger,
+                            mirror_head_sha,
+                            failing_ci_job_ids,
+                        ),
+                    )
+                    .await;
+            }
+        }
+        true
+    }
+
     fn arbiter_failure_dossier(
         base_reason: &str,
         role: &str,
         task: &djinn_core::models::Task,
         history: &PostInterventionHistory,
         attempt_ledger: &[TaskAttemptLedgerRow],
+        mirror_head_sha: Option<&str>,
+        failing_ci_job_ids: &serde_json::Value,
     ) -> serde_json::Value {
         serde_json::json!({
             "kind": "arbiter_failure_dossier",
@@ -1918,6 +2057,10 @@ impl CoordinatorActor {
                 "latest_submission_at": history.latest_submission_at,
             },
             "attempt_ledger": attempt_ledger,
+            "mirror_head_sha": mirror_head_sha,
+            "github_head_sha": task.ci_head_sha,
+            "pr_url": task.pr_url,
+            "failing_ci_job_ids": failing_ci_job_ids,
         })
     }
 

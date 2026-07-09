@@ -344,6 +344,35 @@ async fn task_list_filters_and_pagination() {
         .expect("task_list by_status should dispatch");
     assert!(!by_status["tasks"].as_array().unwrap().is_empty());
 
+    // Negated status filter ("!<status>") excludes matching tasks. Only t1 is
+    // in_progress, so "!closed" returns all three tasks and "!in_progress"
+    // returns the two still-open ones.
+    let not_closed = harness
+        .call_tool(
+            "task_list",
+            json!({"project": project.slug(), "status": "!closed"}),
+        )
+        .await
+        .expect("task_list status=!closed should dispatch");
+    assert_eq!(not_closed["total_count"], 3);
+    assert_eq!(not_closed["tasks"].as_array().unwrap().len(), 3);
+
+    let not_in_progress = harness
+        .call_tool(
+            "task_list",
+            json!({"project": project.slug(), "status": "!in_progress"}),
+        )
+        .await
+        .expect("task_list status=!in_progress should dispatch");
+    assert_eq!(not_in_progress["total_count"], 2);
+    assert!(
+        not_in_progress["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["status"] != "in_progress"),
+    );
+
     let by_text = harness
         .call_tool(
             "task_list",

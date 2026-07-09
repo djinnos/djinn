@@ -45,6 +45,7 @@ use super::types::*;
 
 mod ci;
 mod code_intel;
+mod gate_guard;
 mod jit_pitfalls;
 // Retained for test coverage; production dispatch goes through djinn-mcp-extension.
 #[allow(dead_code)]
@@ -228,7 +229,17 @@ where
             call_read(state, &call.arguments, &root).await
         }
         "code_search" => call_code_search(state, &call.arguments).await,
-        "write" => call_write(state, &call.arguments, worktree_path, project_id.as_deref()).await,
+        "write" => {
+            call_write(
+                state,
+                &call.arguments,
+                worktree_path,
+                project_id.as_deref(),
+                session_task_id,
+                session_role,
+            )
+            .await
+        }
         "edit" => {
             call_edit(
                 state,
@@ -241,7 +252,15 @@ where
             .await
         }
         "apply_patch" => {
-            call_apply_patch(state, &call.arguments, worktree_path, project_id.as_deref()).await
+            call_apply_patch(
+                state,
+                &call.arguments,
+                worktree_path,
+                project_id.as_deref(),
+                session_task_id,
+                session_role,
+            )
+            .await
         }
 
         // ── Code graph (agent-local bridge) ─────────────────────────────

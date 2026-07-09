@@ -15,6 +15,7 @@ use djinn_agent::roles::RoleRegistry;
 use djinn_agent::supervisor::{SupervisorServices, services_for_agent_context};
 use djinn_core::events::EventBus;
 use djinn_core::models::{Task, TransitionAction};
+use djinn_db::repositories::task::ActivityQuery;
 use djinn_db::repositories::task_arbitration::{
     ArbitrationState, CreateArbitrationParams, TaskArbitrationRepository,
 };
@@ -685,4 +686,533 @@ async fn direct_services_arbiter_park_fail_closed_corrupt_arbitration_state() {
         "hold description must indicate arbiter park, got: {}",
         hold_task.description
     );
+}
+
+// ── Git-evidence payload regression tests ────────────────────────────────
+
+/// Verify that `record_arbiter_decision` emits an `arbiter_decision` activity
+/// whose payload includes the git-evidence fields from the arbitration row
+/// when those fields are populated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arbiter_decision_payload_includes_git_evidence_when_populated() {
+    let db = Database::open_in_memory().expect("open in-memory db");
+    let (project_id, epic_id) = create_project_and_epic(&db).await;
+    let task = create_task(&db, &project_id, &epic_id).await;
+
+    // Create an unconsumed arbitration row WITH git-evidence fields.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let failing_jobs = serde_json::json!([12345, 67890]);
+    let ex = serde_json::json!([]);
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: Some("mirror-sha-abc123"),
+            github_head_sha: Some("github-sha-def456"),
+            pr_url: Some("https://github.com/test/repo/pull/42"),
+            failing_ci_job_ids: &failing_jobs,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &ex,
+        })
+        .await
+        .expect("create arbitration row with evidence");
+
+    let ctx = test_agent_context(db.clone());
+    let services: Arc<dyn SupervisorServices> =
+        services_for_agent_context(ctx, CancellationToken::new());
+
+    // Call record_arbiter_decision with an approve decision.
+    services
+        .record_arbiter_decision(
+            task.id.clone(),
+            "approve".into(),
+            r#"{"summary": "looks good"}"#.into(),
+        )
+        .await
+        .expect("record_arbiter_decision must succeed");
+
+    // Read back the arbiter_decision activity event.
+    let events = EventBus::noop();
+    let repo = TaskRepository::new(db.clone(), events);
+    let entries = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("arbiter_decision".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query activity");
+    assert_eq!(
+        entries.len(),
+        1,
+        "must have exactly one arbiter_decision event"
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&entries[0].payload).expect("parse payload JSON");
+
+    // Assert git-evidence fields are present and match.
+    assert_eq!(
+        payload["mirror_head_sha"].as_str(),
+        Some("mirror-sha-abc123"),
+        "mirror_head_sha must match arbitration row"
+    );
+    assert_eq!(
+        payload["github_head_sha"].as_str(),
+        Some("github-sha-def456"),
+        "github_head_sha must match arbitration row"
+    );
+    assert_eq!(
+        payload["pr_url"].as_str(),
+        Some("https://github.com/test/repo/pull/42"),
+        "pr_url must match arbitration row"
+    );
+    assert_eq!(
+        payload["failing_ci_job_ids"],
+        serde_json::json!([12345, 67890]),
+        "failing_ci_job_ids must match arbitration row"
+    );
+    assert_eq!(
+        payload["decision"].as_str(),
+        Some("approve"),
+        "decision must be approve"
+    );
+}
+
+/// Verify that `record_arbiter_decision` emits an `arbiter_decision` activity
+/// whose git-evidence fields are null / empty when the arbitration row has
+/// no evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arbiter_decision_payload_has_empty_evidence_when_absent() {
+    let db = Database::open_in_memory().expect("open in-memory db");
+    let (project_id, epic_id) = create_project_and_epic(&db).await;
+    let task = create_task(&db, &project_id, &epic_id).await;
+
+    // Create an unconsumed arbitration row WITHOUT git-evidence fields.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let empty_jobs = serde_json::json!([]);
+    let ex = serde_json::json!([]);
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &empty_jobs,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &ex,
+        })
+        .await
+        .expect("create arbitration row without evidence");
+
+    let ctx = test_agent_context(db.clone());
+    let services: Arc<dyn SupervisorServices> =
+        services_for_agent_context(ctx, CancellationToken::new());
+
+    services
+        .record_arbiter_decision(
+            task.id.clone(),
+            "approve_conflict".into(),
+            r#"{"summary": "conflict resolved"}"#.into(),
+        )
+        .await
+        .expect("record_arbiter_decision must succeed");
+
+    let events = EventBus::noop();
+    let repo = TaskRepository::new(db.clone(), events);
+    let entries = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("arbiter_decision".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query activity");
+    assert_eq!(entries.len(), 1);
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&entries[0].payload).expect("parse payload JSON");
+
+    // Git-evidence fields must be null when absent.
+    assert!(
+        payload["mirror_head_sha"].is_null(),
+        "mirror_head_sha must be null when absent, got: {}",
+        payload["mirror_head_sha"]
+    );
+    assert!(
+        payload["github_head_sha"].is_null(),
+        "github_head_sha must be null when absent, got: {}",
+        payload["github_head_sha"]
+    );
+    assert!(
+        payload["pr_url"].is_null(),
+        "pr_url must be null when absent, got: {}",
+        payload["pr_url"]
+    );
+    // failing_ci_job_ids should be an empty array when absent.
+    assert_eq!(
+        payload["failing_ci_job_ids"],
+        serde_json::json!([]),
+        "failing_ci_job_ids must be empty array when absent"
+    );
+    assert_eq!(payload["decision"].as_str(), Some("approve_conflict"));
+}
+
+/// Verify that the decision-failure cap park dossier and its associated
+/// `arbiter_decision` activity event include explicit git-evidence fields
+/// when the arbitration row was created with evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decision_failure_cap_dossier_includes_git_evidence_when_populated() {
+    let db = Database::open_in_memory().expect("open in-memory db");
+    let (project_id, epic_id) = create_project_and_epic(&db).await;
+    let task = create_task(&db, &project_id, &epic_id).await;
+
+    // Create an unconsumed arbitration row WITH git-evidence fields.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let failing_jobs = serde_json::json!([99887, 11223]);
+    let ex = serde_json::json!([]);
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: Some("mirror-evidence-sha"),
+            github_head_sha: Some("github-evidence-sha"),
+            pr_url: Some("https://github.com/org/repo/pull/99"),
+            failing_ci_job_ids: &failing_jobs,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &ex,
+        })
+        .await
+        .expect("create arbitration row with evidence");
+
+    let ctx = test_agent_context(db.clone());
+    let services: Arc<dyn SupervisorServices> =
+        services_for_agent_context(ctx, CancellationToken::new());
+
+    // First termination: increments decision_failure_count to 1 (below cap).
+    let capped = services
+        .record_arbiter_session_termination(task.id.clone(), false)
+        .await
+        .expect("first termination");
+    assert!(!capped, "first termination must not reach cap");
+
+    // Second termination: hits cap (decision_failure_count = 2 >= CAP).
+    let capped = services
+        .record_arbiter_session_termination(task.id.clone(), false)
+        .await
+        .expect("second termination");
+    assert!(capped, "second termination must reach decision-failure cap");
+
+    // Read back the dossier from the arbitration row (now in failed state).
+    let record = arb_repo
+        .get_by_task_and_cycle(&task.id, 0)
+        .await
+        .expect("get arbitration")
+        .expect("arbitration row must exist");
+    let dossier = record.dossier.expect("dossier must be set after cap");
+
+    // Assert dossier contains git-evidence fields.
+    assert_eq!(
+        dossier["mirror_head_sha"].as_str(),
+        Some("mirror-evidence-sha"),
+        "dossier mirror_head_sha must match"
+    );
+    assert_eq!(
+        dossier["github_head_sha"].as_str(),
+        Some("github-evidence-sha"),
+        "dossier github_head_sha must match"
+    );
+    assert_eq!(
+        dossier["pr_url"].as_str(),
+        Some("https://github.com/org/repo/pull/99"),
+        "dossier pr_url must match"
+    );
+    assert_eq!(
+        dossier["failing_ci_job_ids"],
+        serde_json::json!([99887, 11223]),
+        "dossier failing_ci_job_ids must match"
+    );
+    assert_eq!(
+        dossier["kind"].as_str(),
+        Some("arbiter_decision_failure_cap"),
+    );
+
+    // Read the arbiter_decision activity event emitted for the cap.
+    let events = EventBus::noop();
+    let repo = TaskRepository::new(db.clone(), events);
+    let entries = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("arbiter_decision".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query activity");
+    assert!(
+        !entries.is_empty(),
+        "must have at least one arbiter_decision event for the cap"
+    );
+    let cap_event = entries
+        .iter()
+        .find_map(|e| {
+            let v: serde_json::Value = serde_json::from_str(&e.payload).ok()?;
+            if v["reason"].as_str() == Some("decision_failure_cap") {
+                Some(v)
+            } else {
+                None
+            }
+        })
+        .expect("must find decision_failure_cap arbiter_decision event");
+
+    assert_eq!(
+        cap_event["mirror_head_sha"].as_str(),
+        Some("mirror-evidence-sha"),
+        "activity mirror_head_sha must match"
+    );
+    assert_eq!(
+        cap_event["github_head_sha"].as_str(),
+        Some("github-evidence-sha"),
+        "activity github_head_sha must match"
+    );
+    assert_eq!(
+        cap_event["pr_url"].as_str(),
+        Some("https://github.com/org/repo/pull/99"),
+        "activity pr_url must match"
+    );
+    assert_eq!(
+        cap_event["failing_ci_job_ids"],
+        serde_json::json!([99887, 11223]),
+        "activity failing_ci_job_ids must match"
+    );
+}
+
+/// Verify that the decision-failure cap park dossier and activity event
+/// have null / empty git-evidence fields when the arbitration row had
+/// no evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decision_failure_cap_dossier_has_empty_evidence_when_absent() {
+    let db = Database::open_in_memory().expect("open in-memory db");
+    let (project_id, epic_id) = create_project_and_epic(&db).await;
+    let task = create_task(&db, &project_id, &epic_id).await;
+
+    // Create an unconsumed arbitration row WITHOUT git-evidence fields.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let empty_jobs = serde_json::json!([]);
+    let ex = serde_json::json!([]);
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &empty_jobs,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &ex,
+        })
+        .await
+        .expect("create arbitration row without evidence");
+
+    let ctx = test_agent_context(db.clone());
+    let services: Arc<dyn SupervisorServices> =
+        services_for_agent_context(ctx, CancellationToken::new());
+
+    // Two non-infra terminations to reach the cap.
+    let _ = services
+        .record_arbiter_session_termination(task.id.clone(), false)
+        .await
+        .expect("first termination");
+    let capped = services
+        .record_arbiter_session_termination(task.id.clone(), false)
+        .await
+        .expect("second termination");
+    assert!(capped, "must reach cap");
+
+    // Read back the dossier.
+    let record = arb_repo
+        .get_by_task_and_cycle(&task.id, 0)
+        .await
+        .expect("get arbitration")
+        .expect("arbitration row must exist");
+    let dossier = record.dossier.expect("dossier must be set");
+
+    // Git-evidence fields in the dossier must be null.
+    assert!(
+        dossier["mirror_head_sha"].is_null(),
+        "dossier mirror_head_sha must be null when absent, got: {}",
+        dossier["mirror_head_sha"]
+    );
+    assert!(
+        dossier["github_head_sha"].is_null(),
+        "dossier github_head_sha must be null when absent, got: {}",
+        dossier["github_head_sha"]
+    );
+    assert!(
+        dossier["pr_url"].is_null(),
+        "dossier pr_url must be null when absent, got: {}",
+        dossier["pr_url"]
+    );
+    assert_eq!(
+        dossier["failing_ci_job_ids"],
+        serde_json::json!([]),
+        "dossier failing_ci_job_ids must be empty array when absent"
+    );
+
+    // Read the activity event.
+    let events = EventBus::noop();
+    let repo = TaskRepository::new(db.clone(), events);
+    let entries = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("arbiter_decision".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query activity");
+    let cap_event = entries
+        .iter()
+        .find_map(|e| {
+            let v: serde_json::Value = serde_json::from_str(&e.payload).ok()?;
+            if v["reason"].as_str() == Some("decision_failure_cap") {
+                Some(v)
+            } else {
+                None
+            }
+        })
+        .expect("must find decision_failure_cap event");
+
+    assert!(
+        cap_event["mirror_head_sha"].is_null(),
+        "activity mirror_head_sha must be null when absent"
+    );
+    assert!(
+        cap_event["github_head_sha"].is_null(),
+        "activity github_head_sha must be null when absent"
+    );
+    assert!(
+        cap_event["pr_url"].is_null(),
+        "activity pr_url must be null when absent"
+    );
+    assert_eq!(
+        cap_event["failing_ci_job_ids"],
+        serde_json::json!([]),
+        "activity failing_ci_job_ids must be empty array when absent"
+    );
+}
+
+/// Verify that the arbiter park transaction persists git-evidence from the
+/// arbitration row into the dispatch ledger on the update path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arbiter_park_transaction_persists_git_evidence_on_ledger() {
+    let db = Database::open_in_memory().expect("open in-memory db");
+    let (project_id, epic_id) = create_project_and_epic(&db).await;
+    let task = create_task(&db, &project_id, &epic_id).await;
+
+    transition_to_in_lead_intervention(&db, &task.id).await;
+
+    // Create an unconsumed arbitration row WITH git-evidence fields.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let failing_jobs = serde_json::json!([55555]);
+    let ex = serde_json::json!([]);
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: Some("park-mirror-sha"),
+            github_head_sha: Some("park-github-sha"),
+            pr_url: Some("https://github.com/test/repo/pull/7"),
+            failing_ci_job_ids: &failing_jobs,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &ex,
+        })
+        .await
+        .expect("create arbitration row with evidence");
+
+    let dossier = serde_json::json!({
+        "hold_description": "Park with evidence test",
+        "failure_analysis": "test",
+    });
+    let dossier_json = serde_json::to_string(&dossier).unwrap();
+
+    let ctx = test_agent_context(db.clone());
+    let services: Arc<dyn SupervisorServices> =
+        services_for_agent_context(ctx, CancellationToken::new());
+
+    services
+        .transition_task(task.id.clone(), "arbiter_park".into(), Some(dossier_json))
+        .await
+        .expect("transition_task arbiter_park must succeed");
+
+    // Read back the arbitration row — it should be consumed with evidence.
+    let record = arb_repo
+        .get_by_task_and_cycle(&task.id, 0)
+        .await
+        .expect("get arbitration")
+        .expect("arbitration row must exist");
+    assert_eq!(
+        record.arbitration_state(),
+        Some(ArbitrationState::Consumed),
+        "must be consumed"
+    );
+    assert_eq!(
+        record.mirror_head_sha.as_deref(),
+        Some("park-mirror-sha"),
+        "ledger must retain mirror_head_sha"
+    );
+    assert_eq!(
+        record.github_head_sha.as_deref(),
+        Some("park-github-sha"),
+        "ledger must retain github_head_sha"
+    );
+    assert_eq!(
+        record.pr_url.as_deref(),
+        Some("https://github.com/test/repo/pull/7"),
+        "ledger must retain pr_url"
+    );
+    assert_eq!(
+        record.failing_ci_job_ids,
+        serde_json::json!([55555]),
+        "ledger must retain failing_ci_job_ids"
+    );
+
+    // Also verify the arbiter_decision activity has the evidence.
+    let events = EventBus::noop();
+    let repo = TaskRepository::new(db.clone(), events);
+    let entries = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("arbiter_decision".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query activity");
+    assert!(
+        !entries.is_empty(),
+        "must have arbiter_decision event from park transaction"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&entries[0].payload).expect("parse payload");
+    assert_eq!(payload["mirror_head_sha"].as_str(), Some("park-mirror-sha"),);
+    assert_eq!(payload["github_head_sha"].as_str(), Some("park-github-sha"),);
+    assert_eq!(
+        payload["pr_url"].as_str(),
+        Some("https://github.com/test/repo/pull/7"),
+    );
+    assert_eq!(payload["failing_ci_job_ids"], serde_json::json!([55555]),);
 }

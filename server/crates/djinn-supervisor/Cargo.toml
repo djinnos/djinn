@@ -13,6 +13,7 @@ djinn-db = { path = "../djinn-db" }
 djinn-provider = { path = "../djinn-provider" }
 djinn-runtime = { path = "../djinn-runtime" }
 djinn-stack = { path = "../djinn-stack" }
+djinn-telemetry = { path = "../djinn-telemetry" }
 djinn-workspace = { path = "../djinn-workspace" }
 anyhow = "1"
 async-trait = "0.1"

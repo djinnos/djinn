@@ -346,6 +346,20 @@ impl SlotActor {
     }
 }
 
+/// Upper bound on how long the pool→slot dispatch ask waits for the slot
+/// actor to ACK a `RunTask`/`RunTaskWithResume` command.
+///
+/// IMPORTANT: the slot ACKs the command *before* running the task lifecycle
+/// (see [`SlotActor::run`] — the ACK is sent at the `respond_to.send(Ok(()))`
+/// immediately after `start_lifecycle`, which only builds the lifecycle future
+/// and does not run it). So this deadline bounds only the *mailbox enqueue +
+/// ACK*, never task execution. It exists so a stalled slot actor (bounded
+/// mailbox backed up, or wedged between commands) cannot in turn wedge the
+/// single-mailbox *pool* actor — which would then wedge the coordinator (the
+/// 2026-07-09 whole-board-freeze chain). The value is generous relative to the
+/// trivial ACK work yet far below any human-visible freeze.
+const SLOT_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
 #[derive(Debug, Clone)]
 pub struct SlotHandle {
     id: usize,
@@ -495,12 +509,28 @@ impl SlotHandle {
                 respond_to: tx,
             },
         };
-        self.sender
-            .send(cmd)
-            .await
-            .map_err(|_| SlotError::SessionFailed("slot actor channel closed".to_string()))?;
-        rx.await
-            .map_err(|_| SlotError::SessionFailed("slot actor did not ack dispatch".to_string()))?
+        // Bound the mailbox enqueue + ACK wait. The slot ACKs before running
+        // the lifecycle, so this deadline never truncates task execution; it
+        // only prevents a stalled slot actor from wedging the pool→slot ask
+        // (and, transitively, the coordinator). Both `send` and `rx.await` are
+        // cancel-safe, so an elapsed deadline leaves no half-delivered command.
+        match tokio::time::timeout(SLOT_ACK_TIMEOUT, async {
+            self.sender
+                .send(cmd)
+                .await
+                .map_err(|_| SlotError::SessionFailed("slot actor channel closed".to_string()))?;
+            rx.await.map_err(|_| {
+                SlotError::SessionFailed("slot actor did not ack dispatch".to_string())
+            })?
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(SlotError::SessionFailed(format!(
+                "slot actor did not ack dispatch within {}s (slot stalled)",
+                SLOT_ACK_TIMEOUT.as_secs()
+            ))),
+        }
     }
     #[tracing::instrument(
         name = "djinn.slot.kill",
@@ -540,6 +570,38 @@ mod tests {
     use tracing_subscriber::layer::Context;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{Layer, registry::LookupSpan};
+
+    /// Pool→slot ACK-timeout regression (2026-07-09 freeze chain). A slot actor
+    /// that never drains its mailbox / never ACKs must not wedge the pool→slot
+    /// dispatch ask forever: `run_task_with_resume` bounds the enqueue + ACK
+    /// wait with `SLOT_ACK_TIMEOUT` and surfaces a `SessionFailed`. The receiver
+    /// is held alive (so `send` sees an open channel) but never read, so the
+    /// oneshot ACK never arrives. `start_paused` auto-advances past the bound.
+    #[tokio::test(start_paused = true)]
+    async fn run_task_ack_times_out_when_slot_never_acks() {
+        let (tx, _rx) = mpsc::channel::<SlotCommand>(16);
+        let handle = SlotHandle {
+            id: 0,
+            model_id: "test/mock".to_string(),
+            sender: tx,
+            compaction_cs: CompactionCriticalSection::new(),
+        };
+
+        let result = handle
+            .run_task_with_resume("task-1".to_string(), "/tmp/proj".to_string(), None)
+            .await;
+
+        match result {
+            Err(SlotError::SessionFailed(msg)) => {
+                assert!(
+                    msg.contains("did not ack dispatch within"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("expected SlotError::SessionFailed ack timeout, got {other:?}"),
+        }
+        drop(_rx);
+    }
     #[derive(Clone, Debug, Default)]
     struct RecordedSpan {
         name: String,

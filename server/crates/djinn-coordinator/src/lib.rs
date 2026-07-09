@@ -135,7 +135,9 @@ pub(crate) mod refinement_dispatch;
 #[cfg(test)]
 mod refinement_e2e_evidence_regression_tests;
 mod refinement_outcome;
+mod refinement_recovery;
 pub mod rules;
+mod tripwire_hold_release;
 mod types;
 mod wave;
 mod worker_lifecycle;

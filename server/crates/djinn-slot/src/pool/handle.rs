@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -9,6 +11,22 @@ use super::actor::SlotPool;
 #[cfg(any(test, feature = "test-support"))]
 use super::types::SlotFactory;
 use super::types::{PoolError, PoolMessage, PoolStatus, Reply, RunningTaskInfo};
+
+/// Upper bound on how long a single coordinator→pool ask may block on the
+/// pool actor's mailbox + reply before the caller gives up with
+/// [`PoolError::Timeout`].
+///
+/// The slot pool is a single-mailbox actor: every ask is serviced serially by
+/// one `select!` loop. On 2026-07-09 an un-timed coordinator→pool ask (tick 72)
+/// wedged the *coordinator's* own single-mailbox loop for 11 minutes when the
+/// pool was transiently stalled during a session-exit→teardown→redispatch
+/// window — starving dispatch, the PR poller, reviewer dispatch, and refinement
+/// driving all at once (whole-board freeze, restart-only recovery). Bounding
+/// the ask converts that hang into a fast, tolerated `PoolError` on the caller
+/// side. The value is comfortably longer than any healthy pool handler (which
+/// are in-memory map operations plus at most one short DB read) yet far below
+/// the multi-minute freeze it prevents.
+pub(crate) const POOL_ASK_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone)]
 pub struct SlotPoolHandle {
@@ -58,11 +76,28 @@ impl SlotPoolHandle {
     }
     async fn request<T>(&self, f: impl FnOnce(Reply<T>) -> PoolMessage) -> Result<T, PoolError> {
         let (tx, rx) = oneshot::channel();
-        self.sender
-            .send(f(tx))
-            .await
-            .map_err(|_| PoolError::ActorDead)?;
-        rx.await.map_err(|_| PoolError::NoResponse)?
+        // Bound BOTH the mailbox enqueue and the reply wait under one deadline.
+        // A stalled pool actor can back up its bounded mailbox (so `send` blocks
+        // on a full channel) *or* accept the message and never reply (so
+        // `rx.await` blocks) — either wedges an un-timed caller. `mpsc::send`
+        // and `oneshot::recv` are both cancel-safe: if the deadline fires during
+        // `send` the message is not enqueued; if it fires during `rx.await` the
+        // message was delivered and the pool will still process it (its reply is
+        // simply dropped, which is harmless for the read/idempotent asks).
+        match tokio::time::timeout(POOL_ASK_TIMEOUT, async {
+            self.sender
+                .send(f(tx))
+                .await
+                .map_err(|_| PoolError::ActorDead)?;
+            rx.await.map_err(|_| PoolError::NoResponse)?
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(PoolError::Timeout {
+                timeout_secs: POOL_ASK_TIMEOUT.as_secs(),
+            }),
+        }
     }
     pub async fn dispatch(
         &self,
@@ -213,3 +248,7 @@ impl SlotPoolHandle {
             .await;
     }
 }
+
+#[cfg(test)]
+#[path = "handle_timeout_tests.rs"]
+mod handle_timeout_tests;

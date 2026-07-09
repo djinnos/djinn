@@ -21,8 +21,10 @@
 //! See [`design/wuom-roadmap`] for the wave-1 decomposition and
 //! [`design/nptj-roadmap`] for the enforcement follow-on.
 
+pub mod active_hold;
 pub mod activity_payloads;
 pub mod engine;
+pub mod hold_release;
 pub mod policy;
 pub mod reason_codes;
 pub mod rules;
@@ -37,6 +39,11 @@ pub mod rules;
 // until those consumers land.
 
 #[allow(unused_imports)]
+pub use active_hold::{
+    ActiveHoldState, ActivityEntryRef, TamperReconciliation, build_tamper_reconciliation_key,
+    check_label_tamper, compute_active_hold_state,
+};
+#[allow(unused_imports)]
 pub use activity_payloads::{
     TRIPWIRE_EVENT_BREAK_GLASS, TRIPWIRE_EVENT_GATE_HELD, TRIPWIRE_EVENT_GATE_PASSED,
     TRIPWIRE_EVENT_GATE_REPORT_ONLY, TRIPWIRE_EVENT_HOLD_RELEASED, TRIPWIRE_EVENT_POLICY_CHANGED,
@@ -49,6 +56,11 @@ pub use engine::{
     ChangedFile, ChangedFileStatus, DiffHunk, EvidenceSpan, GateOutcome, RawFinding,
     TripwireEvaluationInput, TripwireFinding, TripwireFindingSeverity, TripwireGateDecision,
     build_finding_idempotency_key, build_gate_idempotency_key, evaluate, sort_findings,
+};
+#[allow(unused_imports)]
+pub use hold_release::{
+    DEFAULT_HOLD_RELEASE_RATIONALE, HUMAN_RELEASE_ACTOR, HUMAN_RELEASE_ROLE,
+    build_hold_release_key, build_hold_released_payload,
 };
 #[allow(unused_imports)]
 pub use policy::{
@@ -65,6 +77,7 @@ pub use reason_codes::{
 };
 #[allow(unused_imports)]
 pub use rules::{
-    all_rule_evaluators, evaluate_boundary_path_changes, evaluate_dependency_identity_changes,
+    all_rule_evaluators, evaluate_boundary_path_changes, evaluate_ci_workflow_changes,
+    evaluate_dependency_identity_changes, evaluate_large_delete_or_rewrite,
     evaluate_migration_changes, evaluate_network_egress_changes, evaluate_unsafe_code_changes,
 };
