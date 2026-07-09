@@ -440,7 +440,12 @@ impl TaskRepository {
             TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview
         ) || *action == TransitionAction::PrMerge
             || simple_lifecycle_close
-            || *action == TransitionAction::ForceClose;
+            || *action == TransitionAction::ForceClose
+            // Arbiter supersede is a force-close of a decomposed task: its
+            // downstream blockers are transferred to the replacement subtask by
+            // the supersede transaction before this close, so the blocks-others
+            // guard must not reject it (same exemption as ForceClose).
+            || *action == TransitionAction::ArbiterSupersede;
         if work_landed {
             return Ok(());
         }

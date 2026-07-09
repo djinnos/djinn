@@ -1049,6 +1049,10 @@ impl CoordinatorActor {
             "deadline_at": record.deadline_at,
             "decision_failure_count": record.decision_failure_count,
             "infra_retry_count": record.infra_retry_count,
+            "mirror_head_sha": record.mirror_head_sha,
+            "github_head_sha": record.github_head_sha,
+            "pr_url": record.pr_url,
+            "failing_ci_job_ids": record.failing_ci_job_ids,
         })
     }
 
@@ -1120,6 +1124,12 @@ impl CoordinatorActor {
                 "CoordinatorActor: deadline auto-park — failed to store deadline dossier"
             );
         }
+
+        // Emit arbiter rollout telemetry: deadline auto-park.
+        djinn_telemetry::arbiter::record_park(
+            djinn_telemetry::arbiter::PARK_REASON_DEADLINE_EXPIRED,
+            djinn_telemetry::arbiter::PARK_OUTCOME_SUCCESS,
+        );
 
         let quality_strikes = self
             .task_repo()
@@ -1328,7 +1338,17 @@ impl CoordinatorActor {
                                 "deadline_at": deadline_str,
                                 "decision_failure_count": existing.decision_failure_count,
                                 "infra_retry_count": existing.infra_retry_count,
+                                "mirror_head_sha": existing.mirror_head_sha,
+                                "github_head_sha": existing.github_head_sha,
+                                "pr_url": existing.pr_url,
+                                "failing_ci_job_ids": existing.failing_ci_job_ids,
                             });
+
+                            // Emit arbiter rollout telemetry: deadline park.
+                            djinn_telemetry::arbiter::record_park(
+                                djinn_telemetry::arbiter::PARK_REASON_DEADLINE_EXPIRED,
+                                djinn_telemetry::arbiter::PARK_OUTCOME_SUCCESS,
+                            );
 
                             // Update the arbitration row with the dossier.
                             use djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams;
@@ -1394,7 +1414,17 @@ impl CoordinatorActor {
                             "decision_failure_count": existing.decision_failure_count,
                             "infra_retry_count": existing.infra_retry_count,
                             "deadline_at": existing.deadline_at,
+                            "mirror_head_sha": existing.mirror_head_sha,
+                            "github_head_sha": existing.github_head_sha,
+                            "pr_url": existing.pr_url,
+                            "failing_ci_job_ids": existing.failing_ci_job_ids,
                         });
+
+                        // Emit arbiter rollout telemetry: decision-failure cap park.
+                        djinn_telemetry::arbiter::record_park(
+                            djinn_telemetry::arbiter::PARK_REASON_DECISION_FAILURE_CAP,
+                            djinn_telemetry::arbiter::PARK_OUTCOME_SUCCESS,
+                        );
 
                         return self
                             .park_source_human_review_with_dossier(
@@ -1433,6 +1463,8 @@ impl CoordinatorActor {
                                 task,
                                 &history,
                                 &attempt_ledger,
+                                None,
+                                &serde_json::json!([]),
                             ),
                         )
                         .await;
@@ -1522,6 +1554,8 @@ impl CoordinatorActor {
                                 task,
                                 &history,
                                 &attempt_ledger,
+                                mirror_head_sha.as_deref(),
+                                &failing_ci_job_ids,
                             ),
                         )
                         .await;
@@ -1608,6 +1642,8 @@ impl CoordinatorActor {
                                         task,
                                         &history,
                                         &attempt_ledger,
+                                        mirror_head_sha.as_deref(),
+                                        &failing_ci_job_ids,
                                     ),
                                 )
                                 .await;
@@ -1648,6 +1684,11 @@ impl CoordinatorActor {
                         task_id = %task.short_id,
                         hold_cycle,
                         "CoordinatorActor: second-strike — current hold cycle arbitration already consumed/failed; failing closed to human review"
+                    );
+                    // Emit arbiter rollout telemetry: consumed reentry park.
+                    djinn_telemetry::arbiter::record_park(
+                        djinn_telemetry::arbiter::PARK_REASON_CONSUMED_REENTRY,
+                        djinn_telemetry::arbiter::PARK_OUTCOME_SUCCESS,
                     );
                     let stored_dossier =
                         record.dossier.clone().or_else(|| record.directive.clone());
@@ -1901,6 +1942,8 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
         history: &PostInterventionHistory,
         attempt_ledger: &[TaskAttemptLedgerRow],
+        mirror_head_sha: Option<&str>,
+        failing_ci_job_ids: &serde_json::Value,
     ) -> serde_json::Value {
         serde_json::json!({
             "kind": "arbiter_failure_dossier",
@@ -1918,6 +1961,10 @@ impl CoordinatorActor {
                 "latest_submission_at": history.latest_submission_at,
             },
             "attempt_ledger": attempt_ledger,
+            "mirror_head_sha": mirror_head_sha,
+            "github_head_sha": task.ci_head_sha,
+            "pr_url": task.pr_url,
+            "failing_ci_job_ids": failing_ci_job_ids,
         })
     }
 

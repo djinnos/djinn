@@ -41,6 +41,8 @@ mod build_context_tests;
 #[cfg(test)]
 mod embedding_filter_tests;
 #[cfg(test)]
+mod embedding_health_tests;
+#[cfg(test)]
 mod entity_types_tests;
 #[cfg(test)]
 mod ops_tests;

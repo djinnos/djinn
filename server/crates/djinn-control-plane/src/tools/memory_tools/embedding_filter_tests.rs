@@ -75,7 +75,7 @@ mod tests {
     ///
     /// Returns `(server, project_id, seed_permalink, embed_neighbor_id, coaccess_neighbor_id)`.
     async fn setup_filter_data(
-        tmp: &tempfile::TempDir,
+        _tmp: &tempfile::TempDir,
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
         project: &Project,
