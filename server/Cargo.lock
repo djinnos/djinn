@@ -1484,6 +1484,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
  "workspace-hack",

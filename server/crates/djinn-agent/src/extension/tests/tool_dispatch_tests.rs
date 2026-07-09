@@ -20,7 +20,7 @@ async fn write_rejects_symlink_escape_outside_worktree() {
 
     let state =
         crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
-    let result = call_write(&state, &args, worktree.path(), None).await;
+    let result = call_write(&state, &args, worktree.path(), None, None, None).await;
     assert!(result.is_err());
     let err = result.err().unwrap_or_default();
     assert!(err.contains("outside worktree"));
@@ -104,7 +104,7 @@ async fn call_write_emits_related_files_when_coupling_data_exists() {
     );
 
     let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
-    let response = call_write(&state, &args, worktree.path(), Some(pid))
+    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
         .await
         .expect("write");
 
@@ -145,9 +145,16 @@ async fn call_write_omits_related_files_when_coupling_empty() {
     );
 
     let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
-    let response = call_write(&state, &args, worktree.path(), Some(project.id.as_str()))
-        .await
-        .expect("write");
+    let response = call_write(
+        &state,
+        &args,
+        worktree.path(),
+        Some(project.id.as_str()),
+        None,
+        None,
+    )
+    .await
+    .expect("write");
     assert!(
         response.get("related_files").is_none(),
         "expected no related_files field, got {response:?}"
@@ -924,7 +931,7 @@ async fn jit_pitfalls_off_by_default_no_hint() {
             .clone(),
     );
     let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
-    let response = call_write(&state, &args, worktree.path(), Some(pid))
+    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
         .await
         .expect("write");
 
@@ -963,7 +970,7 @@ async fn jit_pitfalls_kill_switch_overrides_legacy_opt_in() {
             .clone(),
     );
     let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
-    let response = call_write(&state, &args, worktree.path(), Some(pid))
+    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
         .await
         .expect("write");
 
@@ -1013,7 +1020,7 @@ async fn jit_pitfalls_on_first_write_appends_then_not_again() {
             .expect("obj")
             .clone(),
     );
-    let r1 = call_write(&state, &args1, worktree.path(), Some(pid))
+    let r1 = call_write(&state, &args1, worktree.path(), Some(pid), None, None)
         .await
         .expect("first write");
 
@@ -1035,7 +1042,7 @@ async fn jit_pitfalls_on_first_write_appends_then_not_again() {
             .expect("obj")
             .clone(),
     );
-    let r2 = call_write(&state, &args2, worktree.path(), Some(pid))
+    let r2 = call_write(&state, &args2, worktree.path(), Some(pid), None, None)
         .await
         .expect("second write");
     assert!(
@@ -1078,7 +1085,7 @@ async fn jit_pitfalls_on_miss_leaves_write_succeeding() {
             .clone(),
     );
     let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
-    let response = call_write(&state, &args, worktree.path(), Some(pid))
+    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
         .await
         .expect("write must still succeed on search miss");
 
@@ -1120,7 +1127,7 @@ async fn jit_pitfalls_on_missing_project_id_leaves_write_succeeding() {
             .clone(),
     );
     let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
-    let response = call_write(&state, &args, worktree.path(), None)
+    let response = call_write(&state, &args, worktree.path(), None, None, None)
         .await
         .expect("write must still succeed when JIT search cannot be scoped");
 
@@ -1197,4 +1204,58 @@ async fn jit_pitfalls_on_edit_first_modification_appends() {
         std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
         std::env::remove_var("DJINN_JIT_PITFALLS");
     }
+}
+
+/// Regression: `call_write` accepts `session_task_id` and `session_role`
+/// parameters (plumbed consistently with `call_edit`) and still succeeds
+/// when invoked with a worker role. This proves the widened signature
+/// compiles and is callable through the worker-role plumbing path without
+/// changing runtime behavior.
+#[tokio::test]
+async fn write_accepts_worker_role_plumbing() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-write-worker-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "path": "src/hello.rs", "content": "fn main() {}\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+
+    // Invoke with worker role and a task id — must succeed (no GateGuard
+    // enforcement in this epic).
+    let response = call_write(
+        &state,
+        &args,
+        worktree.path(),
+        None,
+        Some("task-abc-123"),
+        Some("worker"),
+    )
+    .await
+    .expect("call_write with worker role must succeed");
+
+    assert_eq!(
+        response.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "write must return ok=true, got: {response:?}"
+    );
+    assert_eq!(
+        response.get("path").and_then(|v| v.as_str()),
+        Some(
+            worktree
+                .path()
+                .join("src/hello.rs")
+                .display()
+                .to_string()
+                .as_str()
+        ),
+        "write must report the written path"
+    );
 }
