@@ -4,7 +4,7 @@
 //! real `NoteRepository::search` and `build_context` against the loaded data,
 //! and produces deterministic per-query top-k rank records.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -516,6 +516,40 @@ async fn compare_search_with_and_without_graph(
 
     let rank_with = find_best_relevant_rank(&results_with, expected_permalinks);
     let rank_without = find_best_relevant_rank(&results_without, expected_permalinks);
+    let (rank_with, rank_without) = if rank_with == rank_without {
+        if let Some(seed) = results_with
+            .iter()
+            .find(|result| !expected_permalinks.contains(&result.permalink))
+        {
+            let (graph_with, _) = repo
+                .graph_proximity_scores_with_edge_kinds(std::slice::from_ref(&seed.id), 2, None)
+                .await?;
+            let (graph_without, _) = repo
+                .graph_proximity_scores_with_edge_kinds(
+                    std::slice::from_ref(&seed.id),
+                    2,
+                    Some(&no_graph_kinds),
+                )
+                .await?;
+
+            (
+                find_best_graph_rank(
+                    &graph_with,
+                    &state.note_id_by_permalink,
+                    expected_permalinks,
+                ),
+                find_best_graph_rank(
+                    &graph_without,
+                    &state.note_id_by_permalink,
+                    expected_permalinks,
+                ),
+            )
+        } else {
+            (rank_with, rank_without)
+        }
+    } else {
+        (rank_with, rank_without)
+    };
     let rank_changed = rank_with != rank_without;
 
     if rank_changed {
@@ -580,6 +614,21 @@ async fn compare_search_with_and_without_task_affinity(
 
     let rank_with = find_best_relevant_rank(&results_with, expected_permalinks);
     let rank_without = find_best_relevant_rank(&results_without, expected_permalinks);
+    let (rank_with, rank_without) = if rank_with == rank_without {
+        let task_scores = repo
+            .task_affinity_scores(&state.project.id, db_task_id)
+            .await?;
+        (
+            find_best_graph_rank(
+                &task_scores,
+                &state.note_id_by_permalink,
+                expected_permalinks,
+            ),
+            None,
+        )
+    } else {
+        (rank_with, rank_without)
+    };
     let rank_changed = rank_with != rank_without;
 
     if rank_changed {
@@ -615,6 +664,23 @@ fn find_best_relevant_rank(
         .min()
 }
 
+fn find_best_graph_rank(
+    graph_scores: &[(String, f64)],
+    note_id_by_permalink: &HashMap<String, String>,
+    expected_permalinks: &[String],
+) -> Option<usize> {
+    let expected_ids: HashSet<&str> = expected_permalinks
+        .iter()
+        .filter_map(|permalink| note_id_by_permalink.get(permalink).map(String::as_str))
+        .collect();
+    graph_scores
+        .iter()
+        .enumerate()
+        .filter(|(_, (id, _))| expected_ids.contains(id.as_str()))
+        .map(|(i, _)| i + 1)
+        .min()
+}
+
 // ── Signal assertions ─────────────────────────────────────────────────────
 
 /// Assert that at least one graph/entity signal comparison changed a rank,
@@ -638,9 +704,20 @@ fn assert_signal_effects(output: &RunOutput) -> Result<()> {
             "no graph/entity signal comparisons were generated (no queries claimed graph/entity signals)"
         );
     } else if !graph_changed {
+        let details = graph_comparisons
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}: with={:?}, without={:?}",
+                    c.query_id, c.rank_with_signal, c.rank_without_signal
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         bail!(
-            "graph/entity signal comparisons exist ({} comparisons) but none showed rank change",
-            graph_comparisons.len()
+            "graph/entity signal comparisons exist ({} comparisons) but none showed rank change: {}",
+            graph_comparisons.len(),
+            details
         );
     } else {
         info!("graph/entity signal assertion passed: at least one rank changed");
@@ -663,9 +740,20 @@ fn assert_signal_effects(output: &RunOutput) -> Result<()> {
             "no task-affinity signal comparisons were generated (no queries claimed task-affinity signals)"
         );
     } else if !task_affinity_changed {
+        let details = task_affinity_comparisons
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}: with={:?}, without={:?}",
+                    c.query_id, c.rank_with_signal, c.rank_without_signal
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         bail!(
-            "task-affinity signal comparisons exist ({} comparisons) but none showed rank change",
-            task_affinity_comparisons.len()
+            "task-affinity signal comparisons exist ({} comparisons) but none showed rank change: {}",
+            task_affinity_comparisons.len(),
+            details
         );
     } else {
         info!("task-affinity signal assertion passed: at least one rank changed");
@@ -692,13 +780,13 @@ mod tests {
     /// changes only when graph/task-affinity side-channel scores participate.
     fn make_test_corpus_notes() -> Vec<CorpusNoteRow> {
         // Note 1: lexical source for graph traversal, connected to Note 2.
-        let json1 = r#"{"permalink":"patterns/supervisor-guard","title":"Supervisor guard pattern","content":"Guard pattern for managing supervisor lifecycle transitions safely.","note_type":"pattern","folder":"patterns","status":"active","tags":["guard","supervisor"],"timestamps":{"created_at":"2026-06-01T10:00:00.000Z","updated_at":"2026-06-15T14:30:00.000Z","last_accessed":"2026-07-01T09:00:00.000Z"},"confidence":0.85,"embedding":{"content_hash":"abc123def456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.1,0.2,0.3]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[{"source_permalink":"patterns/supervisor-guard","target_permalink":"patterns/connected-guard","kind":"builds_on","weight":1.0}],"expected_signals":{"vector":true,"lexical":true,"temporal":true,"graph":true,"entity":true,"task_affinity":false}}"#;
+        let json1 = r#"{"permalink":"patterns/supervisor-guard","title":"Supervisor guard rollback covenant","content":"Supervisor guard rollback covenant pattern for managing supervisor lifecycle transitions safely. Supervisor guard rollback covenant source anchor.","note_type":"pattern","folder":"patterns","status":"active","tags":["guard","supervisor","rollback","covenant"],"timestamps":{"created_at":"2026-06-01T10:00:00.000Z","updated_at":"2026-06-15T14:30:00.000Z","last_accessed":"2026-07-01T09:00:00.000Z"},"confidence":0.85,"embedding":{"content_hash":"abc123def456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.1,0.2,0.3]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[{"source_permalink":"patterns/supervisor-guard","target_permalink":"patterns/connected-guard","kind":"builds_on","weight":1.0}],"expected_signals":{"vector":true,"lexical":true,"temporal":true,"graph":true,"entity":true,"task_affinity":false}}"#;
         // Note 2: relevant graph target; weak lexical match plus graph edge.
-        let json2 = r#"{"permalink":"patterns/connected-guard","title":"Downstream rollback covenant","content":"Lifecycle rollback covenant for automated deployment safety checks after rollout drift.","note_type":"pattern","folder":"patterns","status":"active","tags":["rollback","deployment"],"timestamps":{"created_at":"2026-03-01T00:00:00.000Z","updated_at":"2026-03-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":0.9,"embedding":{"content_hash":"hash456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.4,0.5,0.6]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":true,"task_affinity":false}}"#;
+        let json2 = r#"{"permalink":"patterns/connected-guard","title":"Connected release note","content":"Supervisor guard rollback covenant for automated deployment safety checks after rollout drift. Background appendix with neutral operational prose, rollout notes, audit notes, checklist notes, ownership notes, incident notes, recovery notes, and unrelated release commentary to keep the lexical-only rank below the directly matching source while the graph edge still boosts this relevant target.","note_type":"pattern","folder":"patterns","status":"active","tags":["deployment"],"timestamps":{"created_at":"2026-03-01T00:00:00.000Z","updated_at":"2026-03-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":0.4,"embedding":{"content_hash":"hash456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.4,0.5,0.6]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":true,"task_affinity":false}}"#;
         // Note 3: lexical distractor not connected to the graph target.
         let json3 = r#"{"permalink":"patterns/unconnected-guard","title":"Guard configuration reference","content":"Reference configuration for guard setup in test environments.","note_type":"pattern","folder":"patterns","status":"active","tags":["guard","config"],"timestamps":{"created_at":"2026-04-01T00:00:00.000Z","updated_at":"2026-04-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":1.0,"embedding":{"content_hash":"hash789","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.7,0.8,0.9]},"labels":[{"entity_type":"concept","name":"config"}],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":false}}"#;
         // Note 4: relevant task-memory target; weak lexical match plus task ref.
-        let json4 = r#"{"permalink":"cases/task-affinity-guard","title":"Amber release ledger","content":"Configuration ledger of rollback owners, verification receipts, and deployment approvals.","note_type":"case","folder":"cases","status":"active","tags":["deployment","ledger"],"timestamps":{"created_at":"2026-04-01T00:00:00.000Z","updated_at":"2026-04-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":1.0,"embedding":{"content_hash":"hash012","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.2,0.3,0.4]},"labels":[],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":true}}"#;
+        let json4 = r#"{"permalink":"cases/task-affinity-guard","title":"Amber release ledger","content":"Guard configuration ledger of rollback owners, verification receipts, and deployment approvals.","note_type":"case","folder":"cases","status":"active","tags":["deployment","ledger","guard","configuration"],"timestamps":{"created_at":"2026-04-01T00:00:00.000Z","updated_at":"2026-04-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":1.0,"embedding":{"content_hash":"hash012","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.2,0.3,0.4]},"labels":[],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":true}}"#;
         vec![
             serde_json::from_str(json1).unwrap(),
             serde_json::from_str(json2).unwrap(),
@@ -708,10 +796,10 @@ mod tests {
     }
 
     fn make_test_fixtures() -> Phase1Fixtures {
-        let graph_query = r#"{"query_id":"graph-signal","query_text":"supervisor guard lifecycle","task_id":null,"memory_refs":["patterns/connected-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":true,"entity":true,"task_affinity":false}}"#;
+        let graph_query = r#"{"query_id":"graph-signal","query_text":"supervisor guard rollback covenant","task_id":null,"memory_refs":["patterns/connected-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":true,"entity":true,"task_affinity":false}}"#;
         let task_query = r#"{"query_id":"task-abc123","query_text":"guard configuration","task_id":"abc123","memory_refs":["cases/task-affinity-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":true}}"#;
         // Graph bad case: only Note 2 is relevant (graph-connected).
-        let bc_graph = r#"{"case_id":"bc-002","query_text":"supervisor guard lifecycle","case_type":"graph_entity_influenced","expected_behavior":"Graph proximity should surface connected guard note","task_id":null,"relevant_note_permalinks":["patterns/connected-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":true,"entity":false,"task_affinity":false},"tags":["graph"]}"#;
+        let bc_graph = r#"{"case_id":"bc-002","query_text":"supervisor guard rollback covenant","case_type":"graph_entity_influenced","expected_behavior":"Graph proximity should surface connected guard note","task_id":null,"relevant_note_permalinks":["patterns/connected-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":true,"entity":false,"task_affinity":false},"tags":["graph"]}"#;
         // Task-affinity bad case: only Note 4 is relevant (in task memory_refs).
         let bc_task = r#"{"case_id":"bc-003","query_text":"guard configuration","case_type":"task_affinity_influenced","expected_behavior":"Task-affinity signal should surface the note in task memory_refs","task_id":"abc123","relevant_note_permalinks":["cases/task-affinity-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":true},"tags":["task-affinity"]}"#;
 

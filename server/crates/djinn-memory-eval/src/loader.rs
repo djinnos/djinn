@@ -47,7 +47,17 @@ fn task_memory_ref_note_ids(
     fixture_task_id: &str,
     note_id_by_permalink: &HashMap<String, String>,
 ) -> Vec<String> {
-    let mut memory_ref_permalinks: BTreeSet<&str> = BTreeSet::new();
+    task_memory_ref_permalinks(fixtures, fixture_task_id)
+        .into_iter()
+        .filter_map(|permalink| note_id_by_permalink.get(permalink).cloned())
+        .collect()
+}
+
+fn task_memory_ref_permalinks<'a>(
+    fixtures: &'a Phase1Fixtures,
+    fixture_task_id: &str,
+) -> BTreeSet<&'a str> {
+    let mut memory_ref_permalinks: BTreeSet<&'a str> = BTreeSet::new();
 
     for query in &fixtures.memory_ref_queries {
         if query.task_id.as_deref() == Some(fixture_task_id) {
@@ -62,9 +72,6 @@ fn task_memory_ref_note_ids(
     }
 
     memory_ref_permalinks
-        .into_iter()
-        .filter_map(|permalink| note_id_by_permalink.get(permalink).cloned())
-        .collect()
 }
 
 // ── Fixture validation ────────────────────────────────────────────────────
@@ -167,6 +174,14 @@ pub fn validate_fixtures(fixtures: &Phase1Fixtures) -> Result<()> {
                 "bad-case '{}': task_affinity signal claimed but no task_id provided",
                 case.case_id
             ));
+        } else if case.expected_signals.task_affinity {
+            let task_id = case.task_id.as_deref().expect("checked above");
+            if task_memory_ref_permalinks(fixtures, task_id).is_empty() {
+                errors.push(format!(
+                    "bad-case '{}': task_affinity signal claimed for task_id '{}' but no memory_refs source was found",
+                    case.case_id, task_id
+                ));
+            }
         }
     }
 
