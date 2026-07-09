@@ -24,6 +24,7 @@ uuid = { version = "1", features = ["v7"] }
 djinn-db = { path = "../djinn-db" }
 djinn-memory = { path = "../djinn-memory" }
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
+djinn-git = { path = "../djinn-git" }
 workspace-hack.workspace = true
 
 [dev-dependencies]

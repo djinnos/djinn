@@ -298,14 +298,15 @@ async fn cmd_refresh_baseline(crate_root: &std::path::Path) -> Result<()> {
     let current_report: report::Phase1Report =
         serde_json::from_str(&report_data).context("parsing current report JSON")?;
 
-    // 2. Determine refresh commit
-    let refresh_commit = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    // 2. Determine refresh commit via djinn-git (capability boundary)
+    let repo_root = crate_root
+        .ancestors()
+        .nth(3)
+        .unwrap_or(crate_root)
+        .to_path_buf();
+    let refresh_commit = djinn_git::head_commit_sha(&repo_root)
+        .await
+        .unwrap_or_else(|_| "unknown".to_string());
 
     info!("=== Refresh Baseline ===");
     info!(commit = %refresh_commit, "refresh commit");

@@ -1513,6 +1513,7 @@ dependencies = [
  "clap",
  "djinn-core",
  "djinn-db",
+ "djinn-git",
  "djinn-memory",
  "serde",
  "serde_json",
