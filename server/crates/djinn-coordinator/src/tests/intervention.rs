@@ -5027,15 +5027,15 @@ async fn completed_close_reason_is_not_force_close_terminalized() {
 
 /// Repository-level assertion: a valid arbiter park decision persists the
 /// decision payload and structured dossier on the current arbitration row,
-/// marks the row consumed, creates a HumanReview remediation hold whose
-/// description includes the structured dossier content, and the ArbiterPark
-/// transition moves in_lead_intervention → open.
+/// marks the row consumed, creates an autonomous `planner-park-escalation`
+/// task whose description includes the structured dossier content, and the
+/// ArbiterPark transition moves in_lead_intervention → open.
 ///
 /// NOTE: The actual production path (`DirectServices::transition_task("arbiter_park")`)
 /// and malformed/missing arbitration fail-closed behavior are covered by
 /// integration tests in `djinn-agent/tests/arbiter_park_transaction.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn arbiter_park_persists_decision_creates_human_review_hold() {
+async fn arbiter_park_persists_decision_creates_planner_escalation() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
@@ -5119,16 +5119,16 @@ async fn arbiter_park_persists_decision_creates_human_review_hold() {
     let consumed = arb_repo.mark_consumed(&task.id, 0).await.unwrap();
     assert!(consumed, "mark_consumed must succeed on unconsumed row");
 
-    // 2. Create a HumanReview remediation task blocking the source.
-    let hold_description = format!(
-        "Arbiter park decision \u{2014} human review required.\n\n{}",
+    // 2. Create an autonomous planner escalation task blocking the source.
+    let dossier_text = format!(
+        "Arbiter park decision \u{2014} autonomous planner remediation.\n\n{}",
         serde_json::to_string_pretty(&dossier).unwrap()
     );
     let source_label = format!("{} ({})", task.title, task.short_id);
     let review_desc = format!(
-        "Escalated from task {source_label}. Arbiter decided to park \u{2014} \
-         this requires HUMAN review.\n\nDo NOT auto-resolve: a human must \
-         close THIS task to release the blocked source task.\n\nReason: {hold_description}"
+        "Escalated from task {source_label}. The arbiter decided to PARK and \
+         handed you (the Planner) terminal ownership.\n\nYou OWN the resolution; \
+         closing THIS task releases the blocked source.\n\nReason: {dossier_text}"
     );
     let review_task = repo
         .create_in_project(
@@ -5140,7 +5140,7 @@ async fn arbiter_park_persists_decision_creates_human_review_hold() {
                 task.title.chars().take(70).collect::<String>()
             ),
             &review_desc,
-            "Arbiter parked this task. Requires human review.",
+            "Arbiter parked this task and handed you terminal ownership. Resolve it autonomously.",
             "review",
             0,
             "system",
@@ -5150,7 +5150,7 @@ async fn arbiter_park_persists_decision_creates_human_review_hold() {
         .await
         .unwrap();
     repo.add_blocker(&task.id, &review_task.id).await.unwrap();
-    repo.update_labels(&review_task.id, r#"["human-review-hold"]"#)
+    repo.update_labels(&review_task.id, r#"["planner-park-escalation"]"#)
         .await
         .unwrap();
 
@@ -5189,30 +5189,40 @@ async fn arbiter_park_persists_decision_creates_human_review_hold() {
         "Three attempts failed; auth logic needs domain expertise"
     );
 
-    // Verify the HumanReview hold blocks the source with dossier content.
+    // Verify the planner escalation blocks the source with dossier content.
     let blockers = repo.list_blockers(&task.id).await.unwrap();
     assert!(
         !blockers.is_empty(),
-        "source must be blocked by HumanReview hold"
+        "source must be blocked by planner escalation"
     );
     let hold_task = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
     assert_eq!(hold_task.issue_type, "review");
     assert_eq!(hold_task.status, "open");
     assert!(
+        hold_task.labels.contains("planner-park-escalation"),
+        "escalation must carry the planner-park-escalation label, got: {}",
+        hold_task.labels
+    );
+    assert!(
+        !hold_task.labels.contains("human-review-hold"),
+        "park must NOT create a human-review hold, got labels: {}",
+        hold_task.labels
+    );
+    assert!(
         hold_task
             .description
             .contains("Requires senior engineer review of auth flow"),
-        "hold description must contain the dossier hold_description, got: {}",
+        "escalation description must contain the dossier hold_description, got: {}",
         hold_task.description
     );
     assert!(
         hold_task.description.contains("Three attempts failed"),
-        "hold description must contain the dossier failure_analysis, got: {}",
+        "escalation description must contain the dossier failure_analysis, got: {}",
         hold_task.description
     );
     assert!(
         hold_task.description.contains("Arbiter park decision"),
-        "hold description must indicate arbiter park, got: {}",
+        "escalation description must indicate arbiter park, got: {}",
         hold_task.description
     );
 }
@@ -5375,13 +5385,13 @@ fn arbiter_park_transition_rejects_non_lead_intervention_states() {
     assert_eq!(result.unwrap().to_status, Some(TaskStatus::Open));
 }
 
-/// Repository-level assertion: the HumanReview hold description contains the
+/// Repository-level assertion: the planner escalation description contains the
 /// structured dossier content rather than a generic fallback reason.
 ///
 /// NOTE: The actual production path is tested via integration tests in
 /// `djinn-agent/tests/arbiter_park_transaction.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn human_review_hold_description_contains_arbiter_dossier() {
+async fn planner_escalation_description_contains_arbiter_dossier() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
@@ -5454,18 +5464,18 @@ async fn human_review_hold_description_contains_arbiter_dossier() {
         .unwrap();
     arb_repo.mark_consumed(&task.id, 0).await.unwrap();
 
-    // Create the HumanReview hold with dossier as description.
+    // Create the planner escalation with the dossier as description.
     let hold_reason = format!(
-        "Arbiter park decision \u{2014} human review required.\n\n{}",
+        "Arbiter park decision \u{2014} autonomous planner remediation.\n\n{}",
         serde_json::to_string_pretty(&dossier).unwrap()
     );
     let review_task = repo
         .create_in_project(
             &task.project_id,
             None,
-            "Test hold",
+            "Test escalation",
             &format!("Escalated from task. Reason: {hold_reason}"),
-            "Requires human review.",
+            "Resolve autonomously.",
             "review",
             0,
             "system",
@@ -5475,6 +5485,9 @@ async fn human_review_hold_description_contains_arbiter_dossier() {
         .await
         .unwrap();
     repo.add_blocker(&task.id, &review_task.id).await.unwrap();
+    repo.update_labels(&review_task.id, r#"["planner-park-escalation"]"#)
+        .await
+        .unwrap();
 
     // Park the source.
     repo.transition(

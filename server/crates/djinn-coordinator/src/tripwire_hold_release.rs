@@ -41,13 +41,15 @@ use crate::tripwires::{
 
 impl CoordinatorActor {
     /// Emit `tripwire.hold.released` on each source task held by a just-closed
-    /// `human-review-hold` remediation task. Best-effort and fail-open on the
+    /// hold-release task — a legacy `human-review-hold` remediation OR an
+    /// autonomous `planner-park-escalation` (see
+    /// [`crate::roles::releases_source_on_close`]). Best-effort and fail-open on the
     /// emission side: a failure to write a release must not wedge the close.
     pub(super) async fn emit_tripwire_release_on_hold_close(
         &self,
         hold_task: &djinn_core::models::Task,
     ) {
-        if !crate::roles::is_human_review_hold(hold_task) {
+        if !crate::roles::releases_source_on_close(hold_task) {
             return;
         }
 
