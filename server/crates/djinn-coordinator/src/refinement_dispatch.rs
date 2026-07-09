@@ -677,3 +677,7 @@ mod refinement_dor_status_tests;
 #[cfg(test)]
 #[path = "refinement_evidence_resume_tests.rs"]
 mod refinement_evidence_resume_tests;
+
+#[cfg(test)]
+#[path = "refinement_recovery_tests.rs"]
+mod refinement_recovery_tests;
