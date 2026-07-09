@@ -13,7 +13,7 @@ use anyhow::Result;
 use djinn_provider::github_api::{GitHubApiClient, PrFile};
 
 use crate::tripwires::{
-    ChangedFile, ChangedFileStatus, GateOutcome, TRIPWIRE_EVENT_GATE_HELD,
+    ChangedFile, ChangedFileStatus, DiffHunk, GateOutcome, TRIPWIRE_EVENT_GATE_HELD,
     TRIPWIRE_EVENT_GATE_PASSED, TRIPWIRE_EVENT_GATE_REPORT_ONLY, TripwireEvaluationInput,
     TripwireFindingSummary, TripwireGateDecision, TripwireGateDecisionPayload, TripwirePolicy,
     all_rule_evaluators, evaluate,
@@ -21,36 +21,137 @@ use crate::tripwires::{
 
 // ─── PrFile → ChangedFile conversion ─────────────────────────────────────
 
+/// Parse a unified-diff `patch` string into [`DiffHunk`]s.
+///
+/// A hunk header has the form `@@ -old_start,old_lines +new_start,new_lines @@`.
+/// Lines following the header start with ` ` (context), `+` (added), or
+/// `-` (removed). Binary-file patches (patch starts with `Binary files`)
+/// produce no hunks.
+fn parse_patch_to_hunks(patch: &str) -> Vec<DiffHunk> {
+    let mut hunks = Vec::new();
+    let mut current: Option<DiffHunk> = None;
+
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("@@") {
+            // Flush any in-progress hunk.
+            if let Some(h) = current.take() {
+                hunks.push(h);
+            }
+
+            // Parse `@@ -old_start,old_lines +new_start,new_lines @@ optional`
+            // The part before the second `@@` is `-o,l +n,l`.
+            let header_body = rest.split("@@").next().unwrap_or("").trim();
+
+            let (old_part, new_part) = split_hunk_header(header_body);
+            let (old_start, old_lines) = parse_range(&old_part);
+            let (new_start, new_lines) = parse_range(&new_part);
+
+            current = Some(DiffHunk {
+                new_start,
+                new_lines,
+                old_start,
+                old_lines,
+                diff_lines: Vec::new(),
+            });
+        } else if let Some(h) = current.as_mut() {
+            // Diff line: context (' '), added ('+'), removed ('-').
+            h.diff_lines.push(line.to_owned());
+        }
+        // Lines before the first @@ header are ignored (file-level metadata).
+    }
+
+    if let Some(h) = current.take() {
+        hunks.push(h);
+    }
+
+    hunks
+}
+
+/// Split the hunk header body `" -10,5 +12,7 "` into old (`-10,5`) and
+/// new (`+12,7`) parts.
+fn split_hunk_header(body: &str) -> (String, String) {
+    let trimmed = body.trim();
+    // old part starts with '-'; new part starts with '+'.
+    let old_part = trimmed
+        .find('-')
+        .map(|i| {
+            trimmed[i..]
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_owned()
+        })
+        .unwrap_or_default();
+    let new_part = trimmed
+        .find('+')
+        .map(|i| {
+            trimmed[i..]
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_owned()
+        })
+        .unwrap_or_default();
+    (old_part, new_part)
+}
+
+/// Parse a range like `-10,5` or `+12` into `(start, lines)`.
+/// Returns `(0, 0)` when the string is empty or malformed.
+fn parse_range(s: &str) -> (u32, u32) {
+    let s = s.trim_start_matches(['-', '+']);
+    if s.is_empty() {
+        return (0, 0);
+    }
+    if let Some((start_str, count_str)) = s.split_once(',') {
+        let start: u32 = start_str.parse().unwrap_or(0);
+        let count: u32 = count_str.parse().unwrap_or(0);
+        (start, count)
+    } else {
+        let start: u32 = s.parse().unwrap_or(0);
+        (start, 1) // single-line hunk when no comma
+    }
+}
+
 /// Convert a slice of GitHub API [`PrFile`]s to the engine's [`ChangedFile`]
 /// representation.
 ///
 /// The GitHub PR-files endpoint (`GET /pulls/{n}/files`) returns a flat
-/// list with `status`, `additions`, `deletions`, and `filename` fields.
-/// Diff hunks are **not** included in this endpoint's response, so the
-/// converted [`ChangedFile`]s have empty `hunks` — rules that scan diff
-/// lines (network egress, unsafe code) will fall back to file-level
-/// evidence or skip the file when no hunks are present.
+/// list with `status`, `additions`, `deletions`, `filename`, and — for
+/// text files — a `patch` string containing the unified diff. When the
+/// `patch` is present it is parsed into [`DiffHunk`]s so that line-scanning
+/// rules (network egress, unsafe code) can evaluate added diff lines.
+/// Files with `patch = None` (binary files, or responses that omit the
+/// patch) get empty hunks and are evaluated at the file level only.
 ///
 /// Files with unrecognised `status` strings are mapped to `Modified` as
 /// a conservative default (GitHub may add new statuses).
 pub fn convert_pr_files(pr_files: &[PrFile]) -> Vec<ChangedFile> {
     pr_files
         .iter()
-        .map(|pf| ChangedFile {
-            path: pf.filename.clone(),
-            old_path: None, // GitHub's PR-files endpoint doesn't expose old_filename
-            // in the minimal model; renames are flagged by status only.
-            status: match pf.status.as_str() {
-                "added" => ChangedFileStatus::Added,
-                "removed" => ChangedFileStatus::Deleted,
-                "renamed" => ChangedFileStatus::Renamed,
-                _ => ChangedFileStatus::Modified, // "modified" + unknown
-            },
-            additions: pf.additions,
-            deletions: pf.deletions,
-            hunks: Vec::new(), // PR-files endpoint doesn't include per-hunk diffs
-            is_generated: false,
-            is_vendor: false,
+        .map(|pf| {
+            let hunks = pf
+                .patch
+                .as_deref()
+                .filter(|p| !p.is_empty())
+                .map(parse_patch_to_hunks)
+                .unwrap_or_default();
+
+            ChangedFile {
+                path: pf.filename.clone(),
+                old_path: None, // GitHub's PR-files endpoint doesn't expose old_filename
+                // in the minimal model; renames are flagged by status only.
+                status: match pf.status.as_str() {
+                    "added" => ChangedFileStatus::Added,
+                    "removed" => ChangedFileStatus::Deleted,
+                    "renamed" => ChangedFileStatus::Renamed,
+                    _ => ChangedFileStatus::Modified, // "modified" + unknown
+                },
+                additions: pf.additions,
+                deletions: pf.deletions,
+                hunks,
+                is_generated: false,
+                is_vendor: false,
+            }
         })
         .collect()
 }
@@ -173,11 +274,11 @@ pub async fn evaluate_tripwire_gate(
 mod tests {
     use super::*;
     use crate::tripwires::{
-        ChangedFileStatus, DiffHunk, TRIPWIRE_EVENT_GATE_HELD, TRIPWIRE_EVENT_GATE_PASSED,
+        ChangedFileStatus, TRIPWIRE_EVENT_GATE_HELD, TRIPWIRE_EVENT_GATE_PASSED,
         TRIPWIRE_EVENT_GATE_REPORT_ONLY, TripwireFindingSeverity,
     };
 
-    /// Helper: build a `PrFile` with the given fields.
+    /// Helper: build a `PrFile` with the given fields and no patch.
     fn pr_file(filename: &str, status: &str, additions: u32, deletions: u32) -> PrFile {
         PrFile {
             sha: "deadbeef".to_owned(),
@@ -186,6 +287,26 @@ mod tests {
             additions,
             deletions,
             changes: additions + deletions,
+            patch: None,
+        }
+    }
+
+    /// Helper: build a `PrFile` with a patch string (unified diff).
+    fn pr_file_with_patch(
+        filename: &str,
+        status: &str,
+        additions: u32,
+        deletions: u32,
+        patch: &str,
+    ) -> PrFile {
+        PrFile {
+            sha: "deadbeef".to_owned(),
+            filename: filename.to_owned(),
+            status: status.to_owned(),
+            additions,
+            deletions,
+            changes: additions + deletions,
+            patch: Some(patch.to_owned()),
         }
     }
 
@@ -228,10 +349,42 @@ mod tests {
     }
 
     #[test]
-    fn convert_pr_files_produces_empty_hunks() {
+    fn convert_pr_files_produces_empty_hunks_without_patch() {
         let files = vec![pr_file("src/lib.rs", "modified", 10, 5)];
         let converted = convert_pr_files(&files);
         assert!(converted[0].hunks.is_empty());
+    }
+
+    #[test]
+    fn convert_pr_files_parses_patch_into_hunks() {
+        let patch = "@@ -1,2 +1,3 @@\n unchanged\n+added line\n-old line\n";
+        let files = vec![pr_file_with_patch("src/main.rs", "modified", 1, 1, patch)];
+        let converted = convert_pr_files(&files);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].hunks.len(), 1, "one hunk from patch");
+        let hunk = &converted[0].hunks[0];
+        assert_eq!(hunk.old_start, 1);
+        assert_eq!(hunk.old_lines, 2);
+        assert_eq!(hunk.new_start, 1);
+        assert_eq!(hunk.new_lines, 3);
+        assert_eq!(
+            hunk.diff_lines,
+            vec![
+                " unchanged".to_owned(),
+                "+added line".to_owned(),
+                "-old line".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn convert_pr_files_parses_multiple_hunks() {
+        let patch = "@@ -1,1 +1,2 @@\n a\n+b\n@@ -10,1 +11,1 @@\n-c\n+d\n";
+        let files = vec![pr_file_with_patch("src/multi.rs", "modified", 2, 2, patch)];
+        let converted = convert_pr_files(&files);
+        assert_eq!(converted[0].hunks.len(), 2, "two hunks from patch");
+        assert_eq!(converted[0].hunks[0].new_start, 1);
+        assert_eq!(converted[0].hunks[1].new_start, 11);
     }
 
     #[test]
@@ -240,57 +393,51 @@ mod tests {
         assert!(converted.is_empty());
     }
 
-    // ── Evaluation tests (offline, no GitHub API) ───────────────────────
+    #[test]
+    fn parse_patch_to_hunks_empty_string() {
+        assert!(parse_patch_to_hunks("").is_empty());
+    }
+
+    #[test]
+    fn parse_patch_to_hunks_no_hunk_header() {
+        assert!(parse_patch_to_hunks("some random text\nno hunk headers").is_empty());
+    }
+
+    // ── End-to-end evaluation tests via PrFile conversion ───────────────
     //
-    // These tests call `run_gate` directly with synthetic `ChangedFile`
-    // inputs so they cover the seven rule families without network calls.
+    // These tests start from representative `PrFile` payloads (as returned
+    // by GitHub's `GET /pulls/{n}/files` endpoint), convert them through
+    // `convert_pr_files`, and evaluate with `run_gate`. This proves the
+    // full pipeline including patch → DiffHunk conversion works for all
+    // seven rule families.
 
-    /// Helper: build a `ChangedFile` for testing.
-    fn changed_file(
-        path: &str,
-        status: ChangedFileStatus,
-        additions: u32,
-        deletions: u32,
-    ) -> ChangedFile {
-        ChangedFile {
-            path: path.to_owned(),
-            old_path: None,
-            status,
-            additions,
-            deletions,
-            hunks: Vec::new(),
-            is_generated: false,
-            is_vendor: false,
-        }
-    }
-
-    /// Helper: build a `ChangedFile` with diff hunks for line-scanning rules.
-    fn changed_file_with_hunks(
-        path: &str,
-        additions: u32,
-        deletions: u32,
-        hunks: Vec<DiffHunk>,
-    ) -> ChangedFile {
-        ChangedFile {
-            path: path.to_owned(),
-            old_path: None,
-            status: ChangedFileStatus::Modified,
-            additions,
-            deletions,
-            hunks,
-            is_generated: false,
-            is_vendor: false,
-        }
-    }
-
-    /// Helper: run the tripwire engine on given changed files with default policy.
-    fn evaluate_default(changed_files: Vec<ChangedFile>) -> TripwireGateDecision {
+    /// Helper: convert PrFiles to ChangedFiles, then evaluate with default policy.
+    fn evaluate_from_pr_files(pr_files: Vec<PrFile>) -> TripwireGateDecision {
+        let changed_files = convert_pr_files(&pr_files);
         let input = TripwireEvaluationInput {
             task_id: "task-001".to_owned(),
             project_id: "proj-001".to_owned(),
             pr_number: Some(42),
             head_sha: "abc123".to_owned(),
             policy: TripwirePolicy::default(),
+            allowlist_revision: None,
+            changed_files,
+        };
+        run_gate(&input).decision
+    }
+
+    /// Helper: convert PrFiles to ChangedFiles, then evaluate with a custom policy.
+    fn evaluate_from_pr_files_with_policy(
+        pr_files: Vec<PrFile>,
+        policy: TripwirePolicy,
+    ) -> TripwireGateDecision {
+        let changed_files = convert_pr_files(&pr_files);
+        let input = TripwireEvaluationInput {
+            task_id: "task-001".to_owned(),
+            project_id: "proj-001".to_owned(),
+            pr_number: Some(42),
+            head_sha: "abc123".to_owned(),
+            policy,
             allowlist_revision: None,
             changed_files,
         };
@@ -306,17 +453,17 @@ mod tests {
         }
     }
 
-    // ── Rule 1: migration_change ────────────────────────────────────────
+    // ── Rule 1: migration_change (file-level, no hunks needed) ──────────
 
     #[test]
-    fn migration_change_produces_held_gate() {
-        let files = vec![changed_file(
+    fn migration_change_from_pr_file_produces_held_gate() {
+        let files = vec![pr_file(
             "migrations/20260101_create_users.sql",
-            ChangedFileStatus::Added,
+            "added",
             20,
             0,
         )];
-        let decision = evaluate_default(files);
+        let decision = evaluate_from_pr_files(files);
         assert_eq!(decision.outcome, GateOutcome::Held);
         assert!(decision.enforcement_finding_count > 0);
         assert!(
@@ -328,17 +475,12 @@ mod tests {
         assert_eq!(event_type_for(&decision), TRIPWIRE_EVENT_GATE_HELD);
     }
 
-    // ── Rule 2: dependency_identity_change ──────────────────────────────
+    // ── Rule 2: dependency_identity_change (file-level, no hunks) ───────
 
     #[test]
-    fn dependency_identity_change_produces_held_gate() {
-        let files = vec![changed_file(
-            "Cargo.toml",
-            ChangedFileStatus::Modified,
-            5,
-            3,
-        )];
-        let decision = evaluate_default(files);
+    fn dependency_identity_change_from_pr_file_produces_held_gate() {
+        let files = vec![pr_file("Cargo.toml", "modified", 5, 3)];
+        let decision = evaluate_from_pr_files(files);
         assert_eq!(decision.outcome, GateOutcome::Held);
         assert!(
             decision
@@ -348,29 +490,20 @@ mod tests {
         );
     }
 
-    // ── Rule 3: network_egress_change ───────────────────────────────────
+    // ── Rule 3: network_egress_change (requires patch → hunks) ──────────
 
     #[test]
-    fn network_egress_change_produces_held_gate() {
-        let hunk = DiffHunk {
-            new_start: 10,
-            new_lines: 3,
-            old_start: 10,
-            old_lines: 1,
-            diff_lines: vec![
-                " context line".to_owned(),
-                "+use reqwest::Client;".to_owned(),
-                " another context".to_owned(),
-            ],
-        };
-        let files = vec![changed_file_with_hunks("src/http.rs", 3, 1, vec![hunk])];
-        let decision = evaluate_default(files);
+    fn network_egress_change_from_pr_file_produces_held_gate() {
+        let patch = "@@ -1,1 +1,3 @@\n old line\n+use reqwest::Client;\n+let resp = client.get(url).send();\n";
+        let files = vec![pr_file_with_patch("src/http.rs", "modified", 2, 0, patch)];
+        let decision = evaluate_from_pr_files(files);
         assert_eq!(decision.outcome, GateOutcome::Held);
         assert!(
             decision
                 .findings
                 .iter()
-                .any(|f| f.rule_id.as_str() == "network_egress_change")
+                .any(|f| f.rule_id.as_str() == "network_egress_change"),
+            "network_egress_change must surface from PR-file patch conversion"
         );
         // Verify evidence is line-precise.
         let egress_finding = decision
@@ -378,42 +511,35 @@ mod tests {
             .iter()
             .find(|f| f.rule_id.as_str() == "network_egress_change")
             .unwrap();
-        assert!(egress_finding.evidence.start_line.is_some());
+        assert!(
+            egress_finding.evidence.start_line.is_some(),
+            "evidence must have a line number"
+        );
     }
 
-    // ── Rule 4: unsafe_code_change ──────────────────────────────────────
+    // ── Rule 4: unsafe_code_change (requires patch → hunks) ─────────────
 
     #[test]
-    fn unsafe_code_change_produces_held_gate() {
-        let hunk = DiffHunk {
-            new_start: 1,
-            new_lines: 2,
-            old_start: 1,
-            old_lines: 0,
-            diff_lines: vec!["+unsafe {".to_owned(), "+    ptr::null();".to_owned()],
-        };
-        let files = vec![changed_file_with_hunks("src/ffi.rs", 2, 0, vec![hunk])];
-        let decision = evaluate_default(files);
+    fn unsafe_code_change_from_pr_file_produces_held_gate() {
+        let patch = "@@ -1,0 +1,2 @@\n+unsafe {\n+    ptr::read_volatile(addr);\n+}\n";
+        let files = vec![pr_file_with_patch("src/ffi.rs", "modified", 3, 0, patch)];
+        let decision = evaluate_from_pr_files(files);
         assert_eq!(decision.outcome, GateOutcome::Held);
         assert!(
             decision
                 .findings
                 .iter()
-                .any(|f| f.rule_id.as_str() == "unsafe_code_change")
+                .any(|f| f.rule_id.as_str() == "unsafe_code_change"),
+            "unsafe_code_change must surface from PR-file patch conversion"
         );
     }
 
-    // ── Rule 5: boundary_path_change ────────────────────────────────────
+    // ── Rule 5: boundary_path_change (file-level, no hunks needed) ──────
 
     #[test]
-    fn boundary_path_change_produces_held_gate() {
-        let files = vec![changed_file(
-            "src/auth/permissions.rs",
-            ChangedFileStatus::Added,
-            100,
-            0,
-        )];
-        let decision = evaluate_default(files);
+    fn boundary_path_change_from_pr_file_produces_held_gate() {
+        let files = vec![pr_file("src/auth/permissions.rs", "added", 100, 0)];
+        let decision = evaluate_from_pr_files(files);
         assert_eq!(decision.outcome, GateOutcome::Held);
         assert!(
             decision
@@ -430,17 +556,17 @@ mod tests {
         assert!(boundary_finding.allowlist_revision.is_some());
     }
 
-    // ── Rule 6: large_delete_or_rewrite ─────────────────────────────────
+    // ── Rule 6: large_delete_or_rewrite (file-level, no hunks) ──────────
 
     #[test]
-    fn large_delete_or_rewrite_produces_held_gate() {
-        let files = vec![changed_file(
+    fn large_delete_or_rewrite_from_pr_file_produces_held_gate() {
+        let files = vec![pr_file(
             "src/old_module.rs",
-            ChangedFileStatus::Modified,
+            "modified",
             10,
             600, // Exceeds default per-file threshold of 500
         )];
-        let decision = evaluate_default(files);
+        let decision = evaluate_from_pr_files(files);
         assert_eq!(decision.outcome, GateOutcome::Held);
         assert!(
             decision
@@ -450,17 +576,12 @@ mod tests {
         );
     }
 
-    // ── Rule 7: ci_workflow_change ──────────────────────────────────────
+    // ── Rule 7: ci_workflow_change (file-level, no hunks) ───────────────
 
     #[test]
-    fn ci_workflow_change_produces_held_gate() {
-        let files = vec![changed_file(
-            ".github/workflows/ci.yml",
-            ChangedFileStatus::Modified,
-            15,
-            5,
-        )];
-        let decision = evaluate_default(files);
+    fn ci_workflow_change_from_pr_file_produces_held_gate() {
+        let files = vec![pr_file(".github/workflows/ci.yml", "modified", 15, 5)];
+        let decision = evaluate_from_pr_files(files);
         assert_eq!(decision.outcome, GateOutcome::Held);
         assert!(
             decision
@@ -470,303 +591,40 @@ mod tests {
         );
     }
 
-    // ── Report-only scenario ────────────────────────────────────────────
+    // ── All seven rule families from PrFile payloads ────────────────────
 
     #[test]
-    fn report_only_findings_produce_report_only_gate() {
-        // Build a policy where migration changes are report-only.
-        let mut policy = TripwirePolicy::default();
-        policy.migration.report_only = true;
-
-        let files = vec![ChangedFile {
-            path: "migrations/001_init.sql".to_owned(),
-            old_path: None,
-            status: ChangedFileStatus::Added,
-            additions: 50,
-            deletions: 0,
-            hunks: Vec::new(),
-            is_generated: false,
-            is_vendor: false,
-        }];
-
-        let input = TripwireEvaluationInput {
-            task_id: "task-002".to_owned(),
-            project_id: "proj-001".to_owned(),
-            pr_number: Some(99),
-            head_sha: "def456".to_owned(),
-            policy,
-            allowlist_revision: None,
-            changed_files: files,
-        };
-        let result = run_gate(&input);
-        let decision = &result.decision;
-
-        assert_eq!(decision.outcome, GateOutcome::ReportOnly);
-        assert_eq!(decision.enforcement_finding_count, 0);
-        assert!(decision.report_only_finding_count > 0);
-        assert_eq!(event_type_for(decision), TRIPWIRE_EVENT_GATE_REPORT_ONLY);
-
-        // Verify findings carry report-only severity.
-        for f in &decision.findings {
-            assert_eq!(f.severity, TripwireFindingSeverity::ReportOnly);
-        }
-    }
-
-    // ── Passed (no findings) ────────────────────────────────────────────
-
-    #[test]
-    fn no_matching_files_produces_passed_gate() {
-        let files = vec![changed_file(
-            "src/main.rs",
-            ChangedFileStatus::Modified,
-            5,
-            2,
-        )];
-        let decision = evaluate_default(files);
-        assert_eq!(decision.outcome, GateOutcome::Passed);
-        assert_eq!(decision.enforcement_finding_count, 0);
-        assert_eq!(decision.report_only_finding_count, 0);
-        assert!(decision.findings.is_empty());
-        assert_eq!(event_type_for(&decision), TRIPWIRE_EVENT_GATE_PASSED);
-    }
-
-    // ── Idempotency key determinism ─────────────────────────────────────
-
-    #[test]
-    fn gate_idempotency_key_is_deterministic() {
-        let files = vec![changed_file(
-            "migrations/001.sql",
-            ChangedFileStatus::Added,
-            10,
-            0,
-        )];
-        let d1 = evaluate_default(files.clone());
-        let d2 = evaluate_default(files);
-        assert_eq!(d1.idempotency_key, d2.idempotency_key);
-    }
-
-    // ── Payload validation ──────────────────────────────────────────────
-
-    #[test]
-    fn payload_validation_passes_for_consistent_decision() {
-        let files = vec![changed_file(
-            "migrations/001.sql",
-            ChangedFileStatus::Added,
-            10,
-            0,
-        )];
-        let input = TripwireEvaluationInput {
-            task_id: "task-001".to_owned(),
-            project_id: "proj-001".to_owned(),
-            pr_number: Some(42),
-            head_sha: "abc123".to_owned(),
-            policy: TripwirePolicy::default(),
-            allowlist_revision: None,
-            changed_files: files,
-        };
-        let result = run_gate(&input);
-        result
-            .payload
-            .validate()
-            .expect("payload must pass validation for a consistent decision");
-    }
-
-    // ── Mixed findings: enforcement dominates ───────────────────────────
-
-    #[test]
-    fn mixed_findings_enforcement_dominates_over_report_only() {
-        // Migration (enforcement) + CI workflow (report-only) → Held.
-        let mut policy = TripwirePolicy::default();
-        policy.ci_workflow.report_only = true;
-
+    fn all_seven_rule_families_from_pr_files_produce_findings() {
         let files = vec![
-            ChangedFile {
-                path: "migrations/002.sql".to_owned(),
-                old_path: None,
-                status: ChangedFileStatus::Added,
-                additions: 20,
-                deletions: 0,
-                hunks: Vec::new(),
-                is_generated: false,
-                is_vendor: false,
-            },
-            ChangedFile {
-                path: ".github/workflows/release.yml".to_owned(),
-                old_path: None,
-                status: ChangedFileStatus::Modified,
-                additions: 10,
-                deletions: 5,
-                hunks: Vec::new(),
-                is_generated: false,
-                is_vendor: false,
-            },
+            // 1. Migration (file-level)
+            pr_file("migrations/001.sql", "added", 10, 0),
+            // 2. Dependency identity (file-level)
+            pr_file("Cargo.toml", "modified", 2, 1),
+            // 3. Network egress (needs patch → hunks)
+            pr_file_with_patch(
+                "src/webhook.rs",
+                "modified",
+                2,
+                0,
+                "@@ -1,0 +1,2 @@\n+use reqwest::Client;\n+let resp = client.get(url).send();\n",
+            ),
+            // 4. Unsafe code (needs patch → hunks, .rs extension)
+            pr_file_with_patch(
+                "src/ffi.rs",
+                "modified",
+                2,
+                0,
+                "@@ -1,0 +1,2 @@\n+unsafe {\n+    ptr::read_volatile(addr);\n",
+            ),
+            // 5. Boundary path (added status + auth path)
+            pr_file("src/auth/mod.rs", "added", 50, 0),
+            // 6. Large delete
+            pr_file("src/legacy.rs", "modified", 5, 600),
+            // 7. CI workflow
+            pr_file(".github/workflows/ci.yml", "modified", 10, 5),
         ];
 
-        let input = TripwireEvaluationInput {
-            task_id: "task-mixed".to_owned(),
-            project_id: "proj-001".to_owned(),
-            pr_number: Some(77),
-            head_sha: "mixed-sha".to_owned(),
-            policy,
-            allowlist_revision: None,
-            changed_files: files,
-        };
-        let result = run_gate(&input);
-        let decision = &result.decision;
-
-        assert_eq!(decision.outcome, GateOutcome::Held);
-        assert!(decision.enforcement_finding_count > 0);
-        assert!(decision.report_only_finding_count > 0);
-        assert_eq!(event_type_for(decision), TRIPWIRE_EVENT_GATE_HELD);
-    }
-
-    // ── Generated/vendor files are excluded ─────────────────────────────
-
-    #[test]
-    fn generated_files_are_excluded_from_evaluation() {
-        let files = vec![ChangedFile {
-            path: "generated/bindings.rs".to_owned(),
-            old_path: None,
-            status: ChangedFileStatus::Added,
-            additions: 5000,
-            deletions: 0,
-            hunks: Vec::new(),
-            is_generated: true, // This file is classified as generated
-            is_vendor: false,
-        }];
-        let decision = evaluate_default(files);
-        assert_eq!(decision.outcome, GateOutcome::Passed);
-        assert!(decision.findings.is_empty());
-    }
-
-    // ── All seven rule families can surface findings ────────────────────
-
-    #[test]
-    fn all_seven_rule_families_produce_findings() {
-        let mut policy = TripwirePolicy::default();
-        // Enable all rules with enforcement (not report-only).
-        policy.migration.enabled = true;
-        policy.migration.report_only = false;
-        policy.dependency_identity.enabled = true;
-        policy.dependency_identity.report_only = false;
-        policy.network_egress.enabled = true;
-        policy.network_egress.report_only = false;
-        policy.unsafe_code.enabled = true;
-        policy.unsafe_code.report_only = false;
-        policy.boundary_path.enabled = true;
-        policy.boundary_path.report_only = false;
-        policy.large_delete_rewrite.enabled = true;
-        policy.large_delete_rewrite.report_only = false;
-        policy.ci_workflow.enabled = true;
-        policy.ci_workflow.report_only = false;
-
-        let files = vec![
-            // Migration
-            ChangedFile {
-                path: "migrations/001.sql".to_owned(),
-                old_path: None,
-                status: ChangedFileStatus::Added,
-                additions: 10,
-                deletions: 0,
-                hunks: Vec::new(),
-                is_generated: false,
-                is_vendor: false,
-            },
-            // Dependency identity
-            ChangedFile {
-                path: "Cargo.toml".to_owned(),
-                old_path: None,
-                status: ChangedFileStatus::Modified,
-                additions: 2,
-                deletions: 1,
-                hunks: Vec::new(),
-                is_generated: false,
-                is_vendor: false,
-            },
-            // Network egress (needs hunks)
-            ChangedFile {
-                path: "src/webhook.rs".to_owned(),
-                old_path: None,
-                status: ChangedFileStatus::Modified,
-                additions: 5,
-                deletions: 0,
-                hunks: vec![DiffHunk {
-                    new_start: 1,
-                    new_lines: 3,
-                    old_start: 1,
-                    old_lines: 0,
-                    diff_lines: vec![
-                        "+// new".to_owned(),
-                        "+use reqwest::Client;".to_owned(),
-                        "+// done".to_owned(),
-                    ],
-                }],
-                is_generated: false,
-                is_vendor: false,
-            },
-            // Unsafe code (needs hunks with .rs extension)
-            ChangedFile {
-                path: "src/ffi.rs".to_owned(),
-                old_path: None,
-                status: ChangedFileStatus::Modified,
-                additions: 3,
-                deletions: 0,
-                hunks: vec![DiffHunk {
-                    new_start: 1,
-                    new_lines: 2,
-                    old_start: 1,
-                    old_lines: 0,
-                    diff_lines: vec!["+unsafe {".to_owned(), "+    do_something();".to_owned()],
-                }],
-                is_generated: false,
-                is_vendor: false,
-            },
-            // Boundary path (added status + auth path)
-            ChangedFile {
-                path: "src/auth/mod.rs".to_owned(),
-                old_path: None,
-                status: ChangedFileStatus::Added,
-                additions: 50,
-                deletions: 0,
-                hunks: Vec::new(),
-                is_generated: false,
-                is_vendor: false,
-            },
-            // Large delete
-            ChangedFile {
-                path: "src/legacy.rs".to_owned(),
-                old_path: None,
-                status: ChangedFileStatus::Modified,
-                additions: 5,
-                deletions: 600,
-                hunks: Vec::new(),
-                is_generated: false,
-                is_vendor: false,
-            },
-            // CI workflow
-            ChangedFile {
-                path: ".github/workflows/ci.yml".to_owned(),
-                old_path: None,
-                status: ChangedFileStatus::Modified,
-                additions: 10,
-                deletions: 5,
-                hunks: Vec::new(),
-                is_generated: false,
-                is_vendor: false,
-            },
-        ];
-
-        let input = TripwireEvaluationInput {
-            task_id: "task-all-rules".to_owned(),
-            project_id: "proj-001".to_owned(),
-            pr_number: Some(100),
-            head_sha: "all-rules-sha".to_owned(),
-            policy,
-            allowlist_revision: None,
-            changed_files: files,
-        };
-        let result = run_gate(&input);
-        let decision = &result.decision;
+        let decision = evaluate_from_pr_files(files);
 
         assert_eq!(decision.outcome, GateOutcome::Held);
 
@@ -805,5 +663,153 @@ mod tests {
             rule_ids.contains(&"ci_workflow_change"),
             "ci_workflow_change must surface"
         );
+    }
+
+    // ── Report-only scenario from PrFile ────────────────────────────────
+
+    #[test]
+    fn report_only_finding_from_pr_file_produces_report_only_gate() {
+        let mut policy = TripwirePolicy::default();
+        policy.migration.report_only = true;
+
+        let files = vec![pr_file("migrations/001_init.sql", "added", 50, 0)];
+        let decision = evaluate_from_pr_files_with_policy(files, policy);
+
+        assert_eq!(decision.outcome, GateOutcome::ReportOnly);
+        assert_eq!(decision.enforcement_finding_count, 0);
+        assert!(decision.report_only_finding_count > 0);
+        assert_eq!(event_type_for(&decision), TRIPWIRE_EVENT_GATE_REPORT_ONLY);
+        for f in &decision.findings {
+            assert_eq!(f.severity, TripwireFindingSeverity::ReportOnly);
+        }
+    }
+
+    // ── Report-only for network_egress from PrFile (patch-based) ────────
+
+    #[test]
+    fn report_only_network_egress_from_pr_file() {
+        let mut policy = TripwirePolicy::default();
+        policy.network_egress.report_only = true;
+
+        let patch = "@@ -1,0 +1,2 @@\n+use reqwest::Client;\n+let resp = client.get(url).send();\n";
+        let files = vec![pr_file_with_patch("src/http.rs", "modified", 2, 0, patch)];
+        let decision = evaluate_from_pr_files_with_policy(files, policy);
+
+        assert_eq!(decision.outcome, GateOutcome::ReportOnly);
+        assert!(
+            decision
+                .findings
+                .iter()
+                .any(|f| f.rule_id.as_str() == "network_egress_change"),
+            "network_egress_change must surface from patch as report-only"
+        );
+    }
+
+    // ── Passed (no findings) from PrFile ────────────────────────────────
+
+    #[test]
+    fn no_matching_pr_files_produce_passed_gate() {
+        let files = vec![pr_file("src/main.rs", "modified", 5, 2)];
+        let decision = evaluate_from_pr_files(files);
+        assert_eq!(decision.outcome, GateOutcome::Passed);
+        assert_eq!(decision.enforcement_finding_count, 0);
+        assert_eq!(decision.report_only_finding_count, 0);
+        assert!(decision.findings.is_empty());
+        assert_eq!(event_type_for(&decision), TRIPWIRE_EVENT_GATE_PASSED);
+    }
+
+    // ── Idempotency key determinism from PrFile ─────────────────────────
+
+    #[test]
+    fn gate_idempotency_key_is_deterministic_from_pr_files() {
+        let files = vec![pr_file("migrations/001.sql", "added", 10, 0)];
+        let d1 = evaluate_from_pr_files(files.clone());
+        let d2 = evaluate_from_pr_files(files);
+        assert_eq!(d1.idempotency_key, d2.idempotency_key);
+    }
+
+    // ── Payload validation from PrFile ──────────────────────────────────
+
+    #[test]
+    fn payload_validation_passes_from_pr_files() {
+        let files = vec![pr_file("migrations/001.sql", "added", 10, 0)];
+        let changed_files = convert_pr_files(&files);
+        let input = TripwireEvaluationInput {
+            task_id: "task-001".to_owned(),
+            project_id: "proj-001".to_owned(),
+            pr_number: Some(42),
+            head_sha: "abc123".to_owned(),
+            policy: TripwirePolicy::default(),
+            allowlist_revision: None,
+            changed_files,
+        };
+        let result = run_gate(&input);
+        result
+            .payload
+            .validate()
+            .expect("payload must pass validation for a consistent decision");
+    }
+
+    // ── Mixed findings: enforcement dominates (from PrFile) ─────────────
+
+    #[test]
+    fn mixed_findings_enforcement_dominates_over_report_only_from_pr_files() {
+        let mut policy = TripwirePolicy::default();
+        policy.ci_workflow.report_only = true;
+
+        let files = vec![
+            pr_file("migrations/002.sql", "added", 20, 0),
+            pr_file(".github/workflows/release.yml", "modified", 10, 5),
+        ];
+
+        let decision = evaluate_from_pr_files_with_policy(files, policy);
+
+        assert_eq!(decision.outcome, GateOutcome::Held);
+        assert!(decision.enforcement_finding_count > 0);
+        assert!(decision.report_only_finding_count > 0);
+        assert_eq!(event_type_for(&decision), TRIPWIRE_EVENT_GATE_HELD);
+    }
+
+    // ── Patch absent: network_egress/unsafe cannot surface ─────────────
+
+    #[test]
+    fn pr_file_without_patch_does_not_trigger_egress_or_unsafe() {
+        // A .rs file with additions but no patch/hunks.
+        // network_egress and unsafe_code scan diff lines only,
+        // so without a patch they cannot match.
+        let files = vec![pr_file("src/webhook.rs", "modified", 5, 0)];
+        let decision = evaluate_from_pr_files(files);
+        // No other rule matches this file, so outcome is Passed.
+        assert_eq!(decision.outcome, GateOutcome::Passed);
+        assert!(decision.findings.is_empty());
+    }
+
+    // ── Generated/vendor files are excluded ─────────────────────────────
+
+    #[test]
+    fn generated_files_are_excluded_from_evaluation() {
+        let changed_files = vec![ChangedFile {
+            path: "generated/bindings.rs".to_owned(),
+            old_path: None,
+            status: ChangedFileStatus::Added,
+            additions: 5000,
+            deletions: 0,
+            hunks: Vec::new(),
+            is_generated: true, // This file is classified as generated
+            is_vendor: false,
+        }];
+        let input = TripwireEvaluationInput {
+            task_id: "task-001".to_owned(),
+            project_id: "proj-001".to_owned(),
+            pr_number: Some(42),
+            head_sha: "abc123".to_owned(),
+            policy: TripwirePolicy::default(),
+            allowlist_revision: None,
+            changed_files,
+        };
+        let result = run_gate(&input);
+        let decision = &result.decision;
+        assert_eq!(decision.outcome, GateOutcome::Passed);
+        assert!(decision.findings.is_empty());
     }
 }
