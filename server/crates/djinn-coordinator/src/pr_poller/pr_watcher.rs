@@ -313,7 +313,139 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // All CI passed and no merge conflicts — undraft the PR, then transition.
+            // ── Tripwire gate: deterministic pre-undraft evaluation ──────
+            // Evaluate the PR diff against the tripwire policy before the
+            // PR can proceed to undraft/auto-merge. This is a pure
+            // deterministic gate — no LLM or provider call.
+            let tripwire_result = match super::tripwire_gate::evaluate_tripwire_gate(
+                gh_client,
+                &owner,
+                &repo,
+                pull_number,
+                &task.id,
+                &task.project_id,
+                &pr.head.sha,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        error = %e,
+                        "PR poller: tripwire gate evaluation failed — proceeding without gate (will retry next tick)"
+                    );
+                    // Non-fatal: skip this tick so the gate can be
+                    // re-evaluated next tick rather than bypassing it.
+                    continue;
+                }
+            };
+
+            // Log the gate activity event (held, passed, or report-only).
+            let activity_payload =
+                serde_json::to_string(&tripwire_result.payload).unwrap_or_default();
+            if let Err(e) = self
+                .task_repo()
+                .log_activity(
+                    Some(&task.id),
+                    "coordinator",
+                    "system",
+                    tripwire_result.event_type,
+                    &activity_payload,
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    error = %e,
+                    "PR poller: failed to log tripwire gate activity"
+                );
+            }
+
+            match tripwire_result.decision.outcome {
+                crate::tripwires::GateOutcome::Held => {
+                    // Enforcement findings exist — apply human-review-hold
+                    // idempotently and park the source task so it cannot be
+                    // dispatched until the hold is resolved.
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        head_sha = %pr.head.sha,
+                        enforcement_count = tripwire_result.decision.enforcement_finding_count,
+                        "PR poller: tripwire gate HELD — creating human-review hold"
+                    );
+
+                    let findings_summary = tripwire_result
+                        .decision
+                        .findings
+                        .iter()
+                        .map(|f| {
+                            format!(
+                                "- `{}` ({}) — {}",
+                                f.rule_id.as_str(),
+                                f.reason_code,
+                                f.evidence.path,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    let hold_reason = format!(
+                        "Tripwire gate held for PR head `{}`.\n\n\
+                         Policy revision: `{}`\n\
+                         Enforcement findings ({}):\n{}",
+                        &pr.head.sha[..12.min(pr.head.sha.len())],
+                        tripwire_result.decision.policy_revision,
+                        tripwire_result.decision.enforcement_finding_count,
+                        findings_summary,
+                    );
+
+                    // Create a human-review remediation task (idempotent —
+                    // skips if the source is already held by an unresolved
+                    // blocker).
+                    self.create_remediation_task(
+                        &task.id,
+                        &hold_reason,
+                        &task.project_id,
+                        crate::dispatch::RemediationKind::HumanReview,
+                    )
+                    .await;
+
+                    // Park the source so it stops being re-dispatched.
+                    self.park_source_open(&task.id, &hold_reason).await;
+                    self.pr_status_cache.remove(&task.id);
+                    self.pr_draft_first_seen.remove(&task.id);
+                    self.review_stuck_sha_first_seen.remove(&task.id);
+                    continue;
+                }
+                crate::tripwires::GateOutcome::Passed
+                | crate::tripwires::GateOutcome::ReportOnly => {
+                    // Gate passed (with optional advisory findings) —
+                    // proceed to undraft.
+                    if tripwire_result.decision.outcome == crate::tripwires::GateOutcome::ReportOnly
+                    {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            head_sha = %pr.head.sha,
+                            report_only_count = tripwire_result.decision.report_only_finding_count,
+                            "PR poller: tripwire gate PASSED with report-only findings"
+                        );
+                    } else {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            head_sha = %pr.head.sha,
+                            "PR poller: tripwire gate PASSED"
+                        );
+                    }
+                }
+            }
+
+            // All CI passed, no merge conflicts, tripwire gate passed —
+            // undraft the PR, then transition.
             tracing::info!(
                 task_id = %task.short_id,
                 pr = pull_number,
