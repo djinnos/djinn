@@ -1,4 +1,5 @@
-use super::super::fuzzy::MatchMetadata;
+use super::gate_guard::gate_guard_edit_check;
+use super::workspace_helpers::{cargo_check_denied, emit_edit_match_telemetry};
 use super::*;
 
 /// Default interactive-shell timeout (ms) when the caller passes no `timeout_ms`.
@@ -47,80 +48,6 @@ fn effective_shell_timeout_ms(requested: Option<u64>, command: &str) -> u64 {
         base.max(build_command_floor_ms())
     } else {
         base
-    }
-}
-
-/// Denial message for `cargo check`/`cargo build` by worker/reviewer roles.
-/// These cold-build the whole workspace (~12min); clippy reuses the warm cache.
-const CARGO_CHECK_DENIED_MSG: &str = "cargo check / cargo build (for type-checking) is disabled for the worker and reviewer roles: it produces different artifacts than the warm cargo cache and cold-builds the workspace. Use `cargo clippy -p <crate>` instead (it reuses the warm cache and also lints). `cargo test`/`cargo nextest`, `cargo tree`, `cargo metadata`, and `cargo fmt` are allowed.";
-
-/// Does this shell command, run by a code-executing role (worker or reviewer),
-/// invoke a `cargo check` or `cargo build` whose only purpose is type-checking?
-/// Returns the denial message when so. We allow clippy/test/nextest/tree/metadata/fmt
-/// and all non-cargo commands.
-///
-/// Robust to: `bash -lc "cargo check"`, leading paths
-/// (`/usr/local/bin/cargo build`), `cargo +nightly check`, and `&&`/`;`/`|`
-/// command chains. Conservative: only the exact denied subcommands trip it, so a
-/// `cargo clippy` containing the word "check" in a path is unaffected.
-fn cargo_check_denied(command: &str) -> Option<&'static str> {
-    // Split into individual sub-commands across chain/grouping operators so each
-    // is classified on its own (a chain like `cargo clippy && cargo check` must
-    // still be denied for the `cargo check` segment).
-    for segment in command.split(['\n', ';', '&', '|']) {
-        if segment_is_denied_cargo(segment) {
-            return Some(CARGO_CHECK_DENIED_MSG);
-        }
-    }
-    None
-}
-
-/// True when a single shell segment is a `cargo check`/`cargo build` invocation.
-fn segment_is_denied_cargo(segment: &str) -> bool {
-    let mut tokens = segment.split_whitespace().peekable();
-
-    // Walk past a leading `bash -lc`/`sh -c` wrapper and any env-assignment
-    // prefixes (`FOO=bar cargo ...`). The wrapped command's quotes are stripped
-    // by tokenization, so `bash -lc "cargo check"` exposes `cargo` `check`.
-    while let Some(&tok) = tokens.peek() {
-        let bare = tok.trim_matches(['"', '\'']);
-        let base = bare.rsplit('/').next().unwrap_or(bare);
-        if base == "cargo" {
-            break;
-        }
-        // env assignment like KEY=VALUE — skip.
-        if bare.contains('=') && !bare.starts_with('-') {
-            tokens.next();
-            continue;
-        }
-        // shell wrapper / leading binary we don't care about — skip it.
-        tokens.next();
-    }
-
-    // Consume the `cargo` token itself.
-    match tokens.next() {
-        Some(tok) => {
-            let bare = tok.trim_matches(['"', '\'']);
-            let base = bare.rsplit('/').next().unwrap_or(bare);
-            if base != "cargo" {
-                return false;
-            }
-        }
-        None => return false,
-    }
-
-    // Skip a `+toolchain` selector if present.
-    if tokens.peek().is_some_and(|next| next.starts_with('+')) {
-        tokens.next();
-    }
-
-    // The next token is the subcommand.
-    match tokens.next() {
-        Some(sub) => {
-            let sub = sub.trim_matches(['"', '\'']);
-            sub == "check" || sub == "build"
-        }
-        None => false,
     }
 }
 
@@ -468,7 +395,7 @@ pub(crate) async fn call_write(
     worktree_path: &Path,
     project_id: Option<&str>,
     #[allow(unused_variables)] session_task_id: Option<&str>,
-    #[allow(unused_variables)] session_role: Option<&str>,
+    session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: WriteParams = parse_args(arguments)?;
     let path = resolve_path(&p.path, worktree_path);
@@ -507,14 +434,30 @@ pub(crate) async fn call_write(
                         }
                         _ => e,
                     })?;
-            }
 
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| format!("create dirs failed: {e}"))?;
-            }
-            tokio::fs::write(&path, &p.content)
+                    // GateGuard: enforce worker read-coverage gate before
+                    // mutation. call_write overwrites the entire file, so the
+                    // mutation span is 0..file_size.
+                    let file_size = tokio::fs::metadata(&path)
+                        .await
+                        .map(|m| m.len() as usize)
+                        .unwrap_or(0);
+                    gate_guard_edit_check(
+                        state,
+                        session_role,
+                        &worktree_path.display().to_string(),
+                        &path,
+                        0..file_size,
+                    )
+                    .await?;
+                }
+
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| format!("create dirs failed: {e}"))?;
+                }
+                tokio::fs::write(&path, &p.content)
                 .await
                 .map_err(|e| format!("write failed: {e}"))?;
 
@@ -551,87 +494,6 @@ pub(crate) async fn call_write(
         })
         .await
 }
-
-/// Emit bounded-cardinality telemetry for an edit match outcome.
-///
-/// Emits `edit_match_outcome` for all outcomes, and additionally
-/// `edit_match_strategy` for successful matches. Uses structured `tracing`
-/// fields; never logs full file paths or file content.
-///
-/// Telemetry failures are swallowed — this must never make an edit call fail.
-#[allow(clippy::too_many_arguments)]
-fn emit_edit_match_telemetry(
-    metadata: &MatchMetadata,
-    task_id: Option<&str>,
-    session_id: Option<&str>,
-    agent_role: Option<&str>,
-    path_ext: &str,
-    old_bytes: usize,
-    new_bytes: usize,
-    matched_bytes: Option<usize>,
-) {
-    // Swallow any panic so telemetry failures never fail the edit call.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let strategy = metadata.strategy.as_str();
-        let outcome = match metadata.outcome {
-            MatchOutcome::Success => "success",
-            MatchOutcome::Ambiguous => "ambiguous",
-            MatchOutcome::NoMatch => "no_match",
-            MatchOutcome::GuardRejected => "guard_rejected",
-        };
-        let guard = metadata.guard_rejected_reason.unwrap_or("");
-        let score = metadata.nearest_miss;
-        let unicode_splice = metadata.unicode_splice.map(|s| match s {
-            UnicodeSpliceStatus::Clean => "clean",
-            UnicodeSpliceStatus::Adjusted => "adjusted",
-        });
-
-        tracing::info!(
-            event_name = "edit_match_outcome",
-            task_id = task_id.unwrap_or(""),
-            session_id = session_id.unwrap_or(""),
-            agent_role = agent_role.unwrap_or(""),
-            tool_name = "edit",
-            path_ext,
-            strategy,
-            outcome,
-            guard,
-            candidate_count = metadata.candidate_count,
-            score,
-            old_bytes,
-            new_bytes,
-            matched_bytes,
-            reindented = metadata.reindented,
-            unicode_splice,
-            "edit match outcome telemetry"
-        );
-
-        // Additional success-only signal: edit_match_strategy
-        if metadata.outcome == MatchOutcome::Success {
-            tracing::info!(
-                event_name = "edit_match_strategy",
-                task_id = task_id.unwrap_or(""),
-                session_id = session_id.unwrap_or(""),
-                agent_role = agent_role.unwrap_or(""),
-                tool_name = "edit",
-                path_ext,
-                strategy,
-                outcome,
-                guard,
-                candidate_count = metadata.candidate_count,
-                score,
-                old_bytes,
-                new_bytes,
-                matched_bytes,
-                reindented = metadata.reindented,
-                unicode_splice,
-                "edit match strategy success telemetry"
-            );
-        }
-    }));
-}
-
-use super::gate_guard::gate_guard_edit_check;
 
 pub(crate) async fn call_edit(
     state: &AgentContext,
@@ -874,7 +736,7 @@ pub(crate) async fn call_apply_patch(
     worktree_path: &Path,
     project_id: Option<&str>,
     #[allow(unused_variables)] session_task_id: Option<&str>,
-    #[allow(unused_variables)] session_role: Option<&str>,
+    session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: ApplyPatchParams = parse_args(arguments)?;
 
@@ -914,6 +776,13 @@ pub(crate) async fn call_apply_patch(
                             e
                         }
                     })?;
+
+                // GateGuard: enforce worker read-coverage gate before
+                // mutation. Conservative: require full-file coverage for
+                // update/delete since exact touched spans are not proven
+                // from the patch parser.
+                gate_guard_edit_check(state, session_role, &worktree_key, &resolved, 0..usize::MAX)
+                    .await?;
             }
             crate::patch::FileOp::Add { .. } => {
                 // New files don't need FileTime assertion
@@ -1241,44 +1110,5 @@ mod timeout_tests {
     fn a_large_explicit_build_timeout_is_preserved() {
         let got = effective_shell_timeout_ms(Some(3_600_000), "cargo test");
         assert_eq!(got, 3_600_000);
-    }
-}
-
-#[cfg(test)]
-mod cargo_guard_tests {
-    use super::cargo_check_denied;
-
-    #[test]
-    fn rejects_cargo_check_and_build() {
-        assert!(cargo_check_denied("cargo check -p djinn-db").is_some());
-        assert!(cargo_check_denied("cargo build -p x").is_some());
-        // bash -lc wrapper.
-        assert!(cargo_check_denied(r#"bash -lc "cargo check""#).is_some());
-        assert!(cargo_check_denied(r#"bash -lc 'cargo check'"#).is_some());
-        // leading path + toolchain selector.
-        assert!(cargo_check_denied("/usr/local/bin/cargo check").is_some());
-        assert!(cargo_check_denied("cargo +nightly check -p x").is_some());
-        // env-assignment prefix.
-        assert!(cargo_check_denied("FOO=bar cargo check").is_some());
-        // chain — the denied segment trips it even after an allowed one.
-        assert!(cargo_check_denied("cargo clippy -p x && cargo check -p x").is_some());
-        assert!(cargo_check_denied("cd server; cargo build").is_some());
-    }
-
-    #[test]
-    fn allows_clippy_test_and_inspection() {
-        assert!(cargo_check_denied("cargo clippy -p x").is_none());
-        assert!(cargo_check_denied("cargo clippy --all-targets -- -D warnings").is_none());
-        assert!(cargo_check_denied("cargo nextest run -p x").is_none());
-        assert!(cargo_check_denied("cargo test -p x").is_none());
-        assert!(cargo_check_denied("cargo tree -p x").is_none());
-        assert!(cargo_check_denied("cargo metadata --format-version 1").is_none());
-        assert!(cargo_check_denied("cargo fmt").is_none());
-        assert!(cargo_check_denied("git diff").is_none());
-        assert!(cargo_check_denied("ls -la").is_none());
-        // A non-cargo binary that happens to be named with "check" is fine.
-        assert!(cargo_check_denied("./scripts/check-file-size.sh").is_none());
-        // clippy chained with an allowed cargo command stays allowed.
-        assert!(cargo_check_denied("cargo clippy -p x && cargo test -p x").is_none());
     }
 }
