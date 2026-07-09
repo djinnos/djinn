@@ -80,6 +80,26 @@ impl StopReason {
             StopReason::Interrupted => "interrupted",
         }
     }
+
+    /// Best-effort reconstruction of a stop reason from its persisted `tag`.
+    ///
+    /// Only the field-free variants round-trip; reasons that carry additional
+    /// context (`RepeatedObjection`, `AgentFailure`) cannot be rebuilt from the
+    /// tag alone and return `None`. Used by startup recovery to restore the
+    /// parked stop reason on an awaiting-review refinement. The parked phase is
+    /// what drives status/resolve, so a `None` here is a benign loss of the
+    /// display reason, never a correctness issue.
+    pub fn from_tag(tag: &str) -> Option<StopReason> {
+        match tag {
+            "adversary_dry" => Some(StopReason::AdversaryDry),
+            "round_cap" => Some(StopReason::RoundCap),
+            "spawn_cap" => Some(StopReason::SpawnCap),
+            "human_accepted" => Some(StopReason::HumanAccepted),
+            "human_rejected" => Some(StopReason::HumanRejected),
+            "interrupted" => Some(StopReason::Interrupted),
+            _ => None,
+        }
+    }
 }
 
 /// The current phase of the refinement loop.
@@ -263,6 +283,35 @@ impl RefinementLoopState {
     pub fn with_attributed_user(mut self, attributed_user_id: Option<String>) -> Self {
         self.attributed_user_id = attributed_user_id;
         self
+    }
+
+    /// Reconstruct a loop already parked in [`RefinementPhase::AwaitingHumanReview`]
+    /// from durable lifecycle data after a server restart.
+    ///
+    /// The tribunal already converged (or was escalated) before the process
+    /// died; the `refinement_awaiting_review` lifecycle row preserves the
+    /// snapshot/refined revision seqs and the parked stop reason. This rebuilds
+    /// just enough in-memory state that the human's single accept/reject review
+    /// (`resolve_human_review`) and status derivation behave exactly as if the
+    /// process had never restarted. No further tribunal phases are dispatched
+    /// while parked, so the round/dry counters only need to be plausible for the
+    /// reject-with-feedback re-loop; `current_round` is restored from the debate
+    /// trail by the caller.
+    pub fn restored_awaiting_review(
+        proposal_id: impl Into<String>,
+        refined_revision_seq: i32,
+        snapshot_revision_seq: i32,
+        current_round: i32,
+        attributed_user_id: Option<String>,
+        stop_reason: Option<StopReason>,
+    ) -> Self {
+        let mut state = Self::new(proposal_id, refined_revision_seq);
+        state.phase = RefinementPhase::AwaitingHumanReview;
+        state.snapshot_revision_seq = snapshot_revision_seq;
+        state.current_round = current_round.max(1);
+        state.attributed_user_id = attributed_user_id;
+        state.stop_reason = stop_reason;
+        state
     }
 
     /// Whether the loop has terminated.
@@ -1000,6 +1049,69 @@ mod tests {
         );
         assert_eq!(StopReason::HumanAccepted.tag(), "human_accepted");
         assert_eq!(StopReason::HumanRejected.tag(), "human_rejected");
+    }
+
+    #[test]
+    fn stop_reason_from_tag_roundtrips_field_free_variants() {
+        for reason in [
+            StopReason::AdversaryDry,
+            StopReason::RoundCap,
+            StopReason::SpawnCap,
+            StopReason::HumanAccepted,
+            StopReason::HumanRejected,
+            StopReason::Interrupted,
+        ] {
+            assert_eq!(StopReason::from_tag(reason.tag()), Some(reason));
+        }
+    }
+
+    #[test]
+    fn stop_reason_from_tag_returns_none_for_fielded_and_unknown() {
+        // Variants that carry context cannot be rebuilt from the tag alone.
+        assert_eq!(StopReason::from_tag("repeated_objection"), None);
+        assert_eq!(StopReason::from_tag("agent_failure"), None);
+        assert_eq!(StopReason::from_tag("nonsense"), None);
+    }
+
+    // ── Restored awaiting-review park (startup recovery) ─────────────────
+
+    #[test]
+    fn restored_awaiting_review_rebuilds_parked_state() {
+        let state = RefinementLoopState::restored_awaiting_review(
+            "p1",
+            5,               // refined revision seq
+            2,               // snapshot revision seq
+            3,               // current round
+            Some("user-9".to_owned()),
+            Some(StopReason::RoundCap),
+        );
+        // The restored park is indistinguishable from a live converged park:
+        // it reports awaiting-review and is neither complete nor mid-loop.
+        assert!(state.is_awaiting_human_review());
+        assert!(!state.is_complete());
+        assert_eq!(state.phase, RefinementPhase::AwaitingHumanReview);
+        assert_eq!(state.current_revision_seq, 5);
+        assert_eq!(state.snapshot_revision_seq, 2);
+        assert_eq!(state.current_round, 3);
+        assert_eq!(state.attributed_user_id.as_deref(), Some("user-9"));
+        assert_eq!(state.stop_reason, Some(StopReason::RoundCap));
+    }
+
+    #[test]
+    fn restored_awaiting_review_resolves_like_a_live_park() {
+        let mut state = RefinementLoopState::restored_awaiting_review(
+            "p1", 4, 1, 2, None, None,
+        );
+        // The human accepts: the loop completes exactly as a non-restarted park.
+        state.resolve_human_review(true, false);
+        assert!(state.is_complete());
+        assert_eq!(state.stop_reason, Some(StopReason::HumanAccepted));
+    }
+
+    #[test]
+    fn restored_awaiting_review_clamps_round_to_at_least_one() {
+        let state = RefinementLoopState::restored_awaiting_review("p1", 1, 1, 0, None, None);
+        assert_eq!(state.current_round, 1);
     }
 
     // ── Needs-evidence (AwaitingEvidence) ───────────────────────────────
