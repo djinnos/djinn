@@ -226,6 +226,7 @@ fn has_dependencies_coverage(normalized: &str) -> bool {
         normalized,
         &[
             "dependencies",
+            "dependency",
             "coordination",
             "blocked by",
             "prerequisites",
@@ -236,6 +237,7 @@ fn has_dependencies_coverage(normalized: &str) -> bool {
         normalized,
         &[
             "dependencies:",
+            "dependency:",
             "coordination:",
             "prerequisites:",
             "blocked by:",
@@ -269,11 +271,44 @@ fn has_heading_family(normalized: &str, keywords: &[&str]) -> bool {
         if let Some(rest) = trimmed.strip_prefix("#") {
             let rest = rest.trim_start_matches('#').trim_start();
             for kw in keywords {
-                if rest.starts_with(kw) {
+                // Match the keyword as a whole word (or whole phrase) anywhere in
+                // the heading, not just as a prefix.  This lets headings like
+                // "Dependency and coordination plan" satisfy the dependencies
+                // family without matching unrelated prose (e.g. "risky" must not
+                // match the "risk" keyword).
+                if heading_contains_word(rest, kw) {
                     return true;
                 }
             }
         }
+    }
+    false
+}
+
+/// True when `keyword` appears in `heading` bounded by word boundaries on both
+/// sides.  `keyword` may itself be a multi-word phrase (e.g. "out of scope");
+/// only its outer edges are boundary-checked.
+fn heading_contains_word(heading: &str, keyword: &str) -> bool {
+    if keyword.is_empty() {
+        return false;
+    }
+    let mut search_from = 0;
+    while let Some(pos) = heading[search_from..].find(keyword) {
+        let start = search_from + pos;
+        let end = start + keyword.len();
+        let before_ok = heading[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = heading[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        // Advance past this occurrence to look for a bounded match later on.
+        search_from = start + 1;
     }
     false
 }
@@ -447,6 +482,68 @@ Entry points: src/main.rs and src/lib.rs.
         let acs = vec![ac_text("API returns 200")];
         let result = evaluate_proposal_readiness(body, &acs, 1);
         assert!(result.ready, "expected ready: {:?}", result.failures);
+    }
+
+    #[test]
+    fn dependency_and_coordination_plan_heading_passes() {
+        // Regression: the real heading "## Dependency and coordination plan"
+        // previously failed because prefix matching required the heading to
+        // start with the plural "dependencies" or "coordination".
+        let normalized = normalize_body("## Dependency and coordination plan\nBody.");
+        assert!(
+            has_dependencies_coverage(&normalized),
+            "Dependency and coordination plan heading must satisfy dependencies coverage"
+        );
+    }
+
+    #[test]
+    fn dependencies_coverage_via_full_body() {
+        let body = r#"
+# Problem
+Users cannot do X.
+# Scope
+In scope: Y.
+# Objectives
+Deliver A.
+## Dependency and coordination plan
+This work depends on service C landing first.
+# Open Questions
+What if D fails?
+Entry points: src/main.rs.
+"#;
+        let acs = vec![ac_text("API returns 200")];
+        let result = evaluate_proposal_readiness(body, &acs, 1);
+        assert!(result.ready, "expected ready: {:?}", result.failures);
+    }
+
+    #[test]
+    fn heading_word_matching_does_not_over_loosen() {
+        // Adversarial: substrings of keywords must NOT satisfy coverage.
+        // "risky" contains "risk" but is not a whole-word match.
+        let normalized = normalize_body("## Risky ventures\nSome prose.");
+        assert!(
+            !has_open_questions_coverage(&normalized),
+            "'Risky ventures' heading must not satisfy open-questions/risks coverage"
+        );
+
+        // A heading unrelated to dependencies must not match despite sharing
+        // letters ("dependency"/"dependencies" not present as words).
+        let normalized = normalize_body("## Implementation notes\nDetails here.");
+        assert!(
+            !has_dependencies_coverage(&normalized),
+            "'Implementation notes' heading must not satisfy dependencies coverage"
+        );
+    }
+
+    #[test]
+    fn heading_contains_word_boundaries() {
+        assert!(heading_contains_word("dependency and coordination plan", "dependency"));
+        assert!(heading_contains_word("dependency and coordination plan", "coordination"));
+        assert!(heading_contains_word("out of scope details", "out of scope"));
+        // Boundary rejections.
+        assert!(!heading_contains_word("risky ventures", "risk"));
+        assert!(!heading_contains_word("dependencies", "dependency"));
+        assert!(!heading_contains_word("scoped access", "scope"));
     }
 
     #[test]
