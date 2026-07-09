@@ -302,6 +302,29 @@ pub enum ArbiterGateResult {
     Blocked { feedback: String },
 }
 
+/// Enrich the arbiter evidence JSON with the pre-approval gate feedback
+/// when the gate blocked the approval (AC4).  This ensures the decision
+/// evidence recorded on the arbitration row carries the actionable gate
+/// feedback alongside the arbiter's original evidence.
+///
+/// Merges `gate_feedback` under the `pre_approval_gate` key into the
+/// existing evidence JSON (parsed leniently — invalid JSON is treated as
+/// a fresh object).
+pub(crate) fn enrich_evidence_with_gate(evidence: &str, gate_feedback: &str) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(evidence).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "pre_approval_gate".into(),
+            serde_json::json!({
+                "blocked": true,
+                "feedback": gate_feedback,
+            }),
+        );
+    }
+    value.to_string()
+}
+
 impl StageOutcome {
     /// Whether this outcome should short-circuit the role sequence.
     pub fn is_terminal(&self) -> bool {
@@ -2049,6 +2072,32 @@ impl TaskRunSupervisor {
                                     task_id = %spec.task_id,
                                     "supervisor: arbiter pre-approval gate red — task stays in_lead_intervention (no strike, no arbitration consumption)"
                                 );
+                                // Record the decision evidence on the red gate
+                                // too (AC4): the arbiter made a decision but the
+                                // CI-grade gate blocked it.  The evidence and the
+                                // gate feedback are recorded on the arbitration
+                                // row so the externally visible contract is
+                                // fulfilled.  `record_arbiter_decision` does NOT
+                                // consume the arbitration row or transition the
+                                // task — only the approve path below does that.
+                                let enriched_evidence =
+                                    enrich_evidence_with_gate(evidence, &feedback);
+                                if let Err(e) = self
+                                    .services
+                                    .record_arbiter_decision(
+                                        spec.task_id.clone(),
+                                        "approve_blocked".into(),
+                                        enriched_evidence,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        task_run_id = %run_id,
+                                        task_id = %spec.task_id,
+                                        error = %e,
+                                        "supervisor: record_arbiter_decision for approve_blocked failed — proceeding"
+                                    );
+                                }
                                 result = Some(TaskRunOutcome::Escalated {
                                     reason: format!(
                                         "pre-approval CI-grade verification gate blocked arbiter approve; \
@@ -2124,6 +2173,27 @@ impl TaskRunSupervisor {
                                     task_id = %spec.task_id,
                                     "supervisor: arbiter pre-approval gate red — task stays in_lead_intervention (no strike, no arbitration consumption)"
                                 );
+                                // Record the decision evidence on the red gate
+                                // too (AC4): the arbiter made a decision but the
+                                // CI-grade gate blocked it.
+                                let enriched_evidence =
+                                    enrich_evidence_with_gate(evidence, &feedback);
+                                if let Err(e) = self
+                                    .services
+                                    .record_arbiter_decision(
+                                        spec.task_id.clone(),
+                                        "approve_conflict_blocked".into(),
+                                        enriched_evidence,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        task_run_id = %run_id,
+                                        task_id = %spec.task_id,
+                                        error = %e,
+                                        "supervisor: record_arbiter_decision for approve_conflict_blocked failed — proceeding"
+                                    );
+                                }
                                 result = Some(TaskRunOutcome::Escalated {
                                     reason: format!(
                                         "pre-approval CI-grade verification gate blocked arbiter approve_conflict; \
@@ -7203,17 +7273,19 @@ mod tests {
         );
     }
 
-    /// A red-gate approve must NOT call `record_arbiter_decision` — the
-    /// arbitration row must remain unconsumed so the task can be
-    /// re-dispatched to the arbiter.
+    /// A red-gate approve must record the decision evidence (AC4) — the
+    /// arbiter made a decision but the CI-grade gate blocked it.  The
+    /// evidence and the gate feedback are recorded on the arbitration row.
+    /// The task still stays in `in_lead_intervention` (no transition, no
+    /// strike) — only the evidence is persisted.
     #[tokio::test]
-    async fn arbiter_approve_red_does_not_record_decision() {
-        let (_root, supervisor, spec, _transition_calls, _open_pr, _reopen, _complete, decisions) =
+    async fn arbiter_approve_red_records_decision_with_gate_feedback() {
+        let (_root, supervisor, spec, transition_calls, _open_pr, _reopen, _complete, decisions) =
             build_arbiter_gate_test_env_with_reopen(
-                "T-approve-red-no-record",
+                "T-approve-red-record",
                 "proj-approve",
                 StageOutcome::LeadApproved {
-                    evidence: r#"{"summary":"should not be recorded"}"#.into(),
+                    evidence: r#"{"summary":"arbiter approved but gate blocked"}"#.into(),
                 },
                 Ok(ArbiterGateResult::Blocked {
                     feedback: "clippy failed with 3 errors".into(),
@@ -7229,12 +7301,96 @@ mod tests {
             report.outcome
         );
 
-        // record_arbiter_decision must NOT be called on red gate.
+        // AC4: record_arbiter_decision IS called on red gate — the decision
+        // evidence is recorded so the externally visible contract is fulfilled.
         let decs = decisions.lock().unwrap();
         assert_eq!(
             decs.len(),
-            0,
-            "red gate must NOT record decision (arbitration row stays unconsumed), got: {decs:?}"
+            1,
+            "red gate must record decision evidence exactly once, got: {decs:?}"
+        );
+        assert_eq!(
+            decs[0].decision, "approve_blocked",
+            "red gate decision must be 'approve_blocked', got: {}",
+            decs[0].decision
+        );
+
+        // The evidence must be enriched with the gate feedback.
+        let evidence: serde_json::Value =
+            serde_json::from_str(&decs[0].evidence_json).expect("evidence must be valid JSON");
+        assert_eq!(
+            evidence["summary"], "arbiter approved but gate blocked",
+            "original evidence summary must be preserved"
+        );
+        assert_eq!(
+            evidence["pre_approval_gate"]["blocked"], true,
+            "evidence must mark pre_approval_gate.blocked = true"
+        );
+        assert_eq!(
+            evidence["pre_approval_gate"]["feedback"], "clippy failed with 3 errors",
+            "evidence must carry the gate feedback verbatim"
+        );
+
+        // The task must NOT transition (stays in_lead_intervention).
+        let calls = transition_calls.lock().unwrap();
+        assert!(
+            !calls.iter().any(|c| c.action == "lead_approve"),
+            "red gate must NOT fire lead_approve transition, got: {calls:?}"
+        );
+    }
+
+    /// A red-gate approve_conflict must also record the decision evidence (AC4).
+    #[tokio::test]
+    async fn arbiter_approve_conflict_red_records_decision_with_gate_feedback() {
+        let (_root, supervisor, spec, transition_calls, _open_pr, _reopen, _complete, decisions) =
+            build_arbiter_gate_test_env_with_reopen(
+                "T-conflict-red-record",
+                "proj-approve",
+                StageOutcome::LeadApproveConflict {
+                    reason: "merge conflict detected".into(),
+                    evidence: r#"{"summary":"approved despite conflict"}"#.into(),
+                },
+                Ok(ArbiterGateResult::Blocked {
+                    feedback: "test target build failed".into(),
+                }),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Escalated { .. }),
+            "red gate must produce Escalated, got: {:?}",
+            report.outcome
+        );
+
+        let decs = decisions.lock().unwrap();
+        assert_eq!(
+            decs.len(),
+            1,
+            "red gate must record decision evidence exactly once, got: {decs:?}"
+        );
+        assert_eq!(
+            decs[0].decision, "approve_conflict_blocked",
+            "red gate decision must be 'approve_conflict_blocked', got: {}",
+            decs[0].decision
+        );
+
+        let evidence: serde_json::Value =
+            serde_json::from_str(&decs[0].evidence_json).expect("evidence must be valid JSON");
+        assert_eq!(
+            evidence["pre_approval_gate"]["blocked"], true,
+            "evidence must mark pre_approval_gate.blocked = true"
+        );
+        assert_eq!(
+            evidence["pre_approval_gate"]["feedback"], "test target build failed",
+            "evidence must carry the gate feedback verbatim"
+        );
+
+        let calls = transition_calls.lock().unwrap();
+        assert!(
+            !calls.iter().any(|c| c.action == "lead_approve_conflict"),
+            "red gate must NOT fire lead_approve_conflict transition, got: {calls:?}"
         );
     }
 
