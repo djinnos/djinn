@@ -7,6 +7,156 @@
 //! ladder. No path ever produces a human-review hold.
 
 use super::*;
+use djinn_core::models::{CiStatus, TaskPrCiSnapshotInput};
+
+/// Seed a durable failing required-CI snapshot for `task` and return the
+/// reloaded task with the CI projection fields (`ci_status`,
+/// `ci_same_signature_count`, `ci_last_remediation_base_sha`, `ci_head_sha`)
+/// populated. `baseline == head` models "a remediation already ran against the
+/// current head with no new push".
+async fn seed_failing_ci_snapshot(
+    repo: &TaskRepository,
+    task: &djinn_core::models::Task,
+    head: &str,
+    baseline: Option<&str>,
+    same_signature_count: i64,
+    status: CiStatus,
+) -> djinn_core::models::Task {
+    repo.upsert_ci_snapshot(TaskPrCiSnapshotInput {
+        task_id: task.id.clone(),
+        pr_number: 77,
+        head_sha: head.to_owned(),
+        ci_status: status,
+        blocking_required_check_names: vec!["Quality Gate".to_owned()],
+        failure_fingerprint: Some("fp-sig".to_owned()),
+        same_signature_count,
+        last_remediation_base_sha: baseline.map(str::to_owned),
+    })
+    .await
+    .unwrap();
+    repo.get(&task.id).await.unwrap().unwrap()
+}
+
+/// The pure dead-end predicate fires only for a worker dispatch of a failing
+/// required-CI task whose remediation baseline equals the current head and
+/// whose same-signature count has reached the threshold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ci_same_signature_deadlock_predicate() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // Wedged: failing CI, baseline == head, count at threshold.
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let wedged = seed_failing_ci_snapshot(
+        &repo,
+        &task,
+        "HEAD1",
+        Some("HEAD1"),
+        MAX_AUTONOMOUS_ESCALATIONS, // any value >= threshold (both are 3)
+        CiStatus::Failing,
+    )
+    .await;
+    assert!(
+        CoordinatorActor::ci_same_signature_deadlocked(&wedged, "worker"),
+        "worker + failing + baseline==head + count>=threshold must be a dead-end"
+    );
+    assert!(
+        !CoordinatorActor::ci_same_signature_deadlocked(&wedged, "reviewer"),
+        "non-worker roles are never dead-ended by this predicate"
+    );
+
+    // Head advanced past the remediation baseline (a new push landed).
+    let task2 = make_task_with_reopen_count(&db, &tx, 0).await;
+    let advanced = seed_failing_ci_snapshot(
+        &repo,
+        &task2,
+        "HEAD2",
+        Some("OLDBASE"),
+        5,
+        CiStatus::Failing,
+    )
+    .await;
+    assert!(
+        !CoordinatorActor::ci_same_signature_deadlocked(&advanced, "worker"),
+        "a head that advanced past the remediation baseline is not a dead-end"
+    );
+
+    // Below the same-signature threshold.
+    let task3 = make_task_with_reopen_count(&db, &tx, 0).await;
+    let fresh =
+        seed_failing_ci_snapshot(&repo, &task3, "HEAD3", Some("HEAD3"), 1, CiStatus::Failing).await;
+    assert!(
+        !CoordinatorActor::ci_same_signature_deadlocked(&fresh, "worker"),
+        "below the same-signature threshold is not yet a dead-end"
+    );
+
+    // Not failing.
+    let task4 = make_task_with_reopen_count(&db, &tx, 0).await;
+    let green =
+        seed_failing_ci_snapshot(&repo, &task4, "HEAD4", Some("HEAD4"), 9, CiStatus::Passing).await;
+    assert!(
+        !CoordinatorActor::ci_same_signature_deadlocked(&green, "worker"),
+        "a non-failing gate is not a dead-end"
+    );
+}
+
+/// End-to-end: the dispatch ready pass routes a same-signature CI dead-end into
+/// the autonomous escalation ladder (planner-park escalation), never a worker
+/// respawn and never a human hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ci_same_signature_deadlock_routes_to_planner_escalation() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let wedged = seed_failing_ci_snapshot(
+        &repo,
+        &task,
+        "WEDGEDHEAD",
+        Some("WEDGEDHEAD"),
+        MAX_AUTONOMOUS_ESCALATIONS,
+        CiStatus::Failing,
+    )
+    .await;
+    assert_eq!(wedged.status, "open");
+    assert!(CoordinatorActor::ci_same_signature_deadlocked(
+        &wedged, "worker"
+    ));
+
+    actor.dispatch_ready_tasks(Some(&task.project_id)).await;
+
+    // The source was NOT worker-dispatched; it is held by an autonomous
+    // planner-park escalation (no human hold).
+    assert!(
+        !actor.last_dispatched.contains_key(&task.id),
+        "dead-end source must not be worker-dispatched"
+    );
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "dead-end must be held by exactly one escalation blocker"
+    );
+    let escalation = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
+    assert!(
+        escalation.labels.contains("planner-park-escalation"),
+        "dead-end escalation must be a planner-park escalation; labels={}",
+        escalation.labels
+    );
+    assert!(
+        !escalation.labels.contains("human-review-hold"),
+        "dead-end escalation must NOT be a human hold; labels={}",
+        escalation.labels
+    );
+    let parked = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        parked.status, "open",
+        "dead-end source is parked open + held"
+    );
+}
 
 /// Create a closed `planner-park-escalation` review task that blocks `source`,
 /// simulating one prior autonomous escalation round.

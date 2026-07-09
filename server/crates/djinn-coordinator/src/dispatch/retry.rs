@@ -2172,6 +2172,50 @@ impl CoordinatorActor {
         count
     }
 
+    /// Pure predicate: is `task` wedged in the same-signature CI remediation
+    /// dead-end (incident ay3d)?
+    ///
+    /// True when a WORKER-role dispatch is being considered for a task whose
+    /// required-CI gate is failing, a CI-loop remediation already ran against
+    /// the CURRENT PR head (`ci_last_remediation_base_sha` equals the current
+    /// head — no new push has landed since), and the same failure signature has
+    /// persisted at least [`CI_SAME_SIGNATURE_ESCALATION_THRESHOLD`] times. In
+    /// that state re-dispatching the worker only reproduces the identical red
+    /// build, so the respawn guard defers it on every ready pass forever; the
+    /// caller escalates instead.
+    ///
+    /// The "current head" is the attempt-derived GitHub head
+    /// (`ci_github_head_sha`), falling back to the snapshot head
+    /// (`ci_head_sha`) — the same head the CI-loop remediation records as its
+    /// baseline.
+    pub(crate) fn ci_same_signature_deadlocked(
+        task: &djinn_core::models::Task,
+        role: &str,
+    ) -> bool {
+        if role != "worker" {
+            return false;
+        }
+        if task.ci_status.as_str() != djinn_core::models::CiStatus::Failing.as_str() {
+            return false;
+        }
+        if task.ci_same_signature_count < CI_SAME_SIGNATURE_ESCALATION_THRESHOLD {
+            return false;
+        }
+        let Some(baseline) = task
+            .ci_last_remediation_base_sha
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        else {
+            return false;
+        };
+        let head = task
+            .ci_github_head_sha
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| task.ci_head_sha.as_deref().filter(|s| !s.is_empty()));
+        head == Some(baseline)
+    }
+
     /// The no-human bottom of the remediation ladder.
     ///
     /// Creates an autonomous [`PlannerEscalation`](RemediationKind::PlannerEscalation)
