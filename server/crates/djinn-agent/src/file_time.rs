@@ -69,7 +69,7 @@ impl ReadRecord {
         match self.coverage {
             ReadCoverage::Full => true,
             ReadCoverage::Range { start, end } => {
-                span_start >= start && end.map_or(true, |e| span_end <= e)
+                span_start >= start && end.is_none_or(|e| span_end <= e)
             }
         }
     }
