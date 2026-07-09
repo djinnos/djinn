@@ -564,6 +564,10 @@ pub enum TransitionAction {
     Release,
     ReleaseTaskReview,
     ForceClose,
+    /// Administrative override: force a task to an arbitrary target status.
+    /// **Must not** target `NeedsLeadIntervention` or `InLeadIntervention` —
+    /// the arbiter lifecycle is only entered via `Escalate` (coordinator
+    /// park-rung) and `LeadInterventionStart` (INVARIANT 10qg/aizl).
     UserOverride,
     /// System escalates stuck task to Lead intervention queue.
     Escalate,
@@ -888,6 +892,22 @@ pub fn compute_transition(
             let target = target_override.ok_or_else(|| {
                 Error::InvalidTransition("user_override requires target_status".to_owned())
             })?;
+            // INVARIANT (10qg/aizl): UserOverride must NOT bypass the
+            // coordinator arbiter park-rung to enter the Lead intervention
+            // lifecycle.  `NeedsLeadIntervention` is only reachable via
+            // `Escalate` (coordinator park-rung) or
+            // `LeadInterventionRelease` (coordinator session-recovery).
+            // `InLeadIntervention` is only reachable via
+            // `LeadInterventionStart` from `NeedsLeadIntervention`.
+            // Guarded by `only_escalate_and_release_produce_needs_lead_intervention`.
+            if matches!(
+                target,
+                TaskStatus::NeedsLeadIntervention | TaskStatus::InLeadIntervention
+            ) {
+                return bad("user_override must not target needs_lead_intervention or \
+                     in_lead_intervention; use escalate/lead_intervention_start \
+                     for the coordinator arbiter lifecycle");
+            }
             let closing = *target == TaskStatus::Closed;
             TransitionApply {
                 to_status: Some(target.clone()),
@@ -1437,6 +1457,28 @@ mod tests {
         assert_eq!(open.to_status, Some(TaskStatus::Open));
         assert!(open.clear_closed_at);
         assert!(open.clear_close_reason);
+
+        // INVARIANT (10qg/aizl): UserOverride must not bypass the
+        // coordinator arbiter park-rung to enter the Lead intervention
+        // lifecycle.
+        assert!(
+            compute_transition(
+                &TransitionAction::UserOverride,
+                &TaskStatus::Open,
+                Some(&TaskStatus::NeedsLeadIntervention),
+            )
+            .is_err(),
+            "user_override must not target needs_lead_intervention"
+        );
+        assert!(
+            compute_transition(
+                &TransitionAction::UserOverride,
+                &TaskStatus::NeedsLeadIntervention,
+                Some(&TaskStatus::InLeadIntervention),
+            )
+            .is_err(),
+            "user_override must not target in_lead_intervention"
+        );
     }
 
     #[test]
@@ -2210,5 +2252,34 @@ mod tests {
             !produces_needs_lead.is_empty(),
             "at least Escalate must produce NeedsLeadIntervention"
         );
+
+        // Guard the UserOverride backdoor: UserOverride with an explicit
+        // target_override of NeedsLeadIntervention (or InLeadIntervention)
+        // must be rejected for ALL source statuses.  Without this check,
+        // compute_transition(action, from, None) silently skips the
+        // UserOverride path (which requires Some(target_override)) and
+        // the test would miss the backdoor.
+        for from in &all_statuses {
+            assert!(
+                compute_transition(
+                    &TransitionAction::UserOverride,
+                    from,
+                    Some(&TaskStatus::NeedsLeadIntervention),
+                )
+                .is_err(),
+                "UserOverride must NOT target NeedsLeadIntervention from {from:?}; \
+                 the coordinator arbiter park-rung (Escalate) is the only entry"
+            );
+            assert!(
+                compute_transition(
+                    &TransitionAction::UserOverride,
+                    from,
+                    Some(&TaskStatus::InLeadIntervention),
+                )
+                .is_err(),
+                "UserOverride must NOT target InLeadIntervention from {from:?}; \
+                 LeadInterventionStart from NeedsLeadIntervention is the only entry"
+            );
+        }
     }
 }
