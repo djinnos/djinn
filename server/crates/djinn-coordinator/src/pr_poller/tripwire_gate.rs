@@ -8,15 +8,53 @@
 //!
 //! This module is additive plumbing — it does not redefine any tripwire
 //! contract types (policy, reason codes, activity payloads, idempotency keys).
+//!
+//! # Rollout / backfill semantics
+//!
+//! The tripwire enforcement rollout has two phases:
+//!
+//! 1. **Backfill (report-only):** When the tripwire system first evaluates an
+//!    existing open PR head — i.e. the PR was created *before* policy
+//!    publication and the task has no prior tripwire gate activity — all
+//!    findings are evaluated in report-only mode regardless of per-rule
+//!    `report_only` flags.  A `tripwire.gate.report_only` activity event is
+//!    logged with full findings, evidence, revisions, and idempotency keys.
+//!    No `human-review-hold` label is applied and the PR is not blocked by
+//!    this evaluation alone.
+//!
+//! 2. **Enforcement (new heads / new PRs after publication):** When a PR gets
+//!    a new head SHA (developer pushes after policy publication), *or* when a
+//!    PR is first opened after policy publication, the gate evaluates under
+//!    the live policy and may produce a `tripwire.gate.held` event and
+//!    `human-review-hold` label.  This uses the same delivered
+//!    engine/policy/active-hold contracts.
+//!
+//! The distinction is derived from the task's activity log **and** the
+//! policy publication timestamp (`policy_publication_ts`):
+//!
+//! - No prior gate events **and** PR created before policy publication →
+//!   **Backfill** (existing PR, first evaluation).
+//! - No prior gate events **and** PR created after policy publication →
+//!   **Enforce** (new PR subject to live enforcement).
+//! - Prior gate events exist for the *same* head SHA **and** the same
+//!   policy revision → **Idempotent** (duplicate poll; no new event
+//!   emitted).
+//! - Prior gate events exist for the *same* head SHA but a *different*
+//!   policy revision → **Enforce** (policy changed; re-evaluate).
+//! - Prior gate events exist for a *different* head SHA → **Enforce**
+//!   (new push after policy was enabled).
+//!
+//! Direct removal of the `human-review-hold` label is tamper, not a
+//! release path — the reconciliation tick re-applies it.
 
 use anyhow::Result;
 use djinn_provider::github_api::{GitHubApiClient, PrFile};
 
 use crate::tripwires::{
-    ChangedFile, ChangedFileStatus, DiffHunk, GateOutcome, TRIPWIRE_EVENT_GATE_HELD,
-    TRIPWIRE_EVENT_GATE_PASSED, TRIPWIRE_EVENT_GATE_REPORT_ONLY, TripwireEvaluationInput,
-    TripwireFindingSummary, TripwireGateDecision, TripwireGateDecisionPayload, TripwirePolicy,
-    all_rule_evaluators, evaluate,
+    ActivityEntryRef, ChangedFile, ChangedFileStatus, DiffHunk, GateOutcome,
+    TRIPWIRE_EVENT_GATE_HELD, TRIPWIRE_EVENT_GATE_PASSED, TRIPWIRE_EVENT_GATE_REPORT_ONLY,
+    TripwireEvaluationInput, TripwireFindingSummary, TripwireGateDecision,
+    TripwireGateDecisionPayload, TripwirePolicy, all_rule_evaluators, evaluate,
 };
 
 // ─── PrFile → ChangedFile conversion ─────────────────────────────────────
@@ -27,7 +65,7 @@ use crate::tripwires::{
 /// Lines following the header start with ` ` (context), `+` (added), or
 /// `-` (removed). Binary-file patches (patch starts with `Binary files`)
 /// produce no hunks.
-fn parse_patch_to_hunks(patch: &str) -> Vec<DiffHunk> {
+pub(super) fn parse_patch_to_hunks(patch: &str) -> Vec<DiffHunk> {
     let mut hunks = Vec::new();
     let mut current: Option<DiffHunk> = None;
 
@@ -180,7 +218,7 @@ pub struct TripwireGateResult {
 ///
 /// This is a thin helper that calls [`evaluate`] with dereffed boxed
 /// evaluators and wraps the result into a [`TripwireGateResult`].
-fn run_gate(input: &TripwireEvaluationInput) -> TripwireGateResult {
+pub(super) fn run_gate(input: &TripwireEvaluationInput) -> TripwireGateResult {
     let evaluators = all_rule_evaluators();
     // Box<dyn Fn(...) + Send + Sync> implements Fn(...) via blanket impl,
     // so passing the boxed vec as a slice satisfies evaluate's generic bound.
@@ -238,6 +276,7 @@ fn run_gate(input: &TripwireEvaluationInput) -> TripwireGateResult {
 /// * `task_id` — task UUID for idempotency key derivation.
 /// * `project_id` — project UUID for the activity payload.
 /// * `head_sha` — current head SHA of the PR.
+#[allow(dead_code)] // Superseded by `evaluate_tripwire_gate_with_rollout`; kept for direct callers.
 pub async fn evaluate_tripwire_gate(
     gh_client: &GitHubApiClient,
     owner: &str,
@@ -268,549 +307,211 @@ pub async fn evaluate_tripwire_gate(
     Ok(run_gate(&input))
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────
+// ─── Rollout / backfill mode ───────────────────────────────────────────────
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tripwires::{
-        ChangedFileStatus, TRIPWIRE_EVENT_GATE_HELD, TRIPWIRE_EVENT_GATE_PASSED,
-        TRIPWIRE_EVENT_GATE_REPORT_ONLY, TripwireFindingSeverity,
+/// Determines how the tripwire gate should evaluate a PR head.
+///
+/// During the enforcement rollout, existing open PRs are backfilled in
+/// report-only mode so findings are logged without blocking the PR.  A new
+/// head SHA (developer push after policy publication) switches to full
+/// enforcement per the active policy.  See the module-level documentation
+/// for the full operational boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RolloutMode {
+    /// First evaluation of this task — existing open PR head (created
+    /// before policy publication) being backfilled.  All findings are forced
+    /// to report-only; no
+    /// `human-review-hold` label is applied.
+    Backfill,
+    /// Evaluate under the live policy (enforcement-on per rule config).
+    /// Returned for: new head SHA after prior gate activity, new PR after
+    /// policy publication, or same head SHA with a changed policy revision.
+    Enforce,
+    /// This exact `(task_id, head_sha, policy_revision)` was already
+    /// evaluated.  The caller must skip the evaluation to avoid duplicate
+    /// activity events.
+    AlreadyEvaluated,
+}
+
+/// Determine the [`RolloutMode`] for a PR head by examining the task's
+/// tripwire gate activity log.
+///
+/// The logic (in priority order):
+///
+/// 1. If a gate event already exists for this exact `head_sha` **and** the
+///    same `policy_revision` → [`RolloutMode::AlreadyEvaluated`]
+///    (idempotent skip).
+/// 2. If a gate event exists for this `head_sha` but a **different**
+///    `policy_revision` → [`RolloutMode::Enforce`] (policy changed).
+/// 3. If any gate event exists for this task but for a different head SHA →
+///    [`RolloutMode::Enforce`] (new push after policy publication).
+/// 4. If no gate events exist and the PR was created **after** policy
+///    publication → [`RolloutMode::Enforce`] (new PR under enforcement).
+/// 5. If no gate events exist and the PR was created **before** policy
+///    publication (or no `policy_publication_ts` provided) →
+///    [`RolloutMode::Backfill`] (existing PR, first evaluation).
+///
+/// # Arguments
+///
+/// * `entries` — tripwire-related activity entries for the task.
+/// * `head_sha` — the current PR head SHA being evaluated.
+/// * `policy_publication_ts` — RFC 3339 timestamp of policy publication.
+///   Used to distinguish existing open PRs (backfill) from new PRs after
+///   publication (enforce).  When `None`, the absence of prior gate events
+///   defaults to backfill.
+/// * `current_policy_revision` — the policy revision being evaluated.
+///   Used to ensure idempotency is scoped to `(head_sha, policy_revision)`
+///   so that a policy change triggers re-evaluation for the same head.
+pub fn determine_rollout_mode<'a, I>(
+    entries: I,
+    head_sha: &str,
+    policy_publication_ts: Option<&str>,
+    current_policy_revision: &str,
+) -> RolloutMode
+where
+    I: IntoIterator<Item = &'a ActivityEntryRef>,
+{
+    let mut has_prior_event = false;
+
+    for entry in entries {
+        if !is_tripwire_gate_event(&entry.event_type) {
+            continue;
+        }
+
+        // Try to extract head_sha from the payload.
+        if let Ok(payload) = serde_json::from_str::<TripwireGateDecisionPayload>(&entry.payload) {
+            if payload.head_sha == head_sha {
+                if payload.policy_revision == current_policy_revision {
+                    // Same head SHA + same policy revision — idempotent.
+                    return RolloutMode::AlreadyEvaluated;
+                }
+                // Same head SHA but different policy revision — re-evaluate
+                // under the new policy.
+                return RolloutMode::Enforce;
+            }
+            has_prior_event = true;
+        }
+    }
+
+    if has_prior_event {
+        RolloutMode::Enforce
+    } else {
+        // No prior gate events — this is a first evaluation.  Distinguish
+        // existing-open-PR backfill from new-PR-after-publication enforcement
+        // using the policy publication timestamp.
+        //
+        // The caller compares PR creation time against policy publication
+        // time and passes `Some(...)` only for PRs created after publication.
+        // `None` here means the PR predates publication → backfill.
+        match policy_publication_ts {
+            Some(_) => RolloutMode::Enforce,
+            None => RolloutMode::Backfill,
+        }
+    }
+}
+
+/// Returns `true` when the event type is one of the three tripwire gate
+/// decision events (`tripwire.gate.held`, `tripwire.gate.passed`,
+/// `tripwire.gate.report_only`).
+pub fn is_tripwire_gate_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        TRIPWIRE_EVENT_GATE_HELD | TRIPWIRE_EVENT_GATE_PASSED | TRIPWIRE_EVENT_GATE_REPORT_ONLY
+    )
+}
+
+/// Evaluate the tripwire gate with rollout-aware policy selection.
+///
+/// This is the primary entry point for the PR poller's tripwire
+/// integration.  It determines the [`RolloutMode`] from the task's
+/// activity log, applies report-only policy override for backfill
+/// evaluations, and delegates to [`run_gate`].
+///
+/// Returns `Ok(None)` when the mode is [`RolloutMode::AlreadyEvaluated`]
+/// (idempotent skip — no new event should be emitted).
+///
+/// # Arguments
+///
+/// * `gh_client` — authenticated GitHub API client for the installation.
+/// * `owner`, `repo` — repository owner/name.
+/// * `pull_number` — PR number.
+/// * `task_id` — task UUID for idempotency key derivation.
+/// * `project_id` — project UUID for the activity payload.
+/// * `head_sha` — current head SHA of the PR.
+/// * `entries` — tripwire-related activity entries for the task (used to
+///   determine the rollout mode).
+/// * `policy_publication_ts` — RFC 3339 timestamp of policy publication.
+///   Pass `None` when the PR was created before policy publication (backfill
+///   path).  Pass `Some(...)` for PRs created after publication.
+/// * `current_policy_revision` — the policy revision being evaluated today.
+///   Scoped into idempotency so policy changes trigger re-evaluation.
+#[allow(clippy::too_many_arguments)]
+pub async fn evaluate_tripwire_gate_with_rollout(
+    gh_client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    pull_number: u64,
+    task_id: &str,
+    project_id: &str,
+    head_sha: &str,
+    entries: &[ActivityEntryRef],
+    policy_publication_ts: Option<&str>,
+    current_policy_revision: &str,
+) -> Result<Option<(TripwireGateResult, RolloutMode)>> {
+    let mode = determine_rollout_mode(
+        entries,
+        head_sha,
+        policy_publication_ts,
+        current_policy_revision,
+    );
+
+    match mode {
+        RolloutMode::AlreadyEvaluated => {
+            tracing::debug!(
+                task_id,
+                head_sha,
+                "Tripwire gate: head SHA already evaluated — skipping (idempotent)"
+            );
+            return Ok(None);
+        }
+        RolloutMode::Backfill => {
+            tracing::info!(
+                task_id,
+                head_sha,
+                "Tripwire gate: backfill mode — evaluating in report-only"
+            );
+        }
+        RolloutMode::Enforce => {
+            tracing::info!(
+                task_id,
+                head_sha,
+                "Tripwire gate: enforce mode — evaluating under live policy"
+            );
+        }
+    }
+
+    // 1. Fetch changed files from GitHub.
+    let pr_files = gh_client.get_pr_files(owner, repo, pull_number).await?;
+
+    // 2. Convert to engine types.
+    let changed_files = convert_pr_files(&pr_files);
+
+    // 3. Build evaluation input — backfill uses report-only policy.
+    let policy = match mode {
+        RolloutMode::Backfill => TripwirePolicy::default().make_report_only(),
+        _ => TripwirePolicy::default(),
     };
 
-    /// Helper: build a `PrFile` with the given fields and no patch.
-    fn pr_file(filename: &str, status: &str, additions: u32, deletions: u32) -> PrFile {
-        PrFile {
-            sha: "deadbeef".to_owned(),
-            filename: filename.to_owned(),
-            status: status.to_owned(),
-            additions,
-            deletions,
-            changes: additions + deletions,
-            patch: None,
-        }
-    }
+    let input = TripwireEvaluationInput {
+        task_id: task_id.to_owned(),
+        project_id: project_id.to_owned(),
+        pr_number: Some(pull_number),
+        head_sha: head_sha.to_owned(),
+        policy,
+        allowlist_revision: None,
+        changed_files,
+    };
 
-    /// Helper: build a `PrFile` with a patch string (unified diff).
-    fn pr_file_with_patch(
-        filename: &str,
-        status: &str,
-        additions: u32,
-        deletions: u32,
-        patch: &str,
-    ) -> PrFile {
-        PrFile {
-            sha: "deadbeef".to_owned(),
-            filename: filename.to_owned(),
-            status: status.to_owned(),
-            additions,
-            deletions,
-            changes: additions + deletions,
-            patch: Some(patch.to_owned()),
-        }
-    }
-
-    // ── Conversion tests ────────────────────────────────────────────────
-
-    #[test]
-    fn convert_pr_files_maps_added_status() {
-        let files = vec![pr_file("src/new.rs", "added", 50, 0)];
-        let converted = convert_pr_files(&files);
-        assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0].status, ChangedFileStatus::Added);
-        assert_eq!(converted[0].path, "src/new.rs");
-        assert_eq!(converted[0].additions, 50);
-        assert_eq!(converted[0].deletions, 0);
-    }
-
-    #[test]
-    fn convert_pr_files_maps_removed_status() {
-        let files = vec![pr_file("src/old.rs", "removed", 0, 120)];
-        let converted = convert_pr_files(&files);
-        assert_eq!(converted[0].status, ChangedFileStatus::Deleted);
-    }
-
-    #[test]
-    fn convert_pr_files_maps_renamed_status() {
-        let files = vec![pr_file("src/renamed.rs", "renamed", 5, 5)];
-        let converted = convert_pr_files(&files);
-        assert_eq!(converted[0].status, ChangedFileStatus::Renamed);
-    }
-
-    #[test]
-    fn convert_pr_files_maps_modified_and_unknown_to_modified() {
-        let files = vec![
-            pr_file("a.rs", "modified", 10, 5),
-            pr_file("b.rs", "copied", 3, 0),
-        ];
-        let converted = convert_pr_files(&files);
-        assert_eq!(converted[0].status, ChangedFileStatus::Modified);
-        assert_eq!(converted[1].status, ChangedFileStatus::Modified);
-    }
-
-    #[test]
-    fn convert_pr_files_produces_empty_hunks_without_patch() {
-        let files = vec![pr_file("src/lib.rs", "modified", 10, 5)];
-        let converted = convert_pr_files(&files);
-        assert!(converted[0].hunks.is_empty());
-    }
-
-    #[test]
-    fn convert_pr_files_parses_patch_into_hunks() {
-        let patch = "@@ -1,2 +1,3 @@\n unchanged\n+added line\n-old line\n";
-        let files = vec![pr_file_with_patch("src/main.rs", "modified", 1, 1, patch)];
-        let converted = convert_pr_files(&files);
-        assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0].hunks.len(), 1, "one hunk from patch");
-        let hunk = &converted[0].hunks[0];
-        assert_eq!(hunk.old_start, 1);
-        assert_eq!(hunk.old_lines, 2);
-        assert_eq!(hunk.new_start, 1);
-        assert_eq!(hunk.new_lines, 3);
-        assert_eq!(
-            hunk.diff_lines,
-            vec![
-                " unchanged".to_owned(),
-                "+added line".to_owned(),
-                "-old line".to_owned(),
-            ]
-        );
-    }
-
-    #[test]
-    fn convert_pr_files_parses_multiple_hunks() {
-        let patch = "@@ -1,1 +1,2 @@\n a\n+b\n@@ -10,1 +11,1 @@\n-c\n+d\n";
-        let files = vec![pr_file_with_patch("src/multi.rs", "modified", 2, 2, patch)];
-        let converted = convert_pr_files(&files);
-        assert_eq!(converted[0].hunks.len(), 2, "two hunks from patch");
-        assert_eq!(converted[0].hunks[0].new_start, 1);
-        assert_eq!(converted[0].hunks[1].new_start, 11);
-    }
-
-    #[test]
-    fn convert_pr_files_empty_input() {
-        let converted = convert_pr_files(&[]);
-        assert!(converted.is_empty());
-    }
-
-    #[test]
-    fn parse_patch_to_hunks_empty_string() {
-        assert!(parse_patch_to_hunks("").is_empty());
-    }
-
-    #[test]
-    fn parse_patch_to_hunks_no_hunk_header() {
-        assert!(parse_patch_to_hunks("some random text\nno hunk headers").is_empty());
-    }
-
-    // ── End-to-end evaluation tests via PrFile conversion ───────────────
-    //
-    // These tests start from representative `PrFile` payloads (as returned
-    // by GitHub's `GET /pulls/{n}/files` endpoint), convert them through
-    // `convert_pr_files`, and evaluate with `run_gate`. This proves the
-    // full pipeline including patch → DiffHunk conversion works for all
-    // seven rule families.
-
-    /// Helper: convert PrFiles to ChangedFiles, then evaluate with default policy.
-    fn evaluate_from_pr_files(pr_files: Vec<PrFile>) -> TripwireGateDecision {
-        let changed_files = convert_pr_files(&pr_files);
-        let input = TripwireEvaluationInput {
-            task_id: "task-001".to_owned(),
-            project_id: "proj-001".to_owned(),
-            pr_number: Some(42),
-            head_sha: "abc123".to_owned(),
-            policy: TripwirePolicy::default(),
-            allowlist_revision: None,
-            changed_files,
-        };
-        run_gate(&input).decision
-    }
-
-    /// Helper: convert PrFiles to ChangedFiles, then evaluate with a custom policy.
-    fn evaluate_from_pr_files_with_policy(
-        pr_files: Vec<PrFile>,
-        policy: TripwirePolicy,
-    ) -> TripwireGateDecision {
-        let changed_files = convert_pr_files(&pr_files);
-        let input = TripwireEvaluationInput {
-            task_id: "task-001".to_owned(),
-            project_id: "proj-001".to_owned(),
-            pr_number: Some(42),
-            head_sha: "abc123".to_owned(),
-            policy,
-            allowlist_revision: None,
-            changed_files,
-        };
-        run_gate(&input).decision
-    }
-
-    /// Helper: select the event type from a gate decision.
-    fn event_type_for(decision: &TripwireGateDecision) -> &'static str {
-        match decision.outcome {
-            GateOutcome::Held => TRIPWIRE_EVENT_GATE_HELD,
-            GateOutcome::Passed => TRIPWIRE_EVENT_GATE_PASSED,
-            GateOutcome::ReportOnly => TRIPWIRE_EVENT_GATE_REPORT_ONLY,
-        }
-    }
-
-    // ── Rule 1: migration_change (file-level, no hunks needed) ──────────
-
-    #[test]
-    fn migration_change_from_pr_file_produces_held_gate() {
-        let files = vec![pr_file(
-            "migrations/20260101_create_users.sql",
-            "added",
-            20,
-            0,
-        )];
-        let decision = evaluate_from_pr_files(files);
-        assert_eq!(decision.outcome, GateOutcome::Held);
-        assert!(decision.enforcement_finding_count > 0);
-        assert!(
-            decision
-                .findings
-                .iter()
-                .any(|f| f.rule_id.as_str() == "migration_change")
-        );
-        assert_eq!(event_type_for(&decision), TRIPWIRE_EVENT_GATE_HELD);
-    }
-
-    // ── Rule 2: dependency_identity_change (file-level, no hunks) ───────
-
-    #[test]
-    fn dependency_identity_change_from_pr_file_produces_held_gate() {
-        let files = vec![pr_file("Cargo.toml", "modified", 5, 3)];
-        let decision = evaluate_from_pr_files(files);
-        assert_eq!(decision.outcome, GateOutcome::Held);
-        assert!(
-            decision
-                .findings
-                .iter()
-                .any(|f| f.rule_id.as_str() == "dependency_identity_change")
-        );
-    }
-
-    // ── Rule 3: network_egress_change (requires patch → hunks) ──────────
-
-    #[test]
-    fn network_egress_change_from_pr_file_produces_held_gate() {
-        let patch =
-            "@@ -1,1 +1,3 @@\n old line\n+Webhook::register(endpoint);\n+notify(payload);\n";
-        let files = vec![pr_file_with_patch("src/http.rs", "modified", 2, 0, patch)];
-        let decision = evaluate_from_pr_files(files);
-        assert_eq!(decision.outcome, GateOutcome::Held);
-        assert!(
-            decision
-                .findings
-                .iter()
-                .any(|f| f.rule_id.as_str() == "network_egress_change"),
-            "network_egress_change must surface from PR-file patch conversion"
-        );
-        // Verify evidence is line-precise.
-        let egress_finding = decision
-            .findings
-            .iter()
-            .find(|f| f.rule_id.as_str() == "network_egress_change")
-            .unwrap();
-        assert!(
-            egress_finding.evidence.start_line.is_some(),
-            "evidence must have a line number"
-        );
-    }
-
-    // ── Rule 4: unsafe_code_change (requires patch → hunks) ─────────────
-
-    #[test]
-    fn unsafe_code_change_from_pr_file_produces_held_gate() {
-        let patch = "@@ -1,0 +1,2 @@\n+unsafe {\n+    ptr::read_volatile(addr);\n+}\n";
-        let files = vec![pr_file_with_patch("src/ffi.rs", "modified", 3, 0, patch)];
-        let decision = evaluate_from_pr_files(files);
-        assert_eq!(decision.outcome, GateOutcome::Held);
-        assert!(
-            decision
-                .findings
-                .iter()
-                .any(|f| f.rule_id.as_str() == "unsafe_code_change"),
-            "unsafe_code_change must surface from PR-file patch conversion"
-        );
-    }
-
-    // ── Rule 5: boundary_path_change (file-level, no hunks needed) ──────
-
-    #[test]
-    fn boundary_path_change_from_pr_file_produces_held_gate() {
-        let files = vec![pr_file("src/auth/permissions.rs", "added", 100, 0)];
-        let decision = evaluate_from_pr_files(files);
-        assert_eq!(decision.outcome, GateOutcome::Held);
-        assert!(
-            decision
-                .findings
-                .iter()
-                .any(|f| f.rule_id.as_str() == "boundary_path_change")
-        );
-        // Boundary findings carry an allowlist revision.
-        let boundary_finding = decision
-            .findings
-            .iter()
-            .find(|f| f.rule_id.as_str() == "boundary_path_change")
-            .unwrap();
-        assert!(boundary_finding.allowlist_revision.is_some());
-    }
-
-    // ── Rule 6: large_delete_or_rewrite (file-level, no hunks) ──────────
-
-    #[test]
-    fn large_delete_or_rewrite_from_pr_file_produces_held_gate() {
-        let files = vec![pr_file(
-            "src/old_module.rs",
-            "modified",
-            10,
-            600, // Exceeds default per-file threshold of 500
-        )];
-        let decision = evaluate_from_pr_files(files);
-        assert_eq!(decision.outcome, GateOutcome::Held);
-        assert!(
-            decision
-                .findings
-                .iter()
-                .any(|f| f.rule_id.as_str() == "large_delete_or_rewrite")
-        );
-    }
-
-    // ── Rule 7: ci_workflow_change (file-level, no hunks) ───────────────
-
-    #[test]
-    fn ci_workflow_change_from_pr_file_produces_held_gate() {
-        let files = vec![pr_file(".github/workflows/ci.yml", "modified", 15, 5)];
-        let decision = evaluate_from_pr_files(files);
-        assert_eq!(decision.outcome, GateOutcome::Held);
-        assert!(
-            decision
-                .findings
-                .iter()
-                .any(|f| f.rule_id.as_str() == "ci_workflow_change")
-        );
-    }
-
-    // ── All seven rule families from PrFile payloads ────────────────────
-
-    #[test]
-    fn all_seven_rule_families_from_pr_files_produce_findings() {
-        let files = vec![
-            // 1. Migration (file-level)
-            pr_file("migrations/001.sql", "added", 10, 0),
-            // 2. Dependency identity (file-level)
-            pr_file("Cargo.toml", "modified", 2, 1),
-            // 3. Network egress (needs patch → hunks)
-            pr_file_with_patch(
-                "src/webhook.rs",
-                "modified",
-                2,
-                0,
-                "@@ -1,0 +1,2 @@\n+Webhook::register(endpoint);\n+notify(payload);\n",
-            ),
-            // 4. Unsafe code (needs patch → hunks, .rs extension)
-            pr_file_with_patch(
-                "src/ffi.rs",
-                "modified",
-                2,
-                0,
-                "@@ -1,0 +1,2 @@\n+unsafe {\n+    ptr::read_volatile(addr);\n",
-            ),
-            // 5. Boundary path (added status + auth path)
-            pr_file("src/auth/mod.rs", "added", 50, 0),
-            // 6. Large delete
-            pr_file("src/legacy.rs", "modified", 5, 600),
-            // 7. CI workflow
-            pr_file(".github/workflows/ci.yml", "modified", 10, 5),
-        ];
-
-        let decision = evaluate_from_pr_files(files);
-
-        assert_eq!(decision.outcome, GateOutcome::Held);
-
-        let rule_ids: Vec<&str> = decision
-            .findings
-            .iter()
-            .map(|f| f.rule_id.as_str())
-            .collect();
-
-        // Verify each of the seven rule families produced at least one finding.
-        assert!(
-            rule_ids.contains(&"migration_change"),
-            "migration_change must surface"
-        );
-        assert!(
-            rule_ids.contains(&"dependency_identity_change"),
-            "dependency_identity_change must surface"
-        );
-        assert!(
-            rule_ids.contains(&"network_egress_change"),
-            "network_egress_change must surface"
-        );
-        assert!(
-            rule_ids.contains(&"unsafe_code_change"),
-            "unsafe_code_change must surface"
-        );
-        assert!(
-            rule_ids.contains(&"boundary_path_change"),
-            "boundary_path_change must surface"
-        );
-        assert!(
-            rule_ids.contains(&"large_delete_or_rewrite"),
-            "large_delete_or_rewrite must surface"
-        );
-        assert!(
-            rule_ids.contains(&"ci_workflow_change"),
-            "ci_workflow_change must surface"
-        );
-    }
-
-    // ── Report-only scenario from PrFile ────────────────────────────────
-
-    #[test]
-    fn report_only_finding_from_pr_file_produces_report_only_gate() {
-        let mut policy = TripwirePolicy::default();
-        policy.migration.report_only = true;
-
-        let files = vec![pr_file("migrations/001_init.sql", "added", 50, 0)];
-        let decision = evaluate_from_pr_files_with_policy(files, policy);
-
-        assert_eq!(decision.outcome, GateOutcome::ReportOnly);
-        assert_eq!(decision.enforcement_finding_count, 0);
-        assert!(decision.report_only_finding_count > 0);
-        assert_eq!(event_type_for(&decision), TRIPWIRE_EVENT_GATE_REPORT_ONLY);
-        for f in &decision.findings {
-            assert_eq!(f.severity, TripwireFindingSeverity::ReportOnly);
-        }
-    }
-
-    // ── Report-only for network_egress from PrFile (patch-based) ────────
-
-    #[test]
-    fn report_only_network_egress_from_pr_file() {
-        let mut policy = TripwirePolicy::default();
-        policy.network_egress.report_only = true;
-
-        let patch = "@@ -1,0 +1,2 @@\n+Webhook::register(endpoint);\n+notify(payload);\n";
-        let files = vec![pr_file_with_patch("src/http.rs", "modified", 2, 0, patch)];
-        let decision = evaluate_from_pr_files_with_policy(files, policy);
-
-        assert_eq!(decision.outcome, GateOutcome::ReportOnly);
-        assert!(
-            decision
-                .findings
-                .iter()
-                .any(|f| f.rule_id.as_str() == "network_egress_change"),
-            "network_egress_change must surface from patch as report-only"
-        );
-    }
-
-    // ── Passed (no findings) from PrFile ────────────────────────────────
-
-    #[test]
-    fn no_matching_pr_files_produce_passed_gate() {
-        let files = vec![pr_file("src/main.rs", "modified", 5, 2)];
-        let decision = evaluate_from_pr_files(files);
-        assert_eq!(decision.outcome, GateOutcome::Passed);
-        assert_eq!(decision.enforcement_finding_count, 0);
-        assert_eq!(decision.report_only_finding_count, 0);
-        assert!(decision.findings.is_empty());
-        assert_eq!(event_type_for(&decision), TRIPWIRE_EVENT_GATE_PASSED);
-    }
-
-    // ── Idempotency key determinism from PrFile ─────────────────────────
-
-    #[test]
-    fn gate_idempotency_key_is_deterministic_from_pr_files() {
-        let files = vec![pr_file("migrations/001.sql", "added", 10, 0)];
-        let d1 = evaluate_from_pr_files(files.clone());
-        let d2 = evaluate_from_pr_files(files);
-        assert_eq!(d1.idempotency_key, d2.idempotency_key);
-    }
-
-    // ── Payload validation from PrFile ──────────────────────────────────
-
-    #[test]
-    fn payload_validation_passes_from_pr_files() {
-        let files = vec![pr_file("migrations/001.sql", "added", 10, 0)];
-        let changed_files = convert_pr_files(&files);
-        let input = TripwireEvaluationInput {
-            task_id: "task-001".to_owned(),
-            project_id: "proj-001".to_owned(),
-            pr_number: Some(42),
-            head_sha: "abc123".to_owned(),
-            policy: TripwirePolicy::default(),
-            allowlist_revision: None,
-            changed_files,
-        };
-        let result = run_gate(&input);
-        result
-            .payload
-            .validate()
-            .expect("payload must pass validation for a consistent decision");
-    }
-
-    // ── Mixed findings: enforcement dominates (from PrFile) ─────────────
-
-    #[test]
-    fn mixed_findings_enforcement_dominates_over_report_only_from_pr_files() {
-        let mut policy = TripwirePolicy::default();
-        policy.ci_workflow.report_only = true;
-
-        let files = vec![
-            pr_file("migrations/002.sql", "added", 20, 0),
-            pr_file(".github/workflows/release.yml", "modified", 10, 5),
-        ];
-
-        let decision = evaluate_from_pr_files_with_policy(files, policy);
-
-        assert_eq!(decision.outcome, GateOutcome::Held);
-        assert!(decision.enforcement_finding_count > 0);
-        assert!(decision.report_only_finding_count > 0);
-        assert_eq!(event_type_for(&decision), TRIPWIRE_EVENT_GATE_HELD);
-    }
-
-    // ── Patch absent: network_egress/unsafe cannot surface ─────────────
-
-    #[test]
-    fn pr_file_without_patch_does_not_trigger_egress_or_unsafe() {
-        // A .rs file with additions but no patch/hunks.
-        // network_egress and unsafe_code scan diff lines only,
-        // so without a patch they cannot match.
-        let files = vec![pr_file("src/webhook.rs", "modified", 5, 0)];
-        let decision = evaluate_from_pr_files(files);
-        // No other rule matches this file, so outcome is Passed.
-        assert_eq!(decision.outcome, GateOutcome::Passed);
-        assert!(decision.findings.is_empty());
-    }
-
-    // ── Generated/vendor files are excluded ─────────────────────────────
-
-    #[test]
-    fn generated_files_are_excluded_from_evaluation() {
-        let changed_files = vec![ChangedFile {
-            path: "generated/bindings.rs".to_owned(),
-            old_path: None,
-            status: ChangedFileStatus::Added,
-            additions: 5000,
-            deletions: 0,
-            hunks: Vec::new(),
-            is_generated: true, // This file is classified as generated
-            is_vendor: false,
-        }];
-        let input = TripwireEvaluationInput {
-            task_id: "task-001".to_owned(),
-            project_id: "proj-001".to_owned(),
-            pr_number: Some(42),
-            head_sha: "abc123".to_owned(),
-            policy: TripwirePolicy::default(),
-            allowlist_revision: None,
-            changed_files,
-        };
-        let result = run_gate(&input);
-        let decision = &result.decision;
-        assert_eq!(decision.outcome, GateOutcome::Passed);
-        assert!(decision.findings.is_empty());
-    }
+    // 4. Evaluate with all seven rule families.
+    Ok(Some((run_gate(&input), mode)))
 }

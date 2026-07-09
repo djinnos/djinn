@@ -129,21 +129,13 @@ impl CoordinatorActor {
                 )
                 .await;
 
-            // ── Tripwire active-hold reconciliation ──────────────────────────
-            // After the current PR/head is fetched, check whether an active
-            // tripwire hold exists for this head SHA and whether the
-            // human-review-hold label is still present. If the label was
-            // removed outside the release path, reapply it and log a tamper
-            // event. This must run BEFORE any transition that would advance
-            // a held PR (merge, undraft, etc.).
+            // ── Tripwire active-hold reconciliation ──────────────────────
+            // Re-check hold state before any PR advance; reapply tampered labels.
             if self
                 .reconcile_tripwire_hold(&task, pull_number, &pr.head.sha)
                 .await
             {
-                // Active hold exists (or was just reapplied) — do not
-                // advance the PR this tick. The task is already parked by
-                // the gate-held path; reconciliation just ensures the label
-                // stays on.
+                // Active hold — do not advance; ensure label stays on.
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
                 self.review_stuck_sha_first_seen.remove(&task.id);
@@ -184,16 +176,11 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // ── CI gate decision (from durable snapshot) ──────────────────────
-            // The durable CI snapshot recorded above is the authority for
-            // whether the PR may advance.  Pending/Unknown hold in pr_draft
-            // (derived display state: awaiting_ci); Failing routes through
-            // remediation; Passing proceeds to merge-conflict check + undraft.
+            // ── CI gate decision (from durable snapshot) ─────────────────
+            // Pending/Unknown → hold; Failing → remediation; Passing → advance.
             match ci_status {
                 CiStatus::Pending | CiStatus::Unknown => {
-                    // No-CI-configured fast path: after the min-age guard
-                    // elapses, an empty check-run list means the repo has
-                    // no CI configured — treat as green.
+                    // No CI configured after min-age guard — treat as green.
                     if checks.check_runs.is_empty() {
                         tracing::info!(
                             task_id = %task.short_id,
@@ -218,11 +205,7 @@ impl CoordinatorActor {
                     }
                 }
                 CiStatus::Failing => {
-                    // Required checks have failed.  Route through the shared
-                    // CI-failure handler which filters to blocking (required)
-                    // checks, applies the same-signature/scope-inversion/
-                    // diff-empty/escalation logic, and either reworks the
-                    // task or parks it on a remediation blocker.
+                    // Route through CI-failure handler (blocking checks only).
                     let failed_checks: Vec<&CheckRun> = checks
                         .check_runs
                         .iter()
@@ -274,12 +257,7 @@ impl CoordinatorActor {
             // CI passed (or no CI configured, or advisory-only failures).
             // Check for merge conflicts before undrafting.
             if pr.mergeable == Some(false) {
-                // Clean-merge fast path (offloaded): try to resolve the conflict
-                // mechanically (merge target → task branch, push) in a background
-                // task before dispatching any agent. `Merged` → the PR refreshes
-                // and we skip the reopen; `InFlight` → skip this tick and
-                // re-evaluate next tick (the heavy merge must not block the
-                // coordinator); `Reopen` → fall through to the agent rework flow.
+                // Try mechanical merge in background; Merged/InFlight/Reopen.
                 match self.poll_auto_merge_fast_path(&task.id, &task.short_id, &task.project_id) {
                     AutoMergeFastPathState::Merged => {
                         self.pr_status_cache.remove(&task.id);
@@ -313,11 +291,24 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // ── Tripwire gate: deterministic pre-undraft evaluation ──────
-            // Evaluate the PR diff against the tripwire policy before the
-            // PR can proceed to undraft/auto-merge. This is a pure
-            // deterministic gate — no LLM or provider call.
-            let tripwire_result = match super::tripwire_gate::evaluate_tripwire_gate(
+            // ── Tripwire gate: rollout-aware evaluation ─────────────────
+            let tripwire_entries = match self.task_repo().list_activity(&task.id).await {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "PR poller: failed to query activity for tripwire rollout mode — skipping gate this tick"
+                    );
+                    continue;
+                }
+            };
+            let tripwire_entry_refs: Vec<crate::tripwires::ActivityEntryRef> = tripwire_entries
+                .iter()
+                .map(crate::tripwires::ActivityEntryRef::from_entry)
+                .collect();
+
+            let tripwire_result = match super::tripwire_gate::evaluate_tripwire_gate_with_rollout(
                 gh_client,
                 &owner,
                 &repo,
@@ -325,10 +316,34 @@ impl CoordinatorActor {
                 &task.id,
                 &task.project_id,
                 &pr.head.sha,
+                &tripwire_entry_refs,
+                resolve_policy_publication_ts(&task.created_at),
+                &crate::tripwires::TripwirePolicy::default().policy_revision,
             )
             .await
             {
-                Ok(result) => result,
+                Ok(Some((result, mode))) => {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        head_sha = %pr.head.sha,
+                        mode = ?mode,
+                        outcome = ?result.decision.outcome,
+                        "PR poller: tripwire gate evaluated"
+                    );
+                    Some((result, mode))
+                }
+                Ok(None) => {
+                    // AlreadyEvaluated — idempotent skip.  Proceed to
+                    // undraft without emitting a duplicate gate event.
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        head_sha = %pr.head.sha,
+                        "PR poller: tripwire gate already evaluated for this head SHA — skipping"
+                    );
+                    None
+                }
                 Err(e) => {
                     tracing::warn!(
                         task_id = %task.short_id,
@@ -336,110 +351,119 @@ impl CoordinatorActor {
                         error = %e,
                         "PR poller: tripwire gate evaluation failed — proceeding without gate (will retry next tick)"
                     );
-                    // Non-fatal: skip this tick so the gate can be
-                    // re-evaluated next tick rather than bypassing it.
+                    // Non-fatal: retry next tick.
                     continue;
                 }
             };
 
-            // Log the gate activity event (held, passed, or report-only).
-            let activity_payload =
-                serde_json::to_string(&tripwire_result.payload).unwrap_or_default();
-            if let Err(e) = self
-                .task_repo()
-                .log_activity(
-                    Some(&task.id),
-                    "coordinator",
-                    "system",
-                    tripwire_result.event_type,
-                    &activity_payload,
-                )
-                .await
-            {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    pr = pull_number,
-                    error = %e,
-                    "PR poller: failed to log tripwire gate activity"
-                );
-            }
-
-            match tripwire_result.decision.outcome {
-                crate::tripwires::GateOutcome::Held => {
-                    // Enforcement findings exist — apply human-review-hold
-                    // idempotently and park the source task so it cannot be
-                    // dispatched until the hold is resolved.
-                    tracing::info!(
+            if let Some((ref result, mode)) = tripwire_result {
+                let activity_payload = serde_json::to_string(&result.payload).unwrap_or_default();
+                if let Err(e) = self
+                    .task_repo()
+                    .log_activity(
+                        Some(&task.id),
+                        "coordinator",
+                        "system",
+                        result.event_type,
+                        &activity_payload,
+                    )
+                    .await
+                {
+                    tracing::warn!(
                         task_id = %task.short_id,
                         pr = pull_number,
-                        head_sha = %pr.head.sha,
-                        enforcement_count = tripwire_result.decision.enforcement_finding_count,
-                        "PR poller: tripwire gate HELD — creating human-review hold"
+                        error = %e,
+                        "PR poller: failed to log tripwire gate activity"
                     );
-
-                    let findings_summary = tripwire_result
-                        .decision
-                        .findings
-                        .iter()
-                        .map(|f| {
-                            format!(
-                                "- `{}` ({}) — {}",
-                                f.rule_id.as_str(),
-                                f.reason_code,
-                                f.evidence.path,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    let hold_reason = format!(
-                        "Tripwire gate held for PR head `{}`.\n\n\
-                         Policy revision: `{}`\n\
-                         Enforcement findings ({}):\n{}",
-                        &pr.head.sha[..12.min(pr.head.sha.len())],
-                        tripwire_result.decision.policy_revision,
-                        tripwire_result.decision.enforcement_finding_count,
-                        findings_summary,
-                    );
-
-                    // Create a human-review remediation task (idempotent —
-                    // skips if the source is already held by an unresolved
-                    // blocker).
-                    self.create_remediation_task(
-                        &task.id,
-                        &hold_reason,
-                        &task.project_id,
-                        crate::dispatch::RemediationKind::HumanReview,
-                    )
-                    .await;
-
-                    // Park the source so it stops being re-dispatched.
-                    self.park_source_open(&task.id, &hold_reason).await;
-                    self.pr_status_cache.remove(&task.id);
-                    self.pr_draft_first_seen.remove(&task.id);
-                    self.review_stuck_sha_first_seen.remove(&task.id);
-                    continue;
                 }
-                crate::tripwires::GateOutcome::Passed
-                | crate::tripwires::GateOutcome::ReportOnly => {
-                    // Gate passed (with optional advisory findings) —
-                    // proceed to undraft.
-                    if tripwire_result.decision.outcome == crate::tripwires::GateOutcome::ReportOnly
-                    {
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            pr = pull_number,
-                            head_sha = %pr.head.sha,
-                            report_only_count = tripwire_result.decision.report_only_finding_count,
-                            "PR poller: tripwire gate PASSED with report-only findings"
-                        );
-                    } else {
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            pr = pull_number,
-                            head_sha = %pr.head.sha,
-                            "PR poller: tripwire gate PASSED"
-                        );
+
+                match result.decision.outcome {
+                    crate::tripwires::GateOutcome::Held => {
+                        // Backfill mode forces ReportOnly; guard defensively
+                        // against unexpected Held. Enforce mode applies hold.
+                        if mode == super::tripwire_gate::RolloutMode::Backfill {
+                            // Unexpected in backfill — log but don't block.
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                head_sha = %pr.head.sha,
+                                "PR poller: unexpected Held outcome in backfill mode — logging but not blocking"
+                            );
+                        } else {
+                            // Apply human-review-hold and park the source.
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                head_sha = %pr.head.sha,
+                                enforcement_count = result.decision.enforcement_finding_count,
+                                "PR poller: tripwire gate HELD — creating human-review hold"
+                            );
+
+                            let findings_summary = result
+                                .decision
+                                .findings
+                                .iter()
+                                .map(|f| {
+                                    format!(
+                                        "- `{}` ({}) — {}",
+                                        f.rule_id.as_str(),
+                                        f.reason_code,
+                                        f.evidence.path,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+
+                            let hold_reason = format!(
+                                "Tripwire gate held for PR head `{}`.\n\n\
+                                 Policy revision: `{}`\n\
+                                 Enforcement findings ({}):\n{}",
+                                &pr.head.sha[..12.min(pr.head.sha.len())],
+                                result.decision.policy_revision,
+                                result.decision.enforcement_finding_count,
+                                findings_summary,
+                            );
+
+                            // Create a human-review remediation task (idempotent —
+                            // skips if the source is already held by an unresolved
+                            // blocker).
+                            self.create_remediation_task(
+                                &task.id,
+                                &hold_reason,
+                                &task.project_id,
+                                crate::dispatch::RemediationKind::HumanReview,
+                            )
+                            .await;
+
+                            // Park the source so it stops being re-dispatched.
+                            self.park_source_open(&task.id, &hold_reason).await;
+                            self.pr_status_cache.remove(&task.id);
+                            self.pr_draft_first_seen.remove(&task.id);
+                            self.review_stuck_sha_first_seen.remove(&task.id);
+                            continue;
+                        }
+                    }
+                    crate::tripwires::GateOutcome::Passed
+                    | crate::tripwires::GateOutcome::ReportOnly => {
+                        // Gate passed — proceed to undraft.
+                        if result.decision.outcome == crate::tripwires::GateOutcome::ReportOnly {
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                head_sha = %pr.head.sha,
+                                mode = ?mode,
+                                report_only_count = result.decision.report_only_finding_count,
+                                "PR poller: tripwire gate PASSED with report-only findings"
+                            );
+                        } else {
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                head_sha = %pr.head.sha,
+                                mode = ?mode,
+                                "PR poller: tripwire gate PASSED"
+                            );
+                        }
                     }
                 }
             }
@@ -488,26 +512,9 @@ impl CoordinatorActor {
 
     // ── Tripwire active-hold reconciliation ──────────────────────────────
 
-    /// Reconcile the tripwire active-hold state for a task's current PR head.
-    ///
-    /// This runs after the current PR/head is fetched and before any
-    /// transition that would advance a held PR. It:
-    ///
-    /// 1. Queries the task's activity log for `tripwire.gate.held` and
-    ///    `tripwire.hold.released` events.
-    /// 2. Computes the active-hold state for the current head SHA (older
-    ///    heads are superseded).
-    /// 3. If an active hold exists but the task no longer carries
-    ///    `human-review-hold`, reapplies the label idempotently and logs a
-    ///    `tripwire.tamper.label_removed` event.
-    ///
-    /// Returns `true` when an active hold exists for the current head (the
-    /// PR must NOT advance). Returns `false` when there is no active hold
-    /// (the PR may proceed through the normal flow).
-    ///
-    /// **Fail-closed:** if the activity-log query fails, this returns `true`
-    /// (hold assumed) rather than letting the PR advance — an inability to
-    /// verify hold state must not bypass the gate.
+    /// Reconcile tripwire active-hold: query activity, compute hold state,
+    /// reapply `human-review-hold` label if tampered. Fail-closed: returns
+    /// `true` (hold assumed) when the activity-log query fails.
     pub(crate) async fn reconcile_tripwire_hold(
         &self,
         task: &Task,
@@ -617,9 +624,7 @@ impl CoordinatorActor {
 
     // ── needs_task_review polling (review-stuck CI monitoring) ───────────────
 
-    /// Poll tasks parked in `needs_task_review`: if blocking CI is terminal red
-    /// and the PR head SHA has not advanced for the review-stuck window, route a
-    /// Planner intervention for the reviewer loop with the CI failure details.
+    /// Poll `needs_task_review` tasks for review-stuck CI failures.
     pub(crate) async fn poll_pr_review_stuck_tasks(&mut self) {
         let task_repo = self.task_repo();
         let project_repo = djinn_db::ProjectRepository::new(
@@ -863,11 +868,7 @@ impl CoordinatorActor {
         sections.join("\n")
     }
 
-    /// Persist a CI gate snapshot for the current PR head observation.
-    ///
-    /// Write-through only — no lifecycle policy.  Failures are logged as
-    /// warnings (consistent with existing pr_poller error patterns) and do
-    /// **not** block the caller's control flow.
+    /// Persist a CI gate snapshot. Write-through; failures are non-blocking.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn persist_ci_snapshot(
         &self,
@@ -904,15 +905,8 @@ impl CoordinatorActor {
 
     // ── CI snapshot recording (sole writer for GitHub-derived CI fields) ─────
 
-    /// Record the CI snapshot for a task/PR based on observed GitHub data.
-    ///
-    /// Called by `pr_poller` — the **sole writer** of GitHub-derived CI snapshot
-    /// fields. Determines `ci_status` from required-check state and computes
-    /// failure fingerprints using the existing `ci_helpers` utilities.
-    ///
-    /// When the stored head SHA differs from the observed SHA, the snapshot is
-    /// reset to `pending` with stale failure/fingerprint/same-signature data
-    /// cleared (delegated to the repository's `reset_ci_snapshot_for_head`).
+    /// Record CI snapshot. Sole writer of GitHub-derived CI fields.
+    /// Resets to `pending` when the head SHA changes.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn record_ci_snapshot(
         &self,
@@ -1077,11 +1071,7 @@ impl CoordinatorActor {
         ci_status
     }
 
-    /// Record `unknown` CI snapshot when GitHub PR/check data is unavailable.
-    ///
-    /// Called when `gh_client.get_pull_request()` fails. If an existing snapshot
-    /// exists with a known head SHA, updates it to `unknown` so downstream tasks
-    /// see updated observation timestamps without escalating to remediation.
+    /// Record `unknown` CI status when GitHub data is unavailable.
     pub(crate) async fn record_ci_snapshot_unavailable(
         &self,
         task_id: &str,
@@ -1127,6 +1117,25 @@ impl CoordinatorActor {
     }
 
     // ── pr_review polling (review monitoring) ────────────────────────────────
+}
+
+fn resolve_policy_publication_ts(pr_created_at: &str) -> Option<&str> {
+    let pub_ts = std::env::var("DJINN_TRIPWIRE_POLICY_PUBLICATION_TS").ok()?;
+    rollout_policy_publication_marker(pr_created_at, Some(pub_ts.as_str()))
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn rollout_policy_publication_marker<'a>(
+    pr_created_at: &'a str,
+    policy_publication_ts: Option<&str>,
+) -> Option<&'a str> {
+    let pub_ts = policy_publication_ts.filter(|ts| !ts.is_empty())?;
+
+    if pr_created_at >= pub_ts {
+        Some(pr_created_at)
+    } else {
+        None
+    }
 }
 
 /// Decision for a `pr_draft` task based on the durable CI snapshot status.

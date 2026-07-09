@@ -94,6 +94,9 @@ mod pr_cleanup_tests;
 #[cfg(test)]
 mod tripwire_merge_gate_tests;
 
+#[cfg(test)]
+mod tripwire_gate_tests;
+
 use crate::ci_preflight_gate::{
     CiPreflightGateKind, CiPreflightGateVerdict, latest_task_workdir,
     run_ci_reproduction_preflight_gate,
@@ -116,7 +119,9 @@ use pr_review_handlers::effective_review_decision;
 pub use pr_review_handlers::parse_pr_url;
 use pr_undraft::{should_undraft_before_merge, warn_pr_merge_failed};
 #[cfg(test)]
-pub(crate) use pr_watcher::{PrDraftCiAction, decide_pr_draft_ci_action};
+pub(crate) use pr_watcher::{
+    PrDraftCiAction, decide_pr_draft_ci_action, rollout_policy_publication_marker,
+};
 
 use ci_failure_analysis::compute_ci_failure_fingerprint;
 #[cfg(test)]
