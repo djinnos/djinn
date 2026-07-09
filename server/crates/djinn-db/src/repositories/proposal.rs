@@ -1464,6 +1464,23 @@ impl ProposalRepository {
         .await?)
     }
 
+    /// Return the `created_at` of the latest `refinement_start` lifecycle event
+    /// for this proposal — the boundary that separates the current refinement
+    /// run's debate-trail entries from any prior (interrupted) run's entries.
+    ///
+    /// Returns `None` when no `refinement_start` exists (no refinement run
+    /// boundary recorded). Callers use this to scope debate-trail reads to the
+    /// current run so a restarted run's round numbers do not collide with a
+    /// prior run's entries (which reuse the same 1-based round counter).
+    pub async fn latest_refinement_start_at(&self, proposal_id: &str) -> Result<Option<String>> {
+        let revisions = self.revisions(proposal_id).await?;
+        Ok(revisions
+            .iter()
+            .rev()
+            .find(|r| r.event_kind == "refinement_start")
+            .map(|r| r.created_at.clone()))
+    }
+
     /// Record a refinement lifecycle event (`refinement_start` or
     /// `refinement_stop`) as a lightweight `proposal_revisions` row. These
     /// events carry `event_metadata` with structured JSON (e.g.
@@ -7796,6 +7813,51 @@ mod tests {
             .unwrap();
         assert_eq!(status.count, 1);
         assert!(!status.cap_exceeded);
+    }
+
+    /// `latest_refinement_start_at` returns `None` before any run boundary and
+    /// then tracks the LATEST `refinement_start` across an interrupted-and-
+    /// restarted run, so debate-trail reads can be scoped to the current run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn latest_refinement_start_at_tracks_current_run_boundary() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("StartBoundary")).await.unwrap();
+
+        // No refinement run yet → no boundary.
+        assert_eq!(
+            repo.latest_refinement_start_at(&p.id).await.unwrap(),
+            None,
+            "no refinement_start → None"
+        );
+
+        // Run #1 start.
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+        let start1 = repo
+            .latest_refinement_start_at(&p.id)
+            .await
+            .unwrap()
+            .expect("run #1 boundary");
+
+        // Interrupt + restart (run #2). Delay so created_at advances.
+        repo.record_refinement_lifecycle(&p.id, "refinement_stop", None)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+        let start2 = repo
+            .latest_refinement_start_at(&p.id)
+            .await
+            .unwrap()
+            .expect("run #2 boundary");
+
+        assert!(
+            start2 > start1,
+            "latest boundary must be the newest refinement_start ({start2} > {start1})"
+        );
     }
 
     /// Malformed/rejected demands that fail validation in

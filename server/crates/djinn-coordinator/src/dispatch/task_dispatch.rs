@@ -1703,7 +1703,7 @@ impl CoordinatorActor {
                         task_id = %task.short_id,
                         role,
                         pr_url = %pr_url,
-                        "CoordinatorActor: respawn guard adopting existing open PR — skipping dispatch"
+                        "CoordinatorActor: respawn guard adopting existing open PR — handing off to PR poller"
                     );
                     super::respawn_guard::record_adopted_pr_attempt(
                         &self.db,
@@ -1711,6 +1711,18 @@ impl CoordinatorActor {
                         role,
                         &pr_url,
                         Some("respawn_guard: adopted existing open PR"),
+                    )
+                    .await;
+                    // Adoption must imply ownership: move the task out of the
+                    // dispatchable `open` column into the poller-owned
+                    // `pr_review` column so the PR poller advances it (incident
+                    // gton — an adopted `open` task was polled by nobody and
+                    // wedged 9h). Idempotent: a no-op if already poller-owned.
+                    super::respawn_guard::handoff_adopted_pr_to_poller(
+                        &self.task_repo(),
+                        &task.id,
+                        &task.status,
+                        &pr_url,
                     )
                     .await;
                     continue;
