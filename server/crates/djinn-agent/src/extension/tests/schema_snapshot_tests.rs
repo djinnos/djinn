@@ -475,3 +475,62 @@ fn request_lead_handler_is_test_only_reexport() {
         "call_request_lead must be re-exported under #[cfg(test)] only"
     );
 }
+
+/// The production handler dispatch body (`handlers.rs`) must NOT contain
+/// any code that transitions a task to `needs_lead_intervention`.
+///
+/// The only production path into `needs_lead_intervention` is the
+/// coordinator arbiter park-rung / second-strike `Escalate` transition
+/// (retry.rs / session_recovery.rs).  Worker/reviewer handler code must
+/// never directly transition a task there.
+#[test]
+fn production_handler_dispatch_does_not_transition_to_needs_lead_intervention() {
+    let dispatch_src = include_str!("../handlers.rs");
+    // Strip `//` comment lines — only actual code usage triggers failure.
+    let code_only: String = dispatch_src
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect();
+    assert!(
+        !code_only.contains("needs_lead_intervention"),
+        "production handler dispatch (handlers.rs) must NOT contain \
+         needs_lead_intervention in code — only the coordinator arbiter \
+         park-rung path may transition tasks there"
+    );
+}
+
+/// The deprecated `call_request_lead` handler (`task_epic.rs`) must NOT
+/// contain any code that transitions a task to `needs_lead_intervention`.
+/// It routes to `dispatch_planner_escalation` instead.
+#[test]
+fn deprecated_request_lead_handler_does_not_transition_to_needs_lead_intervention() {
+    let src = include_str!("../handlers/task_epic.rs");
+
+    // Find the call_request_lead function body.
+    let fn_start = src
+        .find("async fn call_request_lead")
+        .expect("call_request_lead must exist");
+    let after_fn = &src[fn_start..];
+    // Find the next pub fn / async fn to bound the search.
+    let fn_body_end = after_fn[28..]
+        .find("\npub")
+        .or_else(|| after_fn[28..].find("\nasync fn"))
+        .map(|p| p + 28)
+        .unwrap_or(after_fn.len());
+    let fn_body = &after_fn[..fn_body_end];
+
+    // Strip comment lines before searching.
+    let code_only: String = fn_body
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect();
+    assert!(
+        !code_only.contains("needs_lead_intervention"),
+        "call_request_lead must NOT transition task to needs_lead_intervention; \
+         it should route to dispatch_planner_escalation only"
+    );
+    assert!(
+        code_only.contains("dispatch_planner_escalation"),
+        "call_request_lead must route through dispatch_planner_escalation"
+    );
+}

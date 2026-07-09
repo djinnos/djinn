@@ -2240,6 +2240,9 @@ impl TaskRunSupervisor {
                                 "supervisor: lead force_close transition skipped"
                             );
                         }
+                        djinn_telemetry::arbiter::record_decision(
+                            djinn_telemetry::arbiter::DECISION_FORCE_CLOSE,
+                        );
                         result = Some(TaskRunOutcome::Closed { reason });
                         break;
                     }
@@ -2264,6 +2267,9 @@ impl TaskRunSupervisor {
                                 "supervisor: lead escalate transition skipped"
                             );
                         }
+                        djinn_telemetry::arbiter::record_decision(
+                            djinn_telemetry::arbiter::DECISION_ESCALATE,
+                        );
                         result = Some(TaskRunOutcome::Escalated { reason });
                         break;
                     }
