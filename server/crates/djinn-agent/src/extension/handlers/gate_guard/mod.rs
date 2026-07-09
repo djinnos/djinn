@@ -96,6 +96,6 @@ mod tests {
     }
 
     mod edit_tests;
-    mod write_tests;
     mod patch_tests;
+    mod write_tests;
 }
