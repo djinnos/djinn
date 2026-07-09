@@ -26,6 +26,7 @@
 
 #![allow(dead_code)]
 
+use djinn_core::test_paths::is_test_path;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::tripwires::engine::{ChangedFile, RawFinding};
@@ -34,6 +35,24 @@ use crate::tripwires::reason_codes::TripwireRuleId;
 
 #[cfg(test)]
 mod tests;
+
+// ─── Test-path downgrade ──────────────────────────────────────────────────
+
+/// Effective `report_only` for a finding whose evidence lives at `path`.
+///
+/// A finding is downgraded to report-only (advisory, non-blocking) whenever
+/// either the rule's own `report_only` config is set OR the evidence path is
+/// a test file per djinn-core's canonical [`is_test_path`]. This kills the
+/// single dumbest tripwire false-positive class — an `unsafe`/egress matcher
+/// or a large delete that lives inside a test fixture is never a real
+/// enforcement hold. The engine stamps a human-readable downgrade reason on
+/// any test-path finding (see `engine::TEST_PATH_DOWNGRADE_REASON`).
+///
+/// Applied uniformly across every rule family so no rule can enforce-hold on
+/// a test path.
+fn effective_report_only(config_report_only: bool, path: &str) -> bool {
+    config_report_only || is_test_path(path)
+}
 
 // ─── Glob matching helpers ────────────────────────────────────────────────
 
@@ -128,7 +147,7 @@ pub fn evaluate_migration_changes(
         if current_matches || old_matches {
             findings.push(RawFinding {
                 rule_id: TripwireRuleId::MigrationChange,
-                report_only: config.report_only,
+                report_only: effective_report_only(config.report_only, &file.path),
                 evidence_path: file.path.clone(),
                 evidence_start_line: None,
                 evidence_end_line: None,
@@ -183,7 +202,7 @@ pub fn evaluate_dependency_identity_changes(
             // (add/remove/rename/source switch/major version bump).
             findings.push(RawFinding {
                 rule_id: TripwireRuleId::DependencyIdentityChange,
-                report_only: config.report_only,
+                report_only: effective_report_only(config.report_only, &file.path),
                 evidence_path: file.path.clone(),
                 evidence_start_line: None,
                 evidence_end_line: None,
@@ -192,7 +211,7 @@ pub fn evaluate_dependency_identity_changes(
         } else if is_lockfile && config.lockfile_change_blocks {
             findings.push(RawFinding {
                 rule_id: TripwireRuleId::DependencyIdentityChange,
-                report_only: config.report_only,
+                report_only: effective_report_only(config.report_only, &file.path),
                 evidence_path: file.path.clone(),
                 evidence_start_line: None,
                 evidence_end_line: None,
@@ -281,7 +300,7 @@ pub fn evaluate_network_egress_changes(
         for (path, start, end) in matched_spans {
             findings.push(RawFinding {
                 rule_id: TripwireRuleId::NetworkEgressChange,
-                report_only: config.report_only,
+                report_only: effective_report_only(config.report_only, &path),
                 evidence_path: path,
                 evidence_start_line: start,
                 evidence_end_line: end,
@@ -345,7 +364,7 @@ pub fn evaluate_unsafe_code_changes(
                         let line_num = hunk.new_start + i as u32;
                         findings.push(RawFinding {
                             rule_id: TripwireRuleId::UnsafeCodeChange,
-                            report_only: config.report_only,
+                            report_only: effective_report_only(config.report_only, &file.path),
                             evidence_path: file.path.clone(),
                             evidence_start_line: Some(line_num),
                             evidence_end_line: Some(line_num),
@@ -417,7 +436,7 @@ pub fn evaluate_boundary_path_changes(
 
         findings.push(RawFinding {
             rule_id: TripwireRuleId::BoundaryPathChange,
-            report_only: config.report_only,
+            report_only: effective_report_only(config.report_only, &file.path),
             evidence_path: file.path.clone(),
             evidence_start_line: None,
             evidence_end_line: None,
@@ -493,7 +512,7 @@ pub fn evaluate_large_delete_or_rewrite(
         if deletions > config.per_file_line_threshold {
             findings.push(RawFinding {
                 rule_id: TripwireRuleId::LargeDeleteOrRewrite,
-                report_only: config.report_only,
+                report_only: effective_report_only(config.report_only, &file.path),
                 evidence_path: file.path.clone(),
                 evidence_start_line: None,
                 evidence_end_line: None,
@@ -509,7 +528,7 @@ pub fn evaluate_large_delete_or_rewrite(
             if percentage > config.file_rewrite_percentage_threshold {
                 findings.push(RawFinding {
                     rule_id: TripwireRuleId::LargeDeleteOrRewrite,
-                    report_only: config.report_only,
+                    report_only: effective_report_only(config.report_only, &file.path),
                     evidence_path: file.path.clone(),
                     evidence_start_line: None,
                     evidence_end_line: None,
@@ -527,7 +546,7 @@ pub fn evaluate_large_delete_or_rewrite(
         if let Some(path) = first_file_path {
             findings.push(RawFinding {
                 rule_id: TripwireRuleId::LargeDeleteOrRewrite,
-                report_only: config.report_only,
+                report_only: effective_report_only(config.report_only, &path),
                 evidence_path: path,
                 evidence_start_line: None,
                 evidence_end_line: None,
@@ -580,7 +599,7 @@ pub fn evaluate_ci_workflow_changes(
         if current_matches || old_matches {
             findings.push(RawFinding {
                 rule_id: TripwireRuleId::CIWorkflowChange,
-                report_only: config.report_only,
+                report_only: effective_report_only(config.report_only, &file.path),
                 evidence_path: file.path.clone(),
                 evidence_start_line: None,
                 evidence_end_line: None,

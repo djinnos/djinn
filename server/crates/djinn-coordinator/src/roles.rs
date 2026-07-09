@@ -158,6 +158,26 @@ pub(crate) fn releases_source_on_close(task: &Task) -> bool {
     is_human_review_hold(task) || task.labels.contains(PLANNER_PARK_ESCALATION_LABEL)
 }
 
+/// Remove the `human-review-hold` label from an existing labels JSON array,
+/// returning the updated JSON string. Idempotent: if the label is absent the
+/// input's label set is returned unchanged (re-serialised).
+///
+/// `existing_labels` is a JSON-array string (e.g. `["bug","human-review-hold"]`).
+/// Malformed JSON is treated as an empty label set (yielding `[]`).
+///
+/// Used by the hold-release path: once a hold is released (human close or
+/// arbiter `tripwire_release`) the source task must shed the label so the
+/// dispatch guard stops skipping it and the tamper reconciler does not
+/// re-apply it (the label-only-ever-added regression).
+pub(crate) fn remove_hold_label_from_existing(existing_labels: &str) -> String {
+    let labels: Vec<String> = serde_json::from_str(existing_labels).unwrap_or_default();
+    let kept: Vec<String> = labels
+        .into_iter()
+        .filter(|l| l != HUMAN_REVIEW_HOLD_LABEL)
+        .collect();
+    serde_json::to_string(&kept).unwrap_or_else(|_| "[]".to_owned())
+}
+
 /// Returns `true` if the task is an open/in-progress review task.
 ///
 /// Excludes `human-review-hold` tasks: those are a terminal,
@@ -318,6 +338,25 @@ mod tests {
                 "plain review task ({status}) must route to the planner"
             );
         }
+    }
+
+    /// `remove_hold_label_from_existing` strips only the hold label, keeps
+    /// siblings, and is idempotent when the label is absent / malformed.
+    #[test]
+    fn remove_hold_label_strips_only_the_hold_label() {
+        assert_eq!(
+            remove_hold_label_from_existing(r#"["bug","human-review-hold","blocked"]"#),
+            r#"["bug","blocked"]"#
+        );
+        // Absent → unchanged set (re-serialised).
+        assert_eq!(remove_hold_label_from_existing(r#"["bug"]"#), r#"["bug"]"#);
+        // Only the hold label → empty set.
+        assert_eq!(
+            remove_hold_label_from_existing(r#"["human-review-hold"]"#),
+            r#"[]"#
+        );
+        // Malformed JSON → empty set (fail-safe).
+        assert_eq!(remove_hold_label_from_existing("not json"), r#"[]"#);
     }
 
     /// Regression (this fix): a `human-review-hold`-labeled `review` task

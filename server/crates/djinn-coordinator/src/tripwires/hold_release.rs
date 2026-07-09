@@ -120,6 +120,7 @@ pub fn build_hold_released_payload(
         released_by_role: released_by_role.to_owned(),
         rationale: rationale.to_owned(),
         released_findings: state.active_findings.clone(),
+        carried_forward: false,
         idempotency_key,
         released_at: Some(released_at.to_owned()),
     };
@@ -151,6 +152,8 @@ mod tests {
             severity: TripwireSeverity::HumanReviewRequired,
             evidence: TripwireEvidenceSpan::file(path),
             idempotency_key: key.to_owned(),
+            content_fingerprint: format!("fp:{key}"),
+            downgrade_reason: None,
         }
     }
 

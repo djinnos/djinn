@@ -169,6 +169,19 @@ pub struct TripwireFindingSummary {
     /// `(task_id, pr_number, head_sha, rule_id, evidence_path, evidence_line_range, policy_revision)`.
     /// See engine module (sibling task `gl0p`) for the canonical builder.
     pub idempotency_key: String,
+    /// Head-independent content fingerprint. Stable across PR heads while the
+    /// underlying flagged content (rule + file + patch hunk) is unchanged —
+    /// unlike [`idempotency_key`](TripwireFindingSummary::idempotency_key)
+    /// which includes `head_sha`. The gate's release carry-forward keys on
+    /// this to recognise a finding already adjudicated on a prior head.
+    /// `#[serde(default)]` keeps pre-fingerprint activity rows decoding.
+    #[serde(default)]
+    pub content_fingerprint: String,
+    /// When set, the reason this finding was downgraded from enforcement to
+    /// report-only (e.g. the evidence path is a test file). Omitted from the
+    /// wire when absent.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub downgrade_reason: Option<String>,
 }
 
 // ─── Gate decision payload ─────────────────────────────────────────────────
@@ -288,6 +301,15 @@ pub struct TripwireHoldReleasedPayload {
     pub rationale: String,
     /// Findings that were released (still recorded for audit).
     pub released_findings: Vec<TripwireFindingSummary>,
+    /// `true` when this release was auto-carried-forward from a prior head:
+    /// the same content (by content fingerprint) was already adjudicated and
+    /// released on an earlier head of the same PR and is byte-identical on the
+    /// new head, so the release is re-emitted for the new head referencing the
+    /// prior rationale/releaser without re-running adjudication. `false` for a
+    /// first-time (human- or arbiter-driven) release. `#[serde(default)]`
+    /// keeps pre-carry-forward rows decoding.
+    #[serde(default)]
+    pub carried_forward: bool,
     /// Stable idempotency key for this release. Derived from
     /// `(task_id, pr_number, head_sha, released_by, policy_revision)`.
     pub idempotency_key: String,
@@ -524,6 +546,8 @@ mod tests {
             severity: TripwireSeverity::HumanReviewRequired,
             evidence: TripwireEvidenceSpan::file(path.to_owned()),
             idempotency_key: format!("sha256:{rule_id}:{path}"),
+            content_fingerprint: format!("fp:sha256:{rule_id}:{path}"),
+            downgrade_reason: None,
         }
     }
 
@@ -651,6 +675,8 @@ mod tests {
             severity: TripwireSeverity::ReportOnly,
             evidence: TripwireEvidenceSpan::file(".github/workflows/ci.yml"),
             idempotency_key: "sha256:ci:yml".to_owned(),
+            content_fingerprint: "fp:sha256:ci:yml".to_owned(),
+            downgrade_reason: None,
         };
         let payload = TripwireGateDecisionPayload {
             event_type: TRIPWIRE_EVENT_GATE_REPORT_ONLY.to_owned(),
@@ -746,6 +772,7 @@ mod tests {
                 "tripwire.large_delete_or_rewrite",
                 "legacy/big_file.rs",
             )],
+            carried_forward: false,
             idempotency_key: "sha256:release:feedface".to_owned(),
             released_at: Some("2026-02-02T00:00:00Z".to_owned()),
         };
@@ -769,6 +796,7 @@ mod tests {
             released_by_role: "lead".to_owned(),
             rationale: "rationale".to_owned(),
             released_findings: Vec::new(),
+            carried_forward: false,
             idempotency_key: "k".to_owned(),
             released_at: None,
         };
