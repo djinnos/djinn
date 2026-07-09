@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,\n                                    issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)\n                 VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d95076ded289a1a1bafbbf9da6ef7cb2a3f495c821c233c70053d9625142e789"
+}

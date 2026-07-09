@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO session_messages (id, session_id, role, content_json, created_at)\n                 VALUES ($1, $2, 'assistant', '{}', $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8e19fe8154fc9fd1949d36adc19f5fcee04418f22e88e7d696f33f65e3273c5d"
+}
