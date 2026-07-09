@@ -132,11 +132,8 @@ pub(crate) async fn call_shell(
 ) -> Result<serde_json::Value, String> {
     let p: ShellParams = parse_args(arguments)?;
 
-    // Worker AND reviewer roles: steer type-checks to clippy (which reuses the
-    // warm cargo cache). `cargo check`/`cargo build` cold-build the workspace —
-    // the reviewer's `cargo check` was a ~12min cold full-workspace recompile on
-    // every reviewed task before this steer (different fingerprint than the warm
-    // clippy base). Other roles (planner/architect) don't run cargo.
+    // Worker AND reviewer roles: steer `cargo check`/`cargo build` to clippy
+    // (warm cache). Other roles (planner/architect) don't run cargo.
     if matches!(session_role, Some("worker") | Some("reviewer"))
         && let Some(msg) = cargo_check_denied(&p.command)
     {
@@ -145,10 +142,8 @@ pub(crate) async fn call_shell(
 
     let timeout_ms = effective_shell_timeout_ms(p.timeout_ms, &p.command);
 
-    // Cross-repo shell: when `project` names a DIFFERENT registered project,
-    // lazily check that repo out (read-only, cached per run) into the worktree
-    // and run there. The sandbox root stays the task worktree, so the checkout
-    // (under `.djinn/read-sources/`) is reachable while writes can't escape.
+    // Cross-repo shell: when `project` names a different registered project,
+    // check it out read-only into `.djinn/read-sources/` and run there.
     let run_dir: std::path::PathBuf =
         if let Some(proj) = p.project.as_deref().filter(|s| !s.is_empty()) {
             let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
@@ -636,6 +631,8 @@ fn emit_edit_match_telemetry(
     }));
 }
 
+use super::gate_guard::gate_guard_edit_check;
+
 pub(crate) async fn call_edit(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -695,6 +692,47 @@ pub(crate) async fn call_edit(
 
             match metadata.outcome {
                 MatchOutcome::Success => {
+                    // Structured edit_match metadata.
+                    let byte_range = metadata.byte_range.expect("success has byte range");
+                    let matched_bytes_val = byte_range.end - byte_range.start;
+                    let edit_match = serde_json::json!({
+                        "strategy": metadata.strategy.as_str(),
+                        "matched_byte_range": [byte_range.start, byte_range.end],
+                        "matched_line_range": metadata.line_range.map(|lr| [lr.start, lr.end]),
+                        "old_bytes": p.old_text.len(),
+                        "new_bytes": p.new_text.len(),
+                        "matched_bytes": matched_bytes_val,
+                        "reindented": metadata.reindented,
+                        "unicode_splice": metadata.unicode_splice.map(|s| match s {
+                            UnicodeSpliceStatus::Clean => "clean",
+                            UnicodeSpliceStatus::Adjusted => "adjusted",
+                        }),
+                        "note": match_note_for(metadata.strategy),
+                    });
+
+                    // Emit telemetry BEFORE GateGuard check so match-outcome
+                    // telemetry is always recorded for successful candidates.
+                    emit_edit_match_telemetry(
+                        &metadata,
+                        session_task_id,
+                        session_task_id,
+                        session_role,
+                        &path_ext,
+                        p.old_text.len(),
+                        p.new_text.len(),
+                        matched_bytes,
+                    );
+
+                    // GateGuard: enforce worker read-coverage gate before mutation.
+                    gate_guard_edit_check(
+                        state,
+                        session_role,
+                        &worktree_path.display().to_string(),
+                        &path,
+                        byte_range.start..byte_range.end,
+                    )
+                    .await?;
+
                     let new_content = apply_match(&content, &p.new_text, &metadata);
                     tokio::fs::write(&path, &new_content)
                         .await
@@ -722,36 +760,7 @@ pub(crate) async fn call_edit(
                         result["match_note"] = serde_json::Value::String(note);
                     }
 
-                    // Structured edit_match metadata.
-                    let byte_range = metadata.byte_range.expect("success has byte range");
-                    let matched_bytes_val = byte_range.end - byte_range.start;
-                    let edit_match = serde_json::json!({
-                        "strategy": metadata.strategy.as_str(),
-                        "matched_byte_range": [byte_range.start, byte_range.end],
-                        "matched_line_range": metadata.line_range.map(|lr| [lr.start, lr.end]),
-                        "old_bytes": p.old_text.len(),
-                        "new_bytes": p.new_text.len(),
-                        "matched_bytes": matched_bytes_val,
-                        "reindented": metadata.reindented,
-                        "unicode_splice": metadata.unicode_splice.map(|s| match s {
-                            UnicodeSpliceStatus::Clean => "clean",
-                            UnicodeSpliceStatus::Adjusted => "adjusted",
-                        }),
-                        "note": match_note_for(metadata.strategy),
-                    });
                     result["edit_match"] = edit_match;
-
-                    // Emit telemetry (edit_match_outcome + edit_match_strategy).
-                    emit_edit_match_telemetry(
-                        &metadata,
-                        session_task_id,
-                        session_task_id,
-                        session_role,
-                        &path_ext,
-                        p.old_text.len(),
-                        p.new_text.len(),
-                        matched_bytes,
-                    );
 
                     let result = match (project_id, touched_rel.as_deref()) {
                         (Some(pid), Some(rel)) => {

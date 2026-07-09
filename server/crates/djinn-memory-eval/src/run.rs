@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use tracing::{info, warn};
 
 use djinn_db::database::Database;
@@ -627,8 +627,6 @@ fn assert_signal_effects(output: &RunOutput) -> Result<()> {
         .iter()
         .any(|c| c.signal == "graph" && c.rank_changed);
 
-    // Also count graph comparisons that exist (even if rank didn't change,
-    // the test infrastructure itself is valuable)
     let graph_comparisons: Vec<_> = output
         .signal_comparisons
         .iter()
@@ -640,12 +638,9 @@ fn assert_signal_effects(output: &RunOutput) -> Result<()> {
             "no graph/entity signal comparisons were generated (no queries claimed graph/entity signals)"
         );
     } else if !graph_changed {
-        // This is a warning, not a hard failure, because the actual rank
-        // difference depends on the fixture data. The important thing is that
-        // the comparison infrastructure works.
-        warn!(
-            count = graph_comparisons.len(),
-            "graph/entity signal comparisons exist but none showed rank change"
+        bail!(
+            "graph/entity signal comparisons exist ({} comparisons) but none showed rank change",
+            graph_comparisons.len()
         );
     } else {
         info!("graph/entity signal assertion passed: at least one rank changed");
@@ -668,9 +663,9 @@ fn assert_signal_effects(output: &RunOutput) -> Result<()> {
             "no task-affinity signal comparisons were generated (no queries claimed task-affinity signals)"
         );
     } else if !task_affinity_changed {
-        warn!(
-            count = task_affinity_comparisons.len(),
-            "task-affinity signal comparisons exist but none showed rank change"
+        bail!(
+            "task-affinity signal comparisons exist ({} comparisons) but none showed rank change",
+            task_affinity_comparisons.len()
         );
     } else {
         info!("task-affinity signal assertion passed: at least one rank changed");
@@ -822,19 +817,11 @@ mod tests {
             "must have at least one graph signal comparison"
         );
 
-        // At least one graph comparison must show rank changed, OR there
-        // must be infrastructure to test graph effects. If the corpus is too
-        // small for rank to change, we still validate the comparison infrastructure.
         let any_graph_changed = graph_comparisons.iter().any(|c| c.rank_changed);
-        let any_graph_has_results = graph_comparisons
-            .iter()
-            .any(|c| c.rank_with_signal.is_some() || c.rank_without_signal.is_some());
 
-        // Either the rank changed (proving graph matters) or we have
-        // comparison infrastructure working (testing the test machinery)
         assert!(
-            any_graph_changed || any_graph_has_results,
-            "graph comparisons must show rank change or have results: {:?}",
+            any_graph_changed,
+            "graph comparisons must show rank change for at least one relevant note: {:?}",
             graph_comparisons
         );
     }
@@ -861,13 +848,10 @@ mod tests {
         );
 
         let any_ta_changed = ta_comparisons.iter().any(|c| c.rank_changed);
-        let any_ta_has_results = ta_comparisons
-            .iter()
-            .any(|c| c.rank_with_signal.is_some() || c.rank_without_signal.is_some());
 
         assert!(
-            any_ta_changed || any_ta_has_results,
-            "task-affinity comparisons must show rank change or have results: {:?}",
+            any_ta_changed,
+            "task-affinity comparisons must show rank change for at least one relevant note: {:?}",
             ta_comparisons
         );
     }
