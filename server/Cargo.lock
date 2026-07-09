@@ -1223,6 +1223,7 @@ dependencies = [
  "djinn-telemetry",
  "djinn-workspace",
  "futures",
+ "globset",
  "hex",
  "insta",
  "libc",
