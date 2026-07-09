@@ -89,7 +89,8 @@ fn file_extension(path: &str) -> Option<&str> {
 /// Evaluate migration-change findings.
 ///
 /// Flags any changed file whose path matches the policy's migration
-/// path globs (e.g. `migrations/**`, `db/migrations/**`). Each
+/// path globs (e.g. `migrations/**`, `db/migrations/**`,
+/// `migrations_postgres/**`, database crate SQL paths). Each
 /// matching file produces one file-level finding.
 ///
 /// Deletions and renames of migration files are also flagged because
@@ -627,6 +628,83 @@ mod tests {
             ChangedFileStatus::Added,
             30,
             0,
+        )];
+        let findings = evaluate_migration_changes(&default_policy(), &files);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn migration_file_under_migrations_postgres_path() {
+        let files = vec![simple_file(
+            "migrations_postgres/001_create_users.sql",
+            ChangedFileStatus::Added,
+            45,
+            0,
+        )];
+        let findings = evaluate_migration_changes(&default_policy(), &files);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule_id, TripwireRuleId::MigrationChange);
+        assert_eq!(
+            findings[0].evidence_path,
+            "migrations_postgres/001_create_users.sql"
+        );
+    }
+
+    #[test]
+    fn migration_file_under_nested_migrations_postgres_path() {
+        let files = vec![simple_file(
+            "server/migrations_postgres/002_add_email.sql",
+            ChangedFileStatus::Modified,
+            15,
+            5,
+        )];
+        let findings = evaluate_migration_changes(&default_policy(), &files);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn migration_sql_file_under_db_directory() {
+        let files = vec![simple_file(
+            "db/schema/003_add_index.sql",
+            ChangedFileStatus::Added,
+            20,
+            0,
+        )];
+        let findings = evaluate_migration_changes(&default_policy(), &files);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn migration_sql_file_under_database_directory() {
+        let files = vec![simple_file(
+            "database/init/004_bootstrap.sql",
+            ChangedFileStatus::Added,
+            100,
+            0,
+        )];
+        let findings = evaluate_migration_changes(&default_policy(), &files);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn migration_file_under_database_crate_path() {
+        let files = vec![simple_file(
+            "crates/db-core/migrations/005_create_sessions.sql",
+            ChangedFileStatus::Added,
+            60,
+            0,
+        )];
+        let findings = evaluate_migration_changes(&default_policy(), &files);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn migration_file_under_database_crate_nested_sql() {
+        let files = vec![simple_file(
+            "crates/postgres-store/migrations/006_audit_log.sql",
+            ChangedFileStatus::Modified,
+            25,
+            10,
         )];
         let findings = evaluate_migration_changes(&default_policy(), &files);
         assert_eq!(findings.len(), 1);
