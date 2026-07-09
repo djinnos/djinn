@@ -477,6 +477,8 @@ pub(crate) async fn call_write(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
     project_id: Option<&str>,
+    #[allow(unused_variables)] session_task_id: Option<&str>,
+    #[allow(unused_variables)] session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: WriteParams = parse_args(arguments)?;
     let path = resolve_path(&p.path, worktree_path);
@@ -867,6 +869,8 @@ pub(crate) async fn call_apply_patch(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
     project_id: Option<&str>,
+    #[allow(unused_variables)] session_task_id: Option<&str>,
+    #[allow(unused_variables)] session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: ApplyPatchParams = parse_args(arguments)?;
 

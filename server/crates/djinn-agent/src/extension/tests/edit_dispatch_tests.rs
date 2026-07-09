@@ -37,7 +37,7 @@ async fn apply_patch_twice_without_reread_forces_reread() {
             .expect("obj")
             .clone(),
     );
-    call_apply_patch(&state, &patch1_args, worktree.path(), None)
+    call_apply_patch(&state, &patch1_args, worktree.path(), None, None, None)
         .await
         .expect("first apply_patch should succeed");
 
@@ -52,7 +52,7 @@ async fn apply_patch_twice_without_reread_forces_reread() {
             .expect("obj")
             .clone(),
     );
-    let err = call_apply_patch(&state, &patch2_args, worktree.path(), None)
+    let err = call_apply_patch(&state, &patch2_args, worktree.path(), None, None, None)
         .await
         .expect_err("second patch without re-read must be rejected");
     assert!(
@@ -1441,4 +1441,81 @@ async fn edit_no_match_nearest_miss_score_is_reasonable() {
     // File must NOT be modified.
     let after = tokio::fs::read_to_string(&file).await.expect("read back");
     assert_eq!(after, content, "file must not be modified on no-match");
+}
+
+/// Regression: `call_apply_patch` accepts `session_task_id` and `session_role`
+/// parameters (plumbed consistently with `call_edit`) and still succeeds
+/// when invoked with a worker role. This proves the widened signature
+/// compiles and is callable through the worker-role plumbing path without
+/// changing runtime behavior.
+#[tokio::test]
+async fn apply_patch_accepts_worker_role_plumbing() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-patch-worker-");
+    let file = worktree.path().join("svc.rs");
+    tokio::fs::write(&file, "fn main() {\n    old();\n}\n")
+        .await
+        .expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    // Read first to satisfy read-before-modify.
+    let read_args = Some(
+        serde_json::json!({ "file_path": "svc.rs" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("read");
+
+    let patch = "*** Begin Patch\n*** Update File: svc.rs\n@@ fn main() @@\n fn main() {\n-    old();\n+    new();\n }\n*** End Patch";
+    let patch_args = Some(
+        serde_json::json!({ "patch": patch })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+
+    // Invoke with worker role and a task id — must succeed (no GateGuard
+    // enforcement in this epic).
+    let response = call_apply_patch(
+        &state,
+        &patch_args,
+        worktree.path(),
+        None,
+        Some("task-abc-123"),
+        Some("worker"),
+    )
+    .await
+    .expect("call_apply_patch with worker role must succeed");
+
+    assert_eq!(
+        response.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "apply_patch must return ok=true, got: {response:?}"
+    );
+    let files = response
+        .get("files")
+        .and_then(|v| v.as_array())
+        .expect("apply_patch must return files array");
+    assert_eq!(files.len(), 1, "expected one patched file");
+    assert_eq!(
+        files[0].get("path").and_then(|v| v.as_str()),
+        Some(file.display().to_string().as_str()),
+        "patched file path must match"
+    );
+    assert_eq!(
+        files[0].get("action").and_then(|v| v.as_str()),
+        Some("updated"),
+        "action must be 'updated'"
+    );
+
+    // Verify the content was actually patched.
+    let after = tokio::fs::read_to_string(&file).await.expect("read back");
+    assert!(
+        after.contains("new()"),
+        "file must contain the patched content: {after}"
+    );
 }
