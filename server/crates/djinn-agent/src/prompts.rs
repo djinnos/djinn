@@ -49,22 +49,14 @@ pub fn render_prompt(
 
 /// Append per-role prompt extensions to a fully-rendered system prompt.
 ///
-/// Order: base rendered prompt → system_prompt_extensions → learned_prompt.
+/// Order: base rendered prompt → `system_prompt_extensions`.
 /// Empty or whitespace-only values are skipped.
 /// Called by the execution layer after resolving the applicable DB agent_role.
-pub fn apply_role_extensions(
-    base: &str,
-    system_prompt_extensions: &str,
-    learned_prompt: Option<&str>,
-) -> String {
+pub fn apply_role_extensions(base: &str, system_prompt_extensions: &str) -> String {
     let mut out = base.to_string();
     if !system_prompt_extensions.trim().is_empty() {
         out.push_str("\n\n");
         out.push_str(system_prompt_extensions.trim());
-    }
-    if let Some(lp) = learned_prompt.filter(|s| !s.trim().is_empty()) {
-        out.push_str("\n\n");
-        out.push_str(lp.trim());
     }
     out
 }
