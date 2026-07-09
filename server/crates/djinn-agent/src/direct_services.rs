@@ -433,6 +433,221 @@ impl DirectServices {
 
         Ok(())
     }
+
+    /// Execute the arbiter supersede transaction: persist the decision on the
+    /// current unconsumed arbitration row and mark it consumed, emit an
+    /// `arbiter_decision` activity with decision `"supersede"` and the
+    /// replacement ids, transfer the source task's downstream blockers to the
+    /// last replacement subtask, and clean up the task branch/PR. Unlike the
+    /// park path this creates NO human-review hold — the replacement subtasks
+    /// created by the arbiter already carry the work forward, so the caller
+    /// force-closes the source (via the `arbiter_supersede → closed`
+    /// transition that runs after this method returns).
+    ///
+    /// `payload_json` is the JSON payload carried on the transition:
+    /// `{"reason": "...", "replacement_task_ids": ["..."]}`. Returns the
+    /// human-readable reason (referencing the replacement short_ids) that the
+    /// caller logs with the force-close transition.
+    async fn execute_arbiter_supersede_transaction(
+        &self,
+        task_id: &str,
+        payload_json: Option<&str>,
+    ) -> Result<String, String> {
+        use djinn_db::TaskRepository;
+        use djinn_db::repositories::task_arbitration::{
+            CreateArbitrationParams, TaskArbitrationRepository, UpdateDispatchLedgerParams,
+        };
+
+        let db = self.callbacks.agent_context.db.clone();
+        let event_bus = self.callbacks.agent_context.event_bus.clone();
+        let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+        let arb_repo = TaskArbitrationRepository::new(db.clone());
+
+        // Load the source task for project_id / short_id.
+        let task = task_repo
+            .get(task_id)
+            .await
+            .map_err(|e| format!("arbiter_supersede: failed to load task: {e}"))?
+            .ok_or_else(|| format!("arbiter_supersede: task {task_id} not found"))?;
+
+        // Parse the payload: reason + replacement task ids.
+        let payload: serde_json::Value = payload_json
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let raw_reason = payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let replacement_ids: Vec<String> = payload
+            .get("replacement_task_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Resolve replacement ids → short_ids for the reason/activity, and
+        // capture the last replacement's canonical id for blocker transfer.
+        let mut replacement_short_ids: Vec<String> = Vec::new();
+        let mut last_replacement_id: Option<String> = None;
+        for id in &replacement_ids {
+            match task_repo.resolve(id).await {
+                Ok(Some(t)) => {
+                    replacement_short_ids.push(t.short_id.clone());
+                    last_replacement_id = Some(t.id.clone());
+                }
+                _ => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        replacement = %id,
+                        "arbiter_supersede: replacement task did not resolve; skipping"
+                    );
+                    replacement_short_ids.push(id.clone());
+                }
+            }
+        }
+
+        let human_reason = match raw_reason {
+            Some(r) => r,
+            None if replacement_short_ids.is_empty() => "arbiter superseded task".to_string(),
+            None => format!(
+                "Superseded by replacement subtasks: {}",
+                replacement_short_ids.join(", ")
+            ),
+        };
+
+        // Resolve the current unconsumed arbitration row and persist the
+        // supersede decision, then mark it consumed. Mirrors the park path so
+        // the hold cycle is closed out exactly once.
+        let (hold_cycle, unconsumed_record) = arb_repo
+            .resolve_current_hold_cycle(task_id)
+            .await
+            .map_err(|e| format!("arbiter_supersede: failed to resolve hold cycle: {e}"))?;
+
+        let decision_json = serde_json::json!({
+            "decision": "supersede",
+            "replacement_task_ids": replacement_short_ids,
+        });
+
+        if let Some(ref record) = unconsumed_record {
+            arb_repo
+                .update_dispatch_ledger(UpdateDispatchLedgerParams {
+                    task_id,
+                    hold_cycle: record.hold_cycle,
+                    mirror_head_sha: None,
+                    github_head_sha: None,
+                    pr_url: None,
+                    failing_ci_job_ids: None,
+                    dossier: None,
+                    directive: Some(&decision_json),
+                    verification_command: None,
+                    excluded_models: None,
+                })
+                .await
+                .map_err(|e| format!("arbiter_supersede: failed to update arbitration row: {e}"))?;
+            let consumed = arb_repo
+                .mark_consumed(task_id, record.hold_cycle)
+                .await
+                .map_err(|e| format!("arbiter_supersede: failed to mark consumed: {e}"))?;
+            if !consumed {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    hold_cycle = record.hold_cycle,
+                    "arbiter_supersede: arbitration row was already consumed"
+                );
+            }
+        } else {
+            // Fail closed: create a consumed recovery row so the decision is
+            // durable even when no unconsumed row exists.
+            tracing::warn!(
+                task_id = %task.short_id,
+                hold_cycle,
+                "arbiter_supersede: no unconsumed arbitration row; creating a consumed recovery row"
+            );
+            let failing_ci_job_ids = serde_json::json!([]);
+            let excluded_models = serde_json::json!([]);
+            arb_repo
+                .try_create(CreateArbitrationParams {
+                    task_id,
+                    hold_cycle,
+                    deadline_at: None,
+                    mirror_head_sha: None,
+                    github_head_sha: None,
+                    pr_url: None,
+                    failing_ci_job_ids: &failing_ci_job_ids,
+                    dossier: None,
+                    directive: Some(&decision_json),
+                    verification_command: None,
+                    excluded_models: &excluded_models,
+                })
+                .await
+                .map_err(|e| format!("arbiter_supersede: failed to create recovery row: {e}"))?;
+            let _ = arb_repo.mark_consumed(task_id, hold_cycle).await;
+        }
+
+        // Transfer downstream blocker edges: any task blocked by the closing
+        // source is re-pointed at the last replacement so it is not prematurely
+        // dispatched when the force-close resolves the source blocker. Mirrors
+        // the tool-path `force_close` replacement_task_ids mechanism.
+        if let Some(ref last_id) = last_replacement_id {
+            let downstream = task_repo
+                .list_blocked_by(&task.id)
+                .await
+                .unwrap_or_default();
+            for blocked_ref in &downstream {
+                if let Err(e) = task_repo.add_blocker(&blocked_ref.task_id, last_id).await {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        blocked = %blocked_ref.task_id,
+                        error = %e,
+                        "arbiter_supersede: failed to transfer downstream blocker to replacement"
+                    );
+                }
+            }
+        }
+
+        // Emit arbiter_decision activity.
+        let decision_payload = serde_json::json!({
+            "event": "arbiter_decision",
+            "task_id": task.short_id,
+            "hold_cycle": hold_cycle,
+            "decision": "supersede",
+            "replacement_task_ids": replacement_short_ids,
+        });
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(task_id),
+                "system",
+                "coordinator",
+                "arbiter_decision",
+                &decision_payload.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "arbiter_supersede: failed to log arbiter_decision activity"
+            );
+        }
+
+        // Branch hygiene: delete the task branch on the local mirror and the
+        // GitHub remote so it doesn't linger as a dead ref / open PR. Deleting
+        // the remote ref closes any PR still open on that head — exactly the
+        // superseded-PR cleanup this decision exists to automate. Best-effort.
+        crate::task_merge::cleanup_task_branches_post_close(
+            &task.id,
+            &db,
+            &event_bus,
+            self.callbacks.agent_context.mirror.as_deref(),
+        )
+        .await;
+
+        Ok(human_reason)
+    }
 }
 
 #[async_trait]
@@ -797,12 +1012,31 @@ impl SupervisorServices for DirectServices {
         use djinn_db::TaskRepository;
         let parsed = TransitionAction::parse(&action).map_err(|e| e.to_string())?;
 
+        // The reason string threaded into the state-machine transition (and
+        // hence the activity log). Overridden below for `arbiter_supersede`,
+        // whose wire `reason` is a JSON payload rather than human-readable text.
+        let mut effective_reason = reason.clone();
+
         // Arbiter park: execute the full park transaction before the state
         // transition so the HumanReview blocker exists before the task lands
         // at `open` (the ordering contract from 7f8u).
         if matches!(parsed, TransitionAction::ArbiterPark) {
             self.execute_arbiter_park_transaction(&task_id, reason.as_deref())
                 .await?;
+        }
+
+        // Arbiter supersede: execute the supersede transaction before the
+        // terminal force-close so the arbitration row is consumed, the
+        // `arbiter_decision` activity is emitted, downstream blockers are
+        // transferred to the last replacement, and the task branch/PR are
+        // cleaned up. No human-review hold is created. Returns the
+        // human-readable reason (referencing the replacement short_ids) that
+        // is logged with the force-close transition.
+        if matches!(parsed, TransitionAction::ArbiterSupersede) {
+            let human_reason = self
+                .execute_arbiter_supersede_transaction(&task_id, reason.as_deref())
+                .await?;
+            effective_reason = Some(human_reason);
         }
 
         let repo = TaskRepository::new(
@@ -814,7 +1048,7 @@ impl SupervisorServices for DirectServices {
             parsed.clone(),
             "supervisor",
             "system",
-            reason.as_deref(),
+            effective_reason.as_deref(),
             None,
         )
         .await

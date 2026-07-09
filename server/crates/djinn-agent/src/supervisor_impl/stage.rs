@@ -493,6 +493,8 @@ async fn advertise_read_sources(
 /// - `reopen` requires non-empty `directive` and `verification_command`.
 /// - `park` requires a `park_dossier` object with non-empty `hold_description`
 ///   and `failure_analysis`.
+/// - `supersede` requires a non-empty `created_tasks` array (the replacement
+///   subtask ids); an empty list is rejected with guidance to `park` instead.
 /// - Legacy decisions (`escalate`, `decompose`, `force_close`) are rejected.
 fn lead_stage_outcome(
     finalize_name: &str,
@@ -646,13 +648,50 @@ fn lead_stage_outcome(
                         }
                     }
                 }
+                // supersede: the arbiter decomposed the task into replacement
+                // subtasks that carry the work forward. Force-close the source
+                // (and its PR) as superseded — no human-review hold. Valid ONLY
+                // when `created_tasks` is non-empty; an empty list means there is
+                // no autonomous resolution, so the arbiter must `park` instead.
+                "supersede" => {
+                    let created: Vec<String> = finalize_payload
+                        .and_then(|p| p.get("created_tasks"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str())
+                                .map(|s| s.trim())
+                                .filter(|s| !s.is_empty())
+                                .map(String::from)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if created.is_empty() {
+                        StageOutcome::Failed {
+                            reason: "supersede decision requires a non-empty \
+                                     'created_tasks' array of the replacement \
+                                     subtask IDs that carry the work forward; if \
+                                     no autonomous resolution exists, use park \
+                                     instead"
+                                .into(),
+                            provider_failure: None,
+                        }
+                    } else {
+                        StageOutcome::LeadSuperseded {
+                            reason: reason().unwrap_or_else(|| {
+                                "arbiter superseded task with replacement subtasks".into()
+                            }),
+                            replacement_task_ids: created,
+                        }
+                    }
+                }
                 // Legacy decisions removed: escalate, decompose,
                 // force_close are no longer valid arbiter outcomes.
                 other => StageOutcome::Failed {
                     reason: format!(
                         "lead submitted unknown or removed decision '{other}'; \
                          valid arbiter decisions are: approve, approve_conflict, \
-                         reopen, park"
+                         reopen, park, supersede"
                     ),
                     provider_failure: None,
                 },
@@ -2273,6 +2312,132 @@ mod tests {
             }
             other => panic!("expected LeadParked, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn arbiter_supersede_with_created_tasks_maps_to_lead_superseded() {
+        let payload = serde_json::json!({
+            "decision": "supersede",
+            "rationale": "decomposed into 3 replacement subtasks",
+            "created_tasks": ["repl-1", "repl-2", "repl-3"]
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::LeadSuperseded {
+                replacement_task_ids,
+                ..
+            } => {
+                assert_eq!(
+                    replacement_task_ids,
+                    vec![
+                        "repl-1".to_string(),
+                        "repl-2".to_string(),
+                        "repl-3".to_string()
+                    ],
+                    "supersede must carry the created_tasks as replacement ids"
+                );
+            }
+            other => panic!("expected LeadSuperseded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_supersede_without_created_tasks_fails_with_park_guidance() {
+        let payload = serde_json::json!({
+            "decision": "supersede",
+            "rationale": "meant to decompose but created nothing"
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("created_tasks"),
+                    "failure reason must mention created_tasks, got: {reason}"
+                );
+                assert!(
+                    reason.contains("park"),
+                    "failure reason must direct the arbiter to park instead, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for empty created_tasks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_supersede_empty_created_tasks_array_fails() {
+        // An explicit empty array must be treated the same as a missing field.
+        let payload = serde_json::json!({
+            "decision": "supersede",
+            "created_tasks": []
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("created_tasks") && reason.contains("park"),
+                    "empty created_tasks must fail with park guidance, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for empty created_tasks array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_supersede_blank_ids_are_dropped_and_fail_when_all_blank() {
+        // Whitespace-only ids are not real replacements — after trimming they
+        // leave an empty set, which must fail with park guidance.
+        let payload = serde_json::json!({
+            "decision": "supersede",
+            "created_tasks": ["   ", ""]
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("created_tasks"),
+                    "blank-only created_tasks must fail, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for blank created_tasks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_existing_four_decisions_unchanged_by_supersede_addition() {
+        // Regression guard: adding supersede must not alter the mapping of the
+        // other four decisions.
+        let approve = serde_json::json!({
+            "decision": "approve",
+            "evidence": {"source": "git diff + CI", "summary": "all AC met"}
+        });
+        assert!(matches!(
+            lead_stage_outcome("submit_decision", Some(&approve)),
+            StageOutcome::LeadApproved { .. }
+        ));
+
+        let reopen = serde_json::json!({
+            "decision": "reopen",
+            "directive": "fix the retry loop in dispatch.rs",
+            "verification_command": "cargo test -p djinn-coordinator"
+        });
+        assert!(matches!(
+            lead_stage_outcome("submit_decision", Some(&reopen)),
+            StageOutcome::LeadReopen { .. }
+        ));
+
+        let park = serde_json::json!({
+            "decision": "park",
+            "park_dossier": {"hold_description": "stuck", "failure_analysis": "why"}
+        });
+        assert!(matches!(
+            lead_stage_outcome("submit_decision", Some(&park)),
+            StageOutcome::LeadParked { .. }
+        ));
+
+        let approve_conflict = serde_json::json!({
+            "decision": "approve_conflict",
+            "evidence": {"source": "git diff", "summary": "correct but conflict"}
+        });
+        assert!(matches!(
+            lead_stage_outcome("submit_decision", Some(&approve_conflict)),
+            StageOutcome::LeadApproveConflict { .. }
+        ));
     }
 
     #[test]
