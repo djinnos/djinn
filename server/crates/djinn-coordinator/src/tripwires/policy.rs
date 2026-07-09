@@ -788,8 +788,10 @@ mod tests {
     /// change.
     #[test]
     fn allowlist_content_sha256_round_trips() {
-        let mut a = BoundaryAllowlistRef::default();
-        a.content_sha256 = Some("a".repeat(64));
+        let a = BoundaryAllowlistRef {
+            content_sha256: Some("a".repeat(64)),
+            ..BoundaryAllowlistRef::default()
+        };
         let json = serde_json::to_string(&a).unwrap();
         let back: BoundaryAllowlistRef = serde_json::from_str(&json).unwrap();
         assert_eq!(a, back);
