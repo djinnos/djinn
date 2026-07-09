@@ -16,6 +16,7 @@ vi.mock("@/api/mcpClient", () => ({
 
 vi.mock("@/api/server", () => ({
   loadMoreClosedTasks: vi.fn().mockResolvedValue([]),
+  searchTasksAcrossProjects: vi.fn().mockResolvedValue([]),
 }));
 
 const epicA: Epic = {

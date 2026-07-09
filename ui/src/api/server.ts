@@ -564,3 +564,54 @@ export async function loadMoreClosedTasks(): Promise<Task[]> {
     mergedColumnStore.getState().setLoadingMore(false);
   }
 }
+
+/**
+ * Cap on server-side search results per project. The board's search box only
+ * needs to *surface* matches that aren't already loaded (chiefly old merged
+ * tasks): one page of matches per project is plenty, and we deliberately do NOT
+ * paginate exhaustively — an unbounded fan-out over a project with thousands of
+ * closed tasks would defeat the whole active-first load. A query specific enough
+ * to matter matches far fewer than this.
+ */
+export const SEARCH_RESULT_CAP = 200;
+
+/**
+ * Backend-backed board search: for every project, run `task_list` with the
+ * case-insensitive `text` filter and additively merge the matches into the task
+ * store. This is what lets the search box match tasks the board never loaded
+ * (e.g. merged tasks beyond the first Merged-column page).
+ *
+ * Notes:
+ * - All statuses are searched (not just closed). Active tasks are already
+ *   loaded, but the store is keyed by id so re-upserting them is a cheap no-op;
+ *   searching everything keeps the semantics simple ("find any matching task").
+ * - The Merged-column pagination cursors ({@link mergedColumnStore}) are left
+ *   untouched: search-surfaced closed tasks render in the Merged column out of
+ *   cursor order (fine), while "Load more" keeps advancing from its own offsets.
+ * - Results are capped at {@link SEARCH_RESULT_CAP} per project (single page).
+ */
+export async function searchTasksAcrossProjects(
+  slugs: string[],
+  query: string,
+): Promise<Task[]> {
+  const trimmed = query.trim();
+  if (slugs.length === 0 || trimmed.length === 0) return [];
+  const perProject = await Promise.all(
+    slugs.map(async (slug) => {
+      const projectId = projectIdForSlug(slug);
+      const page = await callMcpTool("task_list", {
+        project: slug,
+        text: trimmed,
+        limit: SEARCH_RESULT_CAP,
+        offset: 0,
+      });
+      return (page.tasks as unknown as Task[]).map((t) => ({
+        ...t,
+        project_id: projectId,
+      }));
+    }),
+  );
+  const tasks = perProject.flatMap((t) => t);
+  taskStore.getState().upsertTasks(tasks);
+  return tasks;
+}

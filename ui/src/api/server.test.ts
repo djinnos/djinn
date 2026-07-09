@@ -8,8 +8,13 @@ import {
   getGithubInstallUrl,
   invalidateProviderCatalogCache,
   listGithubRepos,
+  searchTasksAcrossProjects,
+  SEARCH_RESULT_CAP,
   startProviderOAuth,
 } from "@/api/server";
+import { projectStore } from "@/stores/projectStore";
+import { taskStore } from "@/stores/taskStore";
+import { mergedColumnStore } from "@/stores/mergedColumnStore";
 
 vi.mock("@/api/mcpClient", () => ({
   callMcpTool: vi.fn(),
@@ -208,6 +213,58 @@ describe("server API helpers", () => {
         success: false,
         error: "MCP unavailable",
       });
+    });
+  });
+
+  describe("searchTasksAcrossProjects", () => {
+    beforeEach(() => {
+      taskStore.getState().clearTasks();
+      mergedColumnStore.getState().reset();
+      projectStore.getState().setProjects([
+        {
+          id: "proj-1",
+          name: "One",
+          github_owner: "acme",
+          github_repo: "one",
+        },
+        {
+          id: "proj-2",
+          name: "Two",
+          github_owner: "acme",
+          github_repo: "two",
+        },
+      ] as never);
+    });
+
+    it("queries every project with the case-insensitive text filter and upserts matches", async () => {
+      callMcpToolMock.mockImplementation((async (_tool: string, params: { project: string }) => {
+        if (params.project === "acme/one") {
+          return { tasks: [{ id: "t-1", title: "Auth login", status: "closed" }] };
+        }
+        return { tasks: [{ id: "t-2", title: "AUTHZ policy", status: "closed" }] };
+      }) as never);
+
+      const result = await searchTasksAcrossProjects(["acme/one", "acme/two"], "  auth  ");
+
+      expect(result).toHaveLength(2);
+      // Each project queried once with the trimmed text and the result cap.
+      expect(callMcpToolMock).toHaveBeenCalledWith("task_list", {
+        project: "acme/one",
+        text: "auth",
+        limit: SEARCH_RESULT_CAP,
+        offset: 0,
+      });
+      // Matches are stamped with their project id and merged into the store.
+      expect(taskStore.getState().getTask("t-1")?.project_id).toBe("proj-1");
+      expect(taskStore.getState().getTask("t-2")?.project_id).toBe("proj-2");
+      // The Merged-column pagination cursors are left untouched by search.
+      expect(mergedColumnStore.getState().hasMore()).toBe(false);
+      expect(Object.keys(mergedColumnStore.getState().projects)).toHaveLength(0);
+    });
+
+    it("short-circuits on an empty query without calling the backend", async () => {
+      await expect(searchTasksAcrossProjects(["acme/one"], "   ")).resolves.toEqual([]);
+      expect(callMcpToolMock).not.toHaveBeenCalled();
     });
   });
 
