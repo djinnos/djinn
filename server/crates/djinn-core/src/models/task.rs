@@ -624,6 +624,20 @@ pub enum TransitionAction {
     /// supervisor-side supersede transaction before this terminal move; no
     /// human-review hold is created. Terminal, like `ForceClose`.
     ArbiterSupersede,
+    /// Respawn-guard open-PR adoption handoff. When the pre-dispatch respawn
+    /// guard adopts an existing open PR for a dispatch-eligible worker task
+    /// (task carries `pr_url`, healthy PR, no rework signal), the task is moved
+    /// out of the dispatchable `open` column into the poller-owned `pr_review`
+    /// column so the PR poller advances it to merge. Without this, a task
+    /// reopened to `open` while retaining its `pr_url` (e.g. by the startup
+    /// reaper after a deploy) is adopted on every ready pass — skipping
+    /// dispatch — but polled by NOBODY (the PR poller only polls
+    /// `pr_draft`/`pr_review`), so it wedges (incident gton: 470 adoptions
+    /// overnight, 9h wedge). Only legal from `open`. Strike-free: it does NOT
+    /// bump `reopen_count`, carries no `reopen_class`, and records no
+    /// intervention — the PR already exists, this is a bookkeeping handoff, not
+    /// a rework. Applied by the coordinator with a `system` actor (no user).
+    AdoptionHandoff,
 }
 
 impl TransitionAction {
@@ -678,6 +692,7 @@ impl TransitionAction {
             "preapproval_verify_rejected" => Ok(Self::PreApprovalVerifyRejected),
             "arbiter_park" => Ok(Self::ArbiterPark),
             "arbiter_supersede" => Ok(Self::ArbiterSupersede),
+            "adoption_handoff" => Ok(Self::AdoptionHandoff),
             other => Err(Error::Internal(format!(
                 "unknown transition action: {other}"
             ))),
@@ -1179,6 +1194,26 @@ pub fn compute_transition(
                 ..Default::default()
             }
         }
+
+        TransitionAction::AdoptionHandoff => {
+            // Respawn-guard open-PR adoption handoff: the guard adopted an
+            // existing open PR for a dispatch-eligible worker task, so move the
+            // task out of the dispatchable `open` column into the poller-owned
+            // `pr_review` column. Only legal from `open` — the adoption path
+            // only fires for `open` worker tasks, and a task already in a
+            // poller-owned status needs no handoff (the caller no-ops before
+            // reaching here). Strike-free, like `ParkForRemediation`: no
+            // `reopen_count` bump, no `reopen_class`, no intervention. The PR
+            // already exists; this is a bookkeeping handoff, not a rework.
+            if *from != TaskStatus::Open {
+                return bad("adoption_handoff is only valid from open");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::PrReview),
+                activity_type: "adoption_handoff",
+                ..Default::default()
+            }
+        }
     })
 }
 
@@ -1255,7 +1290,7 @@ mod tests {
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 30] = [
+    const ACTIONS: [TransitionAction; 31] = [
         TransitionAction::Start,
         TransitionAction::ResumeWorker,
         TransitionAction::SubmitTaskReview,
@@ -1286,6 +1321,7 @@ mod tests {
         TransitionAction::PreApprovalVerifyRejected,
         TransitionAction::ArbiterPark,
         TransitionAction::ArbiterSupersede,
+        TransitionAction::AdoptionHandoff,
     ];
 
     fn expected_status(action: &TransitionAction, from: &TaskStatus) -> Option<TaskStatus> {
@@ -1380,6 +1416,7 @@ mod tests {
             (TransitionAction::ArbiterSupersede, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Closed)
             }
+            (TransitionAction::AdoptionHandoff, TaskStatus::Open) => Some(TaskStatus::PrReview),
             (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
                 Some(TaskStatus::Approved)
             }
@@ -1419,6 +1456,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn adoption_handoff_moves_open_to_pr_review_strike_free() {
+        // Respawn-guard adoption handoff (incident gton): a worker task reopened
+        // to `open` while retaining its `pr_url` must be handed to the PR poller
+        // by moving it into the poller-owned `pr_review` column, so it advances
+        // to merge instead of being adopted (skip-dispatch) on every ready pass
+        // and polled by nobody.
+        let apply = compute_transition(&TransitionAction::AdoptionHandoff, &TaskStatus::Open, None)
+            .expect("adoption_handoff from open is valid");
+        assert_eq!(apply.to_status, Some(TaskStatus::PrReview));
+        // Strike-free: the PR already exists, this is a bookkeeping handoff.
+        assert!(
+            !apply.increment_reopen,
+            "handoff must not bump reopen_count"
+        );
+        assert!(
+            apply.reopen_class.is_none(),
+            "handoff carries no reopen_class"
+        );
+        assert!(
+            !apply.record_intervention,
+            "handoff records no intervention"
+        );
+        assert!(!apply.set_closed_at);
+        // Auditable activity type names the handoff so the actor/reason are
+        // legible in the activity log.
+        assert_eq!(apply.activity_type, "adoption_handoff");
+    }
+
+    #[test]
+    fn adoption_handoff_invalid_outside_open() {
+        // The handoff is only legal from `open` — the adoption path only fires
+        // for dispatchable `open` worker tasks, and a task already in a
+        // poller-owned status must not be re-handed (the caller no-ops first).
+        for from in [
+            TaskStatus::InProgress,
+            TaskStatus::NeedsTaskReview,
+            TaskStatus::InTaskReview,
+            TaskStatus::Approved,
+            TaskStatus::PrDraft,
+            TaskStatus::PrReview,
+            TaskStatus::NeedsLeadIntervention,
+            TaskStatus::InLeadIntervention,
+            TaskStatus::Closed,
+        ] {
+            assert!(
+                compute_transition(&TransitionAction::AdoptionHandoff, &from, None).is_err(),
+                "adoption_handoff must be invalid from {from:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adoption_handoff_parses_from_wire() {
+        assert_eq!(
+            TransitionAction::parse("adoption_handoff").unwrap(),
+            TransitionAction::AdoptionHandoff
+        );
     }
 
     #[test]
