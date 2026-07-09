@@ -51,9 +51,7 @@ export namespace AgentCreateOutputSchema {
   is_default?: boolean
   /**
    * Machine-managed prompt learning state. Derived from active
-   * learned_prompt_history amendments. Read-only in public surfaces;
-   * mutations flow through agent_amend_prompt (Planner) and the
-   * evaluator/confirmation loop.
+   * learned_prompt_history amendments. Read-only in public surfaces.
    */
   learned_prompt?: string
   mcp_servers?: AnyJson[]
@@ -105,9 +103,7 @@ export namespace AgentListOutputSchema {
   is_default: boolean
   /**
    * Machine-managed prompt learning state. Derived from active
-   * learned_prompt_history amendments. Read-only in public surfaces;
-   * mutations flow through agent_amend_prompt (Planner) and the
-   * evaluator/confirmation loop.
+   * learned_prompt_history amendments. Read-only in public surfaces.
    */
   learned_prompt?: string
   mcp_servers: AnyJson[]
@@ -191,9 +187,7 @@ export namespace AgentShowOutputSchema {
   is_default?: boolean
   /**
    * Machine-managed prompt learning state. Derived from active
-   * learned_prompt_history amendments. Read-only in public surfaces;
-   * mutations flow through agent_amend_prompt (Planner) and the
-   * evaluator/confirmation loop.
+   * learned_prompt_history amendments. Read-only in public surfaces.
    */
   learned_prompt?: string
   mcp_servers?: AnyJson[]
@@ -214,8 +208,7 @@ export namespace AgentUpdateInputSchema {
   export interface AgentUpdateInput {
   /**
    * Set to true to clear machine-managed learned_prompt back to NULL.
-   * Admin/operator reset path; learned_prompt is otherwise managed through
-   * agent_amend_prompt and the evaluator loop.
+   * Admin/operator reset path.
    */
   clear_learned_prompt?: boolean
   description?: string
@@ -249,9 +242,7 @@ export namespace AgentUpdateOutputSchema {
   is_default?: boolean
   /**
    * Machine-managed prompt learning state. Derived from active
-   * learned_prompt_history amendments. Read-only in public surfaces;
-   * mutations flow through agent_amend_prompt (Planner) and the
-   * evaluator/confirmation loop.
+   * learned_prompt_history amendments. Read-only in public surfaces.
    */
   learned_prompt?: string
   mcp_servers?: AnyJson[]
@@ -3778,10 +3769,30 @@ export namespace MemoryHealthInputSchema {
 export type MemoryHealthInput = MemoryHealthInputSchema.MemoryHealthInput;
 export namespace MemoryHealthOutputSchema {
   export interface MemoryHealthOutput {
+  /**
+   * Notes with zero inbound authored wikilink or explicit authored
+   * association edges.  Machine-minted edges do *not* hide authored-link
+   * debt.
+   */
+  authored_orphan_count?: number
   broken_link_count?: number
   error?: string
+  /**
+   * Notes with no retrieval-effective edges at all — the strictest
+   * connectivity metric.
+   */
+  isolated_count?: number
+  /**
+   * `isolated_count` as a percentage of non-singleton notes.
+   */
+  isolated_pct?: number
   lifecycle?: (LifecycleHealth | null)
   low_confidence_note_count?: number
+  /**
+   * Authored-orphan notes that are *not* graph-isolated because at
+   * least one non-authored retrieval edge connects them.
+   */
+  machine_connected_orphan_count?: number
   orphan_note_count?: number
   recent_sweep?: (RecentSweepMetrics | null)
   stale_note_count?: number
@@ -10283,6 +10294,10 @@ export namespace TaskListInputSchema {
    * "updated", "updated_desc", "closed".
    */
   sort?: string
+  /**
+   * Positive ("open") or negative ("!closed") status filter. A leading "!"
+   * matches every task whose status differs from the given value.
+   */
   status?: string
   /**
    * Full-text search on title and description.

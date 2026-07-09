@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { projectStore } from "@/stores/projectStore";
 import { sseStore, type SSEEvent } from "@/stores/sseStore";
 import { resetMcpClient } from "@/api/mcpClient";
-import { fetchKanbanSnapshot } from "@/api/server";
+import { fetchActiveSnapshot, fetchClosedFirstPage } from "@/api/server";
 import {
   getReconnectDelay,
   INITIAL_RECONNECT_DELAY,
@@ -26,7 +26,8 @@ vi.mock("@/api/serverUrl", () => ({
 }));
 
 vi.mock("@/api/server", () => ({
-  fetchKanbanSnapshot: vi.fn().mockResolvedValue({ tasks: [], epics: [] }),
+  fetchActiveSnapshot: vi.fn().mockResolvedValue({ tasks: [], epics: [] }),
+  fetchClosedFirstPage: vi.fn().mockResolvedValue([]),
   fetchProjects: vi.fn().mockResolvedValue([]),
 }));
 
@@ -172,7 +173,8 @@ describe("useEventSource", () => {
     const hook = await mountEventSourceHook();
     const first = latestEventSource();
     expect(first.url).toBe("http://djinn.test/events");
-    expect(fetchKanbanSnapshot).toHaveBeenCalledWith(null, ["djinnos/djinn"]);
+    expect(fetchActiveSnapshot).toHaveBeenCalledWith(["djinnos/djinn"]);
+    expect(fetchClosedFirstPage).toHaveBeenCalledWith(["djinnos/djinn"]);
 
     act(() => first.onopen?.());
     await advanceTimersBy(SILENCE_TIMEOUT_MS);

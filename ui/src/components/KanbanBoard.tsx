@@ -4,6 +4,8 @@ import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
 import { useProjects } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
+import { useMergedColumnStore } from "@/stores/useMergedColumnStore";
+import { loadMoreClosedTasks } from "@/api/server";
 import type { Epic, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
@@ -28,6 +30,7 @@ import {
   matchesStructuredFilters,
   useBoardFilters,
 } from "@/components/board/boardFilters";
+import { useBoardServerSearch } from "@/components/board/useBoardServerSearch";
 
 type ColumnKey = "open" | "in_progress" | "pr_ready" | "done";
 
@@ -122,9 +125,25 @@ export function KanbanBoard({
   const storeEpics = useEpicStore((state) => state.epics);
   const projects = useProjects();
 
+  // Merged-column pagination: the board loads active tasks first, then the
+  // closed/merged tasks page-by-page. `hasMoreClosed` drives the "Load more"
+  // affordance and the "+" suffix on the Merged header count. When the board is
+  // rendered in controlled mode (`tasksProp`) the store is empty, so both stay
+  // falsy and the affordance is hidden.
+  const hasMoreClosed = useMergedColumnStore((state) => state.hasMore());
+  const loadingMoreClosed = useMergedColumnStore((state) => state.loadingMore);
+  const handleLoadMoreClosed = () => {
+    void loadMoreClosedTasks();
+  };
+
   // Filter values come from the shared header via the URL search params.
   const { projectFilters, epicFilters, ownerFilters, issueTypeFilters, search } =
     useBoardFilters();
+
+  // Backend-backed search: when the query is non-empty, fetch matching tasks
+  // (including old merged ones the board never loaded) into the store. Disabled
+  // in controlled mode (`tasksProp`, used by tests) where the store is unused.
+  useBoardServerSearch({ enabled: !tasksProp });
 
   const tasks = tasksProp ?? storeTasks;
   const epics = epicsProp ?? storeEpics;
@@ -206,7 +225,14 @@ export function KanbanBoard({
     };
     return tasks.filter((task) => {
       if (!matchesStructuredFilters(task, filters)) return false;
-      if (q && !task.title.toLowerCase().includes(q)) return false;
+      // Match title OR description, case-insensitive — mirrors the server's
+      // `text` filter (ILIKE over title/description) so tasks surfaced by the
+      // backend search aren't hidden by a narrower client-side predicate.
+      if (q) {
+        const title = (task.title ?? "").toLowerCase();
+        const description = (task.description ?? "").toLowerCase();
+        if (!title.includes(q) && !description.includes(q)) return false;
+      }
       return true;
     });
   }, [
@@ -319,6 +345,7 @@ export function KanbanBoard({
                       <span className="leading-none">{column.label}</span>
                       <span className="text-xs leading-none text-muted-foreground">
                         {taskCount}
+                        {column.key === "done" && hasMoreClosed ? "+" : ""}
                       </span>
                     </div>
                   </div>
@@ -334,7 +361,8 @@ export function KanbanBoard({
                 </div>
 
                 <CardContent className="relative z-10 flex-1 overflow-y-auto px-3 pt-4">
-                  {!hasContent ? (
+                  {!hasContent &&
+                  !(column.key === "done" && hasMoreClosed) ? (
                     <p className="px-1 text-xs text-muted-foreground/50">
                       No tasks
                     </p>
@@ -426,6 +454,19 @@ export function KanbanBoard({
                           </Card>
                         );
                       })}
+                    </div>
+                  )}
+
+                  {column.key === "done" && hasMoreClosed && (
+                    <div className="px-1 pt-3">
+                      <button
+                        type="button"
+                        onClick={handleLoadMoreClosed}
+                        disabled={loadingMoreClosed}
+                        className="w-full rounded-md border border-white/[0.06] bg-zinc-900/60 px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {loadingMoreClosed ? "Loading…" : "Load more"}
+                      </button>
                     </div>
                   )}
                 </CardContent>

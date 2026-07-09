@@ -23,6 +23,14 @@ export interface TaskState {
   clearTasks: () => void;
 
   setTasks: (tasks: Task[]) => void;
+  /**
+   * Additively merge tasks into the existing map (keyed by id). Unlike
+   * {@link setTasks} it does NOT drop tasks already present, so the Kanban can
+   * paint the active columns first and then append paginated Merged-column
+   * pages without clobbering what is already on screen. Idempotent: re-adding
+   * the same id overwrites its entry.
+   */
+  upsertTasks: (tasks: Task[]) => void;
 }
 
 export const taskStore = createStore<TaskState>()(
@@ -80,6 +88,15 @@ export const taskStore = createStore<TaskState>()(
     setTasks: (tasks) => {
       set({
         tasks: new Map(tasks.map((task) => [task.id, task])),
+      });
+    },
+
+    upsertTasks: (tasks) => {
+      if (tasks.length === 0) return;
+      set((state) => {
+        const newTasks = new Map(state.tasks);
+        for (const task of tasks) newTasks.set(task.id, task);
+        return { tasks: newTasks };
       });
     },
   }))

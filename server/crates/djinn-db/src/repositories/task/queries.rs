@@ -702,9 +702,15 @@ pub(super) fn build_where(
     }
 
     if let Some(s) = status {
-        let ph = format!("${}", param_offset + params.len() + 1);
-        clauses.push(format!("status = {ph}"));
-        params.push(SqlParam::Text(s.clone()));
+        if let Some(neg) = s.strip_prefix('!') {
+            let ph = format!("${}", param_offset + params.len() + 1);
+            clauses.push(format!("status != {ph}"));
+            params.push(SqlParam::Text(neg.to_owned()));
+        } else {
+            let ph = format!("${}", param_offset + params.len() + 1);
+            clauses.push(format!("status = {ph}"));
+            params.push(SqlParam::Text(s.clone()));
+        }
     }
 
     if let Some(it) = issue_type {
@@ -735,7 +741,11 @@ pub(super) fn build_where(
     if let Some(t) = text {
         let ph_a = format!("${}", param_offset + params.len() + 1);
         let ph_b = format!("${}", param_offset + params.len() + 2);
-        clauses.push(format!("(title LIKE {ph_a} OR description LIKE {ph_b})"));
+        // ILIKE (not LIKE): case-insensitive substring match. This filter backs
+        // the Kanban board's search box (which fetches unloaded merged tasks via
+        // task_list?text=…), where a case-sensitive match is surprising — a
+        // search for "auth" should find "Auth" and "AUTHZ" alike.
+        clauses.push(format!("(title ILIKE {ph_a} OR description ILIKE {ph_b})"));
         let pattern = format!("%{t}%");
         params.push(SqlParam::Text(pattern.clone()));
         params.push(SqlParam::Text(pattern));
