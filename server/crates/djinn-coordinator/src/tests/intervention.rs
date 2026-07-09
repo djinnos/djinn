@@ -5807,10 +5807,7 @@ async fn arbiter_failure_dossier_on_db_error_parks_with_evidence_fields() {
 
     // Drop the arbitration table so resolve_current_hold_cycle fails with
     // a real DB error ("no such table").
-    sqlx::query("DROP TABLE IF EXISTS task_arbitrations")
-        .execute(db.pool())
-        .await
-        .unwrap();
+    djinn_db::test_support::drop_table_for_test(&db, "task_arbitrations").await;
 
     // Act: route the park rung — must fail closed to human review.
     let handled = actor
@@ -5925,10 +5922,7 @@ async fn try_create_db_error_parks_with_failure_dossier() {
     // Now drop the table so try_create at cycle 1 fails with a DB error
     // while resolve_current_hold_cycle already returned (1, None) from the
     // consumed cycle 0 row.
-    sqlx::query("DROP TABLE IF EXISTS task_arbitrations")
-        .execute(db.pool())
-        .await
-        .unwrap();
+    djinn_db::test_support::drop_table_for_test(&db, "task_arbitrations").await;
 
     // Act: route the park rung — try_create will fail, must park.
     let handled = actor
