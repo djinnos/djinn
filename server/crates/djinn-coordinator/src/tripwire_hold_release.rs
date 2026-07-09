@@ -93,16 +93,6 @@ impl CoordinatorActor {
                 }
             };
 
-            // The current head is the poller-maintained GitHub head SHA. With
-            // no known head there is nothing to release against.
-            let Some(head_sha) = source
-                .ci_github_head_sha
-                .as_deref()
-                .filter(|s| !s.is_empty())
-            else {
-                continue;
-            };
-
             let entries = match task_repo.list_activity(&source.id).await {
                 Ok(e) => e,
                 Err(e) => {
@@ -117,16 +107,22 @@ impl CoordinatorActor {
             let entry_refs: Vec<ActivityEntryRef> =
                 entries.iter().map(ActivityEntryRef::from_entry).collect();
 
-            let state = compute_active_hold_state(&entry_refs, head_sha);
-            if !state.held {
-                // No active hold for the current head (superseded or already
-                // released) — skip emission.
-                tracing::info!(
-                    source_task_id = %source.short_id,
-                    head_sha = %head_sha,
-                    "tripwire release: no active hold for current head on hold-task close — skipping"
-                );
-                continue;
+            // Release EVERY head that still carries an un-released
+            // `tripwire.gate.held` — NOT just the task row's current GitHub
+            // head. The merge-boundary gate keys "current head" on the head
+            // pinned in the gate.held event (the CI-snapshot head at hold
+            // time), which can lag the task row's `ci_github_head_sha` after a
+            // later push. Releasing only the row head silently misses the hold
+            // the gate actually sees (incident: task `7tmi` — gate head
+            // `fd3d3670` vs row head `e4e0ccb8`).
+            let mut held_heads = crate::tripwires::gate_held_head_shas(&entry_refs);
+            if let Some(row_head) = source
+                .ci_github_head_sha
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                && !held_heads.iter().any(|h| h == row_head)
+            {
+                held_heads.push(row_head.to_owned());
             }
 
             let pr_number = source
@@ -134,53 +130,75 @@ impl CoordinatorActor {
                 .as_deref()
                 .and_then(|url| crate::pr_poller::parse_pr_url(url).map(|(_, _, n)| n));
 
-            let payload = match build_hold_released_payload(
-                &state,
-                &source.id,
-                &source.project_id,
-                pr_number,
-                HUMAN_RELEASE_ACTOR,
-                HUMAN_RELEASE_ROLE,
-                &rationale,
-                &now,
-            ) {
-                Ok(Some(p)) => p,
-                Ok(None) => continue,
-                Err(e) => {
-                    tracing::warn!(
-                        source_task_id = %source.short_id,
-                        error = %e,
-                        "tripwire release: failed to build hold-released payload"
-                    );
+            for head_sha in &held_heads {
+                let state = compute_active_hold_state(&entry_refs, head_sha);
+                if !state.held {
                     continue;
                 }
-            };
-
-            let payload_json = serde_json::to_string(&payload).unwrap_or_default();
-            match task_repo
-                .log_activity(
-                    Some(&source.id),
+                let payload = match build_hold_released_payload(
+                    &state,
+                    &source.id,
+                    &source.project_id,
+                    pr_number,
                     HUMAN_RELEASE_ACTOR,
                     HUMAN_RELEASE_ROLE,
-                    TRIPWIRE_EVENT_HOLD_RELEASED,
-                    &payload_json,
-                )
-                .await
-            {
-                Ok(_) => {
-                    tracing::info!(
-                        source_task_id = %source.short_id,
-                        hold_task_id = %hold_task.short_id,
-                        head_sha = %head_sha,
-                        released_findings = payload.released_findings.len(),
-                        "tripwire release: emitted tripwire.hold.released on human hold-task close"
-                    );
+                    &rationale,
+                    &now,
+                ) {
+                    Ok(Some(p)) => p,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        tracing::warn!(
+                            source_task_id = %source.short_id,
+                            error = %e,
+                            "tripwire release: failed to build hold-released payload"
+                        );
+                        continue;
+                    }
+                };
+
+                let payload_json = serde_json::to_string(&payload).unwrap_or_default();
+                match task_repo
+                    .log_activity(
+                        Some(&source.id),
+                        HUMAN_RELEASE_ACTOR,
+                        HUMAN_RELEASE_ROLE,
+                        TRIPWIRE_EVENT_HOLD_RELEASED,
+                        &payload_json,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!(
+                            source_task_id = %source.short_id,
+                            hold_task_id = %hold_task.short_id,
+                            head_sha = %head_sha,
+                            released_findings = payload.released_findings.len(),
+                            "tripwire release: emitted tripwire.hold.released on human hold-task close"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            source_task_id = %source.short_id,
+                            error = %e,
+                            "tripwire release: failed to log tripwire.hold.released event"
+                        );
+                    }
                 }
-                Err(e) => {
+            }
+
+            // Shed the `human-review-hold` label from the source now the hold
+            // is resolved. Otherwise the dispatch guard keeps skipping the
+            // labeled source AND the tamper reconciler re-applies the label on
+            // its next pass (labels were only ever added, never removed).
+            // Best-effort — a failure here does not wedge the close.
+            if crate::roles::is_human_review_hold(&source) {
+                let cleaned = crate::roles::remove_hold_label_from_existing(&source.labels);
+                if let Err(e) = task_repo.update_labels(&source.id, &cleaned).await {
                     tracing::warn!(
                         source_task_id = %source.short_id,
                         error = %e,
-                        "tripwire release: failed to log tripwire.hold.released event"
+                        "tripwire release: failed to strip human-review-hold label after release"
                     );
                 }
             }

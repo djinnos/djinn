@@ -80,6 +80,45 @@ pub enum PolicySource {
     Org,
 }
 
+// ─── Adjudication mode ─────────────────────────────────────────────────────
+
+/// Who resolves an enforcement hold produced by a rule.
+///
+/// The operator directive is **NO human-review holds**: every tripwire hold
+/// is adjudicated by the ARBITER (lead role) autonomously. [`Arbiter`] is the
+/// default for every rule. [`Human`] is a config-only escape hatch — only
+/// when an operator explicitly publishes `adjudication = human` for a rule via
+/// org policy does the legacy human-review remediation path run for holds
+/// that rule triggers.
+///
+/// [`Arbiter`]: Adjudication::Arbiter
+/// [`Human`]: Adjudication::Human
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Adjudication {
+    /// Autonomous arbiter (lead role) adjudication. The default.
+    #[default]
+    Arbiter,
+    /// Legacy human-review hold. Only reachable when an operator explicitly
+    /// opts a rule out of autonomous adjudication.
+    Human,
+}
+
+impl Adjudication {
+    /// Stable wire literal.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Arbiter => "arbiter",
+            Self::Human => "human",
+        }
+    }
+
+    /// Whether this rule's holds must be routed to a human reviewer.
+    pub const fn is_human(&self) -> bool {
+        matches!(self, Self::Human)
+    }
+}
+
 // ─── Per-rule configuration structs ────────────────────────────────────────
 
 /// Migration change detection: files created, changed, or deleted under the
@@ -92,6 +131,11 @@ pub struct MigrationRuleConfig {
     /// When `true`, findings are recorded as report-only (advisory) and do
     /// not block the gate.
     pub report_only: bool,
+    /// Who adjudicates a hold this rule triggers. Defaults to
+    /// [`Adjudication::Arbiter`]; an operator may set [`Adjudication::Human`]
+    /// via org policy to route this rule's holds to a human reviewer.
+    #[serde(default)]
+    pub adjudication: Adjudication,
     /// Glob patterns identifying migration files (e.g. `["migrations/**",
     /// "db/migrations/**", "migrations_postgres/**", "crates/*/migrations/**"]`).
     pub path_globs: Vec<String>,
@@ -102,6 +146,7 @@ impl Default for MigrationRuleConfig {
         Self {
             enabled: true,
             report_only: false,
+            adjudication: Adjudication::Arbiter,
             path_globs: vec![
                 // Standard migration directories
                 "migrations/**".to_owned(),
@@ -134,6 +179,9 @@ impl Default for MigrationRuleConfig {
 pub struct DependencyIdentityRuleConfig {
     pub enabled: bool,
     pub report_only: bool,
+    /// Who adjudicates a hold this rule triggers (defaults to arbiter).
+    #[serde(default)]
+    pub adjudication: Adjudication,
     pub major_version_bump_blocks: bool,
     pub lockfile_change_blocks: bool,
     /// Manifest paths watched (e.g. `Cargo.toml`, `package.json`,
@@ -148,6 +196,7 @@ impl Default for DependencyIdentityRuleConfig {
         Self {
             enabled: true,
             report_only: false,
+            adjudication: Adjudication::Arbiter,
             major_version_bump_blocks: true,
             lockfile_change_blocks: false,
             manifest_paths: vec![
@@ -175,6 +224,9 @@ impl Default for DependencyIdentityRuleConfig {
 pub struct NetworkEgressRuleConfig {
     pub enabled: bool,
     pub report_only: bool,
+    /// Who adjudicates a hold this rule triggers (defaults to arbiter).
+    #[serde(default)]
+    pub adjudication: Adjudication,
     /// Substring matchers that flag a file as a network-egress touchpoint
     /// (e.g. `reqwest::`, `curl_easy`, `Webhook`, `http::Request`).
     pub matcher_substrings: Vec<String>,
@@ -189,6 +241,7 @@ impl Default for NetworkEgressRuleConfig {
         Self {
             enabled: true,
             report_only: false,
+            adjudication: Adjudication::Arbiter,
             matcher_substrings: vec![
                 "reqwest::".to_owned(),
                 "ureq::".to_owned(),
@@ -210,6 +263,9 @@ impl Default for NetworkEgressRuleConfig {
 pub struct UnsafeCodeRuleConfig {
     pub enabled: bool,
     pub report_only: bool,
+    /// Who adjudicates a hold this rule triggers (defaults to arbiter).
+    #[serde(default)]
+    pub adjudication: Adjudication,
     /// File extensions the rule scans for `unsafe` markers. Files outside
     /// this list are ignored.
     pub extensions: Vec<String>,
@@ -224,6 +280,7 @@ impl Default for UnsafeCodeRuleConfig {
         Self {
             enabled: true,
             report_only: false,
+            adjudication: Adjudication::Arbiter,
             extensions: vec![
                 "rs".to_owned(),
                 "ts".to_owned(),
@@ -268,6 +325,9 @@ pub struct BoundaryPathRuleConfig {
     /// When `true`, findings are recorded as report-only (advisory) and do
     /// not block the gate.
     pub report_only: bool,
+    /// Who adjudicates a hold this rule triggers (defaults to arbiter).
+    #[serde(default)]
+    pub adjudication: Adjudication,
     /// `true` → changed files matching boundary category patterns that are
     /// absent from the allowlist trip the rule. `false` → only newly
     /// introduced boundary-category files trigger findings.
@@ -282,6 +342,7 @@ impl Default for BoundaryPathRuleConfig {
         Self {
             enabled: true,
             report_only: false,
+            adjudication: Adjudication::Arbiter,
             match_outside_allowlist: true,
             category_patterns: vec![
                 "scripts/capability-boundary-allowlist.toml".to_owned(),
@@ -338,6 +399,9 @@ impl Default for BoundaryAllowlistRef {
 pub struct LargeDeleteRewriteRuleConfig {
     pub enabled: bool,
     pub report_only: bool,
+    /// Who adjudicates a hold this rule triggers (defaults to arbiter).
+    #[serde(default)]
+    pub adjudication: Adjudication,
     /// Maximum lines deletable in a single file before the rule trips.
     pub per_file_line_threshold: u32,
     /// Maximum net lines deleted across the PR before the rule trips.
@@ -355,6 +419,7 @@ impl Default for LargeDeleteRewriteRuleConfig {
         Self {
             enabled: true,
             report_only: false,
+            adjudication: Adjudication::Arbiter,
             per_file_line_threshold: 400,
             aggregate_line_threshold: 1_500,
             file_rewrite_percentage_threshold: 60,
@@ -369,6 +434,9 @@ impl Default for LargeDeleteRewriteRuleConfig {
 pub struct CIWorkflowRuleConfig {
     pub enabled: bool,
     pub report_only: bool,
+    /// Who adjudicates a hold this rule triggers (defaults to arbiter).
+    #[serde(default)]
+    pub adjudication: Adjudication,
     /// Path globs identifying CI / workflow / release / deploy / automation
     /// files.
     pub path_globs: Vec<String>,
@@ -379,6 +447,7 @@ impl Default for CIWorkflowRuleConfig {
         Self {
             enabled: true,
             report_only: false,
+            adjudication: Adjudication::Arbiter,
             path_globs: vec![
                 ".github/workflows/**".to_owned(),
                 ".github/actions/**".to_owned(),
@@ -561,6 +630,37 @@ impl TripwirePolicy {
         clone.large_delete_rewrite.report_only = true;
         clone.ci_workflow.report_only = true;
         clone
+    }
+
+    /// The [`Adjudication`] mode configured for a given rule family.
+    ///
+    /// Defaults to [`Adjudication::Arbiter`] for every rule — the operator
+    /// directive is NO human-review holds. Only an explicit org-policy
+    /// override flips a rule to [`Adjudication::Human`].
+    pub fn adjudication_for(&self, rule: super::reason_codes::TripwireRuleId) -> Adjudication {
+        use super::reason_codes::TripwireRuleId;
+        match rule {
+            TripwireRuleId::MigrationChange => self.migration.adjudication,
+            TripwireRuleId::DependencyIdentityChange => self.dependency_identity.adjudication,
+            TripwireRuleId::NetworkEgressChange => self.network_egress.adjudication,
+            TripwireRuleId::UnsafeCodeChange => self.unsafe_code.adjudication,
+            TripwireRuleId::BoundaryPathChange => self.boundary_path.adjudication,
+            TripwireRuleId::LargeDeleteOrRewrite => self.large_delete_rewrite.adjudication,
+            TripwireRuleId::CIWorkflowChange => self.ci_workflow.adjudication,
+        }
+    }
+
+    /// Whether any of the given rule families is configured for human
+    /// adjudication. A hold whose enforcement findings include at least one
+    /// human-adjudicated rule takes the legacy human-review path; otherwise
+    /// the arbiter adjudicates autonomously.
+    pub fn any_rule_requires_human<I>(&self, rules: I) -> bool
+    where
+        I: IntoIterator<Item = super::reason_codes::TripwireRuleId>,
+    {
+        rules
+            .into_iter()
+            .any(|r| self.adjudication_for(r).is_human())
     }
 }
 
@@ -802,6 +902,62 @@ mod tests {
                 "{name}: serialized value must be an object, got {value}"
             );
         }
+    }
+
+    /// Every rule defaults to arbiter adjudication (NO human-review holds),
+    /// and `any_rule_requires_human` reflects an explicit per-rule override.
+    #[test]
+    fn adjudication_defaults_to_arbiter_and_honours_human_override() {
+        let mut p = TripwirePolicy::default();
+        for rule in [
+            TripwireRuleId::MigrationChange,
+            TripwireRuleId::DependencyIdentityChange,
+            TripwireRuleId::NetworkEgressChange,
+            TripwireRuleId::UnsafeCodeChange,
+            TripwireRuleId::BoundaryPathChange,
+            TripwireRuleId::LargeDeleteOrRewrite,
+            TripwireRuleId::CIWorkflowChange,
+        ] {
+            assert_eq!(
+                p.adjudication_for(rule),
+                Adjudication::Arbiter,
+                "{rule:?} must default to arbiter adjudication"
+            );
+        }
+        // No rule requires human by default.
+        assert!(!p.any_rule_requires_human([TripwireRuleId::MigrationChange]));
+
+        // Explicit operator override flips exactly one rule to human.
+        p.migration.adjudication = Adjudication::Human;
+        assert_eq!(
+            p.adjudication_for(TripwireRuleId::MigrationChange),
+            Adjudication::Human
+        );
+        assert!(p.any_rule_requires_human([
+            TripwireRuleId::MigrationChange,
+            TripwireRuleId::UnsafeCodeChange,
+        ]));
+        // A hold whose findings do not include the human-adjudicated rule
+        // stays on the arbiter path.
+        assert!(!p.any_rule_requires_human([TripwireRuleId::UnsafeCodeChange]));
+    }
+
+    /// Adjudication mode must survive a policy serde round-trip and decode
+    /// from a pre-adjudication policy document (serde default = arbiter).
+    #[test]
+    fn adjudication_round_trips_and_defaults_when_absent() {
+        let mut p = TripwirePolicy::default();
+        p.unsafe_code.adjudication = Adjudication::Human;
+        let json = serde_json::to_string(&p).unwrap();
+        let back: TripwirePolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.unsafe_code.adjudication, Adjudication::Human);
+        assert_eq!(back.migration.adjudication, Adjudication::Arbiter);
+
+        // A migration config JSON that predates the field must decode as
+        // arbiter (serde default).
+        let legacy = r#"{"enabled":true,"report_only":false,"path_globs":["migrations/**"]}"#;
+        let cfg: MigrationRuleConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(cfg.adjudication, Adjudication::Arbiter);
     }
 
     /// Boundary allowlist content SHA256 is optional but must round-trip
