@@ -24,6 +24,7 @@
 pub mod active_hold;
 pub mod activity_payloads;
 pub mod engine;
+pub mod hold_release;
 pub mod policy;
 pub mod reason_codes;
 pub mod rules;
@@ -55,6 +56,11 @@ pub use engine::{
     ChangedFile, ChangedFileStatus, DiffHunk, EvidenceSpan, GateOutcome, RawFinding,
     TripwireEvaluationInput, TripwireFinding, TripwireFindingSeverity, TripwireGateDecision,
     build_finding_idempotency_key, build_gate_idempotency_key, evaluate, sort_findings,
+};
+#[allow(unused_imports)]
+pub use hold_release::{
+    DEFAULT_HOLD_RELEASE_RATIONALE, HUMAN_RELEASE_ACTOR, HUMAN_RELEASE_ROLE,
+    build_hold_release_key, build_hold_released_payload,
 };
 #[allow(unused_imports)]
 pub use policy::{

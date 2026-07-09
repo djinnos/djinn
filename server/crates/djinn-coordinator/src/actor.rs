@@ -1278,6 +1278,12 @@ impl CoordinatorActor {
                     }
                     self.persist_terminal_linked_spike_evidence_from_closed_task(&task)
                         .await;
+                    // Tripwire: a closed `human-review-hold` task means a human
+                    // resolved the hold — emit `tripwire.hold.released` on each
+                    // held source so the merge-boundary gate can clear for the
+                    // current head (no release producer existed before; hold
+                    // task `yynd` never cleared its gate on close).
+                    self.emit_tripwire_release_on_hold_close(&task).await;
                     // Fire epic completion rules (spike/batch).
                     self.on_task_closed(&task).await;
                 }
