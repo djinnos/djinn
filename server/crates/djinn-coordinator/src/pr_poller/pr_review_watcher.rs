@@ -702,6 +702,27 @@ impl CoordinatorActor {
                 .get(&task.id)
                 .is_some_and(|sha| sha == &current_sha);
             if pr.auto_merge.is_some() || delegated_for_current_sha {
+                // Tripwire active-hold gate: even when the PR is delegated to
+                // GitHub's merge queue or has auto-merge enabled, an active
+                // hold on the current head SHA must block observation.  Without
+                // this gate, the delegated-observe path would `continue`
+                // before reaching the tripwire check below.
+                //
+                // The `pr.merged == Some(true)` path above is intentionally
+                // NOT gated — that records a historical external merge, not a
+                // Djinn-initiated action.
+                if self
+                    .reconcile_tripwire_hold(&task, pull_number, &current_sha)
+                    .await
+                {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        head_sha = %current_sha,
+                        "PR poller: tripwire active-hold gate: blocking delegation observation — active hold on current head"
+                    );
+                    continue;
+                }
                 self.observe_auto_merge_state(
                     gh_client,
                     &task.id,
@@ -789,13 +810,12 @@ impl CoordinatorActor {
             // also detects and reapplies missing human-review-hold labels
             // (label tamper), failing closed on errors.
             //
-            // The "PR already merged" observation path (pr.merged == Some(true)
-            // above) is intentionally NOT gated — that records a historical
-            // external merge, not a Djinn-initiated one.  The delegated
-            // observation path (auto_merge / delegated_for_current_sha)
-            // observes state already under GitHub's control; if the PR was
-            // delegated before a hold was established, GitHub controls the
-            // outcome.
+            // The delegated observation path (auto_merge /
+            // delegated_for_current_sha) is ALSO gated — see the matching
+            // reconcile_tripwire_hold call inside that branch above.  The
+            // "PR already merged" observation path (pr.merged == Some(true))
+            // is intentionally NOT gated — that records a historical external
+            // merge, not a Djinn-initiated action.
             if self
                 .reconcile_tripwire_hold(&task, pull_number, &current_sha)
                 .await
