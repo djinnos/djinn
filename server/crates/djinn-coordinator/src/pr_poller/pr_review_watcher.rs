@@ -677,77 +677,6 @@ impl CoordinatorActor {
                 }
             }
 
-            // ── Merge path: delegated-to-GitHub vs legacy direct merge ────────
-            // Three modes, picked in order:
-            //
-            //   (a) GitHub already owns the PR's merge timing — either
-            //       `enablePullRequestAutoMerge` succeeded earlier (`pr.auto_merge`
-            //       is set) OR we explicitly enqueued the PR into the merge
-            //       queue on a previous tick (tracked in `delegated_to_github`
-            //       keyed by SHA so a new push re-enters this branch). Just
-            //       observe; on `UNMERGEABLE` or a failure-flavored dequeue
-            //       event the observer surfaces `PrCiFailed`.
-            //
-            //   (b) REST `PUT /pulls/{n}/merge` succeeds — repos without
-            //       merge-queue branch protection. Close the task.
-            //
-            //   (c) REST returns the merge-queue 405 — repo enforces a
-            //       merge queue. We call `enqueuePullRequest` directly
-            //       (works regardless of the repo's "Allow auto-merge"
-            //       setting; `enable_auto_merge_best_effort` from undraft
-            //       time often hits `UNPROCESSABLE` and is unreliable).
-            //       Then mark delegated and observe next tick.
-            let delegated_for_current_sha = self
-                .delegated_to_github
-                .get(&task.id)
-                .is_some_and(|sha| sha == &current_sha);
-            if pr.auto_merge.is_some() || delegated_for_current_sha {
-                // Tripwire active-hold gate: even when the PR is delegated to
-                // GitHub's merge queue or has auto-merge enabled, an active
-                // hold on the current head SHA must block observation.  Without
-                // this gate, the delegated-observe path would `continue`
-                // before reaching the tripwire check below.
-                //
-                // The `pr.merged == Some(true)` path above is intentionally
-                // NOT gated — that records a historical external merge, not a
-                // Djinn-initiated action.
-                if self
-                    .reconcile_tripwire_hold(&task, pull_number, &current_sha)
-                    .await
-                {
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        pr = pull_number,
-                        head_sha = %current_sha,
-                        "PR poller: tripwire active-hold gate: blocking delegation observation — active hold on current head"
-                    );
-                    continue;
-                }
-                self.observe_auto_merge_state(
-                    gh_client,
-                    &task.id,
-                    &task.short_id,
-                    pr_url,
-                    &owner,
-                    &repo,
-                    pull_number,
-                    &pr.node_id,
-                    has_approved,
-                    &current_sha,
-                )
-                .await;
-                continue;
-            }
-            // SHA moved since we last delegated — drop the stale entry so a
-            // fresh enqueue attempt fires below. Drop the conversation-resolved
-            // marker too: the new commit may have new review threads, and the
-            // SHA-keyed guard would otherwise hold the old SHA harmlessly, but
-            // clearing keeps the map tidy.
-            if self.delegated_to_github.contains_key(&task.id) {
-                self.delegated_to_github.remove(&task.id);
-                self.conversations_resolved.remove(&task.id);
-            }
-
             // ── CI merge gate ───────────────────────────────────────────────
             // Block Djinn-initiated merge/close unless the durable CI snapshot
             // for the current PR head is `passing`. This prevents merge when:
@@ -802,20 +731,18 @@ impl CoordinatorActor {
             }
 
             // ── Tripwire active-hold gate (pre-merge boundary) ────────────
-            // After CI passes and before any Djinn-initiated merge or
-            // enqueue, check the durable active-hold state for the current
-            // head SHA.  If an active hold exists (unreleased enforcement
-            // findings from a prior tripwire gate evaluation), the PR must
-            // NOT merge even when CI is green.  The reconciliation helper
-            // also detects and reapplies missing human-review-hold labels
-            // (label tamper), failing closed on errors.
+            // After CI passes and before any Djinn-initiated merge, enqueue,
+            // or delegated-observe action, check the durable active-hold
+            // state for the current head SHA.  If an active hold exists
+            // (unreleased enforcement findings from a prior tripwire gate
+            // evaluation), the PR must NOT merge even when CI is green.
+            // The reconciliation helper also detects and reapplies missing
+            // human-review-hold labels (label tamper), failing closed on
+            // errors.
             //
-            // The delegated observation path (auto_merge /
-            // delegated_for_current_sha) is ALSO gated — see the matching
-            // reconcile_tripwire_hold call inside that branch above.  The
-            // "PR already merged" observation path (pr.merged == Some(true))
-            // is intentionally NOT gated — that records a historical external
-            // merge, not a Djinn-initiated action.
+            // The "PR already merged" observation path (pr.merged == Some(true)
+            // above) is intentionally NOT gated — that records a historical
+            // external merge, not a Djinn-initiated action.
             if self
                 .reconcile_tripwire_hold(&task, pull_number, &current_sha)
                 .await
@@ -827,6 +754,51 @@ impl CoordinatorActor {
                     "PR poller: tripwire active-hold gate: blocking merge — active hold on current head"
                 );
                 continue;
+            }
+
+            // ── Delegated-to-GitHub observe (after CI + tripwire gates) ──
+            // Mode (a): GitHub already owns the PR's merge timing — either
+            // `enablePullRequestAutoMerge` succeeded earlier (`pr.auto_merge`
+            // is set) OR we explicitly enqueued the PR into the merge queue
+            // on a previous tick (tracked in `delegated_to_github` keyed by
+            // SHA so a new push re-enters this branch).  Just observe; on
+            // `UNMERGEABLE` or a failure-flavored dequeue event the observer
+            // surfaces `PrCiFailed`.
+            //
+            // This block runs AFTER the CI merge gate and tripwire active-hold
+            // check so that a held or CI-failing PR cannot be observed through
+            // even when GitHub has auto-merge enabled or the PR was previously
+            // enqueued.  The `pr.merged == Some(true)` historical observation
+            // bypass above is unaffected.
+            let delegated_for_current_sha = self
+                .delegated_to_github
+                .get(&task.id)
+                .is_some_and(|sha| sha == &current_sha);
+            if pr.auto_merge.is_some() || delegated_for_current_sha {
+                self.observe_auto_merge_state(
+                    gh_client,
+                    &task.id,
+                    &task.short_id,
+                    pr_url,
+                    &owner,
+                    &repo,
+                    pull_number,
+                    &pr.node_id,
+                    has_approved,
+                    &current_sha,
+                )
+                .await;
+                continue;
+            }
+
+            // SHA moved since we last delegated — drop the stale entry so a
+            // fresh enqueue attempt fires below. Drop the conversation-resolved
+            // marker too: the new commit may have new review threads, and the
+            // SHA-keyed guard would otherwise hold the old SHA harmlessly, but
+            // clearing keeps the map tidy.
+            if self.delegated_to_github.contains_key(&task.id) {
+                self.delegated_to_github.remove(&task.id);
+                self.conversations_resolved.remove(&task.id);
             }
 
             // Either approved or no reviews — attempt squash merge.
