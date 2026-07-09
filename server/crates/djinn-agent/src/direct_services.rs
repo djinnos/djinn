@@ -140,7 +140,8 @@ impl DirectServices {
         // row, then mark it consumed. If no unconsumed row exists, create a
         // new one in consumed state as a fail-closed recovery.
         if let Some(ref record) = unconsumed_record {
-            // Update the existing unconsumed row with the decision/dossier.
+            // Update the existing unconsumed row with the decision/dossier
+            // and git-evidence fields from the arbitration row.
             let decision_json = serde_json::json!({
                 "decision": "park",
                 "dossier_summary": dossier_summary,
@@ -149,10 +150,10 @@ impl DirectServices {
                 .update_dispatch_ledger(UpdateDispatchLedgerParams {
                     task_id,
                     hold_cycle: record.hold_cycle,
-                    mirror_head_sha: None,
-                    github_head_sha: None,
-                    pr_url: None,
-                    failing_ci_job_ids: None,
+                    mirror_head_sha: record.mirror_head_sha.as_deref(),
+                    github_head_sha: record.github_head_sha.as_deref(),
+                    pr_url: record.pr_url.as_deref(),
+                    failing_ci_job_ids: Some(&record.failing_ci_job_ids),
                     dossier: Some(&dossier),
                     directive: Some(&decision_json),
                     verification_command: None,
@@ -176,6 +177,7 @@ impl DirectServices {
         } else {
             // No unconsumed row exists. Fail closed: create a consumed row
             // with the dossier so the park transaction is recoverable.
+            // Populate git-evidence from the task-level CI fields.
             tracing::warn!(
                 task_id = %task.short_id,
                 hold_cycle,
@@ -194,9 +196,9 @@ impl DirectServices {
                     task_id,
                     hold_cycle,
                     deadline_at: None,
-                    mirror_head_sha: None,
-                    github_head_sha: None,
-                    pr_url: None,
+                    mirror_head_sha: task.ci_mirror_head_sha.as_deref(),
+                    github_head_sha: task.ci_github_head_sha.as_deref(),
+                    pr_url: task.pr_url.as_deref(),
                     failing_ci_job_ids: &failing_ci_job_ids,
                     dossier: Some(&dossier),
                     directive: Some(&decision_json),
@@ -924,15 +926,16 @@ impl SupervisorServices for DirectServices {
         });
 
         if let Some(ref record) = unconsumed_record {
-            // Update the existing unconsumed row with the decision and evidence.
+            // Update the existing unconsumed row with the decision, evidence,
+            // and git-evidence fields from the arbitration row.
             arb_repo
                 .update_dispatch_ledger(UpdateDispatchLedgerParams {
                     task_id: &task_id,
                     hold_cycle: record.hold_cycle,
-                    mirror_head_sha: None,
-                    github_head_sha: None,
-                    pr_url: None,
-                    failing_ci_job_ids: None,
+                    mirror_head_sha: record.mirror_head_sha.as_deref(),
+                    github_head_sha: record.github_head_sha.as_deref(),
+                    pr_url: record.pr_url.as_deref(),
+                    failing_ci_job_ids: Some(&record.failing_ci_job_ids),
                     dossier: None,
                     directive: Some(&decision_json),
                     verification_command: None,
@@ -1316,7 +1319,8 @@ impl SupervisorServices for DirectServices {
                     )
                 });
 
-            // Generate an arbiter-failure dossier.
+            // Generate an arbiter-failure dossier with explicit git-evidence
+            // fields sourced from the existing arbitration row.
             let dossier = serde_json::json!({
                 "kind": "arbiter_decision_failure_cap",
                 "summary": format!(
@@ -1329,18 +1333,22 @@ impl SupervisorServices for DirectServices {
                 "decision_failure_count": new_count,
                 "infra_retry_count": record.infra_retry_count,
                 "deadline_at": record.deadline_at,
+                "mirror_head_sha": record.mirror_head_sha,
+                "github_head_sha": record.github_head_sha,
+                "pr_url": record.pr_url,
+                "failing_ci_job_ids": record.failing_ci_job_ids,
             });
 
-            // Update the arbitration row with the dossier.
+            // Update the arbitration row with the dossier and git-evidence.
             use djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams;
             let _ = arb_repo
                 .update_dispatch_ledger(UpdateDispatchLedgerParams {
                     task_id: &task_id,
                     hold_cycle: record.hold_cycle,
-                    mirror_head_sha: None,
-                    github_head_sha: None,
-                    pr_url: None,
-                    failing_ci_job_ids: None,
+                    mirror_head_sha: record.mirror_head_sha.as_deref(),
+                    github_head_sha: record.github_head_sha.as_deref(),
+                    pr_url: record.pr_url.as_deref(),
+                    failing_ci_job_ids: Some(&record.failing_ci_job_ids),
                     dossier: Some(&dossier),
                     directive: None,
                     verification_command: None,
@@ -1350,6 +1358,37 @@ impl SupervisorServices for DirectServices {
                 .map_err(|e| {
                     format!("record_arbiter_session_termination: failed to update dossier: {e}")
                 });
+
+            // Emit arbiter_decision activity with git-evidence fields for
+            // the decision-failure cap path.
+            let failure_payload = serde_json::json!({
+                "event": "arbiter_decision",
+                "task_id": task.short_id,
+                "decision": "park",
+                "reason": "decision_failure_cap",
+                "hold_cycle": record.hold_cycle,
+                "decision_failure_count": new_count,
+                "mirror_head_sha": record.mirror_head_sha,
+                "github_head_sha": record.github_head_sha,
+                "pr_url": record.pr_url,
+                "failing_ci_job_ids": record.failing_ci_job_ids,
+            });
+            if let Err(e) = task_repo
+                .log_activity(
+                    Some(&task_id),
+                    "system",
+                    "coordinator",
+                    "arbiter_decision",
+                    &failure_payload.to_string(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "record_arbiter_session_termination: failed to log arbiter_decision activity"
+                );
+            }
 
             // Create the HumanReview remediation hold (reuses the existing
             // arbiter-park hold creation logic so the task is blocked before
