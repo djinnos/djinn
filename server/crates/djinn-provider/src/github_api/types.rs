@@ -245,6 +245,11 @@ pub struct PrFile {
     pub additions: u32,
     pub deletions: u32,
     pub changes: u32,
+    /// The unified-diff patch for this file, as returned by GitHub's
+    /// `GET /pulls/{n}/files` endpoint. Present when the file is a text
+    /// file and the diff is under 300 files / per-file byte limits.
+    #[serde(default)]
+    pub patch: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckAnnotation {
