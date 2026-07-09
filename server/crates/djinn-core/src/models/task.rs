@@ -612,6 +612,14 @@ pub enum TransitionAction {
     /// the arbitration row and the hold description. Like `ParkForRemediation`
     /// this is a HOLD, not a rework: it does NOT increment `reopen_count`.
     ArbiterPark,
+    /// Arbiter `submit_decision(decision="supersede")` — the arbiter decomposed
+    /// the task into replacement subtasks that carry the work forward, so the
+    /// source task (and its PR) are force-closed as superseded. Moves
+    /// `in_lead_intervention → closed` with force-closed semantics. The
+    /// replacement subtasks and downstream blocker transfer are handled by the
+    /// supervisor-side supersede transaction before this terminal move; no
+    /// human-review hold is created. Terminal, like `ForceClose`.
+    ArbiterSupersede,
 }
 
 impl TransitionAction {
@@ -665,6 +673,7 @@ impl TransitionAction {
             "submit_for_merge" => Ok(Self::SubmitForMerge),
             "preapproval_verify_rejected" => Ok(Self::PreApprovalVerifyRejected),
             "arbiter_park" => Ok(Self::ArbiterPark),
+            "arbiter_supersede" => Ok(Self::ArbiterSupersede),
             other => Err(Error::Internal(format!(
                 "unknown transition action: {other}"
             ))),
@@ -1118,6 +1127,26 @@ pub fn compute_transition(
             }
             TransitionApply::simple(TaskStatus::Open)
         }
+
+        TransitionAction::ArbiterSupersede => {
+            // Arbiter `submit_decision(decision="supersede")` — the source was
+            // decomposed into replacement subtasks that carry the work forward,
+            // so it is force-closed as superseded. Only legal from
+            // `InLeadIntervention`. Terminal (→ closed) with force-closed
+            // semantics, identical to `ForceClose` but scoped to the arbiter
+            // rung so the supervisor supersede transaction (arbitration-row
+            // consume, blocker transfer, branch/PR cleanup) runs first.
+            if *from != TaskStatus::InLeadIntervention {
+                return bad("arbiter_supersede is only valid from in_lead_intervention");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::Closed),
+                set_closed_at: true,
+                close_reason: Some(CLOSE_REASON_FORCE_CLOSED),
+                clear_merge_conflict_metadata: true,
+                ..Default::default()
+            }
+        }
     })
 }
 
@@ -1165,6 +1194,7 @@ pub fn compute_transition_for_issue_type(
                 | TransitionAction::PrChangesRequested
                 | TransitionAction::ParkForRemediation
                 | TransitionAction::ArbiterPark
+                | TransitionAction::ArbiterSupersede
         );
         if !allowed {
             return Err(Error::InvalidTransition(format!(
@@ -1193,7 +1223,7 @@ mod tests {
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 29] = [
+    const ACTIONS: [TransitionAction; 30] = [
         TransitionAction::Start,
         TransitionAction::ResumeWorker,
         TransitionAction::SubmitTaskReview,
@@ -1223,6 +1253,7 @@ mod tests {
         TransitionAction::ParkForRemediation,
         TransitionAction::PreApprovalVerifyRejected,
         TransitionAction::ArbiterPark,
+        TransitionAction::ArbiterSupersede,
     ];
 
     fn expected_status(action: &TransitionAction, from: &TaskStatus) -> Option<TaskStatus> {
@@ -1313,6 +1344,9 @@ mod tests {
             }
             (TransitionAction::ArbiterPark, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Open)
+            }
+            (TransitionAction::ArbiterSupersede, TaskStatus::InLeadIntervention) => {
+                Some(TaskStatus::Closed)
             }
             (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
                 Some(TaskStatus::Approved)
