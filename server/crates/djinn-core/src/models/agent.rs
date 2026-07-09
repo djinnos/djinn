@@ -18,9 +18,6 @@ pub struct Agent {
     pub skills: String,
     /// `true` when this is the project-level default for its `base_role`.
     pub is_default: bool,
-    /// Auto-improvement loop amendments — never modified by users directly.
-    /// Appended after system_prompt_extensions in the session prompt.
-    pub learned_prompt: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

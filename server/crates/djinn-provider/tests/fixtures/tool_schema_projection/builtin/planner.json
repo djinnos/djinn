@@ -27,7 +27,8 @@
       "type": "object",
       "properties": {
         "status": {
-          "type": "string"
+          "type": "string",
+          "description": "Positive (\"open\") or negative (\"!closed\") status filter. A leading \"!\" matches every task whose status differs from the given value."
         },
         "issue_type": {
           "type": "string"
@@ -47,7 +48,8 @@
           "description": "Epic ID to filter by"
         },
         "sort": {
-          "type": "string"
+          "type": "string",
+          "description": "priority (default), created, created_desc, updated, updated_desc, closed (closed_at DESC then created_at DESC)."
         },
         "limit": {
           "type": "integer"
@@ -891,7 +893,7 @@
   },
   {
     "name": "proposal_show",
-    "description": "Show a graduated proposal's spec for decomposition (Planner Mode D): title, body, status, acceptance_criteria, and targets (each with project slug + role of `primary`/`reference`). Use this first when dispatched on an `epic_breakdown` task.",
+    "description": "Show a proposal's full detail by UUID or short_id. Returns title, body, status, acceptance_criteria, targets, and optionally revisions, feedback, signoffs, debate, epics, and gate_status. Use `fields` to select only the sections you need (accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all). Use `revision_bodies` to control revision verbosity: `excerpt` (default, 512-char body_excerpt + body_truncated), `full` (complete body text), or `omit` (no body data). Ignored when `fields` omits `revisions`.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -900,7 +902,26 @@
       "properties": {
         "id": {
           "type": "string",
-          "description": "Proposal UUID or short ID"
+          "description": "Proposal UUID or short_id"
+        },
+        "fields": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "description": "Select which top-level sections to include. Accepted values: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status. Default: all. Invalid values return a validation error naming the accepted values.",
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "revision_bodies": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Controls revision body verbosity when revisions is selected: excerpt (default, 512-char body_excerpt), full (complete body), omit (no body data). Ignored when fields omits revisions.",
+          "default": null
         }
       }
     },
@@ -1512,40 +1533,6 @@
     "concurrent_safe": false
   },
   {
-    "name": "agent_amend_prompt",
-    "description": "Planner-owned, evidence-based amendment path for machine-managed learned_prompt updates; not a general prompt editor. Use only after agent-effectiveness evidence (agent_metrics, repeated reviewer/lead feedback, or repeated task failures) shows a stable specialist-agent pattern; this is audited in learned_prompt_history and is not a substitute for human/project system_prompt_extensions. Only specialist worker/reviewer agents are eligible; default roles and non-worker/reviewer roles must not be amended. Append concise observed-pattern + behavioral-correction text; provide metrics_snapshot when available so the evaluator can compare before/after outcomes.",
-    "inputSchema": {
-      "type": "object",
-      "required": [
-        "agent_id",
-        "amendment"
-      ],
-      "properties": {
-        "project": {
-          "type": "string",
-          "description": "Absolute project path"
-        },
-        "agent_id": {
-          "type": "string",
-          "description": "Specialist worker/reviewer agent UUID or name to amend; defaults and non-worker/reviewer roles are rejected"
-        },
-        "amendment": {
-          "type": "string",
-          "description": "Concise observed-pattern and behavioral-correction text to append to the machine-managed learned_prompt"
-        },
-        "metrics_snapshot": {
-          "type": "string",
-          "description": "Optional JSON string of current agent_metrics or equivalent evidence for the audit history record; Planner should provide it when available"
-        }
-      }
-    },
-    "readOnly": false,
-    "destructive": true,
-    "idempotent": false,
-    "openWorld": false,
-    "concurrent_safe": false
-  },
-  {
     "name": "submit_grooming",
     "description": "Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.",
     "inputSchema": {
@@ -1593,6 +1580,13 @@
             "escalate"
           ],
           "description": "Outcome decision: 'execute' = wave was created or board work continues (coordinator dispatches the new tasks); 'close' = epic is complete and the planning task should close (set `reason` in summary); 'escalate' = board state needs human attention. Optional — defaults to 'execute' when omitted."
+        },
+        "blocked_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Epics (UUID or short_id) that block this epic. If you conclude the epic cannot proceed until another epic closes and you therefore created NO worker tasks, list the blocking epic(s) here (use decision='escalate'). This durably parks this epic's planning until every listed epic closes — the coordinator wakes it automatically then. Reference the blocking EPIC, not a task (if a task blocks you, reference the epic that owns it). Do NOT re-run planning to restate a known block: declare it here once."
         }
       }
     },

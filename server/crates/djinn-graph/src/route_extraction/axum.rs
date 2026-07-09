@@ -568,7 +568,7 @@ mod tests {
         let report = detect_axum_routes(&mut graph, &root);
 
         assert_eq!(report.skipped_files, 0);
-        assert_eq!(report.hits.len(), 15);
+        assert_eq!(report.hits.len(), 13);
         let pairs: BTreeSet<(String, String)> = report
             .hits
             .iter()
@@ -580,8 +580,6 @@ mod tests {
             ("GET", "/api/agents/metrics"),
             ("GET", "/api/agents/available-mcp-servers"),
             ("GET", "/api/agents/available-skills"),
-            ("GET", "/api/agents/{id}/learned-prompt/history"),
-            ("DELETE", "/api/agents/{id}/learned-prompt"),
             ("PUT", "/api/agents/{id}"),
             ("DELETE", "/api/agents/{id}"),
             ("GET", "/.well-known/oauth-protected-resource"),
@@ -621,13 +619,13 @@ mod tests {
             .node_indices()
             .filter(|idx| graph.node(*idx).kind == RepoGraphNodeKind::Route)
             .count();
-        assert_eq!(route_nodes, 15);
+        assert_eq!(route_nodes, 13);
         let route_edges = graph
             .graph()
             .edge_references()
             .filter(|edge| edge.weight().kind == RepoGraphEdgeKind::HandlesRoute)
             .count();
-        assert_eq!(route_edges, 15);
+        assert_eq!(route_edges, 13);
     }
 
     #[test]

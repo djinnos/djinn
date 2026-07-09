@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    routing::{delete, get, put},
+    routing::{get, put},
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,14 +34,6 @@ pub(super) fn router() -> Router<AppState> {
             get(available_mcp_servers),
         )
         .route("/api/agents/available-skills", get(available_skills))
-        .route(
-            "/api/agents/{id}/learned-prompt/history",
-            get(learned_prompt_history),
-        )
-        .route(
-            "/api/agents/{id}/learned-prompt",
-            delete(clear_learned_prompt),
-        )
         .route("/api/agents/{id}", put(update_agent).delete(delete_agent))
 }
 
@@ -76,8 +68,6 @@ struct AgentResponse {
     skills: Vec<String>,
     model_preference: Option<String>,
     is_default: bool,
-    /// Machine-managed prompt learning state. Read-only in public surfaces.
-    learned_prompt: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -106,7 +96,6 @@ impl From<&Agent> for AgentResponse {
                 .collect(),
             model_preference: r.model_preference.clone(),
             is_default: r.is_default,
-            learned_prompt: r.learned_prompt.clone(),
             created_at: r.created_at.clone(),
             updated_at: r.updated_at.clone(),
         }
@@ -232,16 +221,6 @@ async fn update_agent(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<AgentResponse>, (StatusCode, String)> {
     require_admin(&state, &headers).await?;
-    if body
-        .as_object()
-        .is_some_and(|payload| payload.contains_key("learned_prompt"))
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Direct learned_prompt setting is no longer supported. Use the clear endpoint instead."
-                .to_string(),
-        ));
-    }
     let body: UpdateBody =
         serde_json::from_value(body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
@@ -300,7 +279,6 @@ async fn update_agent(
                 model_preference,
                 mcp_servers: &mcp_servers_str,
                 skills: &skills_str,
-                learned_prompt: existing.learned_prompt.as_deref(),
             },
         )
         .await
@@ -571,79 +549,4 @@ async fn available_skills(
     }
 
     Ok(Json(AvailableSkillsResponse { skills }))
-}
-
-// ── GET /agents/:id/learned-prompt/history ────────────────────────────────────
-
-#[derive(Serialize)]
-struct AmendmentResponse {
-    id: String,
-    proposed_text: String,
-    action: String,
-    metrics_before: serde_json::Value,
-    metrics_after: serde_json::Value,
-    created_at: String,
-}
-
-#[derive(Serialize)]
-struct LearnedPromptHistoryResponse {
-    learned_prompt: Option<String>,
-    amendments: Vec<AmendmentResponse>,
-}
-
-async fn learned_prompt_history(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<LearnedPromptHistoryResponse>, (StatusCode, String)> {
-    let repo = AgentRepository::new(state.db().clone(), state.event_bus());
-    let role = repo
-        .get(&id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("agent not found: {id}")))?;
-
-    let entries = repo
-        .get_history(&id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let amendments = entries
-        .into_iter()
-        .map(|e| AmendmentResponse {
-            id: e.id,
-            proposed_text: e.proposed_text,
-            action: e.action,
-            metrics_before: e
-                .metrics_before
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or(serde_json::Value::Object(Default::default())),
-            metrics_after: e
-                .metrics_after
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or(serde_json::Value::Object(Default::default())),
-            created_at: e.created_at,
-        })
-        .collect();
-
-    Ok(Json(LearnedPromptHistoryResponse {
-        learned_prompt: role.learned_prompt,
-        amendments,
-    }))
-}
-
-// ── DELETE /agents/:id/learned-prompt ────────────────────────────────────────
-
-async fn clear_learned_prompt(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Result<StatusCode, (StatusCode, String)> {
-    require_admin(&state, &headers).await?;
-    let repo = AgentRepository::new(state.db().clone(), state.event_bus());
-    repo.clear_learned_prompt(&id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(StatusCode::NO_CONTENT)
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id AS \"id!\", project_id AS \"project_id!\",\n                name AS \"name!\", base_role AS \"base_role!\",\n                description AS \"description!\",\n                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'\n                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS \"system_prompt_extensions!\",\n                model_preference,\n                mcp_servers::text AS \"mcp_servers!\", skills::text AS \"skills!\",\n                is_default AS \"is_default!: bool\",\n                (SELECT string_agg(h.proposed_text, E'\\n\\n---\\n\\n' ORDER BY h.created_at ASC)\n                 FROM learned_prompt_history h\n                 WHERE h.agent_id = agents.id\n                   AND h.action IN ('keep','confirmed')\n                ) AS learned_prompt,\n                created_at AS \"created_at!\", updated_at AS \"updated_at!\"\n             FROM agents\n             WHERE project_id = $1 ORDER BY is_default DESC, base_role ASC, name ASC",
+  "query": "SELECT id AS \"id!\", project_id AS \"project_id!\",\n                name AS \"name!\", base_role AS \"base_role!\",\n                description AS \"description!\",\n                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'\n                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS \"system_prompt_extensions!\",\n                model_preference,\n                mcp_servers::text AS \"mcp_servers!\", skills::text AS \"skills!\",\n                is_default AS \"is_default!: bool\",\n                created_at AS \"created_at!\", updated_at AS \"updated_at!\"\n             FROM agents\n             ORDER BY project_id ASC, is_default DESC, base_role ASC, name ASC",
   "describe": {
     "columns": [
       {
@@ -55,24 +55,17 @@
       },
       {
         "ordinal": 10,
-        "name": "learned_prompt",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 11,
         "name": "created_at!",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 12,
+        "ordinal": 11,
         "name": "updated_at!",
         "type_info": "Varchar"
       }
     ],
     "parameters": {
-      "Left": [
-        "Text"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -85,10 +78,9 @@
       null,
       null,
       false,
-      null,
       false,
       false
     ]
   },
-  "hash": "eb9910db97a448f1649bd5779c3bb30e2b041c802f9c9ca703977a0305a7b840"
+  "hash": "6f9f1e4141ef33727f49e1c20c8bc753ff93f477513f3b69a47d36b096ebdc9a"
 }

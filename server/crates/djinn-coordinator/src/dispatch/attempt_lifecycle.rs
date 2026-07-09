@@ -279,12 +279,21 @@ pub fn rework_marker_dispatch_key(task_id: &str, role: &str) -> String {
 /// 1. If an in-flight `pending`/`submitted` attempt still exists, the caller's
 ///    normal terminalization owns the `reopened` signal — no marker needed.
 /// 2. Else if the latest non-guard attempt for the pair is already `reopened`
-///    (an in-flight attempt was just terminalized, or a marker already exists),
-///    this is an idempotent no-op.
-/// 3. Else insert a synthetic terminal `reopened` marker row so the respawn
-///    guard's latest-attempt gate treats the task as rework and dispatches a
-///    worker instead of adopting the still-open PR.  This closes the kv6i
-///    invisible-reopen gap (reopens that leave no live attempt behind).
+///    (an in-flight attempt was just terminalized, or a marker already exists
+///    AND is still the newest attempt — rework is already pending), this is an
+///    idempotent no-op.
+/// 3. Else insert OR re-assert a synthetic terminal `reopened` marker row so the
+///    respawn guard's latest-attempt gate treats the task as rework and
+///    dispatches a worker instead of adopting the still-open PR.  This closes
+///    the kv6i invisible-reopen gap (reopens that leave no live attempt behind)
+///    AND the incident-gton merge-queue requeue loop: when a NEWER non-reopened
+///    attempt has landed since the marker was first written (e.g. a rework
+///    worker ran and `completed`, then the merge queue rejected the PR again),
+///    the latest non-guard attempt is that non-reopened row, so this branch
+///    fires and [`TaskAttemptRepository::insert_rework_marker`] REFRESHES the
+///    fixed-key marker's `created_at` to make it the newest attempt again.
+///    Without the refresh the stale marker stayed pinned behind the
+///    `completed` row and the guard re-adopted the open PR forever.
 pub async fn ensure_rework_marker(
     db: &djinn_db::Database,
     task_id: &str,

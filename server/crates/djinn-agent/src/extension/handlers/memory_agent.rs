@@ -305,7 +305,6 @@ pub(super) async fn call_agent_metrics(
                 "agent_id": entry.agent_id,
                 "agent_name": entry.agent_name,
                 "base_role": entry.base_role,
-                "learned_prompt": entry.learned_prompt,
                 "success_rate": entry.success_rate,
                 "avg_reopens": entry.avg_reopens,
                 "completed_task_count": entry.completed_task_count,
