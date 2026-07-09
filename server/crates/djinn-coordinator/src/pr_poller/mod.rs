@@ -82,6 +82,7 @@ mod pr_review_handlers;
 mod pr_review_watcher;
 mod pr_watcher;
 mod state;
+mod tripwire_gate;
 
 #[cfg(test)]
 mod tests;
