@@ -290,14 +290,15 @@ describe("KanbanBoard", () => {
     expect(screen.getAllByText("No tasks")).toHaveLength(4);
   });
 
-  it("suffixes the Merged count with '+' and shows Load more when more closed pages exist", async () => {
-    // Simulate the first closed page having been loaded with more remaining.
+  it("shows the exact server merged total (not the loaded count) and Load more when more merged pages exist", async () => {
+    // Simulate the first merged page having been loaded with more remaining.
+    // The server reports 1231 merged tasks total even though only one is loaded.
     mergedColumnStore.getState().setProjectPage({
       slug: "owner/repo",
       projectId: "p1",
       loaded: 200,
       hasMore: true,
-      totalClosed: 1231,
+      totalMerged: 1231,
     });
 
     const tasks: Task[] = [
@@ -312,22 +313,23 @@ describe("KanbanBoard", () => {
 
     render(<KanbanBoard tasks={tasks} epics={new Map([[epicA.id, epicA]])} />);
 
-    // One merged task loaded, but the server has more → "1+".
+    // Header shows the exact server total (1231), never a "+"-suffixed estimate.
     const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
-    expect(doneCol).toHaveTextContent("1+");
+    expect(doneCol).toHaveTextContent("1231");
+    expect(doneCol).not.toHaveTextContent("+");
 
     const loadMore = screen.getByRole("button", { name: "Load more" });
     await userEvent.click(loadMore);
     expect(loadMoreClosedTasks).toHaveBeenCalledTimes(1);
   });
 
-  it("does not show Load more or a '+' suffix when all closed pages are loaded", () => {
+  it("does not show Load more when all merged pages are loaded and shows the exact total", () => {
     mergedColumnStore.getState().setProjectPage({
       slug: "owner/repo",
       projectId: "p1",
       loaded: 1,
       hasMore: false,
-      totalClosed: 1,
+      totalMerged: 1,
     });
 
     const tasks: Task[] = [
@@ -344,7 +346,7 @@ describe("KanbanBoard", () => {
 
     const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
     expect(doneCol).toHaveTextContent("1");
-    expect(doneCol).not.toHaveTextContent("1+");
+    expect(doneCol).not.toHaveTextContent("+");
     expect(
       screen.queryByRole("button", { name: "Load more" }),
     ).not.toBeInTheDocument();
