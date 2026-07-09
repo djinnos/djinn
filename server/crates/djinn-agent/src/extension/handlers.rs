@@ -45,6 +45,7 @@ use super::types::*;
 
 mod ci;
 mod code_intel;
+mod gate_guard;
 mod jit_pitfalls;
 // Retained for test coverage; production dispatch goes through djinn-mcp-extension.
 #[allow(dead_code)]
