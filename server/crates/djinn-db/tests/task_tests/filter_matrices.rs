@@ -268,6 +268,7 @@ async fn task_count_group_by(#[case] group_by: &str) {
 
 #[rstest]
 #[case("status")]
+#[case("status_negated")]
 #[case("priority")]
 #[case("label")]
 #[case("text")]
@@ -307,6 +308,12 @@ async fn task_list_filter(#[case] filter_kind: &str) {
     let query = match filter_kind {
         "status" => ListQuery {
             status: Some("in_progress".to_owned()),
+            ..Default::default()
+        },
+        // A leading "!" negates the status filter: "!open" matches every task
+        // whose status is not `open`, i.e. only the in_progress `beta` task.
+        "status_negated" => ListQuery {
+            status: Some("!open".to_owned()),
             ..Default::default()
         },
         "priority" => ListQuery {
