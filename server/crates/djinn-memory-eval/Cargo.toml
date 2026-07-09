@@ -28,3 +28,4 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
+tempfile = "3"

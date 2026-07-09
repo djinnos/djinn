@@ -50,6 +50,67 @@ Identical normalised input always produces byte-identical vectors.
 Different content hashes produce distinct deterministic vectors.
 No caching layer is needed because computation is pure and fast.
 
+## Metrics
+
+### Gating metrics (drive the PR gate)
+
+| Metric | Scope | Description |
+|--------|-------|-------------|
+| recall\\@1 | per-suite, aggregate | Fraction of queries with a relevant note at rank ≤ 1 |
+| recall\\@5 | per-suite, aggregate | Fraction of queries with a relevant note at rank ≤ 5 |
+| recall\\@10 | per-suite, aggregate | Fraction of queries with a relevant note at rank ≤ 10 |
+| MRR | per-suite, aggregate | Mean Reciprocal Rank (1/best-rank per query) |
+| Zero-result rate | per-suite, aggregate | Fraction of queries with no relevant note in top-k |
+
+### Non-gating / directional metrics
+
+Precision\\@10 and F1\\@10 are computed but **clearly marked directional/non-gating**
+in both code and report output. Mined `tasks.memory_refs` labels are sparse —
+they represent a subset of truly relevant notes — so true precision and recall
+relative to all relevant notes are unknowable.
+
+### Age-bucket recall curves
+
+Recall is broken down by note age (based on `last_accessed` timestamp) to
+surface over-decay regressions:
+
+| Bucket | Age range |
+|--------|-----------|
+| `<7d` | Fresh (accessed within 7 days) |
+| `7-30d` | Recent |
+| `30-90d` | Mature |
+| `>90d` | Over decay threshold |
+
+## Compare policy
+
+The `compare` command evaluates current metrics against the committed baseline
+using the following thresholds (from proposal `cxe1`):
+
+| Condition | Threshold | Action |
+|-----------|-----------|--------|
+| Suite recall\\@k drop | > 0.02 absolute | FAIL |
+| Bad-case hit-to-miss regression | any | FAIL |
+| Suite MRR drop | > 0.02 absolute | FAIL |
+| Aggregate MRR drop | > 0.01 absolute | FAIL |
+| Bad-case zero-result increase | any | FAIL |
+| Aggregate zero-result increase | > 0.01 absolute | FAIL |
+
+The threshold policy version is tracked in both the baseline and report files
+(currently `phase1-v1`).
+
+### Reviewer baseline-update workflow
+
+When a ranking PR is intentionally improving metrics (not a regression):
+
+1. Run `cargo run -p djinn-memory-eval -- run` to produce the new report.
+2. Run `cargo run -p djinn-memory-eval -- compare` to verify no unintended regressions.
+3. If the compare passes, run `cargo run -p djinn-memory-eval -- refresh-baseline`
+   to update `baselines/phase1.json`.
+4. Commit the updated baseline alongside the ranking change.
+
+When a compare failure is unexpected, review the per-query regression details
+in `target/memory-eval/phase1-summary.md`.
+
 ## Fixture & baseline locations
 
 | path                                          | description                              |
@@ -96,9 +157,9 @@ cargo test -p djinn-memory-eval
 |------------------------------|-------|----------------|
 | Crate shell & CLI subcommands| rgif  | ✅ done        |
 | Fixture schema contracts     | 27tl  | ✅ done        |
-| Deterministic embedder       | csom  | ✅ this task   |
-| Real Postgres fixture loader | qmzw  | planned        |
-| Metrics & compare policy     | zd4o  | planned        |
+| Deterministic embedder       | csom  | ✅ done        |
+| Real Postgres fixture loader | qmzw  | ✅ done        |
+| Metrics & compare policy     | zd4o  | ✅ done        |
 | Fixture snapshot & baseline  | 77sm  | planned        |
 | CI gate wiring & final docs  | 1tk3  | planned        |
 
