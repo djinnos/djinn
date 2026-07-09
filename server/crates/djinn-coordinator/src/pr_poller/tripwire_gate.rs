@@ -14,26 +14,35 @@
 //! The tripwire enforcement rollout has two phases:
 //!
 //! 1. **Backfill (report-only):** When the tripwire system first evaluates an
-//!    existing open PR head — i.e. the task has no prior tripwire gate
-//!    activity — all findings are evaluated in report-only mode regardless of
-//!    per-rule `report_only` flags.  A `tripwire.gate.report_only` activity
-//!    event is logged with full findings, evidence, revisions, and
-//!    idempotency keys.  No `human-review-hold` label is applied and the PR
-//!    is not blocked by this evaluation alone.
+//!    existing open PR head — i.e. the PR was created *before* policy
+//!    publication and the task has no prior tripwire gate activity — all
+//!    findings are evaluated in report-only mode regardless of per-rule
+//!    `report_only` flags.  A `tripwire.gate.report_only` activity event is
+//!    logged with full findings, evidence, revisions, and idempotency keys.
+//!    No `human-review-hold` label is applied and the PR is not blocked by
+//!    this evaluation alone.
 //!
-//! 2. **Enforcement (new heads):** When a PR gets a new head SHA (developer
-//!    pushes after policy publication), the gate evaluates under the live
-//!    policy and may produce a `tripwire.gate.held` event and
+//! 2. **Enforcement (new heads / new PRs after publication):** When a PR gets
+//!    a new head SHA (developer pushes after policy publication), *or* when a
+//!    PR is first opened after policy publication, the gate evaluates under
+//!    the live policy and may produce a `tripwire.gate.held` event and
 //!    `human-review-hold` label.  This uses the same delivered
 //!    engine/policy/active-hold contracts.
 //!
-//! The distinction is derived from the task's activity log:
+//! The distinction is derived from the task's activity log **and** the
+//! policy publication timestamp (`policy_publication_ts`):
 //!
-//! - No prior gate events → **Backfill** (existing PR, first evaluation).
+//! - No prior gate events **and** PR created before policy publication →
+//!   **Backfill** (existing PR, first evaluation).
+//! - No prior gate events **and** PR created after policy publication →
+//!   **Enforce** (new PR subject to live enforcement).
+//! - Prior gate events exist for the *same* head SHA **and** the same
+//!   policy revision → **Idempotent** (duplicate poll; no new event
+//!   emitted).
+//! - Prior gate events exist for the *same* head SHA but a *different*
+//!   policy revision → **Enforce** (policy changed; re-evaluate).
 //! - Prior gate events exist for a *different* head SHA → **Enforce**
 //!   (new push after policy was enabled).
-//! - Prior gate events exist for the *same* head SHA → **Idempotent**
-//!   (duplicate poll; no new event emitted).
 //!
 //! Direct removal of the `human-review-hold` label is tamper, not a
 //! release path — the reconciliation tick re-applies it.
@@ -309,36 +318,56 @@ pub async fn evaluate_tripwire_gate(
 /// for the full operational boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RolloutMode {
-    /// First evaluation of this task — existing open PR head being
-    /// backfilled.  All findings are forced to report-only; no
+    /// First evaluation of this task — existing open PR head (created
+    /// before policy publication) being backfilled.  All findings are forced
+    /// to report-only; no
     /// `human-review-hold` label is applied.
     Backfill,
-    /// New head SHA for a task that already has prior gate activity.
     /// Evaluate under the live policy (enforcement-on per rule config).
+    /// Returned for: new head SHA after prior gate activity, new PR after
+    /// policy publication, or same head SHA with a changed policy revision.
     Enforce,
-    /// This exact `(task_id, head_sha)` was already evaluated with the
-    /// current policy revision.  The caller must skip the evaluation to
-    /// avoid duplicate activity events.
+    /// This exact `(task_id, head_sha, policy_revision)` was already
+    /// evaluated.  The caller must skip the evaluation to avoid duplicate
+    /// activity events.
     AlreadyEvaluated,
 }
 
 /// Determine the [`RolloutMode`] for a PR head by examining the task's
 /// tripwire gate activity log.
 ///
-/// The logic:
+/// The logic (in priority order):
 ///
-/// 1. If a gate event already exists for this exact `head_sha` →
-///    [`RolloutMode::AlreadyEvaluated`] (idempotent skip).
-/// 2. If any gate event exists for this task but for a different head SHA →
+/// 1. If a gate event already exists for this exact `head_sha` **and** the
+///    same `policy_revision` → [`RolloutMode::AlreadyEvaluated`]
+///    (idempotent skip).
+/// 2. If a gate event exists for this `head_sha` but a **different**
+///    `policy_revision` → [`RolloutMode::Enforce`] (policy changed).
+/// 3. If any gate event exists for this task but for a different head SHA →
 ///    [`RolloutMode::Enforce`] (new push after policy publication).
-/// 3. If no gate events exist for this task at all →
+/// 4. If no gate events exist and the PR was created **after** policy
+///    publication → [`RolloutMode::Enforce`] (new PR under enforcement).
+/// 5. If no gate events exist and the PR was created **before** policy
+///    publication (or no `policy_publication_ts` provided) →
 ///    [`RolloutMode::Backfill`] (existing PR, first evaluation).
 ///
 /// # Arguments
 ///
 /// * `entries` — tripwire-related activity entries for the task.
 /// * `head_sha` — the current PR head SHA being evaluated.
-pub fn determine_rollout_mode<'a, I>(entries: I, head_sha: &str) -> RolloutMode
+/// * `policy_publication_ts` — RFC 3339 timestamp of policy publication.
+///   Used to distinguish existing open PRs (backfill) from new PRs after
+///   publication (enforce).  When `None`, the absence of prior gate events
+///   defaults to backfill.
+/// * `current_policy_revision` — the policy revision being evaluated.
+///   Used to ensure idempotency is scoped to `(head_sha, policy_revision)`
+///   so that a policy change triggers re-evaluation for the same head.
+pub fn determine_rollout_mode<'a, I>(
+    entries: I,
+    head_sha: &str,
+    policy_publication_ts: Option<&str>,
+    current_policy_revision: &str,
+) -> RolloutMode
 where
     I: IntoIterator<Item = &'a ActivityEntryRef>,
 {
@@ -352,8 +381,13 @@ where
         // Try to extract head_sha from the payload.
         if let Ok(payload) = serde_json::from_str::<TripwireGateDecisionPayload>(&entry.payload) {
             if payload.head_sha == head_sha {
-                // Same head SHA already evaluated — idempotent.
-                return RolloutMode::AlreadyEvaluated;
+                if payload.policy_revision == current_policy_revision {
+                    // Same head SHA + same policy revision — idempotent.
+                    return RolloutMode::AlreadyEvaluated;
+                }
+                // Same head SHA but different policy revision — re-evaluate
+                // under the new policy.
+                return RolloutMode::Enforce;
             }
             has_prior_event = true;
         }
@@ -362,7 +396,17 @@ where
     if has_prior_event {
         RolloutMode::Enforce
     } else {
-        RolloutMode::Backfill
+        // No prior gate events — this is a first evaluation.  Distinguish
+        // existing-open-PR backfill from new-PR-after-publication enforcement
+        // using the policy publication timestamp.
+        //
+        // The caller compares PR creation time against policy publication
+        // time and passes `Some(...)` only for PRs created after publication.
+        // `None` here means the PR predates publication → backfill.
+        match policy_publication_ts {
+            Some(_) => RolloutMode::Enforce,
+            None => RolloutMode::Backfill,
+        }
     }
 }
 
@@ -396,6 +440,11 @@ pub fn is_tripwire_gate_event(event_type: &str) -> bool {
 /// * `head_sha` — current head SHA of the PR.
 /// * `entries` — tripwire-related activity entries for the task (used to
 ///   determine the rollout mode).
+/// * `policy_publication_ts` — RFC 3339 timestamp of policy publication.
+///   Pass `None` when the PR was created before policy publication (backfill
+///   path).  Pass `Some(...)` for PRs created after publication.
+/// * `current_policy_revision` — the policy revision being evaluated today.
+///   Scoped into idempotency so policy changes trigger re-evaluation.
 #[allow(clippy::too_many_arguments)]
 pub async fn evaluate_tripwire_gate_with_rollout(
     gh_client: &GitHubApiClient,
@@ -406,8 +455,15 @@ pub async fn evaluate_tripwire_gate_with_rollout(
     project_id: &str,
     head_sha: &str,
     entries: &[ActivityEntryRef],
+    policy_publication_ts: Option<&str>,
+    current_policy_revision: &str,
 ) -> Result<Option<(TripwireGateResult, RolloutMode)>> {
-    let mode = determine_rollout_mode(entries, head_sha);
+    let mode = determine_rollout_mode(
+        entries,
+        head_sha,
+        policy_publication_ts,
+        current_policy_revision,
+    );
 
     match mode {
         RolloutMode::AlreadyEvaluated => {
@@ -1012,6 +1068,7 @@ mod tests {
     fn gate_activity_entry(
         event_type: &str,
         head_sha: &str,
+        policy_revision: &str,
         idempotency_key: &str,
         created_at: &str,
     ) -> ActivityEntryRef {
@@ -1022,7 +1079,7 @@ mod tests {
             pr_number: Some(42),
             head_sha: head_sha.to_owned(),
             base_sha: None,
-            policy_revision: "default".to_owned(),
+            policy_revision: policy_revision.to_owned(),
             allowlist_revision: None,
             findings: vec![],
             enforcement_finding_count: 0,
@@ -1037,24 +1094,26 @@ mod tests {
         }
     }
 
-    // AC: No prior gate events → Backfill.
+    // AC: No prior gate events + no policy_publication_ts → Backfill.
     #[test]
     fn determine_rollout_mode_no_prior_events_is_backfill() {
         let entries: Vec<ActivityEntryRef> = vec![];
-        let mode = determine_rollout_mode(&entries, "sha-aaa");
+        let mode = determine_rollout_mode(&entries, "sha-aaa", None, "default");
         assert_eq!(mode, RolloutMode::Backfill);
     }
 
-    // AC: Prior events for same head SHA → AlreadyEvaluated (idempotent).
+    // AC: Prior events for same head SHA + same policy revision →
+    // AlreadyEvaluated (idempotent).
     #[test]
     fn determine_rollout_mode_same_head_sha_is_already_evaluated() {
         let entries = vec![gate_activity_entry(
             TRIPWIRE_EVENT_GATE_REPORT_ONLY,
             "sha-aaa",
+            "default",
             "key-1",
             "2026-01-01T00:00:00Z",
         )];
-        let mode = determine_rollout_mode(&entries, "sha-aaa");
+        let mode = determine_rollout_mode(&entries, "sha-aaa", None, "default");
         assert_eq!(mode, RolloutMode::AlreadyEvaluated);
     }
 
@@ -1064,10 +1123,11 @@ mod tests {
         let entries = vec![gate_activity_entry(
             TRIPWIRE_EVENT_GATE_REPORT_ONLY,
             "sha-old",
+            "default",
             "key-old",
             "2026-01-01T00:00:00Z",
         )];
-        let mode = determine_rollout_mode(&entries, "sha-new");
+        let mode = determine_rollout_mode(&entries, "sha-new", None, "default");
         assert_eq!(mode, RolloutMode::Enforce);
     }
 
@@ -1079,7 +1139,7 @@ mod tests {
             payload: "{}".to_owned(),
             created_at: "2026-01-01T00:00:00Z".to_owned(),
         }];
-        let mode = determine_rollout_mode(&entries, "sha-aaa");
+        let mode = determine_rollout_mode(&entries, "sha-aaa", None, "default");
         assert_eq!(mode, RolloutMode::Backfill);
     }
 
@@ -1095,40 +1155,112 @@ mod tests {
             gate_activity_entry(
                 TRIPWIRE_EVENT_GATE_HELD,
                 "sha-old",
+                "default",
                 "key-old",
                 "2026-01-02T00:00:00Z",
             ),
         ];
-        let mode = determine_rollout_mode(&entries, "sha-new");
+        let mode = determine_rollout_mode(&entries, "sha-new", None, "default");
         assert_eq!(mode, RolloutMode::Enforce);
     }
 
-    // AC: Multiple gate events for different SHAs, then same SHA →
-    // AlreadyEvaluated (same SHA takes precedence).
+    // AC: Multiple gate events for different SHAs, then same SHA + same
+    // policy → AlreadyEvaluated (same SHA + same policy takes precedence).
     #[test]
     fn determine_rollout_mode_multiple_events_same_sha_is_already_evaluated() {
         let entries = vec![
             gate_activity_entry(
                 TRIPWIRE_EVENT_GATE_REPORT_ONLY,
                 "sha-old",
+                "default",
                 "key-old",
                 "2026-01-01T00:00:00Z",
             ),
             gate_activity_entry(
                 TRIPWIRE_EVENT_GATE_HELD,
                 "sha-mid",
+                "default",
                 "key-mid",
                 "2026-01-02T00:00:00Z",
             ),
             gate_activity_entry(
                 TRIPWIRE_EVENT_GATE_PASSED,
                 "sha-aaa",
+                "default",
                 "key-cur",
                 "2026-01-03T00:00:00Z",
             ),
         ];
-        let mode = determine_rollout_mode(&entries, "sha-aaa");
+        let mode = determine_rollout_mode(&entries, "sha-aaa", None, "default");
         assert_eq!(mode, RolloutMode::AlreadyEvaluated);
+    }
+
+    // AC: Same head SHA + different policy revision → Enforce (policy
+    // changed; must re-evaluate).
+    #[test]
+    fn determine_rollout_mode_same_head_sha_new_policy_revision_is_enforce() {
+        let entries = vec![gate_activity_entry(
+            TRIPWIRE_EVENT_GATE_REPORT_ONLY,
+            "sha-aaa",
+            "org-policy:1",
+            "key-v1",
+            "2026-01-01T00:00:00Z",
+        )];
+        // Current policy revision is org-policy:2 — different from the
+        // stored org-policy:1.
+        let mode = determine_rollout_mode(&entries, "sha-aaa", None, "org-policy:2");
+        assert_eq!(
+            mode,
+            RolloutMode::Enforce,
+            "same head SHA but different policy revision must be Enforce"
+        );
+    }
+
+    // AC: Same head SHA + same policy revision in a multi-event log →
+    // AlreadyEvaluated even when other SHAs are present.
+    #[test]
+    fn determine_rollout_mode_multi_event_same_head_and_policy_is_already_evaluated() {
+        let entries = vec![
+            gate_activity_entry(
+                TRIPWIRE_EVENT_GATE_REPORT_ONLY,
+                "sha-old",
+                "default",
+                "key-old",
+                "2026-01-01T00:00:00Z",
+            ),
+            gate_activity_entry(
+                TRIPWIRE_EVENT_GATE_PASSED,
+                "sha-aaa",
+                "default",
+                "key-aaa",
+                "2026-01-02T00:00:00Z",
+            ),
+        ];
+        let mode = determine_rollout_mode(&entries, "sha-aaa", None, "default");
+        assert_eq!(mode, RolloutMode::AlreadyEvaluated);
+    }
+
+    // AC: New PR after policy publication (no prior events +
+    // policy_publication_ts is Some) → Enforce.
+    #[test]
+    fn determine_rollout_mode_new_pr_after_publication_is_enforce() {
+        let entries: Vec<ActivityEntryRef> = vec![];
+        let mode =
+            determine_rollout_mode(&entries, "sha-new", Some("2026-01-01T00:00:00Z"), "default");
+        assert_eq!(
+            mode,
+            RolloutMode::Enforce,
+            "new PR after policy publication must be Enforce, not Backfill"
+        );
+    }
+
+    // AC: Existing PR before policy publication (no prior events +
+    // policy_publication_ts is None) → Backfill.
+    #[test]
+    fn determine_rollout_mode_existing_pr_before_publication_is_backfill() {
+        let entries: Vec<ActivityEntryRef> = vec![];
+        let mode = determine_rollout_mode(&entries, "sha-old", None, "default");
+        assert_eq!(mode, RolloutMode::Backfill);
     }
 
     // ── Rollout mode: is_tripwire_gate_event ─────────────────────────────

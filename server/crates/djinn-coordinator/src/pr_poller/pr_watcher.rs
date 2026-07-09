@@ -316,9 +316,15 @@ impl CoordinatorActor {
             // ── Tripwire gate: rollout-aware deterministic evaluation ──
             //
             // Query activity entries to determine rollout mode:
-            // - No prior gate events → Backfill (report-only, no hold).
+            // - No prior gate events + pre-publication PR → Backfill
+            //   (report-only, no hold).
+            // - No prior gate events + post-publication PR → Enforce
+            //   (live policy, may apply hold).
             // - Prior events for different head SHA → Enforce (live policy).
-            // - Prior events for same head SHA → Idempotent skip.
+            // - Prior events for same head SHA + same policy revision →
+            //   Idempotent skip.
+            // - Prior events for same head SHA + different policy revision →
+            //   Enforce (re-evaluate under new policy).
             //
             // This implements the rollout boundary: existing open PRs are
             // backfilled report-only; enforcement starts for new heads
@@ -349,6 +355,13 @@ impl CoordinatorActor {
                 &task.project_id,
                 &pr.head.sha,
                 &tripwire_entry_refs,
+                // policy_publication_ts: Pass `None` to default to backfill for
+                // first-evaluation PRs.  When a policy-publication-timestamp
+                // source is wired (e.g. from the org tripwire config row),
+                // compare `pr.created_at` against it and pass `Some(...)` for
+                // PRs created after publication to trigger enforcement.
+                None,
+                &crate::tripwires::TripwirePolicy::default().policy_revision,
             )
             .await
             {
