@@ -44,8 +44,10 @@ All remaining hits are negative assertions in test code:
 ### Out-of-scope hits (documented)
 - `server/docs/learned-prompt-harvest.md` — harvest artifact from epic t8p8
 - `server/scripts/fixtures/learned-prompt-equivalence/` — harvest fixtures from epic t8p8
+- `server/scripts/learned-prompt-inventory.sql`, `learned-prompt-inventory.sh`, `learned-prompt-equivalence.sh` — harvest tooling from t8p8
 - SQL schema objects/migrations — owned by sibling epic 8m3c
-- Generated/UI artifacts — owned by sibling epic 3sle
+- ADR design records (`.djinn/decisions/adr-038-*.md`, `adr-051-*.md`) — immutable historical records
+- Generated/UI artifacts — swept by sibling epic 3sle (see below)
 
 ## Changes made
 
@@ -70,3 +72,50 @@ All remaining hits are negative assertions in test code:
 - `cargo test -p djinn-agent --lib -- prompts::tests` — 40 tests pass
 - `cargo test -p djinn-roles --lib -- prompts::tests` — 59 tests pass
 - `cargo fmt` — applied, no changes needed
+
+---
+
+## Final sweep — 3sle frontend/generated/UI artifacts
+
+**Date:** 2026-07-09
+**Task:** 3b8u (3sle) — Sweep learned-prompt generated artifacts, route fixtures, and final grep evidence
+**Landing after:** nqcn (UI/API client removal), xij7 (backend MCP schema snapshot refresh), kutw (frontend MCP tool type regeneration)
+
+### Grep commands run (repo-wide, all source/generated/types)
+
+```bash
+grep -rn 'learned_prompt' --include='*.rs' --include='*.ts' --include='*.tsx' --include='*.json' --include='*.sql' --include='*.toml' --include='*.yaml' --include='*.yml' .
+grep -rn 'learned-prompt' --include='*.rs' --include='*.ts' --include='*.tsx' --include='*.json' --include='*.sql' --include='*.toml' --include='*.yaml' --include='*.yml' .
+grep -rn 'learned_prompt_history' --include='*.rs' --include='*.ts' --include='*.tsx' --include='*.json' --include='*.sql' --include='*.toml' --include='*.yaml' --include='*.yml' .
+grep -rn 'agent_amend_prompt' --include='*.rs' --include='*.ts' --include='*.tsx' --include='*.json' --include='*.sql' --include='*.toml' --include='*.yaml' --include='*.yml' .
+grep -rn 'learned_prompt\|learned-prompt\|learned_prompt_history\|agent_amend_prompt' --include='*.snap' .
+grep -rn 'learned_prompt\|learned-prompt\|learned_prompt_history\|agent_amend_prompt' --include='*.md' .
+grep -rn 'learned_prompt\|learned-prompt\|learned_prompt_history\|agent_amend_prompt' --include='*.html' --include='*.css' .
+```
+
+### UI/generated/test artifact scope — zero hits
+
+| Area | Status |
+|---|---|
+| `ui/src/**` (all `.ts`, `.tsx`) | **Clean** — no learned-prompt references remain |
+| `ui/src/api/generated/mcp-tools.gen.ts` | **Clean** — `agent_amend_prompt` absent; `agent_metrics` present |
+| `server/.sqlx/query-*.json` | **Clean** — no learned-prompt query metadata |
+| `server/crates/djinn-graph/src/route_extraction/tests/fixtures/` | **Clean** — no learned-prompt route fixtures |
+| `server/crates/djinn-agent/src/extension/tests/snapshots/` | **Clean** — no `agent_amend_prompt` in MCP snapshots |
+| `server/crates/djinn-mcp-extension/src/tests/snapshots/` | **Clean** — no `agent_amend_prompt` in MCP snapshots |
+| `server/crates/djinn-provider/tests/fixtures/` | **Clean** — no learned-prompt projection fixtures |
+| `*.snap` files (any crate) | **Clean** — zero snapshot hits |
+
+### Remaining repository-wide hits — all intentional
+
+| Category | Files | Rationale |
+|---|---|---|
+| Negative regression guards | `djinn-agent/src/prompts/tests.rs`, `djinn-roles/src/prompts/tests.rs` | Assert removed guidance/tools do NOT reappear |
+| Harvest artifacts (t8p8) | `server/docs/learned-prompt-harvest.md`, `server/scripts/learned-prompt-*.{sql,sh}`, `server/scripts/fixtures/learned-prompt-equivalence/` | Preserved prompt-equivalence evidence from pre-removal harvest |
+| Migration/schema (8m3c) | `server/crates/djinn-db/migrations_postgres/1_initial_schema.sql` | Initial schema migration; schema drop owned by sibling epic 8m3c |
+| Cutover documentation | `server/docs/learned-prompt-cutover.md` (this file) | Explicit cutover record |
+| ADR design records | `.djinn/decisions/adr-038-*.md`, `.djinn/decisions/adr-051-*.md` | Historical design decisions (immutable records) |
+
+### No code changes required
+
+The sibling tasks nqcn, xij7, and kutw fully cleaned all UI/generated/test artifacts. This sweep confirms the final state and records the evidence above. Only this documentation update was made.
