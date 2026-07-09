@@ -21,6 +21,7 @@
 //! See [`design/wuom-roadmap`] for the wave-1 decomposition and
 //! [`design/nptj-roadmap`] for the enforcement follow-on.
 
+pub mod active_hold;
 pub mod activity_payloads;
 pub mod engine;
 pub mod policy;
@@ -36,6 +37,11 @@ pub mod rules;
 // Downstream tasks reference these names; suppress the unused-import warning
 // until those consumers land.
 
+#[allow(unused_imports)]
+pub use active_hold::{
+    ActiveHoldState, ActivityEntryRef, TamperReconciliation, build_tamper_reconciliation_key,
+    check_label_tamper, compute_active_hold_state,
+};
 #[allow(unused_imports)]
 pub use activity_payloads::{
     TRIPWIRE_EVENT_BREAK_GLASS, TRIPWIRE_EVENT_GATE_HELD, TRIPWIRE_EVENT_GATE_PASSED,

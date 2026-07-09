@@ -129,6 +129,27 @@ impl CoordinatorActor {
                 )
                 .await;
 
+            // ── Tripwire active-hold reconciliation ──────────────────────────
+            // After the current PR/head is fetched, check whether an active
+            // tripwire hold exists for this head SHA and whether the
+            // human-review-hold label is still present. If the label was
+            // removed outside the release path, reapply it and log a tamper
+            // event. This must run BEFORE any transition that would advance
+            // a held PR (merge, undraft, etc.).
+            if self
+                .reconcile_tripwire_hold(&task, pull_number, &pr.head.sha)
+                .await
+            {
+                // Active hold exists (or was just reapplied) — do not
+                // advance the PR this tick. The task is already parked by
+                // the gate-held path; reconciliation just ensures the label
+                // stays on.
+                self.pr_status_cache.remove(&task.id);
+                self.pr_draft_first_seen.remove(&task.id);
+                self.review_stuck_sha_first_seen.remove(&task.id);
+                continue;
+            }
+
             // ── Merged? ───────────────────────────────────────────────────────
             if pr.merged == Some(true) {
                 tracing::info!(
@@ -463,6 +484,135 @@ impl CoordinatorActor {
                 }
             }
         }
+    }
+
+    // ── Tripwire active-hold reconciliation ──────────────────────────────
+
+    /// Reconcile the tripwire active-hold state for a task's current PR head.
+    ///
+    /// This runs after the current PR/head is fetched and before any
+    /// transition that would advance a held PR. It:
+    ///
+    /// 1. Queries the task's activity log for `tripwire.gate.held` and
+    ///    `tripwire.hold.released` events.
+    /// 2. Computes the active-hold state for the current head SHA (older
+    ///    heads are superseded).
+    /// 3. If an active hold exists but the task no longer carries
+    ///    `human-review-hold`, reapplies the label idempotently and logs a
+    ///    `tripwire.tamper.label_removed` event.
+    ///
+    /// Returns `true` when an active hold exists for the current head (the
+    /// PR must NOT advance). Returns `false` when there is no active hold
+    /// (the PR may proceed through the normal flow).
+    ///
+    /// **Fail-closed:** if the activity-log query fails, this returns `true`
+    /// (hold assumed) rather than letting the PR advance — an inability to
+    /// verify hold state must not bypass the gate.
+    pub(crate) async fn reconcile_tripwire_hold(
+        &self,
+        task: &Task,
+        pr_number: u64,
+        head_sha: &str,
+    ) -> bool {
+        let task_repo = self.task_repo();
+
+        // Query activity entries for this task.
+        let entries = match task_repo.list_activity(&task.id).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "PR poller: failed to query activity for tripwire hold reconciliation — failing closed (hold assumed)"
+                );
+                return true;
+            }
+        };
+
+        // Map to lightweight references for the pure computation.
+        let entry_refs: Vec<crate::tripwires::ActivityEntryRef> = entries
+            .iter()
+            .map(crate::tripwires::ActivityEntryRef::from_entry)
+            .collect();
+
+        // Compute active-hold state for the current head SHA.
+        let state = crate::tripwires::compute_active_hold_state(&entry_refs, head_sha);
+
+        if !state.held {
+            return false;
+        }
+
+        // Active hold exists — check whether the label is still present.
+        let has_label = crate::roles::is_human_review_hold(task);
+
+        if !has_label {
+            // Label was removed outside the release path — reapply it and
+            // log a tamper event. Both operations must succeed; if either
+            // fails we fail closed (return true) so the PR does not advance.
+            let now = ::time::OffsetDateTime::now_utc()
+                .format(&::time::format_description::well_known::Rfc3339)
+                .unwrap_or_default();
+
+            let recon = crate::tripwires::check_label_tamper(
+                &state,
+                &task.id,
+                &task.project_id,
+                Some(pr_number),
+                has_label,
+                "pr_poller",
+                &now,
+            );
+
+            if recon.tamper_detected {
+                // Reapply the label idempotently.
+                let labels_json = add_hold_label_to_existing(&task.labels);
+                if let Err(e) = task_repo.update_labels(&task.id, &labels_json).await {
+                    tracing::error!(
+                        task_id = %task.short_id,
+                        pr = pr_number,
+                        head_sha = %head_sha,
+                        error = %e,
+                        "PR poller: FAILED to reapply human-review-hold label during tamper reconciliation — failing closed"
+                    );
+                    return true;
+                }
+
+                // Log the tamper event.
+                if let Some(ref payload) = recon.payload {
+                    let payload_json = serde_json::to_string(payload).unwrap_or_default();
+                    if let Err(e) = task_repo
+                        .log_activity(
+                            Some(&task.id),
+                            "coordinator",
+                            "system",
+                            crate::tripwires::TRIPWIRE_EVENT_TAMPER_LABEL_REMOVED,
+                            &payload_json,
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            task_id = %task.short_id,
+                            pr = pr_number,
+                            head_sha = %head_sha,
+                            error = %e,
+                            "PR poller: FAILED to log tripwire.tamper.label_removed event — failing closed"
+                        );
+                        return true;
+                    }
+                }
+
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pr_number,
+                    head_sha = %head_sha,
+                    active_finding_count = state.active_findings.len(),
+                    "PR poller: tripwire tamper detected — human-review-hold label reapplied and tamper event logged"
+                );
+            }
+        }
+
+        // Active hold exists — PR must not advance.
+        true
     }
 
     // ── needs_task_review polling (review-stuck CI monitoring) ───────────────
@@ -1029,4 +1179,19 @@ pub(crate) fn decide_pr_draft_ci_action(
             needs_passing_persist: false,
         },
     }
+}
+
+/// Add the `human-review-hold` label to an existing labels JSON array,
+/// returning the updated JSON string. Idempotent: if the label is already
+/// present, the input is returned unchanged.
+///
+/// `existing_labels` is a JSON-array string (e.g. `["bug","blocked"]`).
+/// Malformed JSON is treated as an empty label set.
+fn add_hold_label_to_existing(existing_labels: &str) -> String {
+    let mut labels: Vec<String> = serde_json::from_str(existing_labels).unwrap_or_default();
+    let hold_label = crate::roles::HUMAN_REVIEW_HOLD_LABEL;
+    if !labels.iter().any(|l| l == hold_label) {
+        labels.push(hold_label.to_owned());
+    }
+    serde_json::to_string(&labels).unwrap_or_else(|_| format!("[\"{hold_label}\"]"))
 }
