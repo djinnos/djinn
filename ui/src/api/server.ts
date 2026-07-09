@@ -3,6 +3,8 @@ import type { McpToolOutput, ProjectListOutputSchema } from "@/api/generated/mcp
 import { getServerBaseUrl } from "@/api/serverUrl";
 import type { Epic, Task } from "@/api/types";
 import { projectStore } from "@/stores/projectStore";
+import { taskStore } from "@/stores/taskStore";
+import { mergedColumnStore } from "@/stores/mergedColumnStore";
 
 async function getBaseUrl(): Promise<string> {
   return getServerBaseUrl();
@@ -377,97 +379,188 @@ export async function removeProject(projectId: string): Promise<void> {
   });
 }
 
-export interface KanbanSnapshot {
-  projectSlug: string | null;
+const KANBAN_PAGE_SIZE = 200;
+
+/** Resolve a project slug (`owner/repo`) to its stable project id. */
+function projectIdForSlug(slug: string): string | null {
+  return (
+    projectStore
+      .getState()
+      .projects.find((p) => `${p.github_owner}/${p.github_repo}` === slug)?.id ??
+    null
+  );
+}
+
+/**
+ * Fetch every page of `task_list` for a project honoring the given filters.
+ *
+ * The first page is fetched serially; if the server reports more, the remaining
+ * pages are fetched in parallel using `total_count` (rather than the old serial
+ * `has_more` walk) so a large backlog paints in one round-trip's worth of
+ * latency instead of N.
+ */
+async function fetchAllTaskPages(
+  slug: string,
+  params: Record<string, unknown>,
+): Promise<Task[]> {
+  const first = await callMcpTool("task_list", {
+    project: slug,
+    limit: KANBAN_PAGE_SIZE,
+    offset: 0,
+    ...params,
+  });
+  const tasks: Task[] = [...(first.tasks as unknown as Task[])];
+  if (first.has_more) {
+    const total = first.total_count;
+    const offsets: number[] = [];
+    for (let o = tasks.length; o < total; o += KANBAN_PAGE_SIZE) offsets.push(o);
+    const rest = await Promise.all(
+      offsets.map((offset) =>
+        callMcpTool("task_list", {
+          project: slug,
+          limit: KANBAN_PAGE_SIZE,
+          offset,
+          ...params,
+        }),
+      ),
+    );
+    for (const page of rest) tasks.push(...(page.tasks as unknown as Task[]));
+  }
+  return tasks;
+}
+
+/**
+ * Fetch every page of `epic_list` for a project. The server caps epic_list at
+ * ~200 per page (a higher requested limit is clamped), so without this walk the
+ * *newest* epics fall off the first page — and since the default sort is
+ * created-asc, those are the currently-active ones, whose tasks then render
+ * under "Unknown Epic" once the closed-epic count grows past one page.
+ *
+ * Kept as a serial `has_more` walk (unlike the parallel task pagination): the
+ * epic_list schema types `total_count` as optional, so a `total`-driven
+ * parallel fan-out has no reliable page bound.
+ */
+async function fetchAllEpicPages(slug: string): Promise<Epic[]> {
+  const first = await callMcpTool("epic_list", {
+    project: slug,
+    limit: KANBAN_PAGE_SIZE,
+    offset: 0,
+  });
+  const epics: Epic[] = [...((first.epics ?? []) as unknown as Epic[])];
+  if (first.has_more) {
+    let offset = epics.length;
+    while (true) {
+      const page = await callMcpTool("epic_list", {
+        project: slug,
+        limit: KANBAN_PAGE_SIZE,
+        offset,
+      });
+      epics.push(...(page.epics as unknown as Epic[]));
+      if (!page.has_more) break;
+      offset += (page.epics as unknown[]).length;
+    }
+  }
+  return epics;
+}
+
+export interface ActiveSnapshot {
+  /** Non-closed tasks (Open / In Progress / PR Ready columns). */
   tasks: Task[];
   epics: Epic[];
 }
 
-/** Fetch tasks + epics for a single project, or aggregate across all projects. */
-export async function fetchKanbanSnapshot(
-  projectSlug?: string | null,
-  allProjectSlugs?: string[],
-): Promise<KanbanSnapshot> {
-  // All-projects mode: fetch from every project and merge
-  if (allProjectSlugs && allProjectSlugs.length > 0) {
-    const snapshots = await Promise.all(
-      allProjectSlugs.map((slug) => fetchKanbanSnapshot(slug))
-    );
-    return {
-      projectSlug: null,
-      tasks: snapshots.flatMap((s) => s.tasks),
-      epics: snapshots.flatMap((s) => s.epics),
-    };
-  }
-
-  const resolvedProjectSlug = projectSlug ?? null;
-
-  if (!resolvedProjectSlug) {
-    return { projectSlug: null, tasks: [], epics: [] };
-  }
-
-  // Fetch first page of tasks + all epics in parallel
-  const PAGE_SIZE = 200;
-  const [firstTaskPage, firstEpicPage] = await Promise.all([
-    callMcpTool("task_list", {
-      project: resolvedProjectSlug,
-      limit: PAGE_SIZE,
-      offset: 0,
+/**
+ * Phase 1 of Kanban hydration: fetch the ACTIVE (non-closed) tasks plus all
+ * epics across the given projects. This is the fast paint — active tasks are
+ * few (~dozens) so the board renders without waiting on the (potentially
+ * thousands of) closed/merged rows.
+ */
+export async function fetchActiveSnapshot(
+  slugs: string[],
+): Promise<ActiveSnapshot> {
+  if (slugs.length === 0) return { tasks: [], epics: [] };
+  const perProject = await Promise.all(
+    slugs.map(async (slug) => {
+      const projectId = projectIdForSlug(slug);
+      const [tasks, epics] = await Promise.all([
+        fetchAllTaskPages(slug, { status: "!closed" }),
+        fetchAllEpicPages(slug),
+      ]);
+      return {
+        tasks: tasks.map((t) => ({ ...t, project_id: projectId })),
+        epics,
+      };
     }),
-    callMcpTool("epic_list", {
-      project: resolvedProjectSlug,
-      limit: PAGE_SIZE,
-      offset: 0,
-    }),
-  ]);
-
-  // Paginate remaining tasks if the server has more (server caps at ~200 per page)
-  const allTasks: Task[] = [...(firstTaskPage.tasks as unknown as Task[])];
-  if (firstTaskPage.has_more) {
-    let offset = allTasks.length;
-
-    while (true) {
-      const page = await callMcpTool("task_list", {
-        project: resolvedProjectSlug,
-        limit: PAGE_SIZE,
-        offset,
-      });
-      allTasks.push(...(page.tasks as unknown as Task[]));
-      if (!page.has_more) break;
-      offset += (page.tasks as unknown[]).length;
-    }
-  }
-
-  // Paginate remaining epics too. The server caps epic_list at ~200 per page
-  // (a higher requested limit is clamped), so without this loop the *newest*
-  // epics fall off the first page — and since the default sort is created-asc,
-  // those are the currently-active ones, whose tasks then render under
-  // "Unknown Epic" once the closed-epic count grows past one page.
-  const allEpics: Epic[] = [...((firstEpicPage.epics ?? []) as unknown as Epic[])];
-  if (firstEpicPage.has_more) {
-    let epicOffset = allEpics.length;
-
-    while (true) {
-      const page = await callMcpTool("epic_list", {
-        project: resolvedProjectSlug,
-        limit: PAGE_SIZE,
-        offset: epicOffset,
-      });
-      allEpics.push(...(page.epics as unknown as Epic[]));
-      if (!page.has_more) break;
-      epicOffset += (page.epics as unknown[]).length;
-    }
-  }
-
-  // Stamp each task with the project it belongs to (needed for all-projects view)
-  const projectId = projectStore
-    .getState()
-    .projects.find((p) => `${p.github_owner}/${p.github_repo}` === resolvedProjectSlug)?.id ?? null;
-  const tasks = allTasks.map((t) => ({ ...t, project_id: projectId }));
-
+  );
   return {
-    projectSlug: resolvedProjectSlug,
-    tasks,
-    epics: allEpics,
+    tasks: perProject.flatMap((p) => p.tasks),
+    epics: perProject.flatMap((p) => p.epics),
   };
+}
+
+/**
+ * Fetch a single page of closed tasks for a project (sorted newest-closed
+ * first) and record the pagination cursor in {@link mergedColumnStore}.
+ */
+async function fetchClosedPageForProject(
+  slug: string,
+  offset: number,
+): Promise<Task[]> {
+  const projectId = projectIdForSlug(slug);
+  const page = await callMcpTool("task_list", {
+    project: slug,
+    status: "closed",
+    sort: "closed",
+    limit: KANBAN_PAGE_SIZE,
+    offset,
+  });
+  const tasks = (page.tasks as unknown as Task[]).map((t) => ({
+    ...t,
+    project_id: projectId,
+  }));
+  mergedColumnStore.getState().setProjectPage({
+    slug,
+    projectId,
+    loaded: offset + tasks.length,
+    hasMore: page.has_more,
+    totalClosed: page.total_count,
+  });
+  return tasks;
+}
+
+/**
+ * Phase 2 of Kanban hydration: fetch the FIRST page of closed/merged tasks for
+ * every project. Resets the merged-column pagination cursors first, so a
+ * reconnect re-hydration cleanly drops any extra pages that were previously
+ * loaded (the task store is keyed by id, so re-adding page 1 is idempotent).
+ */
+export async function fetchClosedFirstPage(slugs: string[]): Promise<Task[]> {
+  mergedColumnStore.getState().reset();
+  if (slugs.length === 0) return [];
+  const perProject = await Promise.all(
+    slugs.map((slug) => fetchClosedPageForProject(slug, 0)),
+  );
+  return perProject.flatMap((tasks) => tasks);
+}
+
+/**
+ * "Load more" for the Merged column: fetch the next closed page for every
+ * project that still has more, append the rows into the task store, and return
+ * the newly-loaded tasks. Idempotent and safe to call repeatedly; a no-op when
+ * nothing is left to load.
+ */
+export async function loadMoreClosedTasks(): Promise<Task[]> {
+  const pending = mergedColumnStore.getState().projectsWithMore();
+  if (pending.length === 0) return [];
+  mergedColumnStore.getState().setLoadingMore(true);
+  try {
+    const results = await Promise.all(
+      pending.map((p) => fetchClosedPageForProject(p.slug, p.loaded)),
+    );
+    const tasks = results.flatMap((t) => t);
+    taskStore.getState().upsertTasks(tasks);
+    return tasks;
+  } finally {
+    mergedColumnStore.getState().setLoadingMore(false);
+  }
 }

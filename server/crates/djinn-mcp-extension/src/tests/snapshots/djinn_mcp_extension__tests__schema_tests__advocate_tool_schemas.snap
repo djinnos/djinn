@@ -31,7 +31,8 @@ expression: tool_schemas_advocate()
       "type": "object",
       "properties": {
         "status": {
-          "type": "string"
+          "type": "string",
+          "description": "Positive (\"open\") or negative (\"!closed\") status filter. A leading \"!\" matches every task whose status differs from the given value."
         },
         "issue_type": {
           "type": "string"
@@ -51,7 +52,8 @@ expression: tool_schemas_advocate()
           "description": "Epic ID to filter by"
         },
         "sort": {
-          "type": "string"
+          "type": "string",
+          "description": "priority (default), created, created_desc, updated, updated_desc, closed (closed_at DESC then created_at DESC)."
         },
         "limit": {
           "type": "integer"

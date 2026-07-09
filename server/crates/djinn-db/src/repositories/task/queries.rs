@@ -702,9 +702,15 @@ pub(super) fn build_where(
     }
 
     if let Some(s) = status {
-        let ph = format!("${}", param_offset + params.len() + 1);
-        clauses.push(format!("status = {ph}"));
-        params.push(SqlParam::Text(s.clone()));
+        if let Some(neg) = s.strip_prefix('!') {
+            let ph = format!("${}", param_offset + params.len() + 1);
+            clauses.push(format!("status != {ph}"));
+            params.push(SqlParam::Text(neg.to_owned()));
+        } else {
+            let ph = format!("${}", param_offset + params.len() + 1);
+            clauses.push(format!("status = {ph}"));
+            params.push(SqlParam::Text(s.clone()));
+        }
     }
 
     if let Some(it) = issue_type {

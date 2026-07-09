@@ -133,6 +133,8 @@ pub struct TaskShowParams {
 pub struct TaskListParams {
     /// Absolute project path.
     pub project: String,
+    /// Positive ("open") or negative ("!closed") status filter. A leading "!"
+    /// matches every task whose status differs from the given value.
     pub status: Option<String>,
     /// Positive ("task") or negative ("!epic") issue_type filter.
     pub issue_type: Option<String>,

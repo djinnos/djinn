@@ -20,7 +20,7 @@ import { useEffect, useRef } from "react";
 import { sseStore, type SSEEvent } from "../stores/sseStore";
 import { getServerBaseUrl } from "@/api/serverUrl";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
-import { fetchKanbanSnapshot } from "@/api/server";
+import { fetchActiveSnapshot, fetchClosedFirstPage } from "@/api/server";
 import { useProjects } from "@/stores/useProjectStore";
 import { projectStore } from "@/stores/projectStore";
 import { taskStore } from "@/stores/taskStore";
@@ -91,10 +91,21 @@ export function useEventSource() {
         return;
       }
       try {
-        const snapshot = await fetchKanbanSnapshot(null, slugs);
+        // Phase 1 — active-first paint: fetch the non-closed tasks + epics and
+        // render the Open / In Progress / PR Ready columns immediately, without
+        // waiting on the (potentially thousands of) closed/merged rows.
+        const active = await fetchActiveSnapshot(slugs);
         if (!isActive) return;
-        taskStore.getState().setTasks(snapshot.tasks);
-        epicStore.getState().setEpics(snapshot.epics);
+        taskStore.getState().setTasks(active.tasks);
+        epicStore.getState().setEpics(active.epics);
+
+        // Phase 2 — paginated Merged column: append the first page of closed
+        // tasks. `upsertTasks` merges additively so the active columns painted
+        // above are preserved. On reconnect/lag this resets the merged
+        // pagination cursors and drops any previously-loaded extra pages.
+        const closed = await fetchClosedFirstPage(slugs);
+        if (!isActive) return;
+        taskStore.getState().upsertTasks(closed);
       } catch (error) {
         console.error("Failed to hydrate Kanban snapshot:", error);
       }
