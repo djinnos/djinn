@@ -390,57 +390,29 @@ impl CoordinatorActor {
                                 "PR poller: unexpected Held outcome in backfill mode — logging but not blocking"
                             );
                         } else {
-                            // Apply human-review-hold and park the source.
-                            tracing::info!(
-                                task_id = %task.short_id,
-                                pr = pull_number,
-                                head_sha = %pr.head.sha,
-                                enforcement_count = result.decision.enforcement_finding_count,
-                                "PR poller: tripwire gate HELD — creating human-review hold"
-                            );
-
-                            let findings_summary = result
-                                .decision
-                                .findings
-                                .iter()
-                                .map(|f| {
-                                    format!(
-                                        "- `{}` ({}) — {}",
-                                        f.rule_id.as_str(),
-                                        f.reason_code,
-                                        f.evidence.path,
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-
-                            let hold_reason = format!(
-                                "Tripwire gate held for PR head `{}`.\n\n\
-                                 Policy revision: `{}`\n\
-                                 Enforcement findings ({}):\n{}",
-                                &pr.head.sha[..12.min(pr.head.sha.len())],
-                                result.decision.policy_revision,
-                                result.decision.enforcement_finding_count,
-                                findings_summary,
-                            );
-
-                            // Create a human-review remediation task (idempotent —
-                            // skips if the source is already held by an unresolved
-                            // blocker).
-                            self.create_remediation_task(
-                                &task.id,
-                                &hold_reason,
-                                &task.project_id,
-                                crate::dispatch::RemediationKind::HumanReview,
-                            )
-                            .await;
-
-                            // Park the source so it stops being re-dispatched.
-                            self.park_source_open(&task.id, &hold_reason).await;
-                            self.pr_status_cache.remove(&task.id);
-                            self.pr_draft_first_seen.remove(&task.id);
-                            self.review_stuck_sha_first_seen.remove(&task.id);
-                            continue;
+                            // Enforce mode. First run release carry-forward
+                            // (see `tripwire_hold`): if every enforcement
+                            // finding was already adjudicated + released on a
+                            // prior head and is byte-identical here (rebase /
+                            // merge of main), the hold clears autonomously and
+                            // we fall through to undraft. Otherwise create the
+                            // hold for the remaining findings.
+                            let proceed = self
+                                .carry_forward_tripwire_gate(
+                                    &task,
+                                    &pr.head.sha,
+                                    pull_number,
+                                    result,
+                                )
+                                .await;
+                            if !proceed {
+                                self.create_tripwire_hold(&task, result, &pr.head.sha)
+                                    .await;
+                                self.pr_status_cache.remove(&task.id);
+                                self.pr_draft_first_seen.remove(&task.id);
+                                self.review_stuck_sha_first_seen.remove(&task.id);
+                                continue;
+                            }
                         }
                     }
                     crate::tripwires::GateOutcome::Passed

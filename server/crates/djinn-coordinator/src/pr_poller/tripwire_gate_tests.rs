@@ -791,10 +791,14 @@ fn idempotency_key_changes_with_head_sha() {
 fn idempotency_key_changes_with_policy_revision() {
     let files = vec![pr_file("migrations/001.sql", "added", 10, 0)];
     let changed = convert_pr_files(&files);
-    let mut policy_v1 = TripwirePolicy::default();
-    policy_v1.policy_revision = "org-policy:1".to_owned();
-    let mut policy_v2 = TripwirePolicy::default();
-    policy_v2.policy_revision = "org-policy:2".to_owned();
+    let policy_v1 = TripwirePolicy {
+        policy_revision: "org-policy:1".to_owned(),
+        ..TripwirePolicy::default()
+    };
+    let policy_v2 = TripwirePolicy {
+        policy_revision: "org-policy:2".to_owned(),
+        ..TripwirePolicy::default()
+    };
     let input_v1 = TripwireEvaluationInput {
         task_id: "task-001".to_owned(),
         project_id: "proj-001".to_owned(),
@@ -859,10 +863,14 @@ fn same_head_sha_new_policy_revision_not_skipped_by_rollout() {
 
     // Also verify the idempotency key changes (proving the new policy
     // revision produces a distinct key, not a duplicate of the old one).
-    let mut old_policy = TripwirePolicy::default();
-    old_policy.policy_revision = "policy-v1".to_owned();
-    let mut new_policy = TripwirePolicy::default();
-    new_policy.policy_revision = "policy-v2".to_owned();
+    let old_policy = TripwirePolicy {
+        policy_revision: "policy-v1".to_owned(),
+        ..TripwirePolicy::default()
+    };
+    let new_policy = TripwirePolicy {
+        policy_revision: "policy-v2".to_owned(),
+        ..TripwirePolicy::default()
+    };
 
     let files = vec![pr_file("migrations/001.sql", "added", 10, 0)];
     let changed = convert_pr_files(&files);
