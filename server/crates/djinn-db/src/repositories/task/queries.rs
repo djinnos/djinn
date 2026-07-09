@@ -702,7 +702,25 @@ pub(super) fn build_where(
     }
 
     if let Some(s) = status {
-        if let Some(neg) = s.strip_prefix('!') {
+        if s == "merged" {
+            // Pseudo-status: the Kanban "Merged" column. A task counts as merged
+            // when it is closed AND either has a landed merge-commit SHA, or (for
+            // legacy rows closed before the SHA was persisted) opened a PR and
+            // closed as `completed`. This MUST stay in sync with the UI's
+            // `taskToColumnKey` (ui/src/components/KanbanBoard.tsx):
+            //
+            //     const merged =
+            //       task.merge_commit_sha != null ||
+            //       (task.pr_url != null && task.close_reason === "completed");
+            //     return merged ? "done" : null;   // (only when status === "closed")
+            //
+            // All literals are fixed constants (not user input), so no binds.
+            clauses.push(
+                "status = 'closed' AND (merge_commit_sha IS NOT NULL \
+                 OR (pr_url IS NOT NULL AND close_reason = 'completed'))"
+                    .to_owned(),
+            );
+        } else if let Some(neg) = s.strip_prefix('!') {
             let ph = format!("${}", param_offset + params.len() + 1);
             clauses.push(format!("status != {ph}"));
             params.push(SqlParam::Text(neg.to_owned()));
