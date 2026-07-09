@@ -1132,11 +1132,27 @@ impl CoordinatorActor {
 /// publication (enforce), or `None` otherwise (backfill).
 fn resolve_policy_publication_ts(pr_created_at: &str) -> Option<&str> {
     let pub_ts = std::env::var("DJINN_TRIPWIRE_POLICY_PUBLICATION_TS").ok()?;
-    if pub_ts.is_empty() {
-        return None;
-    }
-    // RFC 3339 strings sort lexicographically in chronological order.
-    if pr_created_at >= pub_ts.as_str() {
+    rollout_policy_publication_marker(pr_created_at, Some(pub_ts.as_str()))
+}
+
+/// Pure rollout-boundary helper used by the poller and tests.
+///
+/// The tripwire gate's first-evaluation path must not infer "backfill" from
+/// the absence of prior gate activity alone: PRs opened after policy
+/// publication are already in enforcement. Returning `Some(pr_created_at)` is
+/// the explicit marker passed to `determine_rollout_mode` for those PRs; `None`
+/// preserves report-only backfill for already-open PR heads.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn rollout_policy_publication_marker<'a>(
+    pr_created_at: &'a str,
+    policy_publication_ts: Option<&str>,
+) -> Option<&'a str> {
+    let pub_ts = policy_publication_ts.filter(|ts| !ts.is_empty())?;
+
+    // Timestamps are normalized RFC 3339 strings in poller state/config, so
+    // lexicographic ordering preserves chronological ordering for this rollout
+    // boundary check.
+    if pr_created_at >= pub_ts {
         Some(pr_created_at)
     } else {
         None
