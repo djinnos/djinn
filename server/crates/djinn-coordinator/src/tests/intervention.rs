@@ -5900,6 +5900,55 @@ async fn try_create_db_error_parks_with_failure_dossier() {
     assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
+    // Seed typed evidence that only the `try_create` error arm can preserve in
+    // the failure dossier.  The earlier hold-cycle-resolution error arm builds
+    // its dossier before parsing CI sections or resolving mirror_head_sha, so
+    // the value assertions below fail if this test regresses into that branch.
+    repo.upsert_ci_snapshot(djinn_core::models::TaskPrCiSnapshotInput {
+        task_id: task.id.clone(),
+        pr_number: 1781,
+        head_sha: "gh-head-try-create-fail".to_string(),
+        ci_status: djinn_core::models::CiStatus::Failing,
+        blocking_required_check_names: vec!["Quality Gate".to_string()],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    })
+    .await
+    .unwrap();
+    repo.set_pr_url(&task.id, "https://github.com/djinnos/djinn/pull/1781")
+        .await
+        .unwrap();
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    let attempt = attempt_repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: "try-create-failure-evidence",
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+    attempt_repo
+        .advance_to_terminal(TerminalTaskAttemptParams {
+            id: &attempt.id,
+            outcome: djinn_core::models::TaskAttemptOutcome::Crashed,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: Some("mirror-head-try-create-fail"),
+            github_head_sha: Some("gh-head-try-create-fail"),
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+
     // Seed an existing consumed arbitration so resolve_current_hold_cycle
     // returns (1, None) — i.e. a new cycle can be created.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
@@ -5945,8 +5994,16 @@ async fn try_create_db_error_parks_with_failure_dossier() {
     );
 
     // Act: route the park rung — try_create will fail, must park.
+    let ci_sections = "Required CI failed: Server Clippy (job_id=86091807456), \
+                       Server sqlx Cache (job_id=86091807443)";
     let handled = actor
-        .route_planner_intervention(&task, "worker", "try_create error test", None, 5)
+        .route_planner_intervention(
+            &task,
+            "worker",
+            "try_create error test",
+            Some(ci_sections),
+            5,
+        )
         .await;
     assert!(handled, "try_create error must park (fail-closed)");
 
@@ -5965,6 +6022,11 @@ async fn try_create_db_error_parks_with_failure_dossier() {
         "\"github_head_sha\"",
         "\"pr_url\"",
         "\"failing_ci_job_ids\"",
+        "mirror-head-try-create-fail",
+        "gh-head-try-create-fail",
+        "https://github.com/djinnos/djinn/pull/1781",
+        "86091807456",
+        "86091807443",
         "post_intervention_history",
     ] {
         assert!(

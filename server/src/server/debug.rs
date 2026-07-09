@@ -77,12 +77,11 @@ fn internal_error(error: impl std::fmt::Display) -> (StatusCode, String) {
 
 fn snapshot_at_now() -> String {
     let now = time::OffsetDateTime::now_utc();
-    let prefix = now
-        .format(
-            &time::format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]")
-                .expect("valid timestamp format"),
-        )
-        .expect("UTC timestamp should format");
+    let format = time::format_description::parse_borrowed::<3>(
+        "[year]-[month]-[day]T[hour]:[minute]:[second]",
+    )
+    .expect("valid timestamp format");
+    let prefix = now.format(&format).expect("UTC timestamp should format");
     format!("{prefix}.{:03}Z", now.millisecond())
 }
 
