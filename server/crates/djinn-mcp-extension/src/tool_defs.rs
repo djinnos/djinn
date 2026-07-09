@@ -703,7 +703,7 @@ pub fn tool_schemas_architect() -> Vec<serde_json::Value> {
         serialize_tool(tool_task_reset_counters(), idempotent_destructive()),
         serialize_tool(tool_task_kill_session(), destructive()),
         // Architect keeps `role_metrics` (read) and `role_create`
-        // (structural proposal) but cannot mutate existing learned_prompts.
+        // (structural proposal) but has no mutation tool for role prompts.
         serialize_tool(crate::finalize_tools::tool_submit_work(), mutation()),
     ] {
         tool_values.push(value);

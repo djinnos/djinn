@@ -226,9 +226,8 @@ impl DjinnMcpServer {
     }
 
     /// Update a non-default agent's fields. Cannot modify is_default.
-    /// learned_prompt is machine-managed; direct setting via agent_update is rejected.
     #[tool(
-        description = "Update a specialist agent (name, description, system_prompt_extensions, model_preference, mcp_servers, skills). Cannot modify default agents' is_default flag. Accepts agent UUID or name. learned_prompt is machine-managed and cannot be set directly here."
+        description = "Update a specialist agent (name, description, system_prompt_extensions, model_preference, mcp_servers, skills). Cannot modify default agents' is_default flag. Accepts agent UUID or name."
     )]
     pub async fn agent_update(
         &self,

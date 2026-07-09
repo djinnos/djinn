@@ -631,11 +631,10 @@ fn architect_prompt_requires_read_back_verification_before_file_comments() {
         );
 }
 
-/// The amendment guidance must appear in every Planner mode (the section is in
-/// the top-level planner.md template, injected for all issue types), not just
-/// one workflow. Spot-check decomposition, intervention, and proposal modes.
+/// The learned-prompt amendment guidance has been removed from the planner
+/// template (3x0w). Verify the section does NOT appear in any Planner mode.
 #[test]
-fn planner_learned_prompt_guidance_present_across_modes() {
+fn planner_learned_prompt_guidance_absent_across_modes() {
     let ctx = make_ctx();
 
     for issue_type in ["planning", "review", "epic_breakdown", "task"] {
@@ -643,8 +642,8 @@ fn planner_learned_prompt_guidance_present_across_modes() {
         task.issue_type = issue_type.into();
         let prompt = render_prompt(AgentType::Planner, &task, &ctx);
         assert!(
-            prompt.contains("Learned-prompt amendments"),
-            "planner prompt for issue_type={issue_type} should include the learned-prompt amendment section"
+            !prompt.contains("Learned-prompt amendments"),
+            "planner prompt for issue_type={issue_type} must NOT contain the removed learned-prompt amendment section"
         );
     }
 }
