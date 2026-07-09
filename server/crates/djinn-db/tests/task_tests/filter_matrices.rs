@@ -350,3 +350,93 @@ async fn task_list_filter(#[case] filter_kind: &str) {
     );
     assert_eq!(result.tasks[0].id, beta.id);
 }
+
+// ── task_list status=merged pseudo-filter ────────────────────────────────
+//
+// The Kanban "Merged" column is backed by the `status=merged` pseudo-status,
+// which the backend expands to:
+//   status = 'closed' AND (merge_commit_sha IS NOT NULL
+//     OR (pr_url IS NOT NULL AND close_reason = 'completed'))
+// This MUST match the UI's `taskToColumnKey`. The matrix below exercises every
+// branch: a merge-commit row (included), a legacy pr_url+completed row without a
+// SHA (included), a force-closed row (excluded), a completed row with no PR URL
+// (excluded — the completed branch also requires pr_url), and an open task
+// (excluded — the status guard).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_list_status_merged() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db, event_bus_for(&tx));
+
+    // 1. Closed with a landed merge-commit SHA → included (SHA branch).
+    let merged_sha = repo
+        .create(&epic.id, "merged via sha", "", "", "task", 0, "", Some("open"))
+        .await
+        .unwrap();
+    repo.set_status_with_reason(&merged_sha.id, "closed", Some("completed"))
+        .await
+        .unwrap();
+    repo.set_merge_commit_sha(&merged_sha.id, "abc123def")
+        .await
+        .unwrap();
+
+    // 2. Legacy row: closed as completed with a PR URL but NO SHA → included
+    //    (pr_url + completed branch).
+    let merged_legacy = repo
+        .create(&epic.id, "merged legacy pr", "", "", "task", 0, "", Some("open"))
+        .await
+        .unwrap();
+    repo.set_status_with_reason(&merged_legacy.id, "closed", Some("completed"))
+        .await
+        .unwrap();
+    repo.set_pr_url(&merged_legacy.id, "https://github.com/o/r/pull/7")
+        .await
+        .unwrap();
+
+    // 3. Force-closed without merging (no SHA, no PR URL) → excluded.
+    let force_closed = repo
+        .create(&epic.id, "force closed unmerged", "", "", "task", 0, "", Some("open"))
+        .await
+        .unwrap();
+    repo.set_status_with_reason(&force_closed.id, "closed", Some("force_closed"))
+        .await
+        .unwrap();
+
+    // 4. Closed as completed but never opened a PR (no SHA, no pr_url) →
+    //    excluded: the completed branch also requires pr_url.
+    let completed_no_pr = repo
+        .create(&epic.id, "completed no pr", "", "", "task", 0, "", Some("open"))
+        .await
+        .unwrap();
+    repo.set_status_with_reason(&completed_no_pr.id, "closed", Some("completed"))
+        .await
+        .unwrap();
+
+    // 5. Open task (even if it somehow had a SHA) → excluded by the status guard.
+    let open_task = repo
+        .create(&epic.id, "still open", "", "", "task", 0, "", Some("open"))
+        .await
+        .unwrap();
+    repo.set_merge_commit_sha(&open_task.id, "should-not-count")
+        .await
+        .unwrap();
+
+    let result = repo
+        .list_filtered(ListQuery {
+            status: Some("merged".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .expect("list_filtered should succeed");
+
+    assert_eq!(
+        result.total_count, 2,
+        "status=merged should match exactly the two merged tasks"
+    );
+    let mut ids: Vec<&str> = result.tasks.iter().map(|t| t.id.as_str()).collect();
+    ids.sort_unstable();
+    let mut expected = vec![merged_sha.id.as_str(), merged_legacy.id.as_str()];
+    expected.sort_unstable();
+    assert_eq!(ids, expected, "status=merged returned the wrong task set");
+}

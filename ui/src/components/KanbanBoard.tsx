@@ -126,12 +126,16 @@ export function KanbanBoard({
   const projects = useProjects();
 
   // Merged-column pagination: the board loads active tasks first, then the
-  // closed/merged tasks page-by-page. `hasMoreClosed` drives the "Load more"
-  // affordance and the "+" suffix on the Merged header count. When the board is
-  // rendered in controlled mode (`tasksProp`) the store is empty, so both stay
-  // falsy and the affordance is hidden.
+  // merged tasks page-by-page. `hasMoreClosed` drives the "Load more"
+  // affordance; `mergedTotal` is the EXACT merged count summed across projects
+  // (the backend `status=merged` filter counts only actually-merged rows, so no
+  // "+" estimate is needed). When the board is rendered in controlled mode
+  // (`tasksProp`) the store is empty, so the affordance is hidden and the header
+  // falls back to the loaded count.
   const hasMoreClosed = useMergedColumnStore((state) => state.hasMore());
   const loadingMoreClosed = useMergedColumnStore((state) => state.loadingMore);
+  const mergedTotal = useMergedColumnStore((state) => state.totalMerged());
+  const hasMergedTotals = useMergedColumnStore((state) => state.hasTotals());
   const handleLoadMoreClosed = () => {
     void loadMoreClosedTasks();
   };
@@ -344,8 +348,9 @@ export function KanbanBoard({
                       )}
                       <span className="leading-none">{column.label}</span>
                       <span className="text-xs leading-none text-muted-foreground">
-                        {taskCount}
-                        {column.key === "done" && hasMoreClosed ? "+" : ""}
+                        {column.key === "done" && hasMergedTotals
+                          ? mergedTotal
+                          : taskCount}
                       </span>
                     </div>
                   </div>
