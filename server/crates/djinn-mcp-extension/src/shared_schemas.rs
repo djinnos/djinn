@@ -526,7 +526,7 @@ pub fn tool_task_list() -> RmcpTool {
         object!({
             "type": "object",
             "properties": {
-                "status": {"type": "string", "description": "Positive (\"open\") or negative (\"!closed\") status filter. A leading \"!\" matches every task whose status differs from the given value."},
+                "status": {"type": "string", "description": "Positive (\"open\") or negative (\"!closed\") status filter. A leading \"!\" matches every task whose status differs from the given value. The pseudo-status \"merged\" matches closed tasks that actually merged (have a merge-commit SHA, or opened a PR and closed as completed) — this is what backs the Kanban Merged column."},
                 "issue_type": {"type": "string"},
                 "priority": {"type": "integer"},
                 "text": {"type": "string", "description": "Free-text search in title/description"},

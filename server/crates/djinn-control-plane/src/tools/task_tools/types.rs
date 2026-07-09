@@ -134,7 +134,10 @@ pub struct TaskListParams {
     /// Absolute project path.
     pub project: String,
     /// Positive ("open") or negative ("!closed") status filter. A leading "!"
-    /// matches every task whose status differs from the given value.
+    /// matches every task whose status differs from the given value. The
+    /// pseudo-status "merged" matches closed tasks that actually merged (have a
+    /// merge-commit SHA, or opened a PR and closed as completed) — this is what
+    /// backs the Kanban Merged column.
     pub status: Option<String>,
     /// Positive ("task") or negative ("!epic") issue_type filter.
     pub issue_type: Option<String>,

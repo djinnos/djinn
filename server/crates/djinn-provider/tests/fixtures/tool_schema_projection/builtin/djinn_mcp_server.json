@@ -21011,7 +21011,7 @@
           "type": "string"
         },
         "status": {
-          "description": "Positive (\"open\") or negative (\"!closed\") status filter. A leading \"!\"\nmatches every task whose status differs from the given value.",
+          "description": "Positive (\"open\") or negative (\"!closed\") status filter. A leading \"!\"\nmatches every task whose status differs from the given value. The\npseudo-status \"merged\" matches closed tasks that actually merged (have a\nmerge-commit SHA, or opened a PR and closed as completed) — this is what\nbacks the Kanban Merged column.",
           "type": [
             "string",
             "null"
