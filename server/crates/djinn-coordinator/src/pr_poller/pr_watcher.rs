@@ -292,9 +292,6 @@ impl CoordinatorActor {
             }
 
             // ── Tripwire gate: rollout-aware evaluation ─────────────────
-            // Rollout: existing PRs → backfill (report-only); new heads
-            // after policy publication → enforce. Direct label removal is
-            // tamper, not a release path. See tripwire_gate module docs.
             let tripwire_entries = match self.task_repo().list_activity(&task.id).await {
                 Ok(entries) => entries,
                 Err(e) => {
@@ -320,10 +317,6 @@ impl CoordinatorActor {
                 &task.project_id,
                 &pr.head.sha,
                 &tripwire_entry_refs,
-                // policy_publication_ts: compare task creation time against
-                // the configured policy publication timestamp (task.created_at
-                // is a proxy for PR creation time). When the task was created
-                // after publication, the rollout logic returns Enforce.
                 resolve_policy_publication_ts(&task.created_at),
                 &crate::tripwires::TripwirePolicy::default().policy_revision,
             )
@@ -1126,22 +1119,11 @@ impl CoordinatorActor {
     // ── pr_review polling (review monitoring) ────────────────────────────────
 }
 
-/// Resolve `policy_publication_ts` for the tripwire gate rollout evaluation.
-/// Compares PR creation time against `DJINN_TRIPWIRE_POLICY_PUBLICATION_TS`
-/// (RFC 3339). Returns `Some(pr_created_at)` when the PR was created after
-/// publication (enforce), or `None` otherwise (backfill).
 fn resolve_policy_publication_ts(pr_created_at: &str) -> Option<&str> {
     let pub_ts = std::env::var("DJINN_TRIPWIRE_POLICY_PUBLICATION_TS").ok()?;
     rollout_policy_publication_marker(pr_created_at, Some(pub_ts.as_str()))
 }
 
-/// Pure rollout-boundary helper used by the poller and tests.
-///
-/// The tripwire gate's first-evaluation path must not infer "backfill" from
-/// the absence of prior gate activity alone: PRs opened after policy
-/// publication are already in enforcement. Returning `Some(pr_created_at)` is
-/// the explicit marker passed to `determine_rollout_mode` for those PRs; `None`
-/// preserves report-only backfill for already-open PR heads.
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) fn rollout_policy_publication_marker<'a>(
     pr_created_at: &'a str,
@@ -1149,9 +1131,6 @@ pub(crate) fn rollout_policy_publication_marker<'a>(
 ) -> Option<&'a str> {
     let pub_ts = policy_publication_ts.filter(|ts| !ts.is_empty())?;
 
-    // Timestamps are normalized RFC 3339 strings in poller state/config, so
-    // lexicographic ordering preserves chronological ordering for this rollout
-    // boundary check.
     if pr_created_at >= pub_ts {
         Some(pr_created_at)
     } else {
