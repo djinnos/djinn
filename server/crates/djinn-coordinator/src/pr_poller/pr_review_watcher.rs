@@ -766,6 +766,17 @@ impl CoordinatorActor {
                 self.conversations_resolved.remove(&task.id);
             }
 
+            // All merge gates passed (CI + tripwire active-hold): undraft a
+            // still-draft PR first, else the merge/enqueue 405-loops on
+            // "still a draft" (ufsh / #1794 incident).
+            if should_undraft_before_merge(pr.draft)
+                && !self
+                    .undraft_before_merge(gh_client, &task, &pr.node_id, pull_number)
+                    .await
+            {
+                continue;
+            }
+
             // Either approved or no reviews — attempt squash merge.
             tracing::info!(
                 task_id = %task.short_id,
@@ -780,8 +791,7 @@ impl CoordinatorActor {
             {
                 Ok(merge_response) => {
                     // The PUT /merge response carries the landed squash-commit
-                    // SHA (`{"sha": ..., "merged": true}`); record it so the
-                    // task lands in the board's Merged column.
+                    // SHA; record it so the task lands in the Merged column.
                     let merge_commit_sha = merge_response
                         .get("sha")
                         .and_then(|v| v.as_str())
@@ -934,16 +944,9 @@ impl CoordinatorActor {
                         }
                     }
 
-                    let github_error = render_github_write_error("GitHub PR merge failed", &e);
                     let count = self.merge_fail_count.entry(task.id.clone()).or_insert(0);
                     *count += 1;
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        pr = pull_number,
-                        attempt = *count,
-                        error = %github_error,
-                        "PR poller: merge failed (will retry next tick)"
-                    );
+                    warn_pr_merge_failed(&task.short_id, pull_number, *count, &e);
                     if *count >= MERGE_RETRY_RECHECK_THRESHOLD {
                         tracing::info!(
                             task_id = %task.short_id,
