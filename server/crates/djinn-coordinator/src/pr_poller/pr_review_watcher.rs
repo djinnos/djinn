@@ -677,67 +677,7 @@ impl CoordinatorActor {
                 }
             }
 
-            // ── Merge path: delegated-to-GitHub vs legacy direct merge ────────
-            // Three modes, picked in order:
-            //
-            //   (a) GitHub already owns the PR's merge timing — either
-            //       `enablePullRequestAutoMerge` succeeded earlier (`pr.auto_merge`
-            //       is set) OR we explicitly enqueued the PR into the merge
-            //       queue on a previous tick (tracked in `delegated_to_github`
-            //       keyed by SHA so a new push re-enters this branch). Just
-            //       observe; on `UNMERGEABLE` or a failure-flavored dequeue
-            //       event the observer surfaces `PrCiFailed`.
-            //
-            //   (b) REST `PUT /pulls/{n}/merge` succeeds — repos without
-            //       merge-queue branch protection. Close the task.
-            //
-            //   (c) REST returns the merge-queue 405 — repo enforces a
-            //       merge queue. We call `enqueuePullRequest` directly
-            //       (works regardless of the repo's "Allow auto-merge"
-            //       setting; `enable_auto_merge_best_effort` from undraft
-            //       time often hits `UNPROCESSABLE` and is unreliable).
-            //       Then mark delegated and observe next tick.
-            let delegated_for_current_sha = self
-                .delegated_to_github
-                .get(&task.id)
-                .is_some_and(|sha| sha == &current_sha);
-            if pr.auto_merge.is_some() || delegated_for_current_sha {
-                self.observe_auto_merge_state(
-                    gh_client,
-                    &task.id,
-                    &task.short_id,
-                    pr_url,
-                    &owner,
-                    &repo,
-                    pull_number,
-                    &pr.node_id,
-                    has_approved,
-                    &current_sha,
-                )
-                .await;
-                continue;
-            }
-            // SHA moved since we last delegated — drop the stale entry so a
-            // fresh enqueue attempt fires below. Drop the conversation-resolved
-            // marker too: the new commit may have new review threads, and the
-            // SHA-keyed guard would otherwise hold the old SHA harmlessly, but
-            // clearing keeps the map tidy.
-            if self.delegated_to_github.contains_key(&task.id) {
-                self.delegated_to_github.remove(&task.id);
-                self.conversations_resolved.remove(&task.id);
-            }
-
             // ── CI merge gate ───────────────────────────────────────────────
-            // Block Djinn-initiated merge/close unless the durable CI snapshot
-            // for the current PR head is `passing`. This prevents merge when:
-            //   - Required checks are still running (pending/unknown) → hold
-            //   - Required checks are failing → block (remediation handles)
-            //   - Snapshot is stale (head SHA mismatch) → hold
-            //   - No snapshot exists yet → hold
-            //
-            // The "PR already merged" observation path (pr.merged == Some(true)
-            // above) is intentionally NOT gated — that records an external
-            // merge, not a Djinn-initiated one.
             {
                 let ci_snapshot = match self
                     .task_repo()
@@ -778,6 +718,52 @@ impl CoordinatorActor {
                         continue;
                     }
                 }
+            }
+
+            // ── Tripwire active-hold gate (pre-merge boundary) ────────────
+            if self
+                .reconcile_tripwire_hold(&task, pull_number, &current_sha)
+                .await
+            {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    head_sha = %current_sha,
+                    "PR poller: tripwire active-hold gate: blocking merge — active hold on current head"
+                );
+                continue;
+            }
+
+            // ── Delegated-to-GitHub observe (after CI + tripwire gates) ──
+            let delegated_for_current_sha = self
+                .delegated_to_github
+                .get(&task.id)
+                .is_some_and(|sha| sha == &current_sha);
+            if pr.auto_merge.is_some() || delegated_for_current_sha {
+                self.observe_auto_merge_state(
+                    gh_client,
+                    &task.id,
+                    &task.short_id,
+                    pr_url,
+                    &owner,
+                    &repo,
+                    pull_number,
+                    &pr.node_id,
+                    has_approved,
+                    &current_sha,
+                )
+                .await;
+                continue;
+            }
+
+            // SHA moved since we last delegated — drop the stale entry so a
+            // fresh enqueue attempt fires below. Drop the conversation-resolved
+            // marker too: the new commit may have new review threads, and the
+            // SHA-keyed guard would otherwise hold the old SHA harmlessly, but
+            // clearing keeps the map tidy.
+            if self.delegated_to_github.contains_key(&task.id) {
+                self.delegated_to_github.remove(&task.id);
+                self.conversations_resolved.remove(&task.id);
             }
 
             // Either approved or no reviews — attempt squash merge.
@@ -861,26 +847,6 @@ impl CoordinatorActor {
                                     "GitHub enqueue PR failed",
                                     &enqueue_err,
                                 );
-                                // Enqueue failed (PR not ready: missing
-                                // approval, failing checks, etc.). Don't
-                                // mark delegated — next tick re-checks
-                                // upstream gates and tries again.
-                                //
-                                // One concrete cause on merge-queue repos with
-                                // the "conversation must be resolved" rule is
-                                // unresolved review threads: `enqueuePullRequest`
-                                // rejects the PR much like the direct-merge 405
-                                // does. Unlike that REST path the rejection comes
-                                // back as a GraphQL error (no "405" to match on),
-                                // so we don't string-sniff it — instead, on an
-                                // APPROVED PR (CI already gated green above), we
-                                // resolve any leftover threads directly. Same
-                                // policy as the auto-merge + direct-merge paths;
-                                // harmless if conversations weren't the blocker
-                                // (the resolve list comes back empty). The
-                                // SHA-keyed `conversations_resolved` guard stops
-                                // us re-resolving every tick when a different gate
-                                // keeps enqueue failing.
                                 if has_approved
                                     && self.conversations_resolved.get(&task.id)
                                         != Some(&current_sha)
@@ -935,14 +901,6 @@ impl CoordinatorActor {
                         continue;
                     }
 
-                    // Conversation-resolution 405: the repo's branch protection
-                    // requires every review conversation to be resolved before
-                    // merge, and an external review bot approved the PR *and*
-                    // left inline comments → unresolved threads. An explicit
-                    // approval is the override signal: the reviewer's comments
-                    // are non-blocking, so resolve the leftover threads and let
-                    // the next tick re-attempt the merge. Only do this when the
-                    // PR is approved — otherwise this rule is a legitimate gate.
                     if has_approved && is_conversation_resolution_block(&e) {
                         match self
                             .resolve_unresolved_conversations(
@@ -986,10 +944,6 @@ impl CoordinatorActor {
                         error = %github_error,
                         "PR poller: merge failed (will retry next tick)"
                     );
-                    // After repeated failures, invalidate the CI cache so the
-                    // next tick re-checks whether checks actually passed.
-                    // This catches the case where CI failed after we cached
-                    // a "green" SHA.
                     if *count >= MERGE_RETRY_RECHECK_THRESHOLD {
                         tracing::info!(
                             task_id = %task.short_id,
