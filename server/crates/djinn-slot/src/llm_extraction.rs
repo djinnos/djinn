@@ -70,6 +70,20 @@ const TRANSCRIPT_EXCERPT_CHARS: usize = 12_000;
 /// structured payload while staying well within the model's context window.
 const EXTRACTION_MAX_TOKENS: u32 = 4096;
 
+/// Hard outer bound on the post-session extraction LLM completion.
+///
+/// Post-session knowledge extraction is best-effort background work that runs
+/// on the slot's finalize path. Without an explicit bound it inherits the
+/// provider's own request timeout (up to ~10 minutes for a streaming
+/// completion), which needlessly pins a finalize task and slot-pool resources
+/// on a stalled memory provider — indirect pressure on the same
+/// session-exit→teardown→redispatch window implicated in the 2026-07-09
+/// whole-board freeze. Cap it explicitly and reuse the existing
+/// "LLM completion failed; skipping extraction" degrade path on elapse; the
+/// value sits above the provider's inner per-attempt timeout (plus its one
+/// transient retry) so it only fires when that inner bound is itself defeated.
+const EXTRACTION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 const NO_LLM_PROVIDER_WARNING: &str =
     "llm_extraction: no LLM provider available; skipping extraction";
 
@@ -821,22 +835,33 @@ async fn run_llm_extraction_inner(
         &transcript,
         &scope_json,
     );
-    let response = match complete(
-        provider.as_ref(),
-        CompletionRequest {
-            system: EXTRACTION_SYSTEM_PROMPT.to_string(),
-            prompt,
-            max_tokens: EXTRACTION_MAX_TOKENS,
-        },
+    let completion = tokio::time::timeout(
+        EXTRACTION_LLM_TIMEOUT,
+        complete(
+            provider.as_ref(),
+            CompletionRequest {
+                system: EXTRACTION_SYSTEM_PROMPT.to_string(),
+                prompt,
+                max_tokens: EXTRACTION_MAX_TOKENS,
+            },
+        ),
     )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
+    .await;
+    let response = match completion {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             tracing::warn!(
                 session_id = %session_id,
                 error = %e,
                 "llm_extraction: LLM completion failed; skipping extraction"
+            );
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %session_id,
+                timeout_secs = EXTRACTION_LLM_TIMEOUT.as_secs(),
+                "llm_extraction: LLM completion timed out; skipping extraction"
             );
             return;
         }

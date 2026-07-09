@@ -36,7 +36,7 @@ use super::refinement_dispatch::RefinementSession;
 /// `YYYY-MM-DDTHH:MM:SS.mmmZ`) so lexicographic comparison equals chronological
 /// order. When `run_start` is `None` (no `refinement_start` boundary recorded)
 /// every entry is treated as in-run, preserving the pre-scoping behavior.
-fn entry_in_current_run(entry: &ProposalDebateTrail, run_start: Option<&str>) -> bool {
+pub(super) fn entry_in_current_run(entry: &ProposalDebateTrail, run_start: Option<&str>) -> bool {
     match run_start {
         Some(start) => entry.created_at.as_str() > start,
         None => true,
@@ -468,7 +468,7 @@ impl CoordinatorActor {
     /// entries are not mistaken for the current round's. On a DB error or when
     /// no boundary exists, returns `None` — trail reads then fall back to the
     /// unscoped behavior rather than dropping the whole outcome.
-    async fn latest_refinement_run_start(&self, proposal_id: &str) -> Option<String> {
+    pub(super) async fn latest_refinement_run_start(&self, proposal_id: &str) -> Option<String> {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
         match proposal_repo.latest_refinement_start_at(proposal_id).await {
@@ -620,42 +620,6 @@ impl CoordinatorActor {
             .map_err(|e| format!("failed to revert proposal body: {e}"))?;
 
         Ok(())
-    }
-
-    /// Startup reconciliation for refinements interrupted by a restart.
-    /// Runs once before the message loop; records `refinement_stop` for
-    /// every DB-dangling refinement so the proposal is restartable.
-    pub(super) async fn recover_interrupted_refinements(&mut self) {
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-        let dangling = match proposal_repo.dangling_refinement_proposal_ids().await {
-            Ok(ids) => ids,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to query dangling refinements for startup recovery"
-                );
-                return;
-            }
-        };
-        if dangling.is_empty() {
-            return;
-        }
-        tracing::info!(
-            count = dangling.len(),
-            "Reconciling refinements interrupted by restart"
-        );
-        for proposal_id in dangling {
-            if self.active_refinements.contains_key(&proposal_id) {
-                continue;
-            }
-            self.persist_refinement_stop(&proposal_id, &StopReason::Interrupted)
-                .await;
-            tracing::info!(
-                proposal_id = %proposal_id,
-                "Stopped interrupted refinement (lost across restart); proposal is restartable"
-            );
-        }
     }
 
     /// Persist refinement-stop lifecycle metadata.
