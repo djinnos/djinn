@@ -131,6 +131,33 @@ pub(crate) fn is_human_review_hold(task: &Task) -> bool {
     task.labels.contains(HUMAN_REVIEW_HOLD_LABEL)
 }
 
+/// Label marking a task as an autonomous **arbiter-park planner escalation**.
+///
+/// Unlike [`HUMAN_REVIEW_HOLD_LABEL`], a task carrying this label is a NORMAL,
+/// planner-dispatchable `review` task: the arbiter's `park` decision hands the
+/// full park dossier to a Planner SESSION that resolves it autonomously
+/// (decompose + supersede, close as won't-fix, or re-scope + reopen the
+/// source) — no human is ever required. It therefore must NOT carry the
+/// human-review-hold label (which would exclude it from dispatch and defend it
+/// from auto-close). But because it blocks a parked source task, its CLOSE
+/// must run exactly the same source-release semantics as a human hold: stamp
+/// `human_review_resolved_at` and emit `tripwire.hold.released` when the source
+/// carries an active tripwire hold.
+pub(crate) const PLANNER_PARK_ESCALATION_LABEL: &str = "planner-park-escalation";
+
+/// Returns `true` if closing `task` must run the hold-release semantics on the
+/// source task(s) it was blocking — stamping `human_review_resolved_at` and
+/// emitting `tripwire.hold.released`.
+///
+/// This is `true` for both the legacy human-review hold ([`is_human_review_hold`])
+/// and the autonomous arbiter-park planner escalation
+/// ([`PLANNER_PARK_ESCALATION_LABEL`]). It is deliberately SEPARATE from
+/// [`is_human_review_hold`], which still gates dispatch exclusion and auto-close
+/// protection (the escalation task must stay dispatchable + planner-closable).
+pub(crate) fn releases_source_on_close(task: &Task) -> bool {
+    is_human_review_hold(task) || task.labels.contains(PLANNER_PARK_ESCALATION_LABEL)
+}
+
 /// Returns `true` if the task is an open/in-progress review task.
 ///
 /// Excludes `human-review-hold` tasks: those are a terminal,
@@ -330,6 +357,51 @@ mod tests {
             assert!(!lead_claims(&t, &ctx));
             assert!(!planner_claims(&t, &ctx));
         }
+    }
+
+    /// An autonomous arbiter-park escalation (`planner-park-escalation`) is a
+    /// NORMAL planner-dispatchable review task: unlike a human-review hold it
+    /// must be claimed by the planner (so a session resolves it) and it must
+    /// NOT be treated as a human-only hold. But closing it must still run the
+    /// source-release semantics (`releases_source_on_close`).
+    #[test]
+    fn planner_park_escalation_is_dispatchable_but_releases_on_close() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+        let labels = r#"["planner-park-escalation"]"#;
+
+        for status in ["open", "in_progress"] {
+            let t = task("review", status, labels);
+
+            // NOT a human-only hold — stays dispatchable + planner-closable.
+            assert!(
+                !is_human_review_hold(&t),
+                "planner-park-escalation must NOT be a human-review hold ({status})"
+            );
+            assert!(
+                planner_review_claims(&t, &ctx),
+                "planner must claim a planner-park-escalation task ({status})"
+            );
+            assert_eq!(
+                registry.role_for_task(&t, &ctx),
+                Some("planner"),
+                "planner-park-escalation ({status}) must route to the planner"
+            );
+            // But its close must release the blocked source.
+            assert!(
+                releases_source_on_close(&t),
+                "closing a planner-park-escalation must release the source ({status})"
+            );
+        }
+
+        // The legacy human-review hold also releases on close; a plain review
+        // task does not.
+        assert!(releases_source_on_close(&task(
+            "review",
+            "open",
+            r#"["human-review-hold"]"#
+        )));
+        assert!(!releases_source_on_close(&task("review", "open", "[]")));
     }
 
     /// Evidence-spike tasks (carrying `refinement-evidence` + `read-only`

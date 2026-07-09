@@ -145,7 +145,7 @@ async fn transition_to_in_lead_intervention(db: &Database, task_id: &str) {
 /// Verify a valid arbiter park decision exercises the full
 /// `DirectServices::transition_task("arbiter_park")` path: persists the
 /// decision payload and structured dossier on the arbitration row, marks it
-/// consumed, creates a HumanReview remediation hold whose description
+/// consumed, creates an autonomous planner escalation task whose description
 /// includes the structured dossier content, and parks the task to open.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_services_arbiter_park_full_transaction() {
@@ -239,35 +239,76 @@ async fn direct_services_arbiter_park_full_transaction() {
         "dossier failure_analysis must match"
     );
 
-    // Verify: HumanReview hold blocks source with dossier content in description.
+    // Verify: an autonomous planner escalation (NOT a human-review hold) blocks
+    // the source, carrying the dossier content in its description.
     let blockers = repo.list_blockers(&task.id).await.expect("list blockers");
     assert!(
         !blockers.is_empty(),
-        "source task must be blocked by HumanReview hold"
+        "source task must be blocked by planner escalation task"
     );
     let hold_task = repo
         .get(&blockers[0].task_id)
         .await
-        .expect("get hold task")
-        .expect("hold task exists");
-    assert_eq!(hold_task.issue_type, "review", "hold must be a review task");
-    assert_eq!(hold_task.status, "open", "hold must be open");
+        .expect("get escalation task")
+        .expect("escalation task exists");
+    // Dispatchable planner shape: an open `review` task carrying the
+    // `planner-park-escalation` label and NOT the human-review-hold label.
+    assert_eq!(
+        hold_task.issue_type, "review",
+        "escalation must be a review task (planner-dispatchable)"
+    );
+    assert_eq!(hold_task.status, "open", "escalation must be open");
+    assert!(
+        hold_task.labels.contains("planner-park-escalation"),
+        "escalation must carry the planner-park-escalation label, got: {}",
+        hold_task.labels
+    );
+    assert!(
+        !hold_task.labels.contains("human-review-hold"),
+        "park must NOT create a human-review hold, got labels: {}",
+        hold_task.labels
+    );
     assert!(
         hold_task
             .description
             .contains("Requires senior engineer review of auth flow"),
-        "hold description must contain the dossier hold_description, got: {}",
+        "escalation description must contain the dossier hold_description, got: {}",
         hold_task.description
     );
     assert!(
         hold_task.description.contains("Three attempts failed"),
-        "hold description must contain the dossier failure_analysis, got: {}",
+        "escalation description must contain the dossier failure_analysis, got: {}",
         hold_task.description
     );
     assert!(
         hold_task.description.contains("Arbiter park decision"),
-        "hold description must indicate arbiter park, got: {}",
+        "escalation description must indicate arbiter park, got: {}",
         hold_task.description
+    );
+
+    // Verify: the arbiter_decision activity carries the autonomous_escalation
+    // audit flag (park no longer parks on a human).
+    let decision_activity = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("arbiter_decision".to_string()),
+            ..ActivityQuery::default()
+        })
+        .await
+        .expect("query arbiter_decision activity");
+    assert!(
+        !decision_activity.is_empty(),
+        "arbiter_decision activity must be emitted"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&decision_activity[0].payload).expect("decision payload parses");
+    assert_eq!(
+        payload["decision"], "park",
+        "decision must be park, got: {payload}"
+    );
+    assert_eq!(
+        payload["autonomous_escalation"], true,
+        "decision payload must set autonomous_escalation=true, got: {payload}"
     );
 }
 
@@ -1215,4 +1256,101 @@ async fn arbiter_park_transaction_persists_git_evidence_on_ledger() {
         Some("https://github.com/test/repo/pull/7"),
     );
     assert_eq!(payload["failing_ci_job_ids"], serde_json::json!([55555]),);
+}
+
+/// Closing the planner escalation (as the Planner would after resolving)
+/// releases the parked source: its blocker resolves and
+/// `human_review_resolved_at` is stamped — exactly like the old human-hold
+/// close, but driven by an autonomous planner rather than a human.
+///
+/// The coordinator-side tripwire release on close (`tripwire.hold.released`)
+/// is covered separately in the coordinator crate; here we assert the
+/// DB-level source-release semantics the `planner-park-escalation` label now
+/// triggers via the broadened close path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn planner_escalation_close_releases_source() {
+    let db = Database::open_in_memory().expect("open in-memory db");
+    let (project_id, epic_id) = create_project_and_epic(&db).await;
+    let task = create_task(&db, &project_id, &epic_id).await;
+
+    transition_to_in_lead_intervention(&db, &task.id).await;
+
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let ci = serde_json::json!([]);
+    let ex = serde_json::json!([]);
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &ci,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &ex,
+        })
+        .await
+        .expect("create arbitration row");
+
+    let dossier = serde_json::json!({
+        "hold_description": "Escalate to planner for restructuring",
+        "failure_analysis": "Repeated review rejections on one criterion",
+        "attempted_decisions": ["reopen"],
+        "recommended_action": "Decompose the failing criterion"
+    });
+    let dossier_json = serde_json::to_string(&dossier).unwrap();
+
+    let ctx = test_agent_context(db.clone());
+    let services: Arc<dyn SupervisorServices> =
+        services_for_agent_context(ctx, CancellationToken::new());
+    services
+        .transition_task(task.id.clone(), "arbiter_park".into(), Some(dossier_json))
+        .await
+        .expect("transition_task arbiter_park must succeed");
+
+    let events = EventBus::noop();
+    let repo = TaskRepository::new(db.clone(), events);
+
+    // Source is blocked by the escalation; resolved marker not yet set.
+    let blockers = repo.list_blockers(&task.id).await.expect("list blockers");
+    assert_eq!(blockers.len(), 1, "source must have exactly one blocker");
+    let escalation_id = blockers[0].task_id.clone();
+    assert!(
+        repo.human_review_resolved_at(&task.id)
+            .await
+            .expect("resolved marker")
+            .is_none(),
+        "human_review_resolved_at must be None before the escalation closes"
+    );
+
+    // The planner resolves and closes the escalation. `transition(Close)` on a
+    // task carrying `planner-park-escalation` runs the broadened source-release
+    // path (stamp + unblock) — `set_status` would bypass it.
+    repo.transition(
+        &escalation_id,
+        TransitionAction::Close,
+        "planner",
+        "planner",
+        Some("decomposed source into replacement subtasks"),
+        None,
+    )
+    .await
+    .expect("planner closes the escalation");
+
+    // Source is unblocked and the resolved marker is stamped.
+    assert!(
+        repo.human_review_resolved_at(&task.id)
+            .await
+            .expect("resolved marker")
+            .is_some(),
+        "human_review_resolved_at must be stamped after the planner closes the escalation"
+    );
+    let blockers_after = repo.list_blockers(&task.id).await.expect("list blockers");
+    assert!(
+        blockers_after.iter().all(|b| b.status == "closed"),
+        "source must be unblocked after the escalation closes, got: {blockers_after:?}"
+    );
 }

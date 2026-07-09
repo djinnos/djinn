@@ -190,7 +190,15 @@ impl TaskRepository {
             // revived, so the park evaluator that runs on the very next
             // dispatch tick discounts the pre-release strike ledger and cannot
             // spawn a duplicate hold on unchanged counters (ygj0).
-            if task.labels.contains("human-review-hold")
+            //
+            // The same stamp applies when an autonomous `planner-park-escalation`
+            // closes: the Planner resolving an arbiter-park escalation must
+            // release the source exactly like a human closing a hold did, so
+            // the post-release strike floor is set identically. Kept as literal
+            // labels (djinn-db has no dependency on djinn-coordinator's
+            // `releases_source_on_close`).
+            if (task.labels.contains("human-review-hold")
+                || task.labels.contains("planner-park-escalation"))
                 && let Err(e) = self.mark_human_review_resolved(&task.id).await
             {
                 tracing::warn!(
