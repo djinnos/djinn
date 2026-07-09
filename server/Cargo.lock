@@ -1728,6 +1728,7 @@ dependencies = [
  "djinn-provider",
  "djinn-runtime",
  "djinn-stack",
+ "djinn-telemetry",
  "djinn-workspace",
  "futures",
  "serde",

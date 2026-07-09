@@ -83,6 +83,13 @@ const PROMPT_CONTEXT_LATENCY_SECONDS: &str = "djinn_prompt_context_latency_secon
 const PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS: &str =
     "djinn_prompt_context_child_span_latency_seconds";
 
+// ─── Arbiter rollout hardening metrics ──────────────────────────────────
+const ARBITER_DECISION_TOTAL: &str = "djinn_arbiter_decision_total";
+const ARBITER_PARK_TOTAL: &str = "djinn_arbiter_park_total";
+const ARBITER_MONITORED_REOPEN_TOTAL: &str = "djinn_arbiter_monitored_reopen_total";
+const ARBITER_TERMINATION_TOTAL: &str = "djinn_arbiter_termination_total";
+const ARBITER_TIME_IN_ARBITRATION_SECONDS: &str = "djinn_arbiter_time_in_arbitration_seconds";
+
 // ─── Rollout-validation counters (proposal uk2d AC17) ────────────────────
 const INFRA_EXEMPT_TOTAL: &str = "djinn_infra_exempt_total";
 const FALLBACK_RESCUE_TOTAL: &str = "djinn_fallback_rescue_total";
@@ -756,6 +763,46 @@ fn register_metrics() {
             }
         }
     }
+    // ─── Arbiter rollout hardening metrics ────────────────────────────
+    metrics::describe_counter!(
+        ARBITER_DECISION_TOTAL,
+        "Arbiter decision distribution by decision type. Emitted once per resolved StageOutcome or direct-services decision."
+    );
+    for decision in arbiter::ALL_DECISIONS {
+        metrics::counter!(ARBITER_DECISION_TOTAL, "decision" => decision).absolute(0);
+    }
+    metrics::describe_counter!(
+        ARBITER_PARK_TOTAL,
+        "Arbiter park outcomes partitioned by bounded reason and outcome labels."
+    );
+    for reason in arbiter::ALL_PARK_REASONS {
+        for outcome in arbiter::ALL_PARK_OUTCOMES {
+            metrics::counter!(
+                ARBITER_PARK_TOTAL,
+                "reason" => reason,
+                "outcome" => outcome
+            )
+            .absolute(0);
+        }
+    }
+    metrics::describe_counter!(
+        ARBITER_MONITORED_REOPEN_TOTAL,
+        "Monitored-reopen attempt outcomes from the arbiter reopen decision path."
+    );
+    for outcome in arbiter::ALL_REOPEN_OUTCOMES {
+        metrics::counter!(ARBITER_MONITORED_REOPEN_TOTAL, "outcome" => outcome).absolute(0);
+    }
+    metrics::describe_counter!(
+        ARBITER_TERMINATION_TOTAL,
+        "Arbiter session termination events partitioned by infra vs decision-failure class."
+    );
+    for class in arbiter::ALL_TERMINATION_CLASSES {
+        metrics::counter!(ARBITER_TERMINATION_TOTAL, "class" => class).absolute(0);
+    }
+    metrics::describe_histogram!(
+        ARBITER_TIME_IN_ARBITRATION_SECONDS,
+        "Wall-clock time a task spent in arbitration from dispatch to decision/park/termination."
+    );
 }
 
 pub mod dispatch {
@@ -1210,6 +1257,137 @@ pub mod reasoning_kill {
             "outcome" => outcome,
         )
         .increment(1);
+    }
+}
+
+/// Arbiter rollout hardening metrics.
+///
+/// Covers the two-week rollout signal set: decision distribution,
+/// park outcome/reason, monitored reopen outcome, termination class,
+/// and wall-clock time-in-arbitration.
+///
+/// All labels are bounded/enumerated. Unbounded details belong in
+/// structured activity payloads, not metric labels.
+pub mod arbiter {
+    // ── Decision distribution ──────────────────────────────────────────
+    pub const DECISION_APPROVE: &str = "approve";
+    pub const DECISION_APPROVE_CONFLICT: &str = "approve_conflict";
+    pub const DECISION_REOPEN: &str = "reopen";
+    pub const DECISION_PARK: &str = "park";
+    pub const DECISION_ESCALATE: &str = "escalate";
+    pub const DECISION_DECOMPOSE: &str = "decompose";
+    pub const DECISION_FORCE_CLOSE: &str = "force_close";
+
+    /// All valid decision labels (bounded set for cardinality guard).
+    pub const ALL_DECISIONS: [&str; 7] = [
+        DECISION_APPROVE,
+        DECISION_APPROVE_CONFLICT,
+        DECISION_REOPEN,
+        DECISION_PARK,
+        DECISION_ESCALATE,
+        DECISION_DECOMPOSE,
+        DECISION_FORCE_CLOSE,
+    ];
+
+    // ── Park outcome ───────────────────────────────────────────────────
+    pub const PARK_OUTCOME_SUCCESS: &str = "success";
+    pub const PARK_OUTCOME_TRANSITION_FAILED: &str = "transition_failed";
+    pub const PARK_OUTCOME_RECOVERY: &str = "recovery";
+
+    pub const ALL_PARK_OUTCOMES: [&str; 3] = [
+        PARK_OUTCOME_SUCCESS,
+        PARK_OUTCOME_TRANSITION_FAILED,
+        PARK_OUTCOME_RECOVERY,
+    ];
+
+    // ── Park reason ────────────────────────────────────────────────────
+    pub const PARK_REASON_DEADLINE_EXPIRED: &str = "deadline_expired";
+    pub const PARK_REASON_DECISION_FAILURE_CAP: &str = "decision_failure_cap";
+    pub const PARK_REASON_ARBITER_DECIDED: &str = "arbiter_decided";
+    pub const PARK_REASON_CONSUMED_REENTRY: &str = "consumed_reentry";
+    pub const PARK_REASON_ARBITRATION_ERROR: &str = "arbitration_error";
+
+    pub const ALL_PARK_REASONS: [&str; 5] = [
+        PARK_REASON_DEADLINE_EXPIRED,
+        PARK_REASON_DECISION_FAILURE_CAP,
+        PARK_REASON_ARBITER_DECIDED,
+        PARK_REASON_CONSUMED_REENTRY,
+        PARK_REASON_ARBITRATION_ERROR,
+    ];
+
+    // ── Monitored reopen outcome ───────────────────────────────────────
+    pub const REOPEN_OUTCOME_STARTED: &str = "started";
+    pub const REOPEN_OUTCOME_NO_UNCONSUMED: &str = "no_unconsumed";
+    pub const REOPEN_OUTCOME_FAILED: &str = "failed";
+
+    pub const ALL_REOPEN_OUTCOMES: [&str; 3] = [
+        REOPEN_OUTCOME_STARTED,
+        REOPEN_OUTCOME_NO_UNCONSUMED,
+        REOPEN_OUTCOME_FAILED,
+    ];
+
+    // ── Termination class ──────────────────────────────────────────────
+    pub const TERMINATION_INFRA: &str = "infra";
+    pub const TERMINATION_DECISION_FAILURE: &str = "decision_failure";
+
+    pub const ALL_TERMINATION_CLASSES: [&str; 2] =
+        [TERMINATION_INFRA, TERMINATION_DECISION_FAILURE];
+
+    /// Record an arbiter decision event.  Call once per resolved
+    /// `StageOutcome` decision from the supervisor or from
+    /// `record_arbiter_decision` / `execute_arbiter_park_transaction` /
+    /// `start_monitored_reopen` in the services layer.
+    ///
+    /// `decision` must be one of the `DECISION_*` constants.
+    pub fn record_decision(decision: &'static str) {
+        metrics::counter!(super::ARBITER_DECISION_TOTAL, "decision" => decision).increment(1);
+    }
+
+    /// Record an arbiter park outcome.  Call once per park path
+    /// (coordinator deadline auto-park, decision-failure-cap park,
+    /// consumed-reentry park, arbiter-decided park, or arbitration
+    /// error park).
+    ///
+    /// `reason` and `outcome` must be from the `PARK_REASON_*` and
+    /// `PARK_OUTCOME_*` constant sets respectively.
+    pub fn record_park(reason: &'static str, outcome: &'static str) {
+        metrics::counter!(
+            super::ARBITER_PARK_TOTAL,
+            "reason" => reason,
+            "outcome" => outcome
+        )
+        .increment(1);
+    }
+
+    /// Record a monitored-reopen outcome.  Call from
+    /// `start_monitored_reopen` (started / no_unconsumed / failed).
+    pub fn record_monitored_reopen(outcome: &'static str) {
+        metrics::counter!(
+            super::ARBITER_MONITORED_REOPEN_TOTAL,
+            "outcome" => outcome
+        )
+        .increment(1);
+    }
+
+    /// Record an arbiter session termination class.  Call from
+    /// `record_arbiter_session_termination`.
+    ///
+    /// `class` must be one of `TERMINATION_INFRA` or
+    /// `TERMINATION_DECISION_FAILURE`.
+    pub fn record_termination(class: &'static str) {
+        metrics::counter!(
+            super::ARBITER_TERMINATION_TOTAL,
+            "class" => class
+        )
+        .increment(1);
+    }
+
+    /// Record the wall-clock time a task spent in arbitration.
+    ///
+    /// `seconds` is the elapsed time from arbitration row creation to
+    /// the current decision / park / termination event.
+    pub fn record_time_in_arbitration(seconds: f64) {
+        metrics::histogram!(super::ARBITER_TIME_IN_ARBITRATION_SECONDS).record(seconds);
     }
 }
 
@@ -2542,6 +2720,146 @@ mod tests {
                 assert!(
                     !line.contains(forbidden),
                     "rollout-validation metric must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
+        }
+    }
+
+    // ── Arbiter rollout metrics tests ──────────────────────────────────
+
+    #[test]
+    fn arbiter_decision_metric_names_and_labels_render() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        // Record one of each decision type.
+        for decision in arbiter::ALL_DECISIONS {
+            arbiter::record_decision(decision);
+        }
+
+        let rendered = render().unwrap();
+        for decision in arbiter::ALL_DECISIONS {
+            rendered_sample(&rendered, ARBITER_DECISION_TOTAL, &[("decision", decision)]);
+        }
+    }
+
+    #[test]
+    fn arbiter_park_metric_names_and_labels_render() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        arbiter::record_park(
+            arbiter::PARK_REASON_DEADLINE_EXPIRED,
+            arbiter::PARK_OUTCOME_SUCCESS,
+        );
+        arbiter::record_park(
+            arbiter::PARK_REASON_CONSUMED_REENTRY,
+            arbiter::PARK_OUTCOME_TRANSITION_FAILED,
+        );
+        arbiter::record_park(
+            arbiter::PARK_REASON_ARBITER_DECIDED,
+            arbiter::PARK_OUTCOME_RECOVERY,
+        );
+
+        let rendered = render().unwrap();
+        rendered_sample(
+            &rendered,
+            ARBITER_PARK_TOTAL,
+            &[
+                ("reason", arbiter::PARK_REASON_DEADLINE_EXPIRED),
+                ("outcome", arbiter::PARK_OUTCOME_SUCCESS),
+            ],
+        );
+        rendered_sample(
+            &rendered,
+            ARBITER_PARK_TOTAL,
+            &[
+                ("reason", arbiter::PARK_REASON_CONSUMED_REENTRY),
+                ("outcome", arbiter::PARK_OUTCOME_TRANSITION_FAILED),
+            ],
+        );
+        rendered_sample(
+            &rendered,
+            ARBITER_PARK_TOTAL,
+            &[
+                ("reason", arbiter::PARK_REASON_ARBITER_DECIDED),
+                ("outcome", arbiter::PARK_OUTCOME_RECOVERY),
+            ],
+        );
+    }
+
+    #[test]
+    fn arbiter_monitored_reopen_metric_names_and_labels_render() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        for outcome in arbiter::ALL_REOPEN_OUTCOMES {
+            arbiter::record_monitored_reopen(outcome);
+        }
+
+        let rendered = render().unwrap();
+        for outcome in arbiter::ALL_REOPEN_OUTCOMES {
+            rendered_sample(
+                &rendered,
+                ARBITER_MONITORED_REOPEN_TOTAL,
+                &[("outcome", outcome)],
+            );
+        }
+    }
+
+    #[test]
+    fn arbiter_termination_metric_names_and_labels_render() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        for class in arbiter::ALL_TERMINATION_CLASSES {
+            arbiter::record_termination(class);
+        }
+
+        let rendered = render().unwrap();
+        for class in arbiter::ALL_TERMINATION_CLASSES {
+            rendered_sample(&rendered, ARBITER_TERMINATION_TOTAL, &[("class", class)]);
+        }
+    }
+
+    #[test]
+    fn arbiter_time_in_arbitration_histogram_renders() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        arbiter::record_time_in_arbitration(42.5);
+        arbiter::record_time_in_arbitration(100.0);
+
+        let rendered = render().unwrap();
+        assert!(
+            rendered.contains(ARBITER_TIME_IN_ARBITRATION_SECONDS),
+            "time-in-arbitration histogram must appear in rendered output:\\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn arbiter_metrics_do_not_contain_high_cardinality_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        arbiter::record_decision(arbiter::DECISION_APPROVE);
+        arbiter::record_park(
+            arbiter::PARK_REASON_DEADLINE_EXPIRED,
+            arbiter::PARK_OUTCOME_SUCCESS,
+        );
+        arbiter::record_monitored_reopen(arbiter::REOPEN_OUTCOME_STARTED);
+        arbiter::record_termination(arbiter::TERMINATION_INFRA);
+        arbiter::record_time_in_arbitration(10.0);
+
+        let rendered = render().unwrap();
+        for forbidden in ["task_id=", "session_id=", "attempt_id=", "hold_cycle="] {
+            for line in rendered.lines() {
+                if !line.starts_with("djinn_arbiter_") {
+                    continue;
+                }
+                assert!(
+                    !line.contains(forbidden),
+                    "arbiter metric must not carry high-cardinality label {forbidden}: {line}",
                 );
             }
         }
