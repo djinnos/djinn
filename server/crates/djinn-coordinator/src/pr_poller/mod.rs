@@ -90,6 +90,9 @@ mod tests;
 #[cfg(test)]
 mod pr_cleanup_tests;
 
+#[cfg(test)]
+mod tripwire_merge_gate_tests;
+
 use crate::ci_preflight_gate::{
     CiPreflightGateKind, CiPreflightGateVerdict, latest_task_workdir,
     run_ci_reproduction_preflight_gate,
