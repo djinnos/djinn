@@ -1444,57 +1444,55 @@ async fn edit_no_match_nearest_miss_score_is_reasonable() {
 }
 
 /// Regression: `call_apply_patch` accepts `session_task_id` and `session_role`
-/// (plumbed consistently with `call_edit`) and still succeeds with a worker role.
+/// (plumbed consistently with `call_edit`). GateGuard denies the first worker
+/// edit; retry after re-read succeeds. Full gate-guard behaviour is covered in
+/// `gate_guard::tests`.
 #[tokio::test]
 async fn apply_patch_accepts_worker_role_plumbing() {
     let worktree = crate::test_helpers::test_tempdir("djinn-ext-patch-worker-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "fn main() {\n    old();\n}\n")
         .await
-        .expect("seed file");
-
+        .expect("seed");
     let state =
         crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
     let read_args = Some(
-        serde_json::json!({ "file_path": "svc.rs" })
+        serde_json::json!({"file_path":"svc.rs"})
             .as_object()
-            .expect("obj")
+            .expect("o")
             .clone(),
     );
     call_read(&state, &read_args, worktree.path())
         .await
         .expect("read");
-
-    let patch = "*** Begin Patch\n*** Update File: svc.rs\n@@ fn main() @@\n fn main() {\n-    old();\n+    new();\n }\n*** End Patch";
-    let patch_args = Some(
-        serde_json::json!({ "patch": patch })
-            .as_object()
-            .expect("obj")
-            .clone(),
-    );
-
-    // Invoke with worker role — must succeed (no GateGuard enforcement yet).
+    let patch_args = Some(serde_json::json!({"patch":"*** Begin Patch\n*** Update File: svc.rs\n@@ fn main() @@\n fn main() {\n-    old();\n+    new();\n }\n*** End Patch"}).as_object().expect("o").clone());
+    // First call: GateGuard FORCE prompt (plumbed params hit the gate).
+    let err = call_apply_patch(
+        &state,
+        &patch_args,
+        worktree.path(),
+        None,
+        Some("task-abc"),
+        Some("worker"),
+    )
+    .await
+    .expect_err("GateGuard must deny");
+    assert!(err.contains("GateGuard"), "must mention GateGuard: {err}");
+    // Re-read + retry: succeeds (edit_forced set).
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("re-read");
     let response = call_apply_patch(
         &state,
         &patch_args,
         worktree.path(),
         None,
-        Some("task-abc-123"),
+        Some("task-abc"),
         Some("worker"),
     )
     .await
-    .expect("worker role must succeed");
-
+    .expect("retry succeeds");
     assert_eq!(response.get("ok").and_then(|v| v.as_bool()), Some(true));
-    let files = response
-        .get("files")
-        .and_then(|v| v.as_array())
-        .expect("files array");
-    assert_eq!(files.len(), 1);
-    assert_eq!(
-        files[0].get("action").and_then(|v| v.as_str()),
-        Some("updated"),
-    );
     let after = tokio::fs::read_to_string(&file).await.expect("read back");
     assert!(after.contains("new()"), "patched content missing: {after}");
 }
