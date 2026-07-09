@@ -218,7 +218,7 @@ pub struct TripwireGateResult {
 ///
 /// This is a thin helper that calls [`evaluate`] with dereffed boxed
 /// evaluators and wraps the result into a [`TripwireGateResult`].
-pub(super) fn run_gate(input: &TripwireEvaluationInput) -> TripwireGateResult {
+pub(crate) fn run_gate(input: &TripwireEvaluationInput) -> TripwireGateResult {
     let evaluators = all_rule_evaluators();
     // Box<dyn Fn(...) + Send + Sync> implements Fn(...) via blanket impl,
     // so passing the boxed vec as a slice satisfies evaluate's generic bound.

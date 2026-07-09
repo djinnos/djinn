@@ -406,8 +406,7 @@ impl CoordinatorActor {
                                 )
                                 .await;
                             if !proceed {
-                                self.create_tripwire_hold(&task, result, &pr.head.sha)
-                                    .await;
+                                self.create_tripwire_hold(&task, result, &pr.head.sha).await;
                                 self.pr_status_cache.remove(&task.id);
                                 self.pr_draft_first_seen.remove(&task.id);
                                 self.review_stuck_sha_first_seen.remove(&task.id);
@@ -519,6 +518,29 @@ impl CoordinatorActor {
 
         if !state.held {
             return false;
+        }
+
+        // Determine whether this hold is HUMAN-adjudicated (an explicit
+        // org-policy escape hatch) or ARBITER-adjudicated (the zero-human-hold
+        // default). Only a human-adjudicated hold defends the
+        // `human-review-hold` label on the SOURCE. An arbiter-adjudicated hold
+        // is resolved by an autonomous `planner-park-escalation` review task
+        // (see `create_tripwire_hold`); the SOURCE must NOT carry the
+        // human-review-hold label — it would exclude the source from
+        // reviewer/worker dispatch and defend it from auto-close, neither of
+        // which is wanted. The merge gate does not depend on the label: this
+        // method returning `true` (active hold present) is the real block, so
+        // skipping the label re-application here does not let the PR advance.
+        let policy = crate::tripwires::TripwirePolicy::default();
+        let requires_human = policy.any_rule_requires_human(
+            state
+                .active_findings
+                .iter()
+                .filter_map(|f| crate::tripwires::TripwireRuleId::from_wire(&f.rule_id)),
+        );
+        if !requires_human {
+            // Arbiter-adjudicated (default) — do not touch the source label.
+            return true;
         }
 
         // Active hold exists — check whether the label is still present.

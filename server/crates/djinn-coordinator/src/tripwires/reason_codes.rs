@@ -92,6 +92,26 @@ impl TripwireRuleId {
             Self::CIWorkflowChange => "ci_workflow_change",
         }
     }
+
+    /// Parse a stable wire literal (the [`as_str`](Self::as_str) form, as
+    /// persisted in activity payloads' `rule_id`) back into a
+    /// [`TripwireRuleId`]. Returns `None` for an unrecognised literal.
+    ///
+    /// Used by the merge-boundary hold reconciler to recover the rule family
+    /// from a persisted active-hold finding so it can consult the per-rule
+    /// adjudication policy (arbiter vs human).
+    pub fn from_wire(s: &str) -> Option<Self> {
+        Some(match s {
+            "migration_change" => Self::MigrationChange,
+            "dependency_identity_change" => Self::DependencyIdentityChange,
+            "network_egress_change" => Self::NetworkEgressChange,
+            "unsafe_code_change" => Self::UnsafeCodeChange,
+            "boundary_path_change" => Self::BoundaryPathChange,
+            "large_delete_or_rewrite" => Self::LargeDeleteOrRewrite,
+            "ci_workflow_change" => Self::CIWorkflowChange,
+            _ => return None,
+        })
+    }
 }
 
 /// Map a [`TripwireRuleId`] to its stable, namespaced reason code.

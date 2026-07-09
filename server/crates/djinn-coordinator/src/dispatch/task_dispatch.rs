@@ -1684,6 +1684,40 @@ impl CoordinatorActor {
             //    already exists for this task+role, defer dispatch and record
             //    a guard-only audit row.  No dispatch / provider / reopen
             //    counters are incremented for the deferral.
+            // Same-signature CI remediation dead-end (incident ay3d): an open
+            // worker task whose failing required-CI PR already had a
+            // remediation run against the CURRENT head
+            // (`last_remediation_base_sha` == head) and whose failure signature
+            // has persisted past the threshold would be deferred by the respawn
+            // guard on EVERY ready pass forever — no new push to re-evaluate, no
+            // escalation, no strike accrual, and no manual lever from `open`.
+            // Break the wedge by routing it into the autonomous escalation
+            // ladder: a planner-park escalation below the ceiling, terminal-fail
+            // at it. Fires once — the escalation blocks + parks the source, so
+            // it leaves the ready set on the next pass.
+            if Self::ci_same_signature_deadlocked(&task, role) {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    same_signature_count = task.ci_same_signature_count,
+                    head = task.ci_github_head_sha.as_deref().or(task.ci_head_sha.as_deref()).unwrap_or("(unknown)"),
+                    "CoordinatorActor: same-signature CI remediation dead-end — routing to autonomous escalation instead of deferring worker forever"
+                );
+                let head = task
+                    .ci_github_head_sha
+                    .as_deref()
+                    .or(task.ci_head_sha.as_deref())
+                    .unwrap_or("(unknown)")
+                    .to_owned();
+                let reason = format!(
+                    "Required CI has failed on the same signature {} time(s) at head {} and a \
+                     remediation already ran against that exact head with no new push — the worker \
+                     cannot make forward progress by re-running. Escalating for terminal resolution.",
+                    task.ci_same_signature_count, head,
+                );
+                self.escalate_to_planner_or_terminally_fail(&task, &reason)
+                    .await;
+                continue;
+            }
             let pr_rework_signal = super::respawn_guard::PrReworkSignal::from_task_row(
                 task.ci_status.as_str(),
                 task.merge_conflict_metadata.as_deref(),
