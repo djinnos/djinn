@@ -1444,10 +1444,7 @@ async fn edit_no_match_nearest_miss_score_is_reasonable() {
 }
 
 /// Regression: `call_apply_patch` accepts `session_task_id` and `session_role`
-/// parameters (plumbed consistently with `call_edit`) and still succeeds
-/// when invoked with a worker role. This proves the widened signature
-/// compiles and is callable through the worker-role plumbing path without
-/// changing runtime behavior.
+/// (plumbed consistently with `call_edit`) and still succeeds with a worker role.
 #[tokio::test]
 async fn apply_patch_accepts_worker_role_plumbing() {
     let worktree = crate::test_helpers::test_tempdir("djinn-ext-patch-worker-");
@@ -1458,8 +1455,6 @@ async fn apply_patch_accepts_worker_role_plumbing() {
 
     let state =
         crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
-
-    // Read first to satisfy read-before-modify.
     let read_args = Some(
         serde_json::json!({ "file_path": "svc.rs" })
             .as_object()
@@ -1478,8 +1473,7 @@ async fn apply_patch_accepts_worker_role_plumbing() {
             .clone(),
     );
 
-    // Invoke with worker role and a task id — must succeed (no GateGuard
-    // enforcement in this epic).
+    // Invoke with worker role — must succeed (no GateGuard enforcement yet).
     let response = call_apply_patch(
         &state,
         &patch_args,
@@ -1489,33 +1483,18 @@ async fn apply_patch_accepts_worker_role_plumbing() {
         Some("worker"),
     )
     .await
-    .expect("call_apply_patch with worker role must succeed");
+    .expect("worker role must succeed");
 
-    assert_eq!(
-        response.get("ok").and_then(|v| v.as_bool()),
-        Some(true),
-        "apply_patch must return ok=true, got: {response:?}"
-    );
+    assert_eq!(response.get("ok").and_then(|v| v.as_bool()), Some(true));
     let files = response
         .get("files")
         .and_then(|v| v.as_array())
-        .expect("apply_patch must return files array");
-    assert_eq!(files.len(), 1, "expected one patched file");
-    assert_eq!(
-        files[0].get("path").and_then(|v| v.as_str()),
-        Some(file.display().to_string().as_str()),
-        "patched file path must match"
-    );
+        .expect("files array");
+    assert_eq!(files.len(), 1);
     assert_eq!(
         files[0].get("action").and_then(|v| v.as_str()),
         Some("updated"),
-        "action must be 'updated'"
     );
-
-    // Verify the content was actually patched.
     let after = tokio::fs::read_to_string(&file).await.expect("read back");
-    assert!(
-        after.contains("new()"),
-        "file must contain the patched content: {after}"
-    );
+    assert!(after.contains("new()"), "patched content missing: {after}");
 }

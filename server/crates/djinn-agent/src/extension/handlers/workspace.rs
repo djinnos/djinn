@@ -50,13 +50,8 @@ fn effective_shell_timeout_ms(requested: Option<u64>, command: &str) -> u64 {
     }
 }
 
-/// Message returned to a code-executing role (worker or reviewer) that tries to
-/// type-check with `cargo check`/`cargo build`. Clippy hits the warm cargo cache
-/// (the warm base plus CI compile through clippy-driver under a distinct
-/// fingerprint), whereas `cargo check` produces DIFFERENT artifacts that are NOT
-/// in the warm base, so it cold-builds the whole workspace (~12min observed on
-/// the reviewer path). Steering both roles to clippy is what makes the warm-cache
-/// fast path actually pay off.
+/// Denial message for `cargo check`/`cargo build` by worker/reviewer roles.
+/// These cold-build the whole workspace (~12min); clippy reuses the warm cache.
 const CARGO_CHECK_DENIED_MSG: &str = "cargo check / cargo build (for type-checking) is disabled for the worker and reviewer roles: it produces different artifacts than the warm cargo cache and cold-builds the workspace. Use `cargo clippy -p <crate>` instead (it reuses the warm cache and also lints). `cargo test`/`cargo nextest`, `cargo tree`, `cargo metadata`, and `cargo fmt` are allowed.";
 
 /// Does this shell command, run by a code-executing role (worker or reviewer),
