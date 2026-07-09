@@ -427,12 +427,176 @@ pub fn evaluate_boundary_path_changes(
     findings
 }
 
-// ─── Convenience: all five rule evaluators ────────────────────────────────
+// ─── Rule: large_delete_or_rewrite ────────────────────────────────────────
+
+/// Evaluate large-deletion/rewrite findings.
+///
+/// Flags files that exceed configured deletion thresholds (per-file line
+/// count, aggregate line count across all files, or percentage of a file
+/// rewritten). Deletions in generated/vendor files are excluded before
+/// thresholds are computed.
+///
+/// When line-level diff spans are unavailable the rule falls back to
+/// file-level evidence (no `start_line`/`end_line`).
+///
+/// Thresholds:
+/// - **per_file_line_threshold**: any single file whose deletions exceed
+///   this count triggers a finding.
+/// - **file_rewrite_percentage_threshold**: any single file where deletions
+///   exceed this percentage of total lines (additions + deletions) triggers
+///   a finding. Only evaluated when both additions and deletions are > 0.
+/// - **aggregate_line_threshold**: total deletions across all non-excluded
+///   files triggers a finding when the file count meets
+///   [`LargeDeleteRewriteRuleConfig::aggregate_min_files`].
+///
+/// The aggregate finding uses the first file in the set as evidence path
+/// with a file-level span (line numbers = `None`) because it represents
+/// a cross-file threshold breach.
+pub fn evaluate_large_delete_or_rewrite(
+    policy: &TripwirePolicy,
+    changed_files: &[ChangedFile],
+) -> Vec<RawFinding> {
+    let config = &policy.large_delete_rewrite;
+    if !config.enabled {
+        return Vec::new();
+    }
+
+    let mut findings = Vec::new();
+    let mut aggregate_deletions: u32 = 0;
+    let mut aggregate_file_count: u32 = 0;
+    let mut first_file_path: Option<String> = None;
+
+    for file in changed_files {
+        if file.is_excluded() {
+            continue;
+        }
+
+        // Track first non-excluded file for aggregate evidence path.
+        if first_file_path.is_none() {
+            first_file_path = Some(file.path.clone());
+        }
+
+        let deletions = file.deletions;
+        if deletions == 0 {
+            // Even files with no deletions count toward aggregate file
+            // count if they have additions (substantive changes).
+            if file.additions > 0 {
+                aggregate_file_count += 1;
+            }
+            continue;
+        }
+
+        aggregate_deletions += deletions;
+        aggregate_file_count += 1;
+
+        // ── Per-file line threshold ──────────────────────────────────
+        if deletions > config.per_file_line_threshold {
+            findings.push(RawFinding {
+                rule_id: TripwireRuleId::LargeDeleteOrRewrite,
+                report_only: config.report_only,
+                evidence_path: file.path.clone(),
+                evidence_start_line: None,
+                evidence_end_line: None,
+                evidence_is_excluded: false,
+            });
+            continue; // one finding per file for per-file thresholds
+        }
+
+        // ── File rewrite percentage threshold ────────────────────────
+        let total = file.additions + deletions;
+        if total > 0 && config.file_rewrite_percentage_threshold > 0 {
+            let percentage = (deletions * 100) / total;
+            if percentage > config.file_rewrite_percentage_threshold {
+                findings.push(RawFinding {
+                    rule_id: TripwireRuleId::LargeDeleteOrRewrite,
+                    report_only: config.report_only,
+                    evidence_path: file.path.clone(),
+                    evidence_start_line: None,
+                    evidence_end_line: None,
+                    evidence_is_excluded: false,
+                });
+            }
+        }
+    }
+
+    // ── Aggregate line threshold ─────────────────────────────────────
+    if aggregate_file_count >= config.aggregate_min_files
+        && aggregate_deletions > config.aggregate_line_threshold
+    {
+        // Use the first non-excluded file as evidence path.
+        if let Some(path) = first_file_path {
+            findings.push(RawFinding {
+                rule_id: TripwireRuleId::LargeDeleteOrRewrite,
+                report_only: config.report_only,
+                evidence_path: path,
+                evidence_start_line: None,
+                evidence_end_line: None,
+                evidence_is_excluded: false,
+            });
+        }
+    }
+
+    findings
+}
+
+// ─── Rule: ci_workflow_change ─────────────────────────────────────────────
+
+/// Evaluate CI/workflow/release/deploy/automation change findings.
+///
+/// Flags any changed file whose path matches the policy's CI workflow
+/// path globs (e.g. `.github/workflows/**`, `.github/actions/**`,
+/// `.gitlab-ci.yml`, `deploy/**`, `release/**`, `Makefile`,
+/// `Tiltfile`). Each matching file produces one file-level finding.
+///
+/// This rule mirrors [`evaluate_migration_changes`] in structure but
+/// targets CI/automation surfaces instead of database migrations.
+pub fn evaluate_ci_workflow_changes(
+    policy: &TripwirePolicy,
+    changed_files: &[ChangedFile],
+) -> Vec<RawFinding> {
+    let config = &policy.ci_workflow;
+    if !config.enabled {
+        return Vec::new();
+    }
+
+    let glob_set = match build_glob_set(&config.path_globs) {
+        Some(set) => set,
+        None => return Vec::new(),
+    };
+
+    let mut findings = Vec::new();
+    for file in changed_files {
+        if file.is_excluded() {
+            continue;
+        }
+
+        let current_matches = glob_set.is_match(&file.path);
+        let old_matches = file
+            .old_path
+            .as_deref()
+            .map(|p| glob_set.is_match(p))
+            .unwrap_or(false);
+
+        if current_matches || old_matches {
+            findings.push(RawFinding {
+                rule_id: TripwireRuleId::CIWorkflowChange,
+                report_only: config.report_only,
+                evidence_path: file.path.clone(),
+                evidence_start_line: None,
+                evidence_end_line: None,
+                evidence_is_excluded: false,
+            });
+        }
+    }
+    findings
+}
+
+// ─── Convenience: all seven rule evaluators ────────────────────────────────
 
 /// Type alias for boxed rule evaluator functions.
 type RuleEvaluatorFn = dyn Fn(&TripwirePolicy, &[ChangedFile]) -> Vec<RawFinding> + Send + Sync;
 
-/// Build a vector of all five rule evaluator functions ready to be passed
+/// Build a vector of all seven rule evaluator functions ready to be passed
 /// to [`crate::tripwires::engine::evaluate`].
 ///
 /// Callers who want to register only a subset of rules can call the
@@ -444,5 +608,7 @@ pub fn all_rule_evaluators() -> Vec<Box<RuleEvaluatorFn>> {
         Box::new(evaluate_network_egress_changes),
         Box::new(evaluate_unsafe_code_changes),
         Box::new(evaluate_boundary_path_changes),
+        Box::new(evaluate_large_delete_or_rewrite),
+        Box::new(evaluate_ci_workflow_changes),
     ]
 }
