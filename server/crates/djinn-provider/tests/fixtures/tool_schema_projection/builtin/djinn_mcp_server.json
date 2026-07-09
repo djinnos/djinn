@@ -529,7 +529,7 @@
   },
   {
     "name": "agent_update",
-    "description": "Update a specialist agent (name, description, system_prompt_extensions, model_preference, mcp_servers, skills). Cannot modify default agents' is_default flag. Accepts agent UUID or name. learned_prompt is machine-managed and cannot be set directly here.",
+    "description": "Update a specialist agent (name, description, system_prompt_extensions, model_preference, mcp_servers, skills). Cannot modify default agents' is_default flag. Accepts agent UUID or name.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$defs": {

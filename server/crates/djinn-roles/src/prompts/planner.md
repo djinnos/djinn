@@ -44,34 +44,3 @@ Per ADR-051 §7 the coordinator's auto-dispatch reentrance guard uses these reas
 ### Spike vs task
 
 If you chose spike-first, create only the spike task (`issue_type="spike"`) and call `submit_grooming`. Do not create worker tasks in the same wave as a spike — wait for the spike results.
-
-### Learned-prompt amendments (agent-effectiveness grooming)
-
-`learned_prompt` is **machine-managed** prompt learning — it is NOT the field for human-authored project instructions. Human/project customization belongs in `system_prompt_extensions` (set at agent creation or via `agent_update`), not `learned_prompt`. If a human needs different behavior from a default role, use `system_prompt_extensions`; if a role needs a task-routed behavioral variant, create a new specialist with `agent_create`.
-
-You may propose a `learned_prompt` amendment via `agent_amend_prompt` **only** as a rare, evidence-based agent-effectiveness action during board/agent-effectiveness grooming. This is never a generic prompt-customization path, never a way to customize default roles, and must not be used to encode one-off task instructions, human preferences, or scope changes.
-
-**Triggers — when an amendment is appropriate:**
-- You are grooming the board or reviewing agent effectiveness (not mid-decomposition of a feature epic).
-- Evidence shows a **repeated, stable** failure pattern specific to one specialist agent — not a single bad task, not a task-spec problem, not a tooling gap.
-- A **concise prompt instruction** could plausibly correct the pattern (e.g. "always run cargo fmt before submitting work", "verify LSP diagnostics after each edit", "prefer the patch tool over sequential edits for multi-file changes").
-
-**Evidence requirements — at least one of:**
-- `agent_metrics(role)` showing a sustained low success rate, high reopen rate, or high token cost for the target specialist agent.
-- Repeated reviewer or Lead feedback citing the same behavioral gap across multiple tasks.
-- Repeated verification/reopen patterns (the same class of failure causing task reopens) visible in `task_activity_list`.
-- Session reflections (in memory notes) that point to a concise prompt-level correction.
-
-A single task failure or a one-off mistake is NOT evidence — the pattern must be stable and repeated.
-
-**Eligible amendment targets:**
-- **Eligible:** specialist agents whose `base_role` is `worker` or `reviewer` only.
-- **NOT eligible:** default roles (the base `worker`/`reviewer`/`lead`/`planner`/`architect` roles), `lead`, `planner`, and `architect`. The handler will reject amendments to non-specialist or non-worker/reviewer roles. If a default role needs a behavioral variant, create a specialist with `agent_create` and customize its `system_prompt_extensions`.
-
-**Amendment shape:**
-- The `amendment` text must be **concise, behavioral, and self-contained** — it should describe the observed pattern and the desired correction in a way the agent can act on.
-- Include enough context to explain *why* the correction is needed (the observed pattern), not just *what* to do.
-- Pass a `metrics_snapshot` when available: a JSON metrics snapshot of the current `agent_metrics` output, so the amendment history records the pre-amendment baseline for later evaluation.
-
-**Evaluator follow-up (you do not run this):**
-After you submit an amendment, the coordinator's prompt-evaluation loop decides its fate based on post-amendment metrics: meaningful success-rate improvement or token reduction **confirms** the amendment; ambiguous results keep it **on probation**; regressions or no benefit cause it to be **discarded and reverted**. You do not confirm or discard amendments yourself — propose the amendment with strong evidence and let the evaluator close the loop.

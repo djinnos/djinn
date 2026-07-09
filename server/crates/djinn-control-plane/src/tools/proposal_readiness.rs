@@ -537,9 +537,18 @@ Entry points: src/main.rs.
 
     #[test]
     fn heading_contains_word_boundaries() {
-        assert!(heading_contains_word("dependency and coordination plan", "dependency"));
-        assert!(heading_contains_word("dependency and coordination plan", "coordination"));
-        assert!(heading_contains_word("out of scope details", "out of scope"));
+        assert!(heading_contains_word(
+            "dependency and coordination plan",
+            "dependency"
+        ));
+        assert!(heading_contains_word(
+            "dependency and coordination plan",
+            "coordination"
+        ));
+        assert!(heading_contains_word(
+            "out of scope details",
+            "out of scope"
+        ));
         // Boundary rejections.
         assert!(!heading_contains_word("risky ventures", "risk"));
         assert!(!heading_contains_word("dependencies", "dependency"));
