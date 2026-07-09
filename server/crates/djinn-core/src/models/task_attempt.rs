@@ -56,6 +56,23 @@ pub enum TaskAttemptOutcome {
     ForceClosed,
     /// Handed off to another task, epic, or human process.
     Handoff,
+    /// The run was interrupted by INFRASTRUCTURE — a coordinator deploy/rollout
+    /// that killed the worker pod, a startup reap of a run orphaned by that
+    /// deploy, or a k8s pod eviction/deletion during a rollout — while the task
+    /// was still nonterminal, and NO liveness path (stall/ceiling/no-progress/
+    /// zombie/hard-runtime) had already claimed the attempt as a failure. This
+    /// is an environmental non-attempt (sibling of
+    /// [`TaskRunOutcome::EnvironmentalNonAttempt`](crate) semantics): the
+    /// attempt is terminalized so nothing wedges, but it must contribute NO
+    /// quality strike, NO dispatch-failure streak, NO cooldown escalation, and
+    /// NO `reopen_class` penalty — it is treated as if the attempt never ran.
+    /// Classified as [`is_infra`](Self::is_infra) so it is excluded from the
+    /// quality/park/intervention counters, and the dispatch reappearance path
+    /// treats a task whose latest attempt is `Interrupted` as environmental
+    /// rather than a same-role failure. Distinct from `Crashed` (a genuine
+    /// application/provider crash, which REMAINS a failure) and `TimedOut`
+    /// (stall / hard-runtime, which REMAINS a failure).
+    Interrupted,
 }
 
 impl TaskAttemptOutcome {
@@ -75,6 +92,7 @@ impl TaskAttemptOutcome {
             Self::AdoptedPr => "adopted_pr",
             Self::ForceClosed => "force_closed",
             Self::Handoff => "handoff",
+            Self::Interrupted => "interrupted",
         }
     }
 
@@ -98,7 +116,21 @@ impl TaskAttemptOutcome {
     /// `task_attempts.outcome` contract; matches the set mapped by
     /// `outcome_to_reopen_class`.
     pub fn is_infra(&self) -> bool {
-        matches!(self, Self::TimedOut | Self::SpawnFailed | Self::Crashed)
+        matches!(
+            self,
+            Self::TimedOut | Self::SpawnFailed | Self::Crashed | Self::Interrupted
+        )
+    }
+
+    /// True if this terminal outcome is an ENVIRONMENTAL interruption — the run
+    /// was killed by infrastructure (deploy/rollout/reap/pod-eviction) before
+    /// any liveness path judged it a failure, so it must be treated as if the
+    /// attempt never ran: no dispatch-failure streak, no cooldown escalation,
+    /// no quality/park penalty. Narrower than [`is_infra`](Self::is_infra),
+    /// which also covers genuine crashes/timeouts that DO remain failures for
+    /// the dispatch reappearance streak.
+    pub fn is_environmental_interrupt(&self) -> bool {
+        matches!(self, Self::Interrupted)
     }
 
     /// Lifecycle rank used for forward-only ordering.
@@ -121,6 +153,11 @@ impl TaskAttemptOutcome {
             Self::AdoptedPr => 38,
             Self::ForceClosed => 39,
             Self::Handoff => 40,
+            // Ranked ABOVE the failure outcomes (Crashed 32 / TimedOut 33) so a
+            // recorded environmental interruption is never clobbered backward to
+            // a failure outcome by a racing terminalizer (forward-only advance):
+            // once environmental, it stays environmental.
+            Self::Interrupted => 41,
         }
     }
 
@@ -159,6 +196,7 @@ impl FromStr for TaskAttemptOutcome {
             "adopted_pr" => Ok(Self::AdoptedPr),
             "force_closed" => Ok(Self::ForceClosed),
             "handoff" => Ok(Self::Handoff),
+            "interrupted" => Ok(Self::Interrupted),
             other => Err(format!("unknown task_attempt outcome: {other}")),
         }
     }
@@ -566,6 +604,7 @@ mod tests {
             TaskAttemptOutcome::AdoptedPr,
             TaskAttemptOutcome::ForceClosed,
             TaskAttemptOutcome::Handoff,
+            TaskAttemptOutcome::Interrupted,
         ] {
             let s = outcome.as_str();
             let parsed: TaskAttemptOutcome = s.parse().unwrap();
@@ -598,6 +637,7 @@ mod tests {
             TaskAttemptOutcome::AdoptedPr,
             TaskAttemptOutcome::ForceClosed,
             TaskAttemptOutcome::Handoff,
+            TaskAttemptOutcome::Interrupted,
         ] {
             assert!(terminal.is_terminal(), "{terminal} should be terminal");
             assert!(
@@ -646,6 +686,28 @@ mod tests {
             assert!(rank >= prev, "ranks must be non-decreasing after submitted");
             prev = rank;
         }
+    }
+
+    #[test]
+    fn interrupted_is_environmental_infra_and_terminal() {
+        let o = TaskAttemptOutcome::Interrupted;
+        assert!(o.is_terminal());
+        assert!(!o.is_non_terminal());
+        // Environmental interrupts are infra-classified (quality/park exempt)…
+        assert!(o.is_infra());
+        // …and are the ONLY environmental-interrupt outcome.
+        assert!(o.is_environmental_interrupt());
+        // Genuine crashes / timeouts remain failures — infra, but NOT
+        // environmental interrupts (they still feed the dispatch streak).
+        assert!(TaskAttemptOutcome::Crashed.is_infra());
+        assert!(!TaskAttemptOutcome::Crashed.is_environmental_interrupt());
+        assert!(!TaskAttemptOutcome::TimedOut.is_environmental_interrupt());
+        assert!(!TaskAttemptOutcome::SpawnFailed.is_environmental_interrupt());
+        // Ranked above the failure outcomes so it is never rolled back to a
+        // failure by a racing forward-only terminalizer.
+        assert!(o.is_forward_from(TaskAttemptOutcome::Crashed));
+        assert!(o.is_forward_from(TaskAttemptOutcome::TimedOut));
+        assert!(!TaskAttemptOutcome::Crashed.is_forward_from(o));
     }
 
     #[test]

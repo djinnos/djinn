@@ -1369,6 +1369,7 @@ async fn planner_intervention_markers(
     .collect()
 }
 
+mod deploy_interruptions_environmental;
 mod dispatch_flow;
 mod doctor_zombie_e2e;
 mod intervention;
