@@ -49,11 +49,6 @@ export namespace AgentCreateOutputSchema {
   error?: string
   id?: string
   is_default?: boolean
-  /**
-   * Machine-managed prompt learning state. Derived from active
-   * learned_prompt_history amendments. Read-only in public surfaces.
-   */
-  learned_prompt?: string
   mcp_servers?: AnyJson[]
   model_preference?: string
   name?: string
@@ -101,11 +96,6 @@ export namespace AgentListOutputSchema {
   description: string
   id: string
   is_default: boolean
-  /**
-   * Machine-managed prompt learning state. Derived from active
-   * learned_prompt_history amendments. Read-only in public surfaces.
-   */
-  learned_prompt?: string
   mcp_servers: AnyJson[]
   model_preference?: string
   name: string
@@ -146,7 +136,6 @@ export namespace AgentMetricsOutputSchema {
   base_role: string
   completed_task_count: number
   extraction_quality: ExtractionQualityMetricEntry
-  learned_prompt?: string
   success_rate: number
   [k: string]: any
   }
@@ -185,11 +174,6 @@ export namespace AgentShowOutputSchema {
   error?: string
   id?: string
   is_default?: boolean
-  /**
-   * Machine-managed prompt learning state. Derived from active
-   * learned_prompt_history amendments. Read-only in public surfaces.
-   */
-  learned_prompt?: string
   mcp_servers?: AnyJson[]
   model_preference?: string
   name?: string
@@ -206,11 +190,6 @@ export namespace AgentUpdateInputSchema {
   export type AnyJson = any
 
   export interface AgentUpdateInput {
-  /**
-   * Set to true to clear machine-managed learned_prompt back to NULL.
-   * Admin/operator reset path.
-   */
-  clear_learned_prompt?: boolean
   description?: string
   /**
    * Agent UUID or name.
@@ -240,11 +219,6 @@ export namespace AgentUpdateOutputSchema {
   error?: string
   id?: string
   is_default?: boolean
-  /**
-   * Machine-managed prompt learning state. Derived from active
-   * learned_prompt_history amendments. Read-only in public surfaces.
-   */
-  learned_prompt?: string
   mcp_servers?: AnyJson[]
   model_preference?: string
   name?: string
