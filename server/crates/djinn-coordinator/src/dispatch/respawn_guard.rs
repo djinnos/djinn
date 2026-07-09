@@ -511,3 +511,7 @@ pub async fn handoff_adopted_pr_to_poller(
 #[cfg(test)]
 #[path = "respawn_guard_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "respawn_guard_mergequeue_tests.rs"]
+mod mergequeue_tests;
