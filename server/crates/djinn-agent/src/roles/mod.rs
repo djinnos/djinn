@@ -244,6 +244,11 @@ pub(crate) fn flow_for_task_dispatch(
     // `needs_lead_intervention`, and the coordinator re-dispatched it forever
     // (the 82g0/78y9 wedge). Keep in sync with `role_for_task_dispatch`, which
     // already maps these statuses to `AgentType::Lead`.
+    //
+    // Note: only the coordinator arbiter park-rung / second-strike path
+    // transitions a task INTO `needs_lead_intervention` (via `Escalate`).
+    // The deprecated `request_lead` handler routes to Planner instead
+    // (10qg/aizl).
     if matches!(
         task.status.as_str(),
         "needs_lead_intervention" | "in_lead_intervention"
