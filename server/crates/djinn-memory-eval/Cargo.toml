@@ -1,0 +1,21 @@
+[package]
+publish = false
+name = "djinn-memory-eval"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "djinn-memory-eval"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+workspace-hack.workspace = true
+
+[dev-dependencies]
