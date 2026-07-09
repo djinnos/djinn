@@ -8,7 +8,7 @@ use super::tripwire_gate::*;
 use crate::tripwires::{
     ActivityEntryRef, ChangedFileStatus, GateOutcome, TRIPWIRE_EVENT_GATE_HELD,
     TRIPWIRE_EVENT_GATE_PASSED, TRIPWIRE_EVENT_GATE_REPORT_ONLY, TripwireEvaluationInput,
-    TripwireFindingSeverity, TripwireGateDecision, TripwirePolicy, all_rule_evaluators, evaluate,
+    TripwireFindingSeverity, TripwireGateDecision, TripwirePolicy,
 };
 use djinn_provider::github_api::PrFile;
 
