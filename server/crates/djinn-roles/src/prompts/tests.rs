@@ -370,6 +370,25 @@ fn planner_prompt_prunes_unverifiable_acceptance_criteria() {
             .contains("Prune or repair the criterion with `task_update` instead of escalating"),
         "intervention planner should prune or repair unverifiable AC instead of escalating"
     );
+    assert!(
+        intervention_prompt.contains("Tripwire adjudication"),
+        "intervention planner must document the tripwire-adjudication case"
+    );
+    assert!(
+        intervention_prompt.contains("CLOSE this escalation")
+            && intervention_prompt.contains("tripwire.hold.released"),
+        "tripwire adjudication must explain the close-releases-the-hold semantic"
+    );
+    assert!(
+        intervention_prompt.contains("do NOT close-release")
+            && intervention_prompt.contains("supersedes the hold"),
+        "tripwire adjudication must explain the reopen-with-directive alternative"
+    );
+    assert!(
+        intervention_prompt.contains("escalation ladder is FINITE")
+            && intervention_prompt.contains("terminally fails"),
+        "intervention planner must document the finite escalation ceiling"
+    );
 
     let mut proposal_task = make_task();
     proposal_task.issue_type = "epic_breakdown".into();

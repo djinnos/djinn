@@ -121,76 +121,195 @@ impl CoordinatorActor {
     /// Resolution routing is governed by the per-rule
     /// [`Adjudication`](crate::tripwires::Adjudication) policy knob (default
     /// [`Arbiter`](crate::tripwires::Adjudication::Arbiter), NO human-review
-    /// holds): a hold whose remaining enforcement findings all belong to
-    /// arbiter-adjudicated rules is destined for autonomous arbiter
-    /// adjudication; a hold that includes any rule an operator has explicitly
-    /// opted to [`Human`](crate::tripwires::Adjudication::Human) takes the
-    /// legacy human-review remediation path.
+    /// holds):
     ///
-    /// The hold state itself — the `tripwire.gate.held` event (already logged
-    /// by the caller), the active-hold state machine, the `human-review-hold`
-    /// label, and merge blocking — is identical regardless of resolver; only
-    /// the RESOLVER differs.
+    /// - **Arbiter (default)** — create an autonomous
+    ///   [`PlannerEscalation`](crate::dispatch::RemediationKind::PlannerEscalation)
+    ///   review task carrying the full adjudication dossier, and park the
+    ///   source behind it. The Planner reviews each finding against the diff and
+    ///   either CLOSES the escalation (releasing the hold via
+    ///   [`releases_source_on_close`](crate::roles::releases_source_on_close) —
+    ///   see [`emit_tripwire_release_on_hold_close`](CoordinatorActor::emit_tripwire_release_on_hold_close),
+    ///   which releases every held head and unblocks the merge) or reopens the
+    ///   source with a directive so the next push supersedes the hold. The
+    ///   `human-review-hold` label is **deliberately NOT applied to the source**
+    ///   on this path (that label only gates dispatch exclusion / auto-close
+    ///   defense, neither wanted here). The merge is already blocked by the
+    ///   active tripwire-hold state (`tripwire.gate.held` on the current head —
+    ///   already logged by the caller); the label serves no purpose in the
+    ///   autonomous flow, so the merge-boundary tamper reconciler
+    ///   ([`reconcile_tripwire_hold`](CoordinatorActor::reconcile_tripwire_hold))
+    ///   also skips re-applying it for arbiter-adjudicated holds.
     ///
-    /// NOTE: the autonomous arbiter-dispatch resolver (seed a tripwire
-    /// arbitration row + route the source into the lead-intervention queue,
-    /// where the arbiter `tripwire_release`s benign findings or reopens
-    /// dangerous ones) is being wired as a follow-up. Until it lands, BOTH
-    /// routing intents create the hold via the existing human-review
-    /// remediation substrate so the gate stays fail-closed (a held PR never
-    /// proceeds).
-    pub(super) async fn create_tripwire_hold(
+    /// - **Human (org-policy escape hatch)** — a hold whose enforcement findings
+    ///   include any rule an operator explicitly opted to
+    ///   [`Human`](crate::tripwires::Adjudication::Human) takes the legacy
+    ///   human-review remediation path (`human-review-hold`, awaits a human).
+    pub(crate) async fn create_tripwire_hold(
         &mut self,
         task: &djinn_core::models::Task,
         tripwire_result: &super::tripwire_gate::TripwireGateResult,
         head_sha: &str,
     ) {
-        let policy = crate::tripwires::TripwirePolicy::default();
-        let requires_human = tripwire_result
+        self.create_tripwire_hold_with_policy(
+            task,
+            tripwire_result,
+            head_sha,
+            crate::tripwires::TripwirePolicy::default(),
+        )
+        .await;
+    }
+
+    /// Policy-injectable core of [`create_tripwire_hold`]. Production always
+    /// passes [`TripwirePolicy::default`](crate::tripwires::TripwirePolicy::default)
+    /// (org-policy loading is a follow-up); the `policy` seam lets tests
+    /// exercise the human-adjudication escape hatch end-to-end.
+    pub(crate) async fn create_tripwire_hold_with_policy(
+        &mut self,
+        task: &djinn_core::models::Task,
+        tripwire_result: &super::tripwire_gate::TripwireGateResult,
+        head_sha: &str,
+        policy: crate::tripwires::TripwirePolicy,
+    ) {
+        let enforcement: Vec<&crate::tripwires::engine::TripwireFinding> = tripwire_result
             .decision
             .findings
             .iter()
             .filter(|f| f.severity == crate::tripwires::TripwireFindingSeverity::EnforceHold)
+            .collect();
+        let requires_human = enforcement
+            .iter()
             .any(|f| policy.adjudication_for(f.rule_id).is_human());
 
-        let findings_summary = tripwire_result
-            .decision
-            .findings
-            .iter()
-            .filter(|f| f.severity == crate::tripwires::TripwireFindingSeverity::EnforceHold)
-            .map(|f| {
-                format!(
-                    "- `{}` ({}) — {}",
-                    f.rule_id.as_str(),
-                    f.reason_code,
-                    f.evidence.path,
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        if requires_human {
+            // ── Legacy human-review escape hatch ─────────────────────────────
+            let findings_summary = enforcement
+                .iter()
+                .map(|f| {
+                    format!(
+                        "- `{}` ({}) — {}",
+                        f.rule_id.as_str(),
+                        f.reason_code,
+                        f.evidence.path
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let hold_reason = format!(
+                "Tripwire gate held for PR head `{}`.\n\n\
+                 Policy revision: `{}`\n\
+                 Enforcement findings:\n{}",
+                &head_sha[..12.min(head_sha.len())],
+                tripwire_result.decision.policy_revision,
+                findings_summary,
+            );
+            tracing::info!(
+                task_id = %task.short_id,
+                head_sha = %head_sha,
+                adjudication = "human",
+                "PR poller: tripwire gate held — creating human-review hold (org-policy escape hatch)"
+            );
+            self.create_remediation_task(
+                &task.id,
+                &hold_reason,
+                &task.project_id,
+                crate::dispatch::RemediationKind::HumanReview,
+            )
+            .await;
+            self.park_source_open(&task.id, &hold_reason).await;
+            return;
+        }
 
-        let hold_reason = format!(
-            "Tripwire gate held for PR head `{}`.\n\n\
-             Policy revision: `{}`\n\
-             Enforcement findings:\n{}",
-            &head_sha[..12.min(head_sha.len())],
-            tripwire_result.decision.policy_revision,
-            findings_summary,
-        );
-
+        // ── Arbiter-adjudicated (default): autonomous planner escalation ─────
+        let dossier =
+            build_tripwire_adjudication_dossier(task, tripwire_result, head_sha, &enforcement);
         tracing::info!(
             task_id = %task.short_id,
             head_sha = %head_sha,
-            adjudication = if requires_human { "human" } else { "arbiter" },
-            "PR poller: tripwire gate held — creating hold via remediation substrate"
+            adjudication = "arbiter",
+            enforcement_findings = enforcement.len(),
+            "PR poller: tripwire gate held — creating autonomous planner-park escalation (no human hold, no source label)"
         );
         self.create_remediation_task(
             &task.id,
-            &hold_reason,
+            &dossier,
             &task.project_id,
-            crate::dispatch::RemediationKind::HumanReview,
+            crate::dispatch::RemediationKind::PlannerEscalation,
         )
         .await;
-        self.park_source_open(&task.id, &hold_reason).await;
+        self.park_source_open(&task.id, &dossier).await;
     }
+}
+
+/// Build the tripwire adjudication dossier that becomes the planner-park
+/// escalation body: every enforcement finding (rule, reason code, evidence
+/// path/span, content fingerprint), a per-file finding summary, the PR number +
+/// held head SHA, and explicit close-releases / reopen-supersedes instructions.
+fn build_tripwire_adjudication_dossier(
+    task: &djinn_core::models::Task,
+    tripwire_result: &super::tripwire_gate::TripwireGateResult,
+    head_sha: &str,
+    enforcement: &[&crate::tripwires::engine::TripwireFinding],
+) -> String {
+    let head12 = &head_sha[..12.min(head_sha.len())];
+    let pr_display = tripwire_result
+        .payload
+        .pr_number
+        .map(|n| format!("#{n}"))
+        .unwrap_or_else(|| "(unknown)".to_owned());
+
+    // Per-finding lines, with line-precise span when available.
+    let findings_lines = enforcement
+        .iter()
+        .map(|f| {
+            let span = match (f.evidence.start_line, f.evidence.end_line) {
+                (Some(s), Some(e)) if s == e => format!(":{s}"),
+                (Some(s), Some(e)) => format!(":{s}-{e}"),
+                _ => String::new(),
+            };
+            format!(
+                "- `{}` ({}) — {}{}  [fingerprint: {}]",
+                f.rule_id.as_str(),
+                f.reason_code,
+                f.evidence.path,
+                span,
+                f.content_fingerprint,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Per-file summary (finding count per path) — a lightweight diffstat over
+    // the flagged files (the deterministic gate does not carry line diffstat).
+    let mut per_file: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for f in enforcement {
+        *per_file.entry(f.evidence.path.as_str()).or_default() += 1;
+    }
+    let per_file_lines = per_file
+        .iter()
+        .map(|(path, count)| format!("- {path}: {count} finding(s)"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "## Tripwire adjudication\n\n\
+         The tripwire gate HELD PR {pr_display} at held head `{head12}` on {n} enforcement \
+         finding(s). Policy revision: `{rev}`. Source task: {short_id}.\n\n\
+         ### Findings\n{findings_lines}\n\n\
+         ### Per-file summary\n{per_file_lines}\n\n\
+         ### What to do\n\
+         Review each finding against the diff.\n\
+         - If BENIGN (code motion, refactor, workspace-internal dependency bumps, fixtures): \
+         CLOSE this task with a rationale that NAMES the finding keys you cleared — closing \
+         releases the hold and unblocks the merge.\n\
+         - If genuinely DANGEROUS or unjustified: do NOT close-release. Reopen the source task \
+         with a directive describing exactly what must change; the next push supersedes the hold.",
+        pr_display = pr_display,
+        head12 = head12,
+        n = enforcement.len(),
+        rev = tripwire_result.decision.policy_revision,
+        short_id = task.short_id,
+        findings_lines = findings_lines,
+        per_file_lines = per_file_lines,
+    )
 }
