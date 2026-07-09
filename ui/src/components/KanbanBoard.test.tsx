@@ -1,6 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, waitFor, within } from "@/test/test-utils";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+import { render, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { KanbanBoard } from "@/components/KanbanBoard";
+import { mergedColumnStore } from "@/stores/mergedColumnStore";
+import { loadMoreClosedTasks } from "@/api/server";
 import type { Epic, Task } from "@/api/types";
 
 vi.mock("@/electron/commands", () => ({
@@ -10,6 +12,10 @@ vi.mock("@/electron/commands", () => ({
 
 vi.mock("@/api/mcpClient", () => ({
   callMcpTool: vi.fn(),
+}));
+
+vi.mock("@/api/server", () => ({
+  loadMoreClosedTasks: vi.fn().mockResolvedValue([]),
 }));
 
 const epicA: Epic = {
@@ -66,6 +72,13 @@ const makeTask = (
 });
 
 describe("KanbanBoard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // The Merged-column pagination state is a global store; reset it so tests
+    // that don't opt into "Load more" see no affordance.
+    mergedColumnStore.getState().reset();
+  });
+
   it("renders status columns with tasks in correct columns and header counts", () => {
     const tasks: Task[] = [
       makeTask({
@@ -274,6 +287,66 @@ describe("KanbanBoard", () => {
     render(<KanbanBoard tasks={[]} epics={new Map()} />);
 
     expect(screen.getAllByText("No tasks")).toHaveLength(4);
+  });
+
+  it("suffixes the Merged count with '+' and shows Load more when more closed pages exist", async () => {
+    // Simulate the first closed page having been loaded with more remaining.
+    mergedColumnStore.getState().setProjectPage({
+      slug: "owner/repo",
+      projectId: "p1",
+      loaded: 200,
+      hasMore: true,
+      totalClosed: 1231,
+    });
+
+    const tasks: Task[] = [
+      makeTask({
+        id: "t-done",
+        title: "Merged task",
+        status: "closed",
+        epic_id: epicA.id,
+        merge_commit_sha: "abc123merged",
+      }),
+    ];
+
+    render(<KanbanBoard tasks={tasks} epics={new Map([[epicA.id, epicA]])} />);
+
+    // One merged task loaded, but the server has more → "1+".
+    const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
+    expect(doneCol).toHaveTextContent("1+");
+
+    const loadMore = screen.getByRole("button", { name: "Load more" });
+    await userEvent.click(loadMore);
+    expect(loadMoreClosedTasks).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not show Load more or a '+' suffix when all closed pages are loaded", () => {
+    mergedColumnStore.getState().setProjectPage({
+      slug: "owner/repo",
+      projectId: "p1",
+      loaded: 1,
+      hasMore: false,
+      totalClosed: 1,
+    });
+
+    const tasks: Task[] = [
+      makeTask({
+        id: "t-done",
+        title: "Merged task",
+        status: "closed",
+        epic_id: epicA.id,
+        merge_commit_sha: "abc123merged",
+      }),
+    ];
+
+    render(<KanbanBoard tasks={tasks} epics={new Map([[epicA.id, epicA]])} />);
+
+    const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
+    expect(doneCol).toHaveTextContent("1");
+    expect(doneCol).not.toHaveTextContent("1+");
+    expect(
+      screen.queryByRole("button", { name: "Load more" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows empty open epics in the Open column when they have no tasks", () => {

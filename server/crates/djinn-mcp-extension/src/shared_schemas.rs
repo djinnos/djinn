@@ -526,13 +526,13 @@ pub fn tool_task_list() -> RmcpTool {
         object!({
             "type": "object",
             "properties": {
-                "status": {"type": "string"},
+                "status": {"type": "string", "description": "Positive (\"open\") or negative (\"!closed\") status filter. A leading \"!\" matches every task whose status differs from the given value."},
                 "issue_type": {"type": "string"},
                 "priority": {"type": "integer"},
                 "text": {"type": "string", "description": "Free-text search in title/description"},
                 "label": {"type": "string"},
                 "parent": {"type": "string", "description": "Epic ID to filter by"},
-                "sort": {"type": "string"},
+                "sort": {"type": "string", "description": "priority (default), created, created_desc, updated, updated_desc, closed (closed_at DESC then created_at DESC)."},
                 "limit": {"type": "integer"},
                 "offset": {"type": "integer"}
             }
