@@ -564,6 +564,10 @@ pub enum TransitionAction {
     Release,
     ReleaseTaskReview,
     ForceClose,
+    /// Administrative override: force a task to an arbitrary target status.
+    /// **Must not** target `NeedsLeadIntervention` or `InLeadIntervention` —
+    /// the arbiter lifecycle is only entered via `Escalate` (coordinator
+    /// park-rung) and `LeadInterventionStart` (INVARIANT 10qg/aizl).
     UserOverride,
     /// System escalates stuck task to Lead intervention queue.
     Escalate,
@@ -612,6 +616,14 @@ pub enum TransitionAction {
     /// the arbitration row and the hold description. Like `ParkForRemediation`
     /// this is a HOLD, not a rework: it does NOT increment `reopen_count`.
     ArbiterPark,
+    /// Arbiter `submit_decision(decision="supersede")` — the arbiter decomposed
+    /// the task into replacement subtasks that carry the work forward, so the
+    /// source task (and its PR) are force-closed as superseded. Moves
+    /// `in_lead_intervention → closed` with force-closed semantics. The
+    /// replacement subtasks and downstream blocker transfer are handled by the
+    /// supervisor-side supersede transaction before this terminal move; no
+    /// human-review hold is created. Terminal, like `ForceClose`.
+    ArbiterSupersede,
 }
 
 impl TransitionAction {
@@ -665,6 +677,7 @@ impl TransitionAction {
             "submit_for_merge" => Ok(Self::SubmitForMerge),
             "preapproval_verify_rejected" => Ok(Self::PreApprovalVerifyRejected),
             "arbiter_park" => Ok(Self::ArbiterPark),
+            "arbiter_supersede" => Ok(Self::ArbiterSupersede),
             other => Err(Error::Internal(format!(
                 "unknown transition action: {other}"
             ))),
@@ -888,6 +901,22 @@ pub fn compute_transition(
             let target = target_override.ok_or_else(|| {
                 Error::InvalidTransition("user_override requires target_status".to_owned())
             })?;
+            // INVARIANT (10qg/aizl): UserOverride must NOT bypass the
+            // coordinator arbiter park-rung to enter the Lead intervention
+            // lifecycle.  `NeedsLeadIntervention` is only reachable via
+            // `Escalate` (coordinator park-rung) or
+            // `LeadInterventionRelease` (coordinator session-recovery).
+            // `InLeadIntervention` is only reachable via
+            // `LeadInterventionStart` from `NeedsLeadIntervention`.
+            // Guarded by `only_escalate_and_release_produce_needs_lead_intervention`.
+            if matches!(
+                target,
+                TaskStatus::NeedsLeadIntervention | TaskStatus::InLeadIntervention
+            ) {
+                return bad("user_override must not target needs_lead_intervention or \
+                     in_lead_intervention; use escalate/lead_intervention_start \
+                     for the coordinator arbiter lifecycle");
+            }
             let closing = *target == TaskStatus::Closed;
             TransitionApply {
                 to_status: Some(target.clone()),
@@ -913,6 +942,13 @@ pub fn compute_transition(
             // (Closed) and the Lead intervention pair are intentionally
             // excluded: the arbiter entry point must not re-enter an
             // already-active Lead intervention or bypass close.
+            //
+            // INVARIANT (10qg/aizl): This is the ONLY production path that
+            // transitions a task into `NeedsLeadIntervention`.  The
+            // `only_escalate_and_release_produce_needs_lead_intervention`
+            // test guards this invariant.  Worker/reviewer `request_lead`
+            // calls are deprecated to Planner routing and must NOT reach
+            // this transition.
             if !matches!(
                 from,
                 TaskStatus::Open
@@ -943,6 +979,11 @@ pub fn compute_transition(
         }
 
         TransitionAction::LeadInterventionRelease => {
+            // Coordinator session-recovery: releases an active Lead
+            // intervention back to queued status.  This is the only other
+            // production path (besides `Escalate`) that produces
+            // `NeedsLeadIntervention`.  Guarded by
+            // `only_escalate_and_release_produce_needs_lead_intervention`.
             if *from != TaskStatus::InLeadIntervention {
                 return bad("lead_intervention_release is only valid from in_lead_intervention");
             }
@@ -1118,6 +1159,26 @@ pub fn compute_transition(
             }
             TransitionApply::simple(TaskStatus::Open)
         }
+
+        TransitionAction::ArbiterSupersede => {
+            // Arbiter `submit_decision(decision="supersede")` — the source was
+            // decomposed into replacement subtasks that carry the work forward,
+            // so it is force-closed as superseded. Only legal from
+            // `InLeadIntervention`. Terminal (→ closed) with force-closed
+            // semantics, identical to `ForceClose` but scoped to the arbiter
+            // rung so the supervisor supersede transaction (arbitration-row
+            // consume, blocker transfer, branch/PR cleanup) runs first.
+            if *from != TaskStatus::InLeadIntervention {
+                return bad("arbiter_supersede is only valid from in_lead_intervention");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::Closed),
+                set_closed_at: true,
+                close_reason: Some(CLOSE_REASON_FORCE_CLOSED),
+                clear_merge_conflict_metadata: true,
+                ..Default::default()
+            }
+        }
     })
 }
 
@@ -1165,6 +1226,7 @@ pub fn compute_transition_for_issue_type(
                 | TransitionAction::PrChangesRequested
                 | TransitionAction::ParkForRemediation
                 | TransitionAction::ArbiterPark
+                | TransitionAction::ArbiterSupersede
         );
         if !allowed {
             return Err(Error::InvalidTransition(format!(
@@ -1193,7 +1255,7 @@ mod tests {
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 29] = [
+    const ACTIONS: [TransitionAction; 30] = [
         TransitionAction::Start,
         TransitionAction::ResumeWorker,
         TransitionAction::SubmitTaskReview,
@@ -1223,6 +1285,7 @@ mod tests {
         TransitionAction::ParkForRemediation,
         TransitionAction::PreApprovalVerifyRejected,
         TransitionAction::ArbiterPark,
+        TransitionAction::ArbiterSupersede,
     ];
 
     fn expected_status(action: &TransitionAction, from: &TaskStatus) -> Option<TaskStatus> {
@@ -1313,6 +1376,9 @@ mod tests {
             }
             (TransitionAction::ArbiterPark, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Open)
+            }
+            (TransitionAction::ArbiterSupersede, TaskStatus::InLeadIntervention) => {
+                Some(TaskStatus::Closed)
             }
             (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
                 Some(TaskStatus::Approved)
@@ -1425,6 +1491,28 @@ mod tests {
         assert_eq!(open.to_status, Some(TaskStatus::Open));
         assert!(open.clear_closed_at);
         assert!(open.clear_close_reason);
+
+        // INVARIANT (10qg/aizl): UserOverride must not bypass the
+        // coordinator arbiter park-rung to enter the Lead intervention
+        // lifecycle.
+        assert!(
+            compute_transition(
+                &TransitionAction::UserOverride,
+                &TaskStatus::Open,
+                Some(&TaskStatus::NeedsLeadIntervention),
+            )
+            .is_err(),
+            "user_override must not target needs_lead_intervention"
+        );
+        assert!(
+            compute_transition(
+                &TransitionAction::UserOverride,
+                &TaskStatus::NeedsLeadIntervention,
+                Some(&TaskStatus::InLeadIntervention),
+            )
+            .is_err(),
+            "user_override must not target in_lead_intervention"
+        );
     }
 
     #[test]
@@ -2105,6 +2193,126 @@ mod tests {
             assert!(
                 compute_transition(&TransitionAction::LeadApproveConflict, from, None).is_err(),
                 "lead_approve_conflict must be invalid from {from:?}"
+            );
+        }
+    }
+
+    /// Grep guard: the only `TransitionAction` variants that produce
+    /// `NeedsLeadIntervention` as their target status are `Escalate`
+    /// (coordinator arbiter park-rung / second-strike path) and
+    /// `LeadInterventionRelease` (coordinator session-recovery release
+    /// from `InLeadIntervention` back to queued).  No worker/reviewer
+    /// handler or tool path may produce this transition.
+    ///
+    /// This invariant is the state-machine half of the acceptance
+    /// criterion that "production transitions into needs_lead_intervention
+    /// are limited to the coordinator arbiter park-rung/state-machine path"
+    /// (10qg / aizl).
+    #[test]
+    fn only_escalate_and_release_produce_needs_lead_intervention() {
+        let all_actions = [
+            TransitionAction::Start,
+            TransitionAction::ResumeWorker,
+            TransitionAction::SubmitTaskReview,
+            TransitionAction::TaskReviewStart,
+            TransitionAction::TaskReviewReject,
+            TransitionAction::TaskReviewRejectStale,
+            TransitionAction::TaskReviewRejectConflict,
+            TransitionAction::TaskReviewApprove,
+            TransitionAction::Close,
+            TransitionAction::Reopen,
+            TransitionAction::Release,
+            TransitionAction::ReleaseTaskReview,
+            TransitionAction::ForceClose,
+            TransitionAction::UserOverride,
+            TransitionAction::Escalate,
+            TransitionAction::LeadInterventionStart,
+            TransitionAction::LeadInterventionRelease,
+            TransitionAction::LeadInterventionComplete,
+            TransitionAction::LeadApprove,
+            TransitionAction::LeadApproveConflict,
+            TransitionAction::PrCreated,
+            TransitionAction::PrUndraft,
+            TransitionAction::PrCiFailed,
+            TransitionAction::PrConflict,
+            TransitionAction::PrMerge,
+            TransitionAction::PrChangesRequested,
+            TransitionAction::ParkForRemediation,
+            TransitionAction::SubmitForMerge,
+            TransitionAction::PreApprovalVerifyRejected,
+            TransitionAction::ArbiterPark,
+        ];
+
+        // For each action, try every possible source status and record
+        // which actions can produce NeedsLeadIntervention.
+        let all_statuses = [
+            TaskStatus::Open,
+            TaskStatus::InProgress,
+            TaskStatus::NeedsTaskReview,
+            TaskStatus::InTaskReview,
+            TaskStatus::Approved,
+            TaskStatus::PrDraft,
+            TaskStatus::PrReview,
+            TaskStatus::NeedsLeadIntervention,
+            TaskStatus::InLeadIntervention,
+            TaskStatus::Closed,
+        ];
+
+        let mut produces_needs_lead = Vec::new();
+        for action in &all_actions {
+            for from in &all_statuses {
+                if let Ok(apply) = compute_transition(action, from, None) {
+                    if apply.to_status == Some(TaskStatus::NeedsLeadIntervention) {
+                        produces_needs_lead.push(format!("{action:?} from {from:?}"));
+                    }
+                }
+            }
+        }
+
+        // Only Escalate and LeadInterventionRelease may produce NeedsLeadIntervention.
+        for entry in &produces_needs_lead {
+            assert!(
+                entry.starts_with("Escalate") || entry.starts_with("LeadInterventionRelease"),
+                "unexpected action producing NeedsLeadIntervention: {entry}. \
+                 Only Escalate (coordinator arbiter park-rung) and \
+                 LeadInterventionRelease (coordinator session-recovery) \
+                 may transition to NeedsLeadIntervention"
+            );
+        }
+
+        // Positive check: Escalate must produce NeedsLeadIntervention from
+        // at least one source status (the park-rung sources).
+        assert!(
+            !produces_needs_lead.is_empty(),
+            "at least Escalate must produce NeedsLeadIntervention"
+        );
+
+        // Guard the UserOverride backdoor: UserOverride with an explicit
+        // target_override of NeedsLeadIntervention (or InLeadIntervention)
+        // must be rejected for ALL source statuses.  Without this check,
+        // compute_transition(action, from, None) silently skips the
+        // UserOverride path (which requires Some(target_override)) and
+        // the test would miss the backdoor.
+        for from in &all_statuses {
+            assert!(
+                compute_transition(
+                    &TransitionAction::UserOverride,
+                    from,
+                    Some(&TaskStatus::NeedsLeadIntervention),
+                )
+                .is_err(),
+                "UserOverride must NOT target NeedsLeadIntervention from {from:?}; \
+                 the coordinator arbiter park-rung (Escalate) is the only entry"
+            );
+            assert!(
+                compute_transition(
+                    &TransitionAction::UserOverride,
+                    from,
+                    Some(&TaskStatus::InLeadIntervention),
+                )
+                .is_err(),
+                "UserOverride must NOT target InLeadIntervention from {from:?}; \
+                 LeadInterventionStart from NeedsLeadIntervention is the only entry"
             );
         }
     }

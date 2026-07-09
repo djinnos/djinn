@@ -1456,6 +1456,39 @@ fn lead_prompt_contains_forensic_arbiter_mandate() {
         prompt.contains("verification_command"),
         "lead prompt must reference verification_command for reopen"
     );
+    assert!(
+        prompt.contains("supersede"),
+        "lead prompt must reference the supersede decision"
+    );
+    assert!(
+        prompt.contains("created_tasks"),
+        "lead prompt must reference created_tasks for supersede decisions"
+    );
+}
+
+/// The Lead prompt's Decision Matrix must present five decisions including the
+/// new `supersede` rung, and must steer the arbiter toward supersede (not park)
+/// once it has produced replacement subtasks.
+#[test]
+fn lead_prompt_decision_matrix_includes_supersede_and_prefers_it_over_park() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Lead, &task, &ctx);
+
+    assert!(
+        prompt.contains("five possible decisions"),
+        "decision matrix must declare five possible decisions"
+    );
+    assert!(
+        prompt.contains("Supersede (`decision=\"supersede\"`)"),
+        "decision matrix must contain the Supersede entry"
+    );
+    // Park must be explicitly scoped to the no-autonomous-resolution case so the
+    // arbiter stops parking pure-administration decompositions (the zcsl bug).
+    assert!(
+        prompt.contains("no autonomous resolution exists even in principle"),
+        "park entry must scope park to the no-autonomous-resolution case"
+    );
 }
 
 /// The Lead prompt must NOT surface `request_planner` or `escalate` as
