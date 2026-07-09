@@ -28,6 +28,17 @@ pub enum PoolError {
     ActorDead,
     #[error("no response from actor")]
     NoResponse,
+    /// The coordinator→pool ask exceeded [`super::handle::POOL_ASK_TIMEOUT`]
+    /// without the single-mailbox pool actor replying. Introduced after the
+    /// 2026-07-09 whole-board freeze: an un-timed coordinator→pool ask on
+    /// tick 72 blocked the coordinator's single `select!` loop for 11 minutes
+    /// while the pool was transiently stalled in a
+    /// session-exit→teardown→redispatch window. Callers already tolerate
+    /// `PoolError`, so `Timeout` degrades the same way (ledger preserved,
+    /// session treated as not-running, dispatch retried next tick) rather than
+    /// wedging the whole coordinator.
+    #[error("pool ask timed out after {timeout_secs}s (pool actor stalled)")]
+    Timeout { timeout_secs: u64 },
     #[error("task {task_id} already has an active slot")]
     SessionAlreadyActive { task_id: String },
     #[error("task {task_id} has no active slot")]
