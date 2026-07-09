@@ -111,9 +111,6 @@ pub struct AgentModel {
     pub mcp_servers: Vec<AnyJson>,
     pub skills: Vec<AnyJson>,
     pub is_default: bool,
-    /// Machine-managed prompt learning state. Derived from active
-    /// learned_prompt_history amendments. Read-only in public surfaces.
-    pub learned_prompt: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -131,7 +128,6 @@ impl From<&Agent> for AgentModel {
             mcp_servers: parse_json_array_any(&r.mcp_servers),
             skills: filter_native_skill_entries(parse_json_array_any(&r.skills)),
             is_default: r.is_default,
-            learned_prompt: r.learned_prompt.clone(),
             created_at: r.created_at.clone(),
             updated_at: r.updated_at.clone(),
         }
@@ -170,8 +166,6 @@ pub struct AgentMetricEntry {
     pub agent_id: String,
     pub agent_name: String,
     pub base_role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub learned_prompt: Option<String>,
     pub success_rate: f64,
     pub avg_tokens: f64,
     pub avg_tokens_in: f64,
@@ -402,7 +396,6 @@ pub async fn metrics_for_agents(
             agent_id: agent.id.clone(),
             agent_name: agent.name.clone(),
             base_role: agent.base_role.clone(),
-            learned_prompt: agent.learned_prompt.clone(),
             success_rate: m.success_rate,
             avg_reopens: m.avg_reopens,
             completed_task_count: m.completed_task_count,
@@ -610,7 +603,6 @@ mod tests {
             mcp_servers: "[]".to_string(),
             skills: r#"["my-skill", "visual-spec", "another-skill"]"#.to_string(),
             is_default: false,
-            learned_prompt: None,
             created_at: "2024-01-01".to_string(),
             updated_at: "2024-01-01".to_string(),
         };
@@ -636,7 +628,6 @@ mod tests {
             mcp_servers: "[]".to_string(),
             skills: r#"["skill-a", "skill-b"]"#.to_string(),
             is_default: false,
-            learned_prompt: None,
             created_at: "2024-01-01".to_string(),
             updated_at: "2024-01-01".to_string(),
         };

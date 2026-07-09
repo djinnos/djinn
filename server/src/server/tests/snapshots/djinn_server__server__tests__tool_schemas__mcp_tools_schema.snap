@@ -103,13 +103,6 @@ expression: signatures
         "is_default": {
           "type": "boolean"
         },
-        "learned_prompt": {
-          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "mcp_servers": {
           "items": {
             "$ref": "#/$defs/AnyJson"
@@ -203,13 +196,6 @@ expression: signatures
             },
             "is_default": {
               "type": "boolean"
-            },
-            "learned_prompt": {
-              "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
-              "type": [
-                "string",
-                "null"
-              ]
             },
             "mcp_servers": {
               "items": {
@@ -379,12 +365,6 @@ expression: signatures
             "extraction_quality": {
               "$ref": "#/$defs/ExtractionQualityMetricEntry"
             },
-            "learned_prompt": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "success_rate": {
               "format": "double",
               "type": "number"
@@ -513,13 +493,6 @@ expression: signatures
         "is_default": {
           "type": "boolean"
         },
-        "learned_prompt": {
-          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "mcp_servers": {
           "items": {
             "$ref": "#/$defs/AnyJson"
@@ -567,13 +540,6 @@ expression: signatures
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "clear_learned_prompt": {
-          "description": "Set to true to clear machine-managed learned_prompt back to NULL.\nAdmin/operator reset path.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
         "description": {
           "type": [
             "string",
@@ -657,13 +623,6 @@ expression: signatures
         },
         "is_default": {
           "type": "boolean"
-        },
-        "learned_prompt": {
-          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces.",
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "mcp_servers": {
           "items": {

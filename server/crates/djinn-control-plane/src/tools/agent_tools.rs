@@ -90,14 +90,6 @@ pub struct AgentListParams {
     pub offset: Option<i64>,
 }
 
-fn learned_prompt_was_supplied<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let _ = serde_json::Value::deserialize(deserializer)?;
-    Ok(true)
-}
-
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct AgentUpdateParams {
     /// Absolute project path.
@@ -110,14 +102,6 @@ pub struct AgentUpdateParams {
     pub model_preference: Option<String>,
     pub mcp_servers: Option<Vec<AnyJson>>,
     pub skills: Option<Vec<AnyJson>>,
-    /// Deprecated: direct setting of learned_prompt is no longer supported.
-    /// If provided, the update will be rejected with an error.
-    #[schemars(skip)]
-    #[serde(default, deserialize_with = "learned_prompt_was_supplied")]
-    pub learned_prompt: bool,
-    /// Set to true to clear machine-managed learned_prompt back to NULL.
-    /// Admin/operator reset path.
-    pub clear_learned_prompt: Option<bool>,
 }
 
 // ── Tool implementations ──────────────────────────────────────────────────────
@@ -348,34 +332,6 @@ impl DjinnMcpServer {
                 error: Some(e),
             });
         }
-        // Reject direct learned_prompt setting — it bypasses history semantics,
-        // and mixed learned_prompt + clear_learned_prompt requests must be atomic errors.
-        if p.learned_prompt {
-            return Json(AgentSingleResponse {
-                agent: None,
-                error: Some(
-                    "Direct learned_prompt setting is no longer supported. Use the clear endpoint instead."
-                        .to_string(),
-                ),
-            });
-        }
-
-        // Resolve learned_prompt: clear means NULL; otherwise keep existing.
-        // Since learned_prompt is now derived from history rows, clearing means
-        // marking all active amendments as discarded.
-        if p.clear_learned_prompt.unwrap_or(false)
-            && let Err(e) = repo.clear_amendments(&role.id).await
-        {
-            return Json(AgentSingleResponse {
-                agent: None,
-                error: Some(format!("failed to clear amendments: {e}")),
-            });
-        }
-        let learned_prompt_value: Option<&str> = if p.clear_learned_prompt.unwrap_or(false) {
-            None
-        } else {
-            role.learned_prompt.as_deref()
-        };
 
         match repo
             .update(
@@ -387,7 +343,6 @@ impl DjinnMcpServer {
                     model_preference,
                     mcp_servers: &mcp_servers_str,
                     skills: &skills_str,
-                    learned_prompt: learned_prompt_value,
                 },
             )
             .await

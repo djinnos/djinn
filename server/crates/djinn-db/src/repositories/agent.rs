@@ -25,9 +25,6 @@ pub struct AgentUpdateInput<'a> {
     pub model_preference: Option<&'a str>,
     pub mcp_servers: &'a str,
     pub skills: &'a str,
-    /// Final learned_prompt value to persist. Pass None to clear (set NULL).
-    /// MCP layer resolves the "keep existing / set / clear" logic before calling.
-    pub learned_prompt: Option<&'a str>,
 }
 
 pub struct AgentListQuery {
@@ -73,46 +70,6 @@ pub struct ExtractionQualityMetrics {
     pub discarded: i64,
 }
 
-/// A pending amendment in `learned_prompt_history` that has not yet been
-/// evaluated (action = 'keep', no metrics_after recorded).
-pub struct PendingAmendmentEvaluation {
-    /// History record ID.
-    pub history_id: String,
-    /// Agent the amendment applies to.
-    pub agent_id: String,
-    /// ISO-8601 timestamp when the amendment was first applied.
-    pub created_at: String,
-    /// The amendment text (same as `proposed_text`).
-    pub proposed_text: String,
-    /// Metrics snapshot at proposal time (JSON string, may be None).
-    pub metrics_before: Option<String>,
-}
-
-/// Windowed metrics for a role: task counts and averages over a time range.
-pub struct WindowedRoleMetrics {
-    /// Number of closed tasks completed in the window.
-    pub completed_task_count: i64,
-    /// Number of closed tasks that failed in the window.
-    pub failed_task_count: i64,
-    /// Success rate = completed / (completed + failed).
-    pub success_rate: f64,
-    /// Average total tokens per completed session in the window.
-    pub avg_tokens: f64,
-}
-
-/// One row from `learned_prompt_history` for a role.
-pub struct LearnedPromptHistoryEntry {
-    pub id: String,
-    pub proposed_text: String,
-    pub action: String,
-    pub metrics_before: Option<String>,
-    pub metrics_after: Option<String>,
-    pub created_at: String,
-}
-
-// Standard SELECT projection for Agent queries.  `learned_prompt` is derived
-// from active `learned_prompt_history` rows rather than the stale text column.
-//
 // Inline AGENT_COLUMNS projection for each `query_as!(Agent, ...)` call site.
 // `query_as!` requires a string-literal SQL argument; `concat!()` doesn't
 // satisfy it (verified during batch 4).  Each caller therefore passes the
@@ -154,68 +111,12 @@ impl AgentRepository {
                 model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
-                (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
-                 FROM learned_prompt_history h
-                 WHERE h.agent_id = agents.id
-                   AND h.action IN ('keep','confirmed')
-                ) AS learned_prompt,
                 created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents
              ORDER BY project_id ASC, is_default DESC, base_role ASC, name ASC"#
         )
         .fetch_all(self.db.pool())
         .await?)
-    }
-
-    /// Return the full `learned_prompt_history` for a role, newest first.
-    pub async fn get_history(&self, role_id: &str) -> Result<Vec<LearnedPromptHistoryEntry>> {
-        self.db.ensure_initialized().await?;
-        let rows = sqlx::query!(
-            r#"SELECT id, proposed_text, action AS "action!", metrics_before::text AS "metrics_before?", metrics_after::text AS "metrics_after?", created_at
-                 FROM learned_prompt_history
-                 WHERE agent_id = $1
-                 ORDER BY created_at DESC"#,
-            role_id
-        )
-        .fetch_all(self.db.pool())
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|row| LearnedPromptHistoryEntry {
-                id: row.id,
-                proposed_text: row.proposed_text,
-                action: row.action,
-                metrics_before: row.metrics_before,
-                metrics_after: row.metrics_after,
-                created_at: row.created_at,
-            })
-            .collect())
-    }
-
-    /// Set a role's `learned_prompt` to NULL, discard all active amendments,
-    /// and emit an update event.
-    pub async fn clear_learned_prompt(&self, role_id: &str) -> Result<Agent> {
-        self.db.ensure_initialized().await?;
-        sqlx::query!(
-            r#"UPDATE agents
-             SET learned_prompt = NULL,
-                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $1"#,
-            role_id
-        )
-        .execute(self.db.pool())
-        .await?;
-
-        // Also discard active history rows so the derived learned_prompt stays empty.
-        self.clear_amendments(role_id).await?;
-
-        let role = self
-            .get(role_id)
-            .await?
-            .ok_or_else(|| Error::InvalidData(format!("agent not found: {role_id}")))?;
-        self.events.send(DjinnEventEnvelope::agent_updated(&role));
-        Ok(role)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Agent>> {
@@ -230,11 +131,6 @@ impl AgentRepository {
                 model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
-                (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
-                 FROM learned_prompt_history h
-                 WHERE h.agent_id = agents.id
-                   AND h.action IN ('keep','confirmed')
-                ) AS learned_prompt,
                 created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents WHERE id = $1"#,
             id
@@ -261,11 +157,6 @@ impl AgentRepository {
                 model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
-                (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
-                 FROM learned_prompt_history h
-                 WHERE h.agent_id = agents.id
-                   AND h.action IN ('keep','confirmed')
-                ) AS learned_prompt,
                 created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents
              WHERE project_id = $1 AND base_role = $2 AND is_default = TRUE LIMIT 1"#,
@@ -296,11 +187,6 @@ impl AgentRepository {
                 model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
-                (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
-                 FROM learned_prompt_history h
-                 WHERE h.agent_id = agents.id
-                   AND h.action IN ('keep','confirmed')
-                ) AS learned_prompt,
                 created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents WHERE project_id = $1 AND name = $2"#,
             project_id,
@@ -324,11 +210,6 @@ impl AgentRepository {
                 model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
-                (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
-                 FROM learned_prompt_history h
-                 WHERE h.agent_id = agents.id
-                   AND h.action IN ('keep','confirmed')
-                ) AS learned_prompt,
                 created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents
              WHERE project_id = $1 ORDER BY is_default DESC, base_role ASC, name ASC"#,
@@ -397,16 +278,15 @@ impl AgentRepository {
             r#"UPDATE agents
              SET name = $1, description = $2, system_prompt_extensions = $3,
                  model_preference = $4,
-                 mcp_servers = $5, skills = $6, learned_prompt = $7,
+                 mcp_servers = $5, skills = $6,
                  updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $8"#,
+             WHERE id = $7"#,
             input.name,
             input.description,
             system_prompt_value,
             input.model_preference,
             mcp_servers_value,
             skills_value,
-            input.learned_prompt,
             id
         )
         .execute(self.db.pool())
@@ -534,11 +414,6 @@ impl AgentRepository {
                          THEN system_prompt_extensions #>> '{{}}' ELSE '' END AS system_prompt_extensions,
                     model_preference,
                     mcp_servers::text AS mcp_servers, skills::text AS skills, is_default,
-                    (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
-                     FROM learned_prompt_history h
-                     WHERE h.agent_id = agents.id
-                       AND h.action IN ('keep','confirmed')
-                    ) AS learned_prompt,
                     created_at, updated_at
              FROM agents WHERE {where_sql}
              ORDER BY is_default DESC, base_role ASC, name ASC
@@ -653,245 +528,6 @@ impl AgentRepository {
                 discarded: session_row.as_ref().map(|r| r.discarded).unwrap_or(0),
             },
         })
-    }
-
-    /// Return pending (action='keep', metrics_after IS NULL) history entries for
-    /// all roles in the project.  These are amendments that have been applied but
-    /// not yet evaluated.
-    pub async fn get_pending_evaluations(
-        &self,
-        project_id: &str,
-    ) -> Result<Vec<PendingAmendmentEvaluation>> {
-        self.db.ensure_initialized().await?;
-        let rows = sqlx::query!(
-            r#"SELECT h.id, h.agent_id, h.created_at, h.proposed_text, h.metrics_before::text AS "metrics_before"
-             FROM learned_prompt_history h
-             JOIN agents r ON r.id = h.agent_id
-             WHERE r.project_id = $1
-               AND h.action = 'keep'
-               AND h.metrics_after IS NULL
-             ORDER BY h.created_at ASC"#,
-            project_id
-        )
-        .fetch_all(self.db.pool())
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|row| PendingAmendmentEvaluation {
-                history_id: row.id,
-                agent_id: row.agent_id,
-                created_at: row.created_at,
-                proposed_text: row.proposed_text,
-                metrics_before: row.metrics_before,
-            })
-            .collect())
-    }
-
-    /// Count closed tasks for a role (by agent_type) that completed (or failed)
-    /// strictly after `since_timestamp` (ISO-8601 string).
-    ///
-    /// Returns `(completed_count, failed_count)` — tasks closed after the given
-    /// timestamp whose sessions used the given agent_type.
-    pub async fn count_closed_tasks_since(
-        &self,
-        project_id: &str,
-        agent_type: &str,
-        since_timestamp: &str,
-    ) -> Result<(i64, i64)> {
-        self.db.ensure_initialized().await?;
-        let row = sqlx::query!(
-            r#"SELECT
-                COALESCE(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END), 0) AS "completed!: i64",
-                COALESCE(SUM(CASE WHEN t.close_reason != 'completed' OR t.close_reason IS NULL THEN 1 ELSE 0 END), 0) AS "failed!: i64"
-             FROM tasks t
-             WHERE t.project_id = $1
-               AND t.status = 'closed'
-               AND t.closed_at > $2
-               AND EXISTS (
-                   SELECT 1 FROM sessions s
-                   WHERE s.task_id = t.id AND s.agent_type = $3
-               )"#,
-            project_id,
-            since_timestamp,
-            agent_type
-        )
-        .fetch_one(self.db.pool())
-        .await
-        .ok();
-        Ok(row.map(|r| (r.completed, r.failed)).unwrap_or((0, 0)))
-    }
-
-    /// Return windowed metrics for a role over tasks closed in a time range.
-    ///
-    /// `from_timestamp` and `to_timestamp` are ISO-8601 strings (exclusive on
-    /// from, inclusive on to).  Pass `None` for open-ended bounds.
-    pub async fn get_windowed_metrics(
-        &self,
-        project_id: &str,
-        agent_type: &str,
-        from_timestamp: Option<&str>,
-        to_timestamp: Option<&str>,
-    ) -> Result<WindowedRoleMetrics> {
-        self.db.ensure_initialized().await?;
-
-        // Default open bounds to sentinel values that cover all time.
-        let from = from_timestamp.unwrap_or("1970-01-01T00:00:00.000Z");
-        let to = to_timestamp.unwrap_or("9999-12-31T23:59:59.999Z");
-
-        let row = sqlx::query!(
-            r#"SELECT
-                COALESCE(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END), 0) AS "completed!: i64",
-                COALESCE(SUM(CASE WHEN t.close_reason != 'completed' THEN 1 ELSE 0 END), 0) AS "failed!: i64",
-                COALESCE(AVG(
-                    CASE WHEN t.close_reason = 'completed'
-                        THEN (
-                            SELECT COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS DOUBLE PRECISION)), 0.0)
-                            FROM sessions s
-                            WHERE s.task_id = t.id AND s.agent_type = $1
-                        )
-                        ELSE NULL
-                    END
-                ), 0.0) AS "avg_tokens!: f64"
-             FROM tasks t
-             WHERE t.project_id = $2
-               AND t.status = 'closed'
-               AND t.closed_at > $3
-               AND t.closed_at <= $4
-               AND EXISTS (
-                   SELECT 1 FROM sessions s
-                   WHERE s.task_id = t.id AND s.agent_type = $5
-               )"#,
-            agent_type,
-            project_id,
-            from,
-            to,
-            agent_type
-        )
-        .fetch_one(self.db.pool())
-        .await
-        .ok();
-
-        let (completed, failed, avg_tokens) = row
-            .map(|r| (r.completed, r.failed, r.avg_tokens))
-            .unwrap_or((0, 0, 0.0));
-        let total = completed + failed;
-        let success_rate = if total > 0 {
-            completed as f64 / total as f64
-        } else {
-            0.0
-        };
-
-        Ok(WindowedRoleMetrics {
-            completed_task_count: completed,
-            failed_task_count: failed,
-            success_rate,
-            avg_tokens,
-        })
-    }
-
-    /// Update a `learned_prompt_history` record with the evaluation outcome.
-    ///
-    /// `action` must be `'confirmed'` (metrics improved — keep the amendment) or
-    /// `'discard'` (metrics did not improve — revert).
-    /// `metrics_after` is a JSON snapshot of the post-amendment metrics.
-    pub async fn resolve_pending_amendment(
-        &self,
-        history_id: &str,
-        action: &str,
-        metrics_after: &str,
-    ) -> Result<()> {
-        self.db.ensure_initialized().await?;
-        let metrics_after_value: serde_json::Value =
-            serde_json::from_str(metrics_after).map_err(|e| {
-                Error::InvalidData(format!(
-                    "invalid json for learned_prompt_history.metrics_after: {e}"
-                ))
-            })?;
-        sqlx::query!(
-            "UPDATE learned_prompt_history
-             SET action = $1, metrics_after = $2
-             WHERE id = $3",
-            action,
-            metrics_after_value,
-            history_id
-        )
-        .execute(self.db.pool())
-        .await?;
-        Ok(())
-    }
-
-    /// Mark all active amendments for an agent as discarded, effectively clearing
-    /// the derived learned_prompt.
-    pub async fn clear_amendments(&self, agent_id: &str) -> Result<()> {
-        self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE learned_prompt_history
-             SET action = 'discard'
-             WHERE agent_id = $1 AND action IN ('keep','confirmed')",
-            agent_id
-        )
-        .execute(self.db.pool())
-        .await?;
-        Ok(())
-    }
-
-    /// Append an amendment to a role's `learned_prompt` and log the proposal to
-    /// `learned_prompt_history`.  The amendment is appended with a separator; it
-    /// never replaces any existing content.
-    ///
-    /// `metrics_snapshot` is a JSON string capturing role metrics at proposal time.
-    pub async fn append_learned_prompt(
-        &self,
-        role_id: &str,
-        amendment: &str,
-        metrics_snapshot: Option<&str>,
-    ) -> Result<Agent> {
-        self.db.ensure_initialized().await?;
-
-        // Verify the agent exists.
-        self.get(role_id)
-            .await?
-            .ok_or_else(|| Error::InvalidData(format!("agent not found: {role_id}")))?;
-
-        // Insert into learned_prompt_history with action='keep' (pending eval).
-        // The derived AGENT_COLUMNS query will pick it up automatically.
-        let history_id = uuid::Uuid::now_v7().to_string();
-        let amendment_trimmed = amendment.trim();
-        let metrics_snapshot_value: Option<serde_json::Value> = match metrics_snapshot {
-            Some(s) => Some(serde_json::from_str(s).map_err(|e| {
-                Error::InvalidData(format!(
-                    "invalid json for learned_prompt_history.metrics_before: {e}"
-                ))
-            })?),
-            None => None,
-        };
-        sqlx::query!(
-            "INSERT INTO learned_prompt_history
-                (id, agent_id, proposed_text, action, metrics_before)
-             VALUES ($1, $2, $3, 'keep', $4)",
-            history_id,
-            role_id,
-            amendment_trimmed,
-            metrics_snapshot_value
-        )
-        .execute(self.db.pool())
-        .await?;
-
-        // Touch updated_at so consumers see the change.
-        sqlx::query!(
-            r#"UPDATE agents SET updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#,
-            role_id
-        )
-        .execute(self.db.pool())
-        .await?;
-
-        let updated = self.get(role_id).await?.ok_or_else(|| {
-            Error::InvalidData(format!("agent not found after update: {role_id}"))
-        })?;
-        self.events
-            .send(DjinnEventEnvelope::agent_updated(&updated));
-        Ok(updated)
     }
 }
 
@@ -1045,7 +681,6 @@ mod tests {
                     model_preference: Some("claude-opus-4-6"),
                     mcp_servers: "[]",
                     skills: "[]",
-                    learned_prompt: None,
                 },
             )
             .await
@@ -1254,325 +889,5 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].entity_type, "agent");
         assert_eq!(events[0].action, "created");
-    }
-
-    // ── Learned prompt lifecycle regression tests ───────────────────────────
-
-    /// Helper: create a worker agent and return its id.
-    async fn create_worker_agent(db: &Database, project_id: &str, name: &str) -> Agent {
-        let repo = AgentRepository::new(db.clone(), EventBus::noop());
-        repo.create_for_project(
-            project_id,
-            AgentCreateInput {
-                name,
-                base_role: "worker",
-                description: "test worker",
-                system_prompt_extensions: "",
-                model_preference: None,
-                mcp_servers: None,
-                skills: None,
-                is_default: false,
-            },
-        )
-        .await
-        .unwrap()
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn append_learned_prompt_records_history_and_derives_active() {
-        let db = test_db();
-        let project_id = create_project(&db).await;
-        let agent = create_worker_agent(&db, &project_id, "w1").await;
-        let repo = AgentRepository::new(db, EventBus::noop());
-
-        // Before amendment: learned_prompt should be None.
-        let before = repo.get(&agent.id).await.unwrap().unwrap();
-        assert!(before.learned_prompt.is_none());
-
-        // Append an amendment.
-        let updated = repo
-            .append_learned_prompt(&agent.id, "Always write tests first.", None)
-            .await
-            .unwrap();
-
-        // Derived learned_prompt should now contain the amendment text.
-        let lp = updated.learned_prompt.as_deref().unwrap();
-        assert!(
-            lp.contains("Always write tests first."),
-            "derived learned_prompt should contain the amendment: {lp:?}"
-        );
-
-        // History should have exactly one entry.
-        let history = repo.get_history(&agent.id).await.unwrap();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].proposed_text, "Always write tests first.");
-        assert_eq!(history[0].action, "keep");
-        assert!(history[0].metrics_after.is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn multiple_amendments_concat_in_derived_prompt() {
-        let db = test_db();
-        let project_id = create_project(&db).await;
-        let agent = create_worker_agent(&db, &project_id, "w2").await;
-        let repo = AgentRepository::new(db, EventBus::noop());
-
-        repo.append_learned_prompt(&agent.id, "First amendment.", None)
-            .await
-            .unwrap();
-        let updated = repo
-            .append_learned_prompt(&agent.id, "Second amendment.", None)
-            .await
-            .unwrap();
-
-        let lp = updated.learned_prompt.as_deref().unwrap();
-        assert!(lp.contains("First amendment."));
-        assert!(lp.contains("Second amendment."));
-
-        let history = repo.get_history(&agent.id).await.unwrap();
-        assert_eq!(history.len(), 2);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn get_pending_evaluations_returns_pending_entries() {
-        let db = test_db();
-        let project_id = create_project(&db).await;
-        let agent = create_worker_agent(&db, &project_id, "w3").await;
-        let repo = AgentRepository::new(db, EventBus::noop());
-
-        // Before any amendment, no pending evaluations.
-        let pending = repo.get_pending_evaluations(&project_id).await.unwrap();
-        assert!(pending.is_empty());
-
-        // Append an amendment.
-        repo.append_learned_prompt(&agent.id, "Pending amendment.", None)
-            .await
-            .unwrap();
-
-        let pending = repo.get_pending_evaluations(&project_id).await.unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].agent_id, agent.id);
-        assert_eq!(pending[0].proposed_text, "Pending amendment.");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn resolve_pending_amendment_confirmed_keeps_in_derived_prompt() {
-        let db = test_db();
-        let project_id = create_project(&db).await;
-        let agent = create_worker_agent(&db, &project_id, "w4").await;
-        let repo = AgentRepository::new(db, EventBus::noop());
-
-        repo.append_learned_prompt(&agent.id, "Good amendment.", None)
-            .await
-            .unwrap();
-
-        let pending = repo.get_pending_evaluations(&project_id).await.unwrap();
-        assert_eq!(pending.len(), 1);
-
-        let metrics_json = serde_json::json!({
-            "success_rate": 0.85,
-            "avg_tokens": 900.0,
-            "completed_task_count": 25,
-            "failed_task_count": 2,
-        })
-        .to_string();
-
-        // Resolve as confirmed.
-        repo.resolve_pending_amendment(&pending[0].history_id, "confirmed", &metrics_json)
-            .await
-            .unwrap();
-
-        // Should no longer be pending.
-        let pending_after = repo.get_pending_evaluations(&project_id).await.unwrap();
-        assert!(pending_after.is_empty());
-
-        // Derived prompt should still contain the amendment (action='confirmed' is active).
-        let agent_after = repo.get(&agent.id).await.unwrap().unwrap();
-        let lp = agent_after.learned_prompt.as_deref().unwrap();
-        assert!(lp.contains("Good amendment."));
-
-        // History should show 'confirmed' with metrics_after populated.
-        let history = repo.get_history(&agent.id).await.unwrap();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].action, "confirmed");
-        assert!(history[0].metrics_after.is_some());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn resolve_pending_amendment_discard_removes_from_derived_prompt() {
-        let db = test_db();
-        let project_id = create_project(&db).await;
-        let agent = create_worker_agent(&db, &project_id, "w5").await;
-        let repo = AgentRepository::new(db, EventBus::noop());
-
-        repo.append_learned_prompt(&agent.id, "Bad amendment.", None)
-            .await
-            .unwrap();
-
-        // Confirm it's in the derived prompt.
-        let before = repo.get(&agent.id).await.unwrap().unwrap();
-        assert!(
-            before
-                .learned_prompt
-                .as_deref()
-                .unwrap()
-                .contains("Bad amendment.")
-        );
-
-        let pending = repo.get_pending_evaluations(&project_id).await.unwrap();
-        assert_eq!(pending.len(), 1);
-
-        let metrics_json = serde_json::json!({
-            "success_rate": 0.50,
-            "avg_tokens": 1200.0,
-            "completed_task_count": 20,
-            "failed_task_count": 10,
-        })
-        .to_string();
-
-        // Resolve as discard.
-        repo.resolve_pending_amendment(&pending[0].history_id, "discard", &metrics_json)
-            .await
-            .unwrap();
-
-        // Derived prompt should no longer contain the discarded amendment.
-        let after = repo.get(&agent.id).await.unwrap().unwrap();
-        assert!(
-            after.learned_prompt.is_none(),
-            "derived prompt should be None after discard: {:?}",
-            after.learned_prompt
-        );
-
-        // History should show 'discard' with metrics_after populated.
-        let history = repo.get_history(&agent.id).await.unwrap();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].action, "discard");
-        assert!(history[0].metrics_after.is_some());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn clear_amendments_discards_all_active_amendments() {
-        let db = test_db();
-        let project_id = create_project(&db).await;
-        let agent = create_worker_agent(&db, &project_id, "w6").await;
-        let repo = AgentRepository::new(db, EventBus::noop());
-
-        // Append two amendments.
-        repo.append_learned_prompt(&agent.id, "Amendment A.", None)
-            .await
-            .unwrap();
-        repo.append_learned_prompt(&agent.id, "Amendment B.", None)
-            .await
-            .unwrap();
-
-        // Both should be in the derived prompt.
-        let before = repo.get(&agent.id).await.unwrap().unwrap();
-        let lp = before.learned_prompt.as_deref().unwrap();
-        assert!(lp.contains("Amendment A."));
-        assert!(lp.contains("Amendment B."));
-
-        // Clear all amendments.
-        repo.clear_amendments(&agent.id).await.unwrap();
-
-        // Derived prompt should now be None.
-        let after = repo.get(&agent.id).await.unwrap().unwrap();
-        assert!(
-            after.learned_prompt.is_none(),
-            "derived prompt should be None after clear_amendments: {:?}",
-            after.learned_prompt
-        );
-
-        // History should show both as 'discard'.
-        let history = repo.get_history(&agent.id).await.unwrap();
-        assert_eq!(history.len(), 2);
-        for entry in &history {
-            assert_eq!(entry.action, "discard");
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn append_learned_prompt_with_metrics_snapshot_round_trips() {
-        let db = test_db();
-        let project_id = create_project(&db).await;
-        let agent = create_worker_agent(&db, &project_id, "w7").await;
-        let repo = AgentRepository::new(db, EventBus::noop());
-
-        let metrics_json = serde_json::json!({
-            "success_rate": 0.72,
-            "avg_tokens": 1100.0,
-            "completed_task_count": 15,
-            "failed_task_count": 3,
-        })
-        .to_string();
-
-        repo.append_learned_prompt(&agent.id, "Amendment with metrics.", Some(&metrics_json))
-            .await
-            .unwrap();
-
-        let history = repo.get_history(&agent.id).await.unwrap();
-        assert_eq!(history.len(), 1);
-        assert!(history[0].metrics_before.is_some());
-        let before_json = history[0].metrics_before.as_ref().unwrap();
-        assert!(before_json.contains("0.72"));
-        assert!(before_json.contains("1100"));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn discard_revert_learns_from_confirmed_and_keeps_confirmed() {
-        // Scenario: Two amendments, first is confirmed, second is discarded.
-        // The derived prompt should only include the confirmed one.
-        let db = test_db();
-        let project_id = create_project(&db).await;
-        let agent = create_worker_agent(&db, &project_id, "w8").await;
-        let repo = AgentRepository::new(db, EventBus::noop());
-
-        // First amendment: will be confirmed.
-        repo.append_learned_prompt(&agent.id, "Confirmed rule.", None)
-            .await
-            .unwrap();
-
-        let pending = repo.get_pending_evaluations(&project_id).await.unwrap();
-        let metrics_json = serde_json::json!({
-            "success_rate": 0.90,
-            "avg_tokens": 800.0,
-            "completed_task_count": 25,
-            "failed_task_count": 1,
-        })
-        .to_string();
-        repo.resolve_pending_amendment(&pending[0].history_id, "confirmed", &metrics_json)
-            .await
-            .unwrap();
-
-        // Second amendment: will be discarded.
-        repo.append_learned_prompt(&agent.id, "Discarded rule.", None)
-            .await
-            .unwrap();
-
-        let pending2 = repo.get_pending_evaluations(&project_id).await.unwrap();
-        let metrics_json2 = serde_json::json!({
-            "success_rate": 0.60,
-            "avg_tokens": 1200.0,
-            "completed_task_count": 20,
-            "failed_task_count": 8,
-        })
-        .to_string();
-        repo.resolve_pending_amendment(&pending2[0].history_id, "discard", &metrics_json2)
-            .await
-            .unwrap();
-
-        // Derived prompt should contain only the confirmed amendment.
-        let agent_after = repo.get(&agent.id).await.unwrap().unwrap();
-        let lp = agent_after.learned_prompt.as_deref().unwrap();
-        assert!(lp.contains("Confirmed rule."));
-        assert!(!lp.contains("Discarded rule."));
-
-        // History: two entries, first confirmed, second discarded.
-        let history = repo.get_history(&agent.id).await.unwrap();
-        assert_eq!(history.len(), 2);
-        // History is newest first.
-        assert_eq!(history[0].action, "discard");
-        assert_eq!(history[0].proposed_text, "Discarded rule.");
-        assert_eq!(history[1].action, "confirmed");
-        assert_eq!(history[1].proposed_text, "Confirmed rule.");
     }
 }

@@ -80,6 +80,7 @@ mod pr_commands;
 mod pr_rejection_fingerprint;
 mod pr_review_handlers;
 mod pr_review_watcher;
+mod pr_undraft;
 mod pr_watcher;
 mod state;
 mod tripwire_gate;
@@ -116,6 +117,7 @@ pub(crate) use pr_commands::{
 };
 use pr_review_handlers::effective_review_decision;
 pub use pr_review_handlers::parse_pr_url;
+use pr_undraft::{should_undraft_before_merge, warn_pr_merge_failed};
 #[cfg(test)]
 pub(crate) use pr_watcher::{PrDraftCiAction, decide_pr_draft_ci_action};
 
