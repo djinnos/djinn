@@ -21,7 +21,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v7"] }
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 djinn-db = { path = "../djinn-db" }
 djinn-memory = { path = "../djinn-memory" }
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }

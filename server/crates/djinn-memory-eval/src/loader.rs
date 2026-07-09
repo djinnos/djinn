@@ -232,7 +232,7 @@ pub async fn load_fixtures(db: &Database, fixtures: &Phase1Fixtures) -> Result<L
     let mut note_id_by_permalink: HashMap<String, String> = HashMap::new();
 
     for note_row in &fixtures.corpus_notes {
-        let note = insert_corpus_note(db, &repo, &project.id, note_row)
+        let note = insert_corpus_note(db, &project.id, note_row)
             .await
             .with_context(|| format!("inserting note '{}'", note_row.permalink))?;
         note_id_by_permalink.insert(note_row.permalink.clone(), note.id.clone());
@@ -415,12 +415,11 @@ pub async fn load_fixtures(db: &Database, fixtures: &Phase1Fixtures) -> Result<L
 
 // ── Internal helpers ──────────────────────────────────────────────────────
 
-/// Insert a corpus note row using direct SQL for full control over timestamps,
-/// status, and confidence. This avoids the repository `create` method which
-/// auto-generates these values and triggers wikilink indexing.
+/// Insert a corpus note row using the djinn-db test_support seed helper,
+/// which provides full control over timestamps, status, and confidence
+/// without triggering wikilink indexing or event emission.
 async fn insert_corpus_note(
     db: &Database,
-    _repo: &NoteRepository,
     project_id: &str,
     row: &CorpusNoteRow,
 ) -> Result<djinn_memory::Note> {
@@ -432,7 +431,6 @@ async fn insert_corpus_note(
     };
     let tags_json: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&row.tags)?).unwrap_or(serde_json::json!([]));
-    let empty_scope: serde_json::Value = serde_json::json!([]);
     let tags_str = serde_json::to_string(&row.tags)?;
     let content_hash = djinn_db::repositories::note::embedding_content_hash(
         &row.title,
@@ -442,54 +440,25 @@ async fn insert_corpus_note(
         row.retrieval_anchor.as_deref(),
     );
 
-    sqlx::query(
-        r#"INSERT INTO notes
-            (id, project_id, permalink, title, file_path,
-             storage, note_type, folder, tags, content, retrieval_anchor,
-             content_hash, scope_paths,
-             created_at, updated_at, last_accessed,
-             status, confidence, abstract, overview, access_count)
-         VALUES ($1, $2, $3, $4, '',
-                 'db', $5, $6, $7, $8, $9,
-                 $10, $11,
-                 $12, $13, $14,
-                 $15, $16, NULL, NULL, 0)"#,
+    let note = djinn_db::repositories::test_support::seed_eval_note(
+        db,
+        &id,
+        project_id,
+        &row.permalink,
+        &row.title,
+        &row.note_type,
+        folder,
+        &tags_json,
+        &row.content,
+        row.retrieval_anchor.as_deref(),
+        &content_hash,
+        &row.timestamps.created_at,
+        &row.timestamps.updated_at,
+        &row.timestamps.last_accessed,
+        &row.status,
+        row.confidence,
     )
-    .bind(&id)
-    .bind(project_id)
-    .bind(&row.permalink)
-    .bind(&row.title)
-    .bind(&row.note_type)
-    .bind(folder)
-    .bind(&tags_json)
-    .bind(&row.content)
-    .bind(&row.retrieval_anchor)
-    .bind(&content_hash)
-    .bind(&empty_scope)
-    .bind(&row.timestamps.created_at)
-    .bind(&row.timestamps.updated_at)
-    .bind(&row.timestamps.last_accessed)
-    .bind(&row.status)
-    .bind(row.confidence)
-    .execute(db.pool())
-    .await
-    .with_context(|| format!("inserting note '{}' into notes table", row.permalink))?;
-
-    // Fetch the note back
-    let note = sqlx::query_as::<_, djinn_memory::Note>(
-        r#"SELECT id, project_id, permalink, title, file_path,
-                  storage, note_type, folder, status, tags::text AS tags, content,
-                  retrieval_anchor, created_at, updated_at, last_accessed,
-                  access_count, confidence, abstract as abstract_, overview,
-                  scope_paths::text AS scope_paths
-           FROM notes WHERE id = $1"#,
-    )
-    .bind(&id)
-    .fetch_one(db.pool())
-    .await?;
-
-    // Note: events are not fired during fixture loading since we manage
-    // embeddings and associations separately through direct repository calls.
+    .await;
 
     Ok(note)
 }
@@ -512,22 +481,9 @@ fn parse_note_association_kind(
     }
 }
 
-/// Create an epic row.
+/// Create an epic row using the djinn-db test_support seed helper.
 async fn create_epic(db: &Database, project_id: &str, title: &str) -> String {
-    let epic_id = uuid::Uuid::now_v7().to_string();
-    let short_id = format!("ep-{}", &epic_id[epic_id.len() - 12..]);
-    sqlx::query(
-        "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-         VALUES ($1, $2, $3, $4, '', '', '', '', '[]'::jsonb)",
-    )
-    .bind(&epic_id)
-    .bind(project_id)
-    .bind(&short_id)
-    .bind(title)
-    .execute(db.pool())
-    .await
-    .expect("failed to create epic");
-    epic_id
+    djinn_db::repositories::test_support::seed_eval_epic(db, project_id, title).await
 }
 
 /// Create a task with memory_refs pointing to note IDs (for task-affinity scoring).
@@ -538,29 +494,15 @@ async fn create_task_with_memory_refs(
     fixture_task_id: &str,
     memory_refs_note_ids: &[String],
 ) -> Result<String> {
-    let task_id = uuid::Uuid::now_v7().to_string();
-    let short_id = format!(
-        "eval-{}",
-        fixture_task_id.chars().take(8).collect::<String>()
-    );
     let memory_refs_json = serde_json::to_string(memory_refs_note_ids)?;
-
-    sqlx::query(
-        r#"INSERT INTO tasks
-            (id, project_id, short_id, epic_id, title, description, design,
-             issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, $3, $4, $5, '', '', 'task', 0, '', 'open', 0, $6::jsonb)"#,
+    let task_id = djinn_db::repositories::test_support::seed_eval_task_with_memory_refs(
+        db,
+        project_id,
+        epic_id,
+        fixture_task_id,
+        &memory_refs_json,
     )
-    .bind(&task_id)
-    .bind(project_id)
-    .bind(&short_id)
-    .bind(epic_id)
-    .bind(format!("Eval task {}", fixture_task_id))
-    .bind(&memory_refs_json)
-    .execute(db.pool())
-    .await
-    .with_context(|| format!("creating task row for '{}'", fixture_task_id))?;
-
+    .await;
     Ok(task_id)
 }
 
