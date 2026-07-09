@@ -30,6 +30,7 @@ import {
   matchesStructuredFilters,
   useBoardFilters,
 } from "@/components/board/boardFilters";
+import { useBoardServerSearch } from "@/components/board/useBoardServerSearch";
 
 type ColumnKey = "open" | "in_progress" | "pr_ready" | "done";
 
@@ -139,6 +140,11 @@ export function KanbanBoard({
   const { projectFilters, epicFilters, ownerFilters, issueTypeFilters, search } =
     useBoardFilters();
 
+  // Backend-backed search: when the query is non-empty, fetch matching tasks
+  // (including old merged ones the board never loaded) into the store. Disabled
+  // in controlled mode (`tasksProp`, used by tests) where the store is unused.
+  useBoardServerSearch({ enabled: !tasksProp });
+
   const tasks = tasksProp ?? storeTasks;
   const epics = epicsProp ?? storeEpics;
   const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>(
@@ -219,7 +225,14 @@ export function KanbanBoard({
     };
     return tasks.filter((task) => {
       if (!matchesStructuredFilters(task, filters)) return false;
-      if (q && !task.title.toLowerCase().includes(q)) return false;
+      // Match title OR description, case-insensitive — mirrors the server's
+      // `text` filter (ILIKE over title/description) so tasks surfaced by the
+      // backend search aren't hidden by a narrower client-side predicate.
+      if (q) {
+        const title = (task.title ?? "").toLowerCase();
+        const description = (task.description ?? "").toLowerCase();
+        if (!title.includes(q) && !description.includes(q)) return false;
+      }
       return true;
     });
   }, [
