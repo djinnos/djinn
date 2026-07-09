@@ -58,8 +58,8 @@ pub struct SubmitReview {
 #[derive(Debug, Deserialize)]
 pub struct SubmitDecision {
     pub task_id: String,
-    /// Decision taken: "approve", "approve_conflict", "reopen", or "park".
-    /// The supervisor maps this to the terminal board transition
+    /// Decision taken: "approve", "approve_conflict", "reopen", "park", or
+    /// "supersede". The supervisor maps this to the terminal board transition
     /// (see `StageOutcome` Lead variants); the Lead does NOT
     /// call `task_transition` for the terminal move itself.
     pub decision: String,
@@ -75,7 +75,9 @@ pub struct SubmitDecision {
     /// Models excluded from next dispatch — optional for `reopen`.
     #[serde(default)]
     pub exclude_models: Vec<String>,
-    /// IDs of tasks created during this Lead intervention (for decompose decisions).
+    /// IDs of replacement subtasks created during this Lead intervention.
+    /// Required (non-empty) for the `supersede` decision — they are the tasks
+    /// that carry the work forward when the source task is force-closed.
     #[serde(default)]
     pub created_tasks: Vec<String>,
 }

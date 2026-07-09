@@ -763,9 +763,10 @@ expression: tool_schemas_judge()
             "approve",
             "approve_conflict",
             "reopen",
-            "park"
+            "park",
+            "supersede"
           ],
-          "description": "The decision: approve (work is complete + correct — the worker just couldn't self-certify; requires evidence citation), approve_conflict (correct but a merge conflict exists — approve then send for conflict retry; requires evidence citation), reopen (send back to a fresh worker with a directive and verification command), park (hold the task for human review with a structured dossier)"
+          "description": "The decision: approve (work is complete + correct — the worker just couldn't self-certify; requires evidence citation), approve_conflict (correct but a merge conflict exists — approve then send for conflict retry; requires evidence citation), reopen (send back to a fresh worker with a directive and verification command), park (hold the task for human review with a structured dossier), supersede (you decomposed the work into replacement subtasks that carry it forward — the source task and its PR are force-closed as superseded automatically; requires a non-empty created_tasks array)"
         },
         "rationale": {
           "type": "string",
@@ -842,7 +843,7 @@ expression: tool_schemas_judge()
           "items": {
             "type": "string"
           },
-          "description": "IDs of tasks created during this intervention (for decompose decisions)"
+          "description": "Required for supersede: IDs (short_id or UUID) of the replacement subtasks created during this intervention that carry the work forward. Must be non-empty for a supersede decision."
         }
       }
     },

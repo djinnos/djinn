@@ -263,6 +263,21 @@ pub enum StageOutcome {
         /// JSON-serialized park dossier with hold description and failure analysis.
         park_dossier_json: String,
     },
+    /// Arbiter `submit_decision(decision="supersede")` — the arbiter decomposed
+    /// the task into replacement subtasks (already created via MCP) that carry
+    /// the work forward, so the source task and its PR are force-closed as
+    /// superseded. Maps to the `arbiter_supersede` terminal transition
+    /// (in_lead_intervention → closed); the supervisor supersede transaction
+    /// consumes the arbitration row, emits an `arbiter_decision` activity,
+    /// transfers downstream blockers to the last replacement, and cleans up the
+    /// task branch/PR. NO human-review hold is created (that is `LeadParked`).
+    LeadSuperseded {
+        reason: String,
+        /// Short_ids / UUIDs of the replacement subtasks that carry the work
+        /// forward. Non-empty by construction (the stage mapper rejects an
+        /// empty `created_tasks` and directs the arbiter to `park` instead).
+        replacement_task_ids: Vec<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +323,7 @@ impl StageOutcome {
                 | StageOutcome::LeadClose { .. }
                 | StageOutcome::LeadEscalate { .. }
                 | StageOutcome::LeadParked { .. }
+                | StageOutcome::LeadSuperseded { .. }
         )
     }
 }
@@ -334,6 +350,7 @@ fn emit_stage_outcome_event(
         StageOutcome::LeadClose { .. } => "lead_close",
         StageOutcome::LeadEscalate { .. } => "lead_escalate",
         StageOutcome::LeadParked { .. } => "lead_parked",
+        StageOutcome::LeadSuperseded { .. } => "lead_superseded",
         StageOutcome::Failed { .. } => "failed",
         StageOutcome::LoopGuardTripped { .. } => "loop_guard_tripped",
         StageOutcome::Parked { .. } => "parked",
@@ -2240,6 +2257,9 @@ impl TaskRunSupervisor {
                                 "supervisor: lead force_close transition skipped"
                             );
                         }
+                        djinn_telemetry::arbiter::record_decision(
+                            djinn_telemetry::arbiter::DECISION_FORCE_CLOSE,
+                        );
                         result = Some(TaskRunOutcome::Closed { reason });
                         break;
                     }
@@ -2264,6 +2284,9 @@ impl TaskRunSupervisor {
                                 "supervisor: lead escalate transition skipped"
                             );
                         }
+                        djinn_telemetry::arbiter::record_decision(
+                            djinn_telemetry::arbiter::DECISION_ESCALATE,
+                        );
                         result = Some(TaskRunOutcome::Escalated { reason });
                         break;
                     }
@@ -2294,6 +2317,46 @@ impl TaskRunSupervisor {
                         result = Some(TaskRunOutcome::Closed {
                             reason: format!("arbiter_parked: {}", park_dossier_json),
                         });
+                        break;
+                    }
+                    StageOutcome::LeadSuperseded {
+                        reason,
+                        replacement_task_ids,
+                    } => {
+                        // Arbiter superseded → terminal force-close as
+                        // superseded. The `arbiter_supersede` transition runs the
+                        // supersede transaction host-side (consume the
+                        // arbitration row, emit `arbiter_decision` with the
+                        // replacement ids, transfer downstream blockers to the
+                        // last replacement, clean up the task branch/PR) and
+                        // then applies the force-close to `closed`. NO
+                        // human-review hold is created — the replacement subtasks
+                        // already carry the work forward. The reason + replacement
+                        // ids ride the transition as a JSON payload so the
+                        // host-side interception can act on them.
+                        let payload = serde_json::json!({
+                            "reason": reason,
+                            "replacement_task_ids": replacement_task_ids,
+                        })
+                        .to_string();
+                        if !self.services.cancel().is_cancelled()
+                            && let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "arbiter_supersede".into(),
+                                    Some(payload),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: arbiter_supersede transition failed — task remains in_lead_intervention"
+                            );
+                        }
+                        result = Some(TaskRunOutcome::Closed { reason });
                         break;
                     }
                     StageOutcome::ReviewerRejected { feedback } => {
@@ -6233,6 +6296,70 @@ mod tests {
             0,
             "complete_monitored_reopen must NOT be called on the arbiter reopen run \
              (the row must stay unconsumed for the next worker dispatch), got: {complete:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn arbiter_supersede_force_closes_source_with_replacement_ids_no_hold() {
+        // A valid arbiter `supersede` must fire exactly one terminal
+        // force-close transition (`arbiter_supersede`, which the host-side
+        // interception applies as a force-close to `closed`), carrying the
+        // replacement subtask ids, and must NOT route through the park/
+        // human-review-hold path (`arbiter_park`).
+        let (_root, supervisor, spec, transition_calls, open_pr_called) =
+            build_arbiter_gate_test_env(
+                "T-supersede",
+                "proj-supersede",
+                StageOutcome::LeadSuperseded {
+                    reason: "decomposed into 2 replacement subtasks".into(),
+                    replacement_task_ids: vec!["repl-1".into(), "repl-2".into()],
+                },
+                Ok(ArbiterGateResult::Pass),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        let calls = transition_calls.lock().unwrap();
+
+        // Exactly one supersede/force-close transition, carrying the ids.
+        let supersede_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.action == "arbiter_supersede")
+            .collect();
+        assert_eq!(
+            supersede_calls.len(),
+            1,
+            "supersede must fire exactly one arbiter_supersede (force-close) transition, got: {calls:?}"
+        );
+        let payload = supersede_calls[0]
+            .reason
+            .as_deref()
+            .expect("arbiter_supersede transition must carry a reason payload");
+        assert!(
+            payload.contains("repl-1") && payload.contains("repl-2"),
+            "supersede transition payload must carry the replacement ids, got: {payload}"
+        );
+        assert!(
+            payload.contains("replacement_task_ids"),
+            "supersede transition payload must name replacement_task_ids, got: {payload}"
+        );
+
+        // Must NOT create a human-review hold (the park path).
+        assert!(
+            !calls.iter().any(|c| c.action == "arbiter_park"),
+            "supersede must NOT route through the arbiter_park / human-review-hold path, got: {calls:?}"
+        );
+
+        // Supersede is terminal — produces Closed, and does not open a PR.
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Closed { .. }),
+            "supersede must produce Closed, got: {:?}",
+            report.outcome
+        );
+        assert!(
+            !open_pr_called.load(std::sync::atomic::Ordering::SeqCst),
+            "supersede must not open a PR"
         );
     }
 
