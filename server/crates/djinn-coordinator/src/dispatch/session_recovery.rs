@@ -2778,9 +2778,10 @@ fn parse_iso_elapsed(started_at: &str) -> Option<u64> {
         .ok()
         .or_else(|| {
             // SQLite often stores "YYYY-MM-DD HH:MM:SS" without offset — assume UTC.
-            let fmt =
-                ::time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
-                    .ok()?;
+            let fmt = ::time::format_description::parse_borrowed::<3>(
+                "[year]-[month]-[day] [hour]:[minute]:[second]",
+            )
+            .ok()?;
             let primitive = ::time::PrimitiveDateTime::parse(started_at, &fmt).ok()?;
             Some(primitive.assume_utc())
         })?;

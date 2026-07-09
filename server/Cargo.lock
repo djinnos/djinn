@@ -1461,6 +1461,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -1512,7 +1513,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1620,6 +1621,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -7241,6 +7243,7 @@ dependencies = [
  "reqwest 0.13.4",
  "ring",
  "rmcp",
+ "rust-embed-utils",
  "rustls",
  "rustls-webpki",
  "schemars 1.2.1",
@@ -7271,6 +7274,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-subscriber",
+ "typenum",
  "uuid",
  "winnow 1.0.3",
  "yoke",
