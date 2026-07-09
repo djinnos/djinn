@@ -200,13 +200,27 @@ fn double_close_returns_error() {
 // ── Property tests (pure logic, no DB — 256 random samples worthwhile) ───────
 
 proptest! {
-    // 3. UserOverride accepts every (from, to) status pair — no Err path.
+    // 3. UserOverride accepts every (from, to) status pair — EXCEPT the
+    //    arbiter lifecycle statuses (NeedsLeadIntervention, InLeadIntervention)
+    //    which must only be entered via the coordinator park-rung (Escalate)
+    //    and LeadInterventionStart respectively.  See INVARIANT (10qg/aizl).
     #[test]
-    fn user_override_accepts_any_status_pair(from in arb_status(), to in arb_status()) {
+    fn user_override_accepts_any_non_arbiter_status_pair(from in arb_status(), to in arb_status()) {
         let result = compute_transition(&TransitionAction::UserOverride, &from, Some(&to));
-        prop_assert!(result.is_ok(), "user_override must succeed for any (from, to) pair");
-        let apply = result.unwrap();
-        prop_assert_eq!(apply.to_status, Some(to));
+        if matches!(
+            to,
+            TaskStatus::NeedsLeadIntervention | TaskStatus::InLeadIntervention
+        ) {
+            prop_assert!(
+                result.is_err(),
+                "user_override must reject arbiter lifecycle target {:?} from {:?}",
+                to, from
+            );
+        } else {
+            prop_assert!(result.is_ok(), "user_override must succeed for non-arbiter target {:?} from {:?}", to, from);
+            let apply = result.unwrap();
+            prop_assert_eq!(apply.to_status, Some(to));
+        }
     }
 
     // 4. Every successful compute_transition produces a to_status whose as_str()

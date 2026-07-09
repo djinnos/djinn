@@ -33,6 +33,12 @@ fn idempotent_destructive() -> ToolSafetyAnnotations {
     ToolSafetyAnnotations::idempotent_destructive()
 }
 
+/// [HISTORICAL-COMPAT] Retained for the `request_lead` drain window after
+/// epic 10qg cut-over.  Production worker/reviewer surfaces no longer
+/// advertise this tool; it exists so that stale sessions dispatched before
+/// the cutover can still call it and be routed to Planner via the
+/// deprecated compatibility handler.  Tests reference this definition to
+/// verify the tool name is absent from active role schemas.
 pub fn tool_request_lead() -> RmcpTool {
     RmcpTool::new(
         "request_lead".to_string(),
@@ -895,7 +901,9 @@ pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
 /// - `role_create` (destructive agent mutation).
 /// - `task_delete_branch`, `task_archive_activity`, `task_reset_counters`,
 ///   `task_kill_session` (destructive task admin).
-/// - `request_lead`, `request_planner` (mutation escalation).
+/// - `request_planner` (mutation escalation).
+///   (`request_lead` is a [HISTORICAL-COMPAT] definition only — not part of
+///   the active evidence-spike tool surface.)
 /// - Any proposal/debate mutation tools.
 pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
     let mut tool_values = Vec::new();

@@ -95,7 +95,7 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "memory_write"
         | "memory_edit"
         | "memory_move"
-        | "request_lead"
+        | "request_lead"   // [HISTORICAL-COMPAT] drain-window tool name (10qg)
         | "request_planner"
         | "proposal_ac_amend"
         | "proposal_update"
