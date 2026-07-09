@@ -2261,10 +2261,10 @@ mod tests {
         let mut produces_needs_lead = Vec::new();
         for action in &all_actions {
             for from in &all_statuses {
-                if let Ok(apply) = compute_transition(action, from, None) {
-                    if apply.to_status == Some(TaskStatus::NeedsLeadIntervention) {
-                        produces_needs_lead.push(format!("{action:?} from {from:?}"));
-                    }
+                if let Ok(apply) = compute_transition(action, from, None)
+                    && apply.to_status == Some(TaskStatus::NeedsLeadIntervention)
+                {
+                    produces_needs_lead.push(format!("{action:?} from {from:?}"));
                 }
             }
         }

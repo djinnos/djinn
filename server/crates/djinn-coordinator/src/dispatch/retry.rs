@@ -1563,93 +1563,23 @@ impl CoordinatorActor {
             };
 
             match create_result {
-                TryCreateResult::Created(_) | TryCreateResult::AlreadyExistsUnconsumed(_) => {
-                    // Arbiter dispatch path.
-                    tracing::warn!(
-                        task_id = %task.short_id,
+                TryCreateResult::Created(_) => {
+                    // Arbiter dispatch path — fresh arbitration row created.
+                    self.dispatch_arbiter_second_strike(
+                        task,
                         hold_cycle,
-                        intervention_count = task.intervention_count,
-                        total_reopen_count = task.total_reopen_count,
-                        reopen_count = task.reopen_count,
                         quality_strikes,
-                        "CoordinatorActor: second-strike — dispatching Lead arbiter for current hold cycle"
-                    );
-                    // Clear streak/cooldown so the hold isn't shadowed by stale
-                    // backoff state.
-                    self.dispatch_failure_streak.remove(&task.id);
-                    self.dispatch_cooldowns.remove(&task.id);
-                    self.last_dispatched.remove(&task.id);
-                    self.inflight_dispatches.remove(&task.id);
-                    self.clear_durable_dispatch_backoff_state(
-                        &task.id,
-                        Some(&task.short_id),
-                        "planner_second_strike_arbiter_dispatch",
+                        &reason,
+                        role,
+                        &history,
+                        &attempt_ledger,
+                        mirror_head_sha.as_deref(),
+                        &failing_ci_job_ids,
                     )
                     .await;
-                    // Interrupt any running session for this task so parking it
-                    // actually frees the dispatch slot.
-                    let session_repo = djinn_db::SessionRepository::new(
-                        self.db.clone(),
-                        crate::events::event_bus_for(&self.events_tx),
-                    );
-                    if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            error = %e,
-                            "CoordinatorActor: failed to interrupt running sessions while dispatching Lead arbiter"
-                        );
-                    }
-                    // The arbiter entry contract is explicit: the source task
-                    // must be in `needs_lead_intervention` after this path. If
-                    // it is already actively running a Lead intervention, move
-                    // it back to the queued Lead status; otherwise use the
-                    // widened Escalate transition. Fail closed if either
-                    // transition cannot be applied.
-                    if task.status != "needs_lead_intervention" {
-                        let task_repo = self.task_repo();
-                        let transition_action = if task.status == "in_lead_intervention" {
-                            TransitionAction::LeadInterventionRelease
-                        } else {
-                            TransitionAction::Escalate
-                        };
-                        if let Err(e) = task_repo
-                            .transition(
-                                &task.id,
-                                transition_action,
-                                "system",
-                                "coordinator",
-                                Some(&reason),
-                                None,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                task_id = %task.short_id,
-                                error = %e,
-                                status = %task.status,
-                                "CoordinatorActor: failed to transition source to \
-                                 needs_lead_intervention; failing closed to human review"
-                            );
-                            return self
-                                .park_source_human_review_with_dossier(
-                                    task,
-                                    &reason,
-                                    quality_strikes,
-                                    None,
-                                    &Self::arbiter_failure_dossier(
-                                        &reason,
-                                        role,
-                                        task,
-                                        &history,
-                                        &attempt_ledger,
-                                        mirror_head_sha.as_deref(),
-                                        &failing_ci_job_ids,
-                                    ),
-                                )
-                                .await;
-                        }
-                    }
-                    // Log the arbiter_dispatched outbox payload.
+                    // Log the arbiter_dispatched outbox payload — only on
+                    // initial creation so outbox replay (AlreadyExistsUnconsumed)
+                    // does not emit a duplicate activity event.
                     let payload = serde_json::json!({
                         "hold_cycle": hold_cycle,
                         "mirror_head_sha": mirror_head_sha,
@@ -1675,6 +1605,62 @@ impl CoordinatorActor {
                             error = %e,
                             "CoordinatorActor: failed to log arbiter_dispatched activity"
                         );
+                    }
+                    return true;
+                }
+                TryCreateResult::AlreadyExistsUnconsumed(_) => {
+                    // Outbox replay: arbitration row already exists and is
+                    // unconsumed — the arbiter is already in flight.  Do NOT
+                    // re-run dispatch cleanup or status transition (those were
+                    // done on the initial `Created` path).
+                    //
+                    // Crash-recovery idempotency: if the initial dispatch
+                    // succeeded but the `arbiter_dispatched` activity write
+                    // was lost (best-effort outbox), re-log it.  If the
+                    // activity already exists (normal replay), skip to avoid
+                    // duplicate rows.
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        hold_cycle,
+                        "CoordinatorActor: second-strike — outbox replay; arbiter already in flight"
+                    );
+                    let existing_events = self
+                        .task_repo()
+                        .query_activity(ActivityQuery {
+                            task_id: Some(task.id.clone()),
+                            event_type: Some("arbiter_dispatched".to_string()),
+                            ..ActivityQuery::default()
+                        })
+                        .await
+                        .unwrap_or_default();
+                    if existing_events.is_empty() {
+                        // Crash recovery: the activity was lost. Re-log.
+                        let payload = serde_json::json!({
+                            "hold_cycle": hold_cycle,
+                            "mirror_head_sha": mirror_head_sha,
+                            "github_head_sha": task.ci_head_sha,
+                            "pr_url": task.pr_url,
+                            "failing_ci_job_ids": failing_ci_job_ids,
+                            "reason": reason,
+                            "role": role,
+                        });
+                        let task_repo = self.task_repo();
+                        if let Err(e) = task_repo
+                            .log_activity(
+                                Some(&task.id),
+                                "system",
+                                "coordinator",
+                                "arbiter_dispatched",
+                                &payload.to_string(),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "CoordinatorActor: failed to replay arbiter_dispatched activity"
+                            );
+                        }
                     }
                     return true;
                 }
@@ -1934,6 +1920,116 @@ impl CoordinatorActor {
                 Vec::new()
             }
         }
+    }
+
+    /// Shared pre-dispatch logic for the arbiter second-strike path.
+    ///
+    /// Clears in-memory/durable backoff state, interrupts running sessions,
+    /// and transitions the source to `needs_lead_intervention`.  Returns
+    /// `true` on success; fails closed to the human-review park path on any
+    /// status-transition error.
+    ///
+    /// The caller is responsible for the `arbiter_dispatched` outbox event —
+    /// this helper deliberately does NOT emit it so `AlreadyExistsUnconsumed`
+    /// replay callers can skip the duplicate.
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_arbiter_second_strike(
+        &mut self,
+        task: &djinn_core::models::Task,
+        hold_cycle: i32,
+        quality_strikes: i64,
+        reason: &str,
+        role: &str,
+        history: &PostInterventionHistory,
+        attempt_ledger: &[TaskAttemptLedgerRow],
+        mirror_head_sha: Option<&str>,
+        failing_ci_job_ids: &serde_json::Value,
+    ) -> bool {
+        tracing::warn!(
+            task_id = %task.short_id,
+            hold_cycle,
+            intervention_count = task.intervention_count,
+            total_reopen_count = task.total_reopen_count,
+            reopen_count = task.reopen_count,
+            quality_strikes,
+            "CoordinatorActor: second-strike — dispatching Lead arbiter for current hold cycle"
+        );
+        // Clear streak/cooldown so the hold isn't shadowed by stale
+        // backoff state.
+        self.dispatch_failure_streak.remove(&task.id);
+        self.dispatch_cooldowns.remove(&task.id);
+        self.last_dispatched.remove(&task.id);
+        self.inflight_dispatches.remove(&task.id);
+        self.clear_durable_dispatch_backoff_state(
+            &task.id,
+            Some(&task.short_id),
+            "planner_second_strike_arbiter_dispatch",
+        )
+        .await;
+        // Interrupt any running session for this task so parking it
+        // actually frees the dispatch slot.
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "CoordinatorActor: failed to interrupt running sessions while dispatching Lead arbiter"
+            );
+        }
+        // The arbiter entry contract is explicit: the source task
+        // must be in `needs_lead_intervention` after this path. If
+        // it is already actively running a Lead intervention, move
+        // it back to the queued Lead status; otherwise use the
+        // widened Escalate transition. Fail closed if either
+        // transition cannot be applied.
+        if task.status != "needs_lead_intervention" {
+            let task_repo = self.task_repo();
+            let transition_action = if task.status == "in_lead_intervention" {
+                TransitionAction::LeadInterventionRelease
+            } else {
+                TransitionAction::Escalate
+            };
+            if let Err(e) = task_repo
+                .transition(
+                    &task.id,
+                    transition_action,
+                    "system",
+                    "coordinator",
+                    Some(reason),
+                    None,
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    status = %task.status,
+                    "CoordinatorActor: failed to transition source to \
+                     needs_lead_intervention; failing closed to human review"
+                );
+                return self
+                    .park_source_human_review_with_dossier(
+                        task,
+                        reason,
+                        quality_strikes,
+                        None,
+                        &Self::arbiter_failure_dossier(
+                            reason,
+                            role,
+                            task,
+                            history,
+                            attempt_ledger,
+                            mirror_head_sha,
+                            failing_ci_job_ids,
+                        ),
+                    )
+                    .await;
+            }
+        }
+        true
     }
 
     fn arbiter_failure_dossier(
