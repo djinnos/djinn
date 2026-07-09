@@ -57,6 +57,7 @@ mod task_admin;
 #[allow(dead_code)]
 mod task_epic;
 mod workspace;
+mod workspace_helpers;
 
 // ── Re-exports for agent-internal callers ────────────────────────────────
 // These handler functions are called directly from `direct_services.rs`,
