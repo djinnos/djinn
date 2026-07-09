@@ -2585,23 +2585,56 @@ impl CoordinatorActor {
         // non-terminal forever and the respawn guard defers every future
         // dispatch of this (task, role) pair — a permanent wedge.
         //
-        // `advance_to_terminal` is forward-only and idempotent, so duplicate
-        // exit events (or overlap with the recovery-scan terminalizers) are
-        // safe. `KillNoop` means the task is already terminal — leave the
-        // attempt to the terminal-path owners (PR poller / force-close).
+        // Outcome selection distinguishes an ENVIRONMENTAL interruption from a
+        // genuine failure:
+        //
+        //  - `interrupted`  → the pod was killed by infrastructure (a coordinator
+        //    deploy/rollout, a k8s pod eviction/deletion, or a startup reap of a
+        //    run that deploy orphaned) while the task was still nonterminal. This
+        //    is an environmental non-attempt: terminalize as `Interrupted` so
+        //    nothing wedges, but contribute NO quality strike, NO dispatch-failure
+        //    streak, and NO reopen_class penalty (the dispatch reappearance path
+        //    treats a latest `Interrupted` attempt as environmental).
+        //  - `failed`       → a genuine application/provider crash. Stays a
+        //    failure (`Crashed`), which the reappearance path still counts.
+        //
+        // This terminalizer only fires when the attempt is STILL pending/submitted
+        // (`advance_latest_to_terminal` no-ops on an already-terminal row). Every
+        // coordinator liveness path (stall-kill → TimedOut, ceiling → LoopGuard,
+        // no-progress/zombie/hard-runtime → TimedOut/Crashed) terminalizes the
+        // attempt with its own failure outcome BEFORE this event is processed, so
+        // stall / runtime-cap / zombie kills are NEVER reclassified environmental
+        // here — only a pure infra kill that no liveness path claimed reaches this
+        // `Interrupted` branch. Forward-only + idempotent; `KillNoop` means the
+        // task is already terminal — leave the attempt to the terminal-path owners
+        // (PR poller / force-close).
         if matches!(session_status, "failed" | "interrupted")
             && result.outcome != Some(LivenessOutcome::KillNoop)
         {
+            let (attempt_outcome, failure_class, summary) = if session_status == "interrupted" {
+                (
+                    TaskAttemptOutcome::Interrupted,
+                    "environmental_interrupt",
+                    "session interrupted by infrastructure (deploy/rollout/pod-eviction/reap) \
+                     while task nonterminal — environmental non-attempt, no dispatch penalty",
+                )
+            } else {
+                (
+                    TaskAttemptOutcome::Crashed,
+                    "session_exit_nonterminal",
+                    "session exited failed while task nonterminal",
+                )
+            };
             self.terminalize_recovery_attempt(
                 task_id,
                 role,
-                TaskAttemptOutcome::Crashed,
+                attempt_outcome,
                 "session_exit_liveness",
                 Some(session_id),
                 task_run_id,
                 Some(result.verdict.as_str()),
-                Some("session_exit_nonterminal"),
-                Some("session exited failed/interrupted while task nonterminal"),
+                Some(failure_class),
+                Some(summary),
             )
             .await;
         }

@@ -4621,6 +4621,347 @@ async fn stall_timeout_terminalizes_attempt_as_timed_out() {
     cancel.cancel();
 }
 
+// ── Deploy/reap interruptions are environmental (fix/deploy-interruptions) ──
+
+/// A session `interrupted` by INFRASTRUCTURE (deploy/rollout/pod-eviction/reap)
+/// while its task is still nonterminal must terminalize the live attempt as the
+/// environmental `interrupted` outcome — NOT `crashed`. This is what lets the
+/// dispatch reappearance path spare the task from a failure streak / cooldown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_session_terminalizes_attempt_as_environmental_interrupt() {
+    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+    use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "env-interrupt-attempt").await;
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-env-interrupt";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    // A live (pending) dispatch-start attempt exists — nothing has claimed it as
+    // a failure, i.e. a pure infra kill (no stall/ceiling/zombie decision).
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+
+    let actor = coordinator_actor_for_tests(&db, &tx);
+    actor
+        .classify_session_exit_liveness(
+            &session.id,
+            &task.id,
+            Some(run_id),
+            "interrupted",
+            "worker",
+        )
+        .await;
+
+    let repo = TaskAttemptRepository::new(db.clone());
+    let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        attempt.outcome, "interrupted",
+        "an infrastructure interruption must terminalize the attempt as environmental \
+         `interrupted`, not `crashed`"
+    );
+    assert!(attempt.terminal_at.is_some());
+    let outcome: TaskAttemptOutcome = attempt.outcome.parse().unwrap();
+    assert!(outcome.is_environmental_interrupt());
+    assert!(
+        outcome.is_infra(),
+        "environmental interrupt is infra-classified (quality/park exempt)"
+    );
+    let sj: serde_json::Value =
+        serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "environmental_interrupt");
+    assert_eq!(sj["recovery_classifier"], "session_exit_liveness");
+    // No duplicate row.
+    assert_eq!(repo.list_for_task(&task.id).await.unwrap().len(), 1);
+}
+
+/// Regression: a genuine `failed` session exit (application/provider crash) still
+/// terminalizes the attempt as `crashed` — a real failure the reappearance streak
+/// keeps counting. Only `interrupted` (infra) is treated environmental.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_session_terminalizes_attempt_as_crashed_not_interrupted() {
+    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+    use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "failed-stays-crashed").await;
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-failed-crash";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+
+    let actor = coordinator_actor_for_tests(&db, &tx);
+    actor
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "failed", "worker")
+        .await;
+
+    let repo = TaskAttemptRepository::new(db.clone());
+    let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        attempt.outcome, "crashed",
+        "a genuine failed exit must remain a `crashed` failure"
+    );
+    let outcome: TaskAttemptOutcome = attempt.outcome.parse().unwrap();
+    assert!(!outcome.is_environmental_interrupt());
+}
+
+/// Regression: a stall/ceiling/zombie kill terminalizes the attempt with its own
+/// failure outcome BEFORE the session-interrupt event is processed. The later
+/// `interrupted` event must NOT reclassify that already-terminal failure to
+/// environmental — `advance_latest_to_terminal` no-ops on a terminal attempt, so
+/// stall-killed / runtime-exceeded runs stay failures.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_event_does_not_reclassify_already_terminal_failure() {
+    use djinn_db::{
+        CreateSessionParams, SessionRepository, TaskAttemptRepository, TerminalTaskAttemptParams,
+    };
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "stall-then-interrupt").await;
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-stall-then-interrupt";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    // The stall path already terminalized the attempt as `timed_out`.
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+    let repo = TaskAttemptRepository::new(db.clone());
+    repo.advance_to_terminal(TerminalTaskAttemptParams {
+        id: &attempt_id,
+        outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::TimedOut,
+        pr_url: None,
+        submit_ref: None,
+        checkpoint_ref: None,
+        mirror_head_sha: None,
+        github_head_sha: None,
+        summary: Some("stall kill"),
+        summary_json: None,
+        log_tail: None,
+    })
+    .await
+    .unwrap();
+
+    // The session-interrupt event arrives afterward — must be a no-op.
+    let actor = coordinator_actor_for_tests(&db, &tx);
+    actor
+        .classify_session_exit_liveness(
+            &session.id,
+            &task.id,
+            Some(run_id),
+            "interrupted",
+            "worker",
+        )
+        .await;
+
+    let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        attempt.outcome, "timed_out",
+        "an already-terminal stall/timeout attempt must NOT be reclassified environmental"
+    );
+}
+
+/// Fix #3: the STARTUP orphaned-pending reaper stamps `interrupted` (a deploy
+/// killed the run), while the PERIODIC/other reap stays `crashed`. Both are
+/// infra-classified; they differ only in whether the reappearance streak counts
+/// them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_orphan_reap_stamps_interrupted_periodic_stamps_crashed() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // A stale orphaned pending attempt (no live run/session). Reap it via the
+    // STARTUP path → environmental `interrupted`. Seed + reap in isolation so the
+    // startup sweep (which reaps every eligible orphan) does not also claim the
+    // periodic fixture below.
+    let (task_startup, _n) = create_task_with_note(&db, &tx, "orphan-startup").await;
+    let startup_attempt = seed_pending_attempt(&db, &task_startup.id, "reviewer").await;
+    backdate_attempt(&db, &startup_attempt).await;
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "startup").await;
+
+    // A second stale orphan seeded AFTER the startup sweep, reaped via the
+    // PERIODIC path → stays `crashed` (conservative).
+    let (task_periodic, _n) = create_task_with_note(&db, &tx, "orphan-periodic").await;
+    let periodic_attempt = seed_pending_attempt(&db, &task_periodic.id, "reviewer").await;
+    backdate_attempt(&db, &periodic_attempt).await;
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
+
+    let startup = repo.get(&startup_attempt).await.unwrap().unwrap();
+    assert_eq!(
+        startup.outcome, "interrupted",
+        "a startup reap (deploy killed the run) must stamp environmental `interrupted`"
+    );
+    let sj: serde_json::Value =
+        serde_json::from_str(startup.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "environmental_interrupt_startup_reap");
+
+    let periodic = repo.get(&periodic_attempt).await.unwrap().unwrap();
+    assert_eq!(
+        periodic.outcome, "crashed",
+        "a periodic reap stays `crashed` (conservative)"
+    );
+}
+
+/// The reappearance helper detects only an environmental `interrupted` latest
+/// attempt — genuine `crashed`/`timed_out` latest attempts are NOT environmental,
+/// guard-only rows are skipped, and no attempt is NOT environmental.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn latest_attempt_environmental_interrupt_helper_detection() {
+    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+    use djinn_db::{TaskAttemptRepository, TerminalTaskAttemptParams};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    let terminalize = |attempt_id: String, outcome: TaskAttemptOutcome| {
+        let db = db.clone();
+        async move {
+            let repo = TaskAttemptRepository::new(db.clone());
+            repo.advance_to_terminal(TerminalTaskAttemptParams {
+                id: &attempt_id,
+                outcome,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .unwrap();
+        }
+    };
+
+    // Interrupted latest → environmental.
+    let (t_env, _n) = create_task_with_note(&db, &tx, "helper-env").await;
+    let a = seed_pending_attempt(&db, &t_env.id, "reviewer").await;
+    terminalize(a, TaskAttemptOutcome::Interrupted).await;
+    assert!(
+        actor
+            .latest_attempt_was_environmental_interrupt(&t_env.id, "reviewer")
+            .await
+    );
+    // Wrong role → not environmental for that role.
+    assert!(
+        !actor
+            .latest_attempt_was_environmental_interrupt(&t_env.id, "worker")
+            .await
+    );
+
+    // Crashed latest → NOT environmental (genuine failure still counts).
+    let (t_crash, _n) = create_task_with_note(&db, &tx, "helper-crash").await;
+    let a = seed_pending_attempt(&db, &t_crash.id, "reviewer").await;
+    terminalize(a, TaskAttemptOutcome::Crashed).await;
+    assert!(
+        !actor
+            .latest_attempt_was_environmental_interrupt(&t_crash.id, "reviewer")
+            .await
+    );
+
+    // No attempt at all → NOT environmental.
+    let (t_none, _n) = create_task_with_note(&db, &tx, "helper-none").await;
+    assert!(
+        !actor
+            .latest_attempt_was_environmental_interrupt(&t_none.id, "reviewer")
+            .await
+    );
+}
+
 /// A zombie session reaped past the hard cap with no live worker is a crash:
 /// the matching attempt must be terminalized as `crashed` with a `failure_class`
 /// in its structured context. Running the reaper again must not duplicate the
