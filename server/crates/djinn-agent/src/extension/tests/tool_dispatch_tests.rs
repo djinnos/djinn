@@ -532,7 +532,10 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
         roles[0].get("base_role").and_then(|value| value.as_str()),
         Some("worker")
     );
-    assert!(roles[0].get("learned_prompt").is_some());
+    assert!(
+        roles[0].get("success_rate").is_some(),
+        "metrics entry should have success_rate"
+    );
     let extraction_quality = roles[0]
         .get("extraction_quality")
         .and_then(|value| value.as_object())
