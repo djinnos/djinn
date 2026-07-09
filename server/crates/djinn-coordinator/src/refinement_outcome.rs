@@ -21,6 +21,62 @@ use super::refinement::{
 use super::actor::CoordinatorActor;
 use super::refinement_dispatch::RefinementSession;
 
+/// True when a debate-trail entry belongs to the current refinement run.
+///
+/// The current run's boundary is the `created_at` of the latest
+/// `refinement_start` lifecycle event. Debate-trail round numbers reuse the
+/// same 1-based counter every run (`RefinementLoopState` always starts at
+/// round 1), but the trail persists across runs. When a run is interrupted
+/// (e.g. a restart) and later restarted, the new run's round-1 entries collide
+/// with the prior run's round-1 entries. Scoping every trail read to entries
+/// created *after* the current run's start keeps prior-run entries from being
+/// mistaken for the current round's.
+///
+/// `created_at` is a fixed-width ISO-8601 UTC string (`VARCHAR(64)`,
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ`) so lexicographic comparison equals chronological
+/// order. When `run_start` is `None` (no `refinement_start` boundary recorded)
+/// every entry is treated as in-run, preserving the pre-scoping behavior.
+fn entry_in_current_run(entry: &ProposalDebateTrail, run_start: Option<&str>) -> bool {
+    match run_start {
+        Some(start) => entry.created_at.as_str() > start,
+        None => true,
+    }
+}
+
+/// Select the judge verdict entry for the current run's `round`.
+///
+/// Scopes to the current run, then to `round`, then prefers the verdict written
+/// against `current_revision_seq`. When multiple candidates still match, the
+/// LATEST by `created_at` wins — never the first. The trail is ordered
+/// `ORDER BY round, created_at`, so a naive `.find()` returns the OLDEST
+/// matching verdict, which across an interrupted-and-restarted run can be a
+/// stale prior-run verdict with a colliding round number.
+fn select_current_run_verdict<'a>(
+    entries: &'a [ProposalDebateTrail],
+    round: i32,
+    current_revision_seq: i32,
+    run_start: Option<&str>,
+) -> Option<&'a ProposalDebateTrail> {
+    let in_round = |e: &&ProposalDebateTrail| {
+        e.agent_role == "judge"
+            && e.kind == "verdict"
+            && e.round == round
+            && entry_in_current_run(e, run_start)
+    };
+
+    entries
+        .iter()
+        .filter(&in_round)
+        .filter(|e| e.against_revision_seq == current_revision_seq)
+        .max_by(|a, b| a.created_at.cmp(&b.created_at))
+        .or_else(|| {
+            entries
+                .iter()
+                .filter(&in_round)
+                .max_by(|a, b| a.created_at.cmp(&b.created_at))
+        })
+}
+
 fn format_debate_context_entry(entry: &ProposalDebateTrail) -> String {
     format!(
         "- round {}, revision {}, {} by {} (blocking={}): {}",
@@ -172,10 +228,20 @@ impl CoordinatorActor {
             }
         };
 
+        // Scope to the current refinement run so a prior (interrupted) run's
+        // round-numbered objections are not re-counted (see
+        // `entry_in_current_run`).
+        let run_start = self.latest_refinement_run_start(proposal_id).await;
+
         let round = state.current_round;
         let round_objections: Vec<ObjectionRecord> = entries
             .iter()
-            .filter(|e| e.agent_role == "adversary" && e.kind == "objection" && e.round == round)
+            .filter(|e| {
+                e.agent_role == "adversary"
+                    && e.kind == "objection"
+                    && e.round == round
+                    && entry_in_current_run(e, run_start.as_deref())
+            })
             .map(|e| ObjectionRecord {
                 body: e.body.clone(),
                 blocking: e.blocking,
@@ -309,6 +375,13 @@ impl CoordinatorActor {
 
         let round = state.current_round;
 
+        // Scope every trail read below to the current refinement run. Round
+        // numbers reuse the same 1-based counter each run, so an interrupted-
+        // and-restarted run's round-1 entries collide with the prior run's
+        // round-1 entries. `run_start` is the boundary that tells them apart
+        // (see `entry_in_current_run`).
+        let run_start = self.latest_refinement_run_start(proposal_id).await;
+
         // ── Check for an accepted needs-evidence demand first ───────────
         //
         // If the Judge called `proposal_refinement_demand_evidence` and the
@@ -322,6 +395,7 @@ impl CoordinatorActor {
                 && e.kind == "needs_evidence"
                 && e.round == round
                 && e.body_metadata.is_some()
+                && entry_in_current_run(e, run_start.as_deref())
         });
 
         if let Some(_entry) = needs_evidence_entry {
@@ -337,9 +411,12 @@ impl CoordinatorActor {
         }
 
         // ── Normal verdict path ─────────────────────────────────────────
-        let verdict_entry = entries
-            .iter()
-            .find(|e| e.agent_role == "judge" && e.kind == "verdict" && e.round == round);
+        let verdict_entry = select_current_run_verdict(
+            &entries,
+            round,
+            state.current_revision_seq,
+            run_start.as_deref(),
+        );
 
         let verdict = if let Some(entry) = verdict_entry {
             JudgeVerdictResult {
@@ -382,6 +459,29 @@ impl CoordinatorActor {
                 round,
                 "Judge ruled not-ready — running another round"
             );
+        }
+    }
+
+    /// Fetch the current refinement run's start boundary: the `created_at` of
+    /// the latest `refinement_start` lifecycle event. Used to scope debate-trail
+    /// reads to the current run so a prior (interrupted) run's round-numbered
+    /// entries are not mistaken for the current round's. On a DB error or when
+    /// no boundary exists, returns `None` — trail reads then fall back to the
+    /// unscoped behavior rather than dropping the whole outcome.
+    async fn latest_refinement_run_start(&self, proposal_id: &str) -> Option<String> {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        match proposal_repo.latest_refinement_start_at(proposal_id).await {
+            Ok(start) => start,
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "Failed to read latest refinement_start boundary; \
+                     processing debate trail without current-run scoping"
+                );
+                None
+            }
         }
     }
 
@@ -1039,4 +1139,130 @@ mod tests {
 
     // `logs_contain` is injected by the `#[tracing_test::traced_test]` macro
     // into each test function scope; no module-level helper is needed.
+
+    // ---- current-run debate-trail scoping (cross-run collision) ----
+
+    /// Build a judge verdict debate-trail entry with an explicit `created_at`
+    /// so tests can reproduce a trail that spans two refinement runs.
+    fn verdict_entry(
+        round: i32,
+        against_revision_seq: i32,
+        blocking: bool,
+        created_at: &str,
+    ) -> ProposalDebateTrail {
+        ProposalDebateTrail {
+            id: format!("verdict/{created_at}"),
+            proposal_id: "p1".into(),
+            kind: "verdict".into(),
+            body: if blocking { "needs work" } else { "approve" }.into(),
+            blocking,
+            agent_role: "judge".into(),
+            author_kind: "agent".into(),
+            author_user_id: None,
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq,
+            round,
+            body_metadata: None,
+            resolved_at: None,
+            resolved_by_user_id: None,
+            reopened_at: None,
+            reopened_by_user_id: None,
+            created_at: created_at.into(),
+            updated_at: created_at.into(),
+        }
+    }
+
+    /// Incident 019f0c29: run #1 produced a round-1 APPROVE verdict (against
+    /// revision seq 2), was interrupted by a restart, then run #2 produced a
+    /// round-1 NEEDS-WORK verdict (against revision seq 3). The debate trail is
+    /// ordered `round, created_at`, so a naive `.find()` returned the stale
+    /// approve. With current-run scoping the fresh needs-work verdict must win.
+    #[test]
+    fn verdict_scoping_ignores_stale_prior_run_approve() {
+        // Trail ordered as `debate_trail()` returns it (round, then created_at).
+        let entries = vec![
+            // Run #1, round 1: stale approve (interrupted run).
+            verdict_entry(1, 2, false, "2026-07-08T10:00:00.000Z"),
+            // Run #2, round 1: fresh needs-work.
+            verdict_entry(1, 3, true, "2026-07-08T10:00:40.000Z"),
+        ];
+        // Run #2 started between the two verdicts.
+        let run_start = Some("2026-07-08T10:00:30.000Z");
+
+        let selected = select_current_run_verdict(&entries, 1, 3, run_start)
+            .expect("a current-run verdict must be selected");
+        assert!(
+            selected.blocking,
+            "must select the fresh needs-work verdict, not the stale approve"
+        );
+        assert_eq!(selected.against_revision_seq, 3);
+
+        // The state machine must run another round, not park for human review.
+        let mut state = RefinementLoopState::with_config("p1", 3, test_config());
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: selected.body.clone(),
+            blocking: selected.blocking,
+        });
+        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
+        assert!(!state.is_awaiting_human_review());
+    }
+
+    /// Belt-and-braces: even with no `refinement_start` boundary recorded
+    /// (`run_start == None`), the `against_revision_seq == current_revision_seq`
+    /// preference plus latest-by-`created_at` tie-break still selects the fresh
+    /// verdict rather than the stale approve.
+    #[test]
+    fn verdict_selection_prefers_current_revision_without_boundary() {
+        let entries = vec![
+            verdict_entry(1, 2, false, "2026-07-08T10:00:00.000Z"),
+            verdict_entry(1, 3, true, "2026-07-08T10:00:40.000Z"),
+        ];
+        let selected =
+            select_current_run_verdict(&entries, 1, 3, None).expect("a verdict must be selected");
+        assert!(
+            selected.blocking,
+            "must prefer the current-revision verdict"
+        );
+        assert_eq!(selected.against_revision_seq, 3);
+    }
+
+    /// When several verdicts match the current revision (e.g. a re-run wrote a
+    /// second one), the LATEST by `created_at` wins — never the oldest.
+    #[test]
+    fn verdict_selection_takes_latest_on_tie() {
+        let entries = vec![
+            verdict_entry(1, 3, false, "2026-07-08T10:00:40.000Z"),
+            verdict_entry(1, 3, true, "2026-07-08T10:01:10.000Z"),
+        ];
+        let selected = select_current_run_verdict(&entries, 1, 3, Some("2026-07-08T10:00:30.000Z"))
+            .expect("a verdict must be selected");
+        assert!(selected.blocking, "latest verdict must win the tie");
+        assert_eq!(selected.created_at, "2026-07-08T10:01:10.000Z");
+    }
+
+    #[test]
+    fn entry_in_current_run_boundary_semantics() {
+        let entry = verdict_entry(1, 1, false, "2026-07-08T10:00:30.000Z");
+        // Strictly after the boundary → in-run.
+        assert!(entry_in_current_run(
+            &entry,
+            Some("2026-07-08T10:00:00.000Z")
+        ));
+        // At or before the boundary → prior run.
+        assert!(!entry_in_current_run(
+            &entry,
+            Some("2026-07-08T10:00:30.000Z")
+        ));
+        assert!(!entry_in_current_run(
+            &entry,
+            Some("2026-07-08T10:01:00.000Z")
+        ));
+        // No boundary → always in-run.
+        assert!(entry_in_current_run(&entry, None));
+    }
+
+    fn test_config() -> super::super::refinement::RefinementConfig {
+        super::super::refinement::RefinementConfig::default()
+    }
 }
