@@ -688,18 +688,17 @@ mod tests {
     use super::*;
     use crate::fixtures::*;
 
-    /// Build a corpus with notes that all match "guard" lexically but differ
-    /// in graph proximity and task-affinity signals, so we can prove those
-    /// signals change rank.
+    /// Build a corpus where relevant notes are weak lexical matches whose rank
+    /// changes only when graph/task-affinity side-channel scores participate.
     fn make_test_corpus_notes() -> Vec<CorpusNoteRow> {
-        // Note 1: "Supervisor guard pattern" - strong match for "guard", connected to Note 2
+        // Note 1: lexical source for graph traversal, connected to Note 2.
         let json1 = r#"{"permalink":"patterns/supervisor-guard","title":"Supervisor guard pattern","content":"Guard pattern for managing supervisor lifecycle transitions safely.","note_type":"pattern","folder":"patterns","status":"active","tags":["guard","supervisor"],"timestamps":{"created_at":"2026-06-01T10:00:00.000Z","updated_at":"2026-06-15T14:30:00.000Z","last_accessed":"2026-07-01T09:00:00.000Z"},"confidence":0.85,"embedding":{"content_hash":"abc123def456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.1,0.2,0.3]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[{"source_permalink":"patterns/supervisor-guard","target_permalink":"patterns/connected-guard","kind":"builds_on","weight":1.0}],"expected_signals":{"vector":true,"lexical":true,"temporal":true,"graph":true,"entity":true,"task_affinity":false}}"#;
-        // Note 2: "Guard rails for pipeline" - partial "guard" match, connected to Note 1 via graph
-        let json2 = r#"{"permalink":"patterns/connected-guard","title":"Guard rails for pipeline configuration","content":"Pipeline guard rails prevent misconfiguration during automated deployment.","note_type":"pattern","folder":"patterns","status":"active","tags":["guard","pipeline"],"timestamps":{"created_at":"2026-03-01T00:00:00.000Z","updated_at":"2026-03-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":0.9,"embedding":{"content_hash":"hash456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.4,0.5,0.6]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[{"source_permalink":"patterns/supervisor-guard","target_permalink":"patterns/connected-guard","kind":"builds_on","weight":1.0}],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":true,"entity":true,"task_affinity":false}}"#;
-        // Note 3: "Guard configuration reference" - partial "guard" match, NOT connected
+        // Note 2: relevant graph target; weak lexical match plus graph edge.
+        let json2 = r#"{"permalink":"patterns/connected-guard","title":"Downstream rollback covenant","content":"Lifecycle rollback covenant for automated deployment safety checks after rollout drift.","note_type":"pattern","folder":"patterns","status":"active","tags":["rollback","deployment"],"timestamps":{"created_at":"2026-03-01T00:00:00.000Z","updated_at":"2026-03-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":0.9,"embedding":{"content_hash":"hash456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.4,0.5,0.6]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":true,"task_affinity":false}}"#;
+        // Note 3: lexical distractor not connected to the graph target.
         let json3 = r#"{"permalink":"patterns/unconnected-guard","title":"Guard configuration reference","content":"Reference configuration for guard setup in test environments.","note_type":"pattern","folder":"patterns","status":"active","tags":["guard","config"],"timestamps":{"created_at":"2026-04-01T00:00:00.000Z","updated_at":"2026-04-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":1.0,"embedding":{"content_hash":"hash789","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.7,0.8,0.9]},"labels":[{"entity_type":"concept","name":"config"}],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":false}}"#;
-        // Note 4: "Pipeline guard deployment" - has "guard" + "pipeline", in task memory_refs
-        let json4 = r#"{"permalink":"cases/task-affinity-guard","title":"Pipeline guard deployment notes","content":"Deployment notes for pipeline guard configuration and rollback procedures.","note_type":"case","folder":"cases","status":"active","tags":["deployment","pipeline","guard"],"timestamps":{"created_at":"2026-04-01T00:00:00.000Z","updated_at":"2026-04-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":1.0,"embedding":{"content_hash":"hash012","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.2,0.3,0.4]},"labels":[],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":true}}"#;
+        // Note 4: relevant task-memory target; weak lexical match plus task ref.
+        let json4 = r#"{"permalink":"cases/task-affinity-guard","title":"Amber release ledger","content":"Configuration ledger of rollback owners, verification receipts, and deployment approvals.","note_type":"case","folder":"cases","status":"active","tags":["deployment","ledger"],"timestamps":{"created_at":"2026-04-01T00:00:00.000Z","updated_at":"2026-04-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":1.0,"embedding":{"content_hash":"hash012","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.2,0.3,0.4]},"labels":[],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":true}}"#;
         vec![
             serde_json::from_str(json1).unwrap(),
             serde_json::from_str(json2).unwrap(),
@@ -709,18 +708,19 @@ mod tests {
     }
 
     fn make_test_fixtures() -> Phase1Fixtures {
-        // Query "guard" matches all 4 notes lexically. With graph signal,
-        // Note 2 (connected-guard) should rank higher relative to Note 3
-        // (unconnected-guard). With task-affinity, Note 4 should rank higher.
-        let query_json = r#"{"query_id":"task-abc123","query_text":"guard","task_id":"abc123","memory_refs":["patterns/connected-guard","patterns/unconnected-guard","cases/task-affinity-guard"],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":true,"entity":true,"task_affinity":true}}"#;
-        // Graph bad case: only Note 2 is relevant (graph-connected)
-        let bc_graph = r#"{"case_id":"bc-002","query_text":"guard pipeline configuration","case_type":"graph_entity_influenced","expected_behavior":"Graph proximity should boost connected guard note","task_id":null,"relevant_note_permalinks":["patterns/connected-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":true,"entity":false,"task_affinity":false},"tags":["graph"]}"#;
-        // Task-affinity bad case: only Note 4 is relevant (in task memory_refs)
-        let bc_task = r#"{"case_id":"bc-003","query_text":"guard deployment pipeline","case_type":"task_affinity_influenced","expected_behavior":"Task-affinity signal should boost the note in task memory_refs","task_id":"abc123","relevant_note_permalinks":["cases/task-affinity-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":true},"tags":["task-affinity"]}"#;
+        let graph_query = r#"{"query_id":"graph-signal","query_text":"supervisor guard lifecycle","task_id":null,"memory_refs":["patterns/connected-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":true,"entity":true,"task_affinity":false}}"#;
+        let task_query = r#"{"query_id":"task-abc123","query_text":"guard configuration","task_id":"abc123","memory_refs":["cases/task-affinity-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":true}}"#;
+        // Graph bad case: only Note 2 is relevant (graph-connected).
+        let bc_graph = r#"{"case_id":"bc-002","query_text":"supervisor guard lifecycle","case_type":"graph_entity_influenced","expected_behavior":"Graph proximity should surface connected guard note","task_id":null,"relevant_note_permalinks":["patterns/connected-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":true,"entity":false,"task_affinity":false},"tags":["graph"]}"#;
+        // Task-affinity bad case: only Note 4 is relevant (in task memory_refs).
+        let bc_task = r#"{"case_id":"bc-003","query_text":"guard configuration","case_type":"task_affinity_influenced","expected_behavior":"Task-affinity signal should surface the note in task memory_refs","task_id":"abc123","relevant_note_permalinks":["cases/task-affinity-guard"],"expected_signals":{"vector":false,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":true},"tags":["task-affinity"]}"#;
 
         Phase1Fixtures {
             corpus_notes: make_test_corpus_notes(),
-            memory_ref_queries: vec![serde_json::from_str(query_json).unwrap()],
+            memory_ref_queries: vec![
+                serde_json::from_str(graph_query).unwrap(),
+                serde_json::from_str(task_query).unwrap(),
+            ],
             bad_cases: vec![
                 serde_json::from_str(bc_graph).unwrap(),
                 serde_json::from_str(bc_task).unwrap(),
@@ -736,12 +736,12 @@ mod tests {
             .await
             .expect("run should succeed");
 
-        assert_eq!(output.query_records.len(), 1);
+        assert_eq!(output.query_records.len(), 2);
         assert_eq!(output.bad_case_records.len(), 2);
         assert_eq!(output.corpus_note_count, 4);
 
         let query_record = &output.query_records[0];
-        assert_eq!(query_record.query_id, "task-abc123");
+        assert_eq!(query_record.query_id, "graph-signal");
         assert!(!query_record.result_permalinks.is_empty());
     }
 
