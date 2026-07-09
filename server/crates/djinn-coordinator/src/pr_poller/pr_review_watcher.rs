@@ -780,6 +780,35 @@ impl CoordinatorActor {
                 }
             }
 
+            // ── Tripwire active-hold gate (pre-merge boundary) ────────────
+            // After CI passes and before any Djinn-initiated merge or
+            // enqueue, check the durable active-hold state for the current
+            // head SHA.  If an active hold exists (unreleased enforcement
+            // findings from a prior tripwire gate evaluation), the PR must
+            // NOT merge even when CI is green.  The reconciliation helper
+            // also detects and reapplies missing human-review-hold labels
+            // (label tamper), failing closed on errors.
+            //
+            // The "PR already merged" observation path (pr.merged == Some(true)
+            // above) is intentionally NOT gated — that records a historical
+            // external merge, not a Djinn-initiated one.  The delegated
+            // observation path (auto_merge / delegated_for_current_sha)
+            // observes state already under GitHub's control; if the PR was
+            // delegated before a hold was established, GitHub controls the
+            // outcome.
+            if self
+                .reconcile_tripwire_hold(&task, pull_number, &current_sha)
+                .await
+            {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    head_sha = %current_sha,
+                    "PR poller: tripwire active-hold gate: blocking merge — active hold on current head"
+                );
+                continue;
+            }
+
             // Either approved or no reviews — attempt squash merge.
             tracing::info!(
                 task_id = %task.short_id,
