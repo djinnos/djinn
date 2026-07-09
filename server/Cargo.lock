@@ -1483,10 +1483,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "djinn-core",
+ "djinn-db",
+ "djinn-memory",
  "serde",
  "serde_json",
+ "sqlx",
+ "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "workspace-hack",
 ]
 
