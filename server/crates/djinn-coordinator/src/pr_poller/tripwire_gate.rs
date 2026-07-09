@@ -494,7 +494,8 @@ mod tests {
 
     #[test]
     fn network_egress_change_from_pr_file_produces_held_gate() {
-        let patch = "@@ -1,1 +1,3 @@\n old line\n+use reqwest::Client;\n+let resp = client.get(url).send();\n";
+        let patch =
+            "@@ -1,1 +1,3 @@\n old line\n+Webhook::register(endpoint);\n+notify(payload);\n";
         let files = vec![pr_file_with_patch("src/http.rs", "modified", 2, 0, patch)];
         let decision = evaluate_from_pr_files(files);
         assert_eq!(decision.outcome, GateOutcome::Held);
@@ -606,7 +607,7 @@ mod tests {
                 "modified",
                 2,
                 0,
-                "@@ -1,0 +1,2 @@\n+use reqwest::Client;\n+let resp = client.get(url).send();\n",
+                "@@ -1,0 +1,2 @@\n+Webhook::register(endpoint);\n+notify(payload);\n",
             ),
             // 4. Unsafe code (needs patch → hunks, .rs extension)
             pr_file_with_patch(
@@ -691,7 +692,7 @@ mod tests {
         let mut policy = TripwirePolicy::default();
         policy.network_egress.report_only = true;
 
-        let patch = "@@ -1,0 +1,2 @@\n+use reqwest::Client;\n+let resp = client.get(url).send();\n";
+        let patch = "@@ -1,0 +1,2 @@\n+Webhook::register(endpoint);\n+notify(payload);\n";
         let files = vec![pr_file_with_patch("src/http.rs", "modified", 2, 0, patch)];
         let decision = evaluate_from_pr_files_with_policy(files, policy);
 
