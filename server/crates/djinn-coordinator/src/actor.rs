@@ -664,6 +664,56 @@ impl CoordinatorActor {
         }
     }
 
+    /// Watchdog deadline for a single coordinator pass (one API message, one
+    /// domain event, or one safety-net tick).
+    ///
+    /// The coordinator is a single-mailbox actor: [`run`](Self::run) is one
+    /// `select!` loop that services each pass serially. If any pass blocks
+    /// forever (the 2026-07-09 incident: tick 72 blocked on an un-timed
+    /// coordinator→pool ask while the pool was transiently stalled), the whole
+    /// board freezes — dispatch, PR poller, reviewer dispatch, and refinement
+    /// driving all starve at once until a manual restart.
+    ///
+    /// The bounded pool/slot asks (`POOL_ASK_TIMEOUT` / `SLOT_ACK_TIMEOUT`)
+    /// address the known cause; this watchdog is the defense-in-depth backstop
+    /// for any *other* unbounded await a pass might hit. It is generous
+    /// relative to any healthy pass yet far below the multi-minute freeze it
+    /// guards against.
+    const PASS_DEADLINE: StdDuration = StdDuration::from_secs(120);
+
+    /// Run one coordinator pass under the whole-board-freeze watchdog.
+    ///
+    /// On elapse the `pass` future is dropped (cancelled) and a loud ERROR is
+    /// logged; the caller's `select!` loop then continues to the next
+    /// iteration instead of freezing. This is the coordinator analogue of
+    /// session stall-kill.
+    ///
+    /// Cancel-safety: dropping a pass future mid-await cancels whatever async
+    /// operation it was suspended on. Every DB mutation the passes perform is a
+    /// single transactional repository call (sqlx autocommit, or an explicit
+    /// transaction that rolls back on drop), so dropping *between* operations
+    /// leaves earlier committed operations applied and any in-flight one rolled
+    /// back — never a torn write. The passes are sequences of independent,
+    /// idempotent reconcile / dispatch steps that the 30s safety-net tick
+    /// re-derives, so an abandoned partial pass is recovered next tick.
+    /// `handle_message` may drop an API caller's reply oneshot (the caller sees
+    /// an error rather than a hang) and `handle_event_result` may drop a
+    /// mid-processed event (the tick re-drives any missed dispatch) — both
+    /// strictly better than freezing the entire board.
+    pub(super) async fn run_pass_with_watchdog(
+        pass_kind: &'static str,
+        pass: impl std::future::Future<Output = ()>,
+    ) {
+        if time::timeout(Self::PASS_DEADLINE, pass).await.is_err() {
+            tracing::error!(
+                pass_kind,
+                deadline_secs = Self::PASS_DEADLINE.as_secs(),
+                "CoordinatorActor: pass exceeded watchdog deadline; abandoning it and \
+                 continuing the loop (whole-board-freeze backstop)"
+            );
+        }
+    }
+
     pub(super) async fn run(mut self) {
         tracing::info!("CoordinatorActor started");
 
@@ -723,19 +773,19 @@ impl CoordinatorActor {
                         tracing::debug!("CoordinatorActor: message channel closed");
                         break;
                     };
-                    self.handle_message(msg).await;
+                    Self::run_pass_with_watchdog("message", self.handle_message(msg)).await;
                 }
 
                 // 3. Domain events from repositories.
                 event = self.events.recv() => {
-                    self.handle_event_result(event).await;
+                    Self::run_pass_with_watchdog("event", self.handle_event_result(event)).await;
                 }
 
                 // 4. 30s safety-net tick — stuck detection + dispatch pass for
                 //    any tasks that missed an event (e.g. needs_lead_intervention
                 //    tasks surviving a server restart).
                 _ = self.tick.tick() => {
-                    self.run_tick().await;
+                    Self::run_pass_with_watchdog("tick", self.run_tick()).await;
                 }
             }
         }
