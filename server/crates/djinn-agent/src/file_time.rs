@@ -27,10 +27,7 @@ pub enum ReadCoverage {
     /// file). `end` is the **exclusive** upper byte offset; `None` means the
     /// range extends to the end of the file at the time of reading (e.g. an
     /// offset read that ran to EOF without a `has_more` window boundary).
-    Range {
-        start: u64,
-        end: Option<u64>,
-    },
+    Range { start: u64, end: Option<u64> },
 }
 
 /// A single recorded read of a file within a session.
@@ -286,7 +283,10 @@ mod tests {
         let rec = ft.latest_record("s1", &path).await.unwrap();
         assert!(!rec.is_full(), "range read is not full");
         assert!(rec.covers_span(2, 5), "span inside range");
-        assert!(rec.covers_span(3, 7), "span reaching exclusive end boundary");
+        assert!(
+            rec.covers_span(3, 7),
+            "span reaching exclusive end boundary"
+        );
         assert!(
             !rec.covers_span(0, 3),
             "span starting before range is not covered"
@@ -307,7 +307,10 @@ mod tests {
         ft.read_with_coverage(
             "s1",
             &path,
-            ReadCoverage::Range { start: 4, end: None },
+            ReadCoverage::Range {
+                start: 4,
+                end: None,
+            },
             false,
         )
         .await
@@ -364,6 +367,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test-only: real time to simulate an external mtime change
     async fn modified_since_read_failure_includes_read_timestamp() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
@@ -429,7 +433,9 @@ mod tests {
         ft.read("s1", &path).await.unwrap();
 
         // Without changing mtime, assert should succeed.
-        ft.assert("s1", &path).await.expect("unchanged mtime passes");
+        ft.assert("s1", &path)
+            .await
+            .expect("unchanged mtime passes");
     }
 
     #[tokio::test]
