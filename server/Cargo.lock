@@ -1478,6 +1478,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-memory-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tracing",
+ "tracing-subscriber",
+ "workspace-hack",
+]
+
+[[package]]
 name = "djinn-orchestration-types"
 version = "0.1.0"
 dependencies = [
@@ -7457,6 +7468,7 @@ dependencies = [
  "hyper-util",
  "indexmap 2.13.0",
  "insta",
+ "lazy_static",
  "libc",
  "libgit2-sys",
  "log",
