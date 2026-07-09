@@ -96,7 +96,25 @@ pub(crate) enum RemediationKind {
     /// auto-resolves; the source stays held (open + blocked) until a human
     /// closes the remediation task. Idempotent: skipped when the source is
     /// already held by an unresolved blocker.
+    ///
+    /// Only reachable through an explicit org-policy escape hatch (a tripwire
+    /// rule an operator opted into `adjudication = human`) or a legacy-close
+    /// compatibility path — the autonomous default is [`Self::PlannerEscalation`].
     HumanReview,
+    /// Autonomous **planner-park escalation** (the no-human default for the
+    /// second-strike / CI-loop / tripwire-hold rungs). Like [`Self::HumanReview`]
+    /// it dispatches NO agent inline and blocks the source until the escalation
+    /// closes — but it is a NORMAL, planner-dispatchable `review` task labelled
+    /// [`PLANNER_PARK_ESCALATION_LABEL`](crate::roles::PLANNER_PARK_ESCALATION_LABEL),
+    /// **not** `human-review-hold`. The coordinator dispatch pass routes it to
+    /// the Planner (which owns terminal resolution: decompose + supersede, close
+    /// won't-fix, or re-scope + reopen), and closing it runs the same
+    /// source-release semantics as a human hold
+    /// ([`releases_source_on_close`](crate::roles::releases_source_on_close)):
+    /// blocker resolution + `human_review_resolved_at` stamp + `tripwire.hold.released`.
+    /// Idempotent: skipped when the source is already held by an unresolved
+    /// blocker.
+    PlannerEscalation,
 }
 
 impl CoordinatorActor {
@@ -558,6 +576,51 @@ impl CoordinatorActor {
 
         self.route_loop_guard_planner_intervention(&task.id, role, &intervention_reason)
             .await
+    }
+
+    /// True when the newest non-guard attempt for `(task, role)` terminalized as
+    /// an ENVIRONMENTAL interruption (`TaskAttemptOutcome::Interrupted`) — i.e.
+    /// the prior session was killed by infrastructure (a deploy/rollout, a k8s
+    /// pod eviction, or a startup reap of a run that deploy orphaned) rather than
+    /// by any liveness/quality decision.
+    ///
+    /// The dispatch reappearance path uses this to spare an innocent in-flight
+    /// task from a same-role dispatch-failure streak + escalating cooldown after
+    /// a deploy: an environmental interruption is treated "as if the attempt
+    /// never ran". Guard-only rows (`deferred`/`adopted_pr`) are skipped so the
+    /// check reflects the newest REAL attempt. Fail-safe: any lookup error
+    /// returns `false`, preserving the existing failure-counting behavior (never
+    /// silently suppress a genuine failure on a transient DB blip).
+    pub(crate) async fn latest_attempt_was_environmental_interrupt(
+        &self,
+        task_id: &str,
+        role: &str,
+    ) -> bool {
+        let repo = TaskAttemptRepository::new(self.db.clone());
+        let attempts = match repo.list_for_task(task_id).await {
+            Ok(attempts) => attempts,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    role,
+                    error = %e,
+                    "CoordinatorActor: environmental-interrupt attempt lookup failed; \
+                     treating reappearance as a normal failure (fail-safe)"
+                );
+                return false;
+            }
+        };
+        // `list_for_task` is ordered created_at DESC, so the first non-guard row
+        // for this role is the newest real attempt.
+        attempts
+            .iter()
+            .filter(|a| a.role == role)
+            .find(|a| {
+                a.outcome != TaskAttemptOutcome::Deferred.as_str()
+                    && a.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
+            })
+            .and_then(|a| a.outcome_enum().ok())
+            .is_some_and(|o| o.is_environmental_interrupt())
     }
 
     /// Trigger C: a worker/reviewer run completed degenerate because the
@@ -2126,13 +2189,138 @@ impl CoordinatorActor {
             .await
     }
 
-    /// Fail-closed human-review park path for the second-strike rung.
+    /// Count of prior held-remediation blockers (human-review hold OR
+    /// planner-park escalation — see
+    /// [`releases_source_on_close`](crate::roles::releases_source_on_close)) on
+    /// `source_task_id`, including CLOSED ones.
     ///
-    /// Clears in-memory and durable backoff, interrupts running sessions, creates
-    /// a human-review remediation task, parks the source `open`, and records
-    /// the park metric. This is exactly the same cleanup as the old
-    /// second-strike path so that any arbiter failure mode behaves identically
-    /// to a human hold.
+    /// Each autonomous escalation adds exactly one blocker that is never
+    /// removed (blockers persist across close), so this is the number of
+    /// escalation rounds already spent on the source — the strike counter for
+    /// the autonomous-escalation ceiling. Fail-open: returns 0 on any query
+    /// error (the ceiling only ever GATES a fresh escalation, so under-counting
+    /// keeps the ladder running rather than failing a task early).
+    async fn planner_escalation_count(&self, source_task_id: &str) -> i64 {
+        let repo = self.task_repo();
+        let blockers = match repo.list_blockers(source_task_id).await {
+            Ok(b) => b,
+            Err(_) => return 0,
+        };
+        let mut count = 0i64;
+        for b in &blockers {
+            if let Ok(Some(t)) = repo.get(&b.task_id).await
+                && crate::roles::releases_source_on_close(&t)
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Pure predicate: is `task` wedged in the same-signature CI remediation
+    /// dead-end (incident ay3d)?
+    ///
+    /// True when a WORKER-role dispatch is being considered for a task whose
+    /// required-CI gate is failing, a CI-loop remediation already ran against
+    /// the CURRENT PR head (`ci_last_remediation_base_sha` equals the current
+    /// head — no new push has landed since), and the same failure signature has
+    /// persisted at least [`CI_SAME_SIGNATURE_ESCALATION_THRESHOLD`] times. In
+    /// that state re-dispatching the worker only reproduces the identical red
+    /// build, so the respawn guard defers it on every ready pass forever; the
+    /// caller escalates instead.
+    ///
+    /// The "current head" is the attempt-derived GitHub head
+    /// (`ci_github_head_sha`), falling back to the snapshot head
+    /// (`ci_head_sha`) — the same head the CI-loop remediation records as its
+    /// baseline.
+    pub(crate) fn ci_same_signature_deadlocked(
+        task: &djinn_core::models::Task,
+        role: &str,
+    ) -> bool {
+        if role != "worker" {
+            return false;
+        }
+        if task.ci_status.as_str() != djinn_core::models::CiStatus::Failing.as_str() {
+            return false;
+        }
+        if task.ci_same_signature_count < CI_SAME_SIGNATURE_ESCALATION_THRESHOLD {
+            return false;
+        }
+        let Some(baseline) = task
+            .ci_last_remediation_base_sha
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        else {
+            return false;
+        };
+        let head = task
+            .ci_github_head_sha
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| task.ci_head_sha.as_deref().filter(|s| !s.is_empty()));
+        head == Some(baseline)
+    }
+
+    /// The no-human bottom of the remediation ladder.
+    ///
+    /// Creates an autonomous [`PlannerEscalation`](RemediationKind::PlannerEscalation)
+    /// that blocks the stuck source and parks it `open` — UNLESS the
+    /// autonomous-escalation ceiling ([`MAX_AUTONOMOUS_ESCALATIONS`]) has
+    /// already been spent on this source, in which case the board gives up
+    /// LOUDLY: it terminally fails (ForceClose) the source with a reason
+    /// documenting the exhausted ladder rather than parking it for a person. A
+    /// terminal close releases the source's blockers (verified in #1804), and a
+    /// planner can always resurrect the work from the epic level.
+    ///
+    /// Returns `true` when the source was parked behind a fresh escalation,
+    /// `false` when it was terminally failed (ceiling reached).
+    pub(crate) async fn escalate_to_planner_or_terminally_fail(
+        &mut self,
+        task: &djinn_core::models::Task,
+        reason: &str,
+    ) -> bool {
+        let prior = self.planner_escalation_count(&task.id).await;
+        if prior >= MAX_AUTONOMOUS_ESCALATIONS {
+            let terminal_reason = format!(
+                "Autonomous remediation ladder exhausted: {prior} planner-park escalations already \
+                 spent (ceiling {MAX_AUTONOMOUS_ESCALATIONS}) without convergence. Terminally \
+                 failing this task rather than parking it for a human — a planner may resurrect it \
+                 from the epic. Last reason: {reason}"
+            );
+            tracing::warn!(
+                task_id = %task.short_id,
+                prior_escalations = prior,
+                ceiling = MAX_AUTONOMOUS_ESCALATIONS,
+                "CoordinatorActor: autonomous-escalation ceiling reached — terminally failing task (no human park)"
+            );
+            self.terminally_fail_task(task, "coordinator", &terminal_reason)
+                .await;
+            return false;
+        }
+        // Ensure a planner-park escalation task blocks the source (creating one
+        // only if it isn't already held), THEN park the source to `open`. The
+        // blocker is added before the park, so the open task is never
+        // dispatchable without its blocker in place.
+        self.create_remediation_task(
+            &task.id,
+            reason,
+            &task.project_id,
+            RemediationKind::PlannerEscalation,
+        )
+        .await;
+        self.park_source_open(&task.id, reason).await;
+        true
+    }
+
+    /// Fail-closed loop-breaker park path for the second-strike rung.
+    ///
+    /// Clears in-memory and durable backoff, interrupts running sessions, then
+    /// hands the source to the autonomous escalation ladder
+    /// ([`escalate_to_planner_or_terminally_fail`](Self::escalate_to_planner_or_terminally_fail)):
+    /// a planner-park escalation blocks + parks the source, or — once the
+    /// escalation ceiling is spent — the source is terminally failed. Records
+    /// the park metric. NO human-review hold is ever produced on the autonomous
+    /// path.
     async fn park_source_human_review(
         &mut self,
         task: &djinn_core::models::Task,
@@ -2145,7 +2333,7 @@ impl CoordinatorActor {
             total_reopen_count = task.total_reopen_count,
             reopen_count = task.reopen_count,
             quality_strikes,
-            "CoordinatorActor: second-strike — holding unconvergeable task on human review after repeated planner interventions"
+            "CoordinatorActor: second-strike — routing unconvergeable task to autonomous planner escalation after repeated planner interventions"
         );
         // Clear streak/cooldown so the hold isn't shadowed by stale backoff
         // state.
@@ -2156,7 +2344,7 @@ impl CoordinatorActor {
         self.clear_durable_dispatch_backoff_state(
             &task.id,
             Some(&task.short_id),
-            "planner_second_strike_human_hold_clear",
+            "planner_second_strike_hold_clear",
         )
         .await;
         // Interrupt any running session for this task so parking it actually
@@ -2172,18 +2360,8 @@ impl CoordinatorActor {
                 "CoordinatorActor: failed to interrupt running sessions while parking second-strike task"
             );
         }
-        // Ensure a HUMAN-review remediation task blocks the source (creating
-        // one only if it isn't already held), THEN park the source to `open`.
-        // The blocker is added before the park, so the open task is never
-        // dispatchable without its blocker in place.
-        self.create_remediation_task(
-            &task.id,
-            reason,
-            &task.project_id,
-            RemediationKind::HumanReview,
-        )
-        .await;
-        self.park_source_open(&task.id, reason).await;
+        self.escalate_to_planner_or_terminally_fail(task, reason)
+            .await;
         self.record_task_parked_metric(task, quality_strikes).await;
         true
     }
@@ -2258,17 +2436,21 @@ impl CoordinatorActor {
             .as_ref()
             .and_then(|t| t.created_by_user_id.clone());
 
-        // Human-review remediation is idempotent: if the source is already held
-        // by an unresolved blocker, a remediation task already exists — don't
-        // stack a fresh one on every park tick.
-        if kind == RemediationKind::HumanReview
-            && let Some(src) = source_task.as_ref()
+        // A held remediation (human-review OR planner-park escalation) is
+        // idempotent: if the source is already held by an unresolved blocker, a
+        // remediation task already exists — don't stack a fresh one on every
+        // park tick. (Planner dispatch is NOT idempotent here — it is its own
+        // dispatch path.)
+        if matches!(
+            kind,
+            RemediationKind::HumanReview | RemediationKind::PlannerEscalation
+        ) && let Some(src) = source_task.as_ref()
         {
             match task_repo.list_blockers(&src.id).await {
                 Ok(blockers) if blockers.iter().any(|b| b.status != "closed") => {
                     tracing::info!(
                         source_task_id = %src.short_id,
-                        "CoordinatorActor: human-review remediation skipped — source already held by an unresolved blocker"
+                        "CoordinatorActor: held remediation skipped — source already held by an unresolved blocker"
                     );
                     return;
                 }
@@ -2339,7 +2521,10 @@ impl CoordinatorActor {
                 };
                 (model_ids, Some(project_path))
             }
-            RemediationKind::HumanReview => (Vec::new(), None),
+            // Neither held-remediation kind is dispatched inline: HumanReview
+            // waits for a human, and a PlannerEscalation is a normal review task
+            // the coordinator dispatch pass routes to the Planner.
+            RemediationKind::HumanReview | RemediationKind::PlannerEscalation => (Vec::new(), None),
         };
 
         // Name the review task after the work it is solving, not just a
@@ -2371,6 +2556,20 @@ impl CoordinatorActor {
                     "Escalated from task {source_label}. Repeated automated remediation FAILED — this requires HUMAN review.\n\nDo NOT auto-resolve: a human must close THIS task to release the blocked source task.\n\nReason: {reason}"
                 ),
                 "Repeated automated remediation failed. Requires human review — do not auto-resolve; a human must close this task to release the blocked source task.",
+            ),
+            RemediationKind::PlannerEscalation => (
+                format!(
+                    "Escalated from task {source_label}. Repeated automated remediation could not \
+                     converge — the board handed YOU (the Planner) terminal ownership.\n\nYou OWN \
+                     the resolution: decompose the source into replacement subtasks and supersede \
+                     it, close it as won't-fix with a reason, or re-scope and reopen it. Do NOT \
+                     create another escalation and do NOT wait for a human — closing THIS task \
+                     releases the blocked source.\n\nReason: {reason}"
+                ),
+                "Automated remediation could not converge and the board handed you terminal \
+                 ownership. Resolve it autonomously (decompose + supersede, close as won't-fix, or \
+                 re-scope + reopen the source); closing this task releases the blocked source. Do \
+                 NOT escalate again and do NOT wait for a human.",
             ),
         };
         let review_task = match djinn_core::auth_context::SESSION_USER_ID
@@ -2420,23 +2619,34 @@ impl CoordinatorActor {
             );
         }
 
-        // Tag the human-review remediation task with `human-review-hold` so the
-        // UI can surface a "needs your review" indicator on it (the actual item
-        // a human must act on; closing it revives the held source task). Write
-        // only the labels column: reusing the broad `update` path here is more
-        // fragile because it reserializes unrelated JSON columns and can silently
-        // leave the hold unlabeled if any copied field fails validation.
-        // Non-fatal: a failed label write still leaves the hold in place via the
-        // blocker + comment, but tests assert this path stays healthy.
-        if kind == RemediationKind::HumanReview
-            && let Err(e) = task_repo
-                .update_labels(&review_task.id, r#"["human-review-hold"]"#)
-                .await
+        // Label the held remediation task. Write only the labels column:
+        // reusing the broad `update` path here is more fragile because it
+        // reserializes unrelated JSON columns and can silently leave the hold
+        // unlabeled if any copied field fails validation. Non-fatal: a failed
+        // label write still leaves the hold in place via the blocker + comment,
+        // but tests assert this path stays healthy.
+        //
+        // - `HumanReview`  → `human-review-hold`: excludes the task from dispatch
+        //   (a human must act) and marks the "needs your review" UI indicator.
+        // - `PlannerEscalation` → `planner-park-escalation`: a NORMAL,
+        //   planner-dispatchable review task. The label is NOT applied to the
+        //   SOURCE (that would block reviewer/worker dispatch on the source and
+        //   defend it from auto-close); the source's own hold state (its parked
+        //   status + any active tripwire `gate.held`) is the real gate. The
+        //   label only drives the close-time source-release semantics
+        //   (`releases_source_on_close`).
+        let hold_label: Option<&str> = match kind {
+            RemediationKind::HumanReview => Some(r#"["human-review-hold"]"#),
+            RemediationKind::PlannerEscalation => Some(r#"["planner-park-escalation"]"#),
+            RemediationKind::Planner => None,
+        };
+        if let Some(labels_json) = hold_label
+            && let Err(e) = task_repo.update_labels(&review_task.id, labels_json).await
         {
             tracing::warn!(
                 error = %e,
                 review_task_id = %review_task.short_id,
-                "CoordinatorActor: human-review remediation — failed to set human-review-hold label"
+                "CoordinatorActor: held remediation — failed to set hold label"
             );
         }
 
@@ -2452,6 +2662,12 @@ impl CoordinatorActor {
                  resolves it. Reason: {}",
                 review_task.short_id, reason
             ),
+            RemediationKind::PlannerEscalation => format!(
+                "[PLANNER_PARK_ESCALATION] Held on autonomous planner escalation task {} after \
+                 automated remediation could not converge. The Planner owns terminal resolution; \
+                 closing it releases this source. Reason: {}",
+                review_task.short_id, reason
+            ),
         };
         let comment_payload = serde_json::json!({ "body": comment_body }).to_string();
         let _ = task_repo
@@ -2464,14 +2680,22 @@ impl CoordinatorActor {
             )
             .await;
 
-        // Human-review remediation is intentionally NOT dispatched to any agent —
-        // a human must resolve it, so the source stays held until they do.
-        if kind == RemediationKind::HumanReview {
+        // Neither held-remediation kind is dispatched inline here. HumanReview
+        // waits for a human. A PlannerEscalation is a normal open review task —
+        // the coordinator's dispatch pass claims it for the Planner role on a
+        // later tick (see `crate::roles::planner_review_claims`), so we must not
+        // dispatch it here (and must not fall through to the Planner-dispatch
+        // path below, which would double-dispatch).
+        if matches!(
+            kind,
+            RemediationKind::HumanReview | RemediationKind::PlannerEscalation
+        ) {
             tracing::info!(
                 review_task_id = %review_task.short_id,
                 source_task_id = %source_task_id,
                 project_id = %project_id,
-                "CoordinatorActor: human-review remediation created; awaiting human resolution (no agent dispatched)"
+                kind = ?kind,
+                "CoordinatorActor: held remediation created; source held until the remediation task closes"
             );
             return;
         }
@@ -2576,9 +2800,13 @@ fn outcome_to_reopen_class(outcome: &TaskAttemptOutcome) -> Option<ReopenClass> 
         // park escalation thresholds — while still surfacing in diagnostic
         // park/retry reasons. Sourced from the `7w2i` `task_attempts.outcome`
         // contract; no parallel outcome store is introduced.
+        // `Interrupted` is an environmental infrastructure interruption
+        // (deploy/rollout/reap); classified `Infra` so it never counts as a
+        // worker/task-quality strike or park escalation.
         TaskAttemptOutcome::TimedOut
         | TaskAttemptOutcome::SpawnFailed
-        | TaskAttemptOutcome::Crashed => Some(ReopenClass::Infra),
+        | TaskAttemptOutcome::Crashed
+        | TaskAttemptOutcome::Interrupted => Some(ReopenClass::Infra),
         // Guard-only or not a submission-triggered terminal.
         TaskAttemptOutcome::Deferred
         | TaskAttemptOutcome::AdoptedPr

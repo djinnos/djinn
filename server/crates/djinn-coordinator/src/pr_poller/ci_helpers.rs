@@ -692,9 +692,11 @@ impl CoordinatorActor {
             );
         }
 
-        // Escalate to the Planner (ADR-051 §8 escalation ceiling), which creates
-        // a remediation task and BLOCKS the source on it, so a human / Planner
-        // sees why the task gave up and can drive it forward.
+        // Route the CI-loop park through the autonomous escalation ladder: a
+        // planner-park escalation blocks + parks the source (the Planner owns
+        // terminal resolution), OR — once the autonomous-escalation ceiling is
+        // spent on this source — the source is terminally failed rather than
+        // held for a person. NO human-review hold is produced on this path.
         let enriched_reason = if ci_failure_sections.is_empty() {
             reason.to_string()
         } else {
@@ -703,23 +705,12 @@ impl CoordinatorActor {
                 ci_failure_sections.join("\n")
             )
         };
-        // Create a HUMAN-review remediation task (not a Planner dispatch) that
-        // blocks the source.  A CI-loop park is a terminal escalation: the
-        // automated remediation has failed and a human must resolve it, so we
-        // use `HumanReview` kind which sets the `human-review-hold` label and
-        // intentionally does NOT dispatch any agent to the remediation task.
-        self.create_remediation_task(
-            &task.id,
-            &enriched_reason,
-            &task.project_id,
-            crate::dispatch::RemediationKind::HumanReview,
-        )
-        .await;
-
-        // Park (hold) the source on the blocker just added — NOT force-close.
-        // The blocker was added by `create_remediation_task` BEFORE this
-        // park, so the open task is never dispatchable without its blocker.
-        self.park_source_open(&task.id, reason).await;
+        // `escalate_to_planner_or_terminally_fail` adds the blocker BEFORE
+        // parking the source, so the open task is never dispatchable without its
+        // blocker; when the ceiling is reached it ForceCloses the source instead
+        // (which releases its blockers) and does NOT park.
+        self.escalate_to_planner_or_terminally_fail(task, &enriched_reason)
+            .await;
         self.pr_status_cache.remove(&task.id);
         self.pr_draft_first_seen.remove(&task.id);
         self.review_stuck_sha_first_seen.remove(&task.id);

@@ -7,12 +7,12 @@ use super::{
     ci_merge_gate_verdict, classify_same_signature_escalation, compute_ci_failure_fingerprint,
     count_consecutive_identical, decide_auto_merge_tick, decide_pr_draft_ci_action,
     dequeue_reason_is_failure, dequeue_requires_rework, detect_scope_inversion,
-    rollout_policy_publication_marker,
     effective_review_decision, extract_crate_name, extract_crate_names, is_advisory_check_name,
     is_conversation_resolution_block, is_merge_queue_405, is_racing_unmerged_status,
     parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
     pr_transition_increments_reopen_count, record_auto_merge_decision_metrics,
-    record_pr_transition_reopen_metric, should_auto_resolve_conversations,
+    record_pr_transition_reopen_metric, rollout_policy_publication_marker,
+    should_auto_resolve_conversations,
 };
 use djinn_core::events::EventBus;
 use djinn_core::models::TransitionAction;
@@ -2954,10 +2954,7 @@ fn ci_merge_gate_stale_sha_overrides_status_in_all_variants() {
 #[test]
 fn rollout_publication_marker_enforces_prs_created_after_publication() {
     assert_eq!(
-        rollout_policy_publication_marker(
-            "2026-01-02T00:00:00Z",
-            Some("2026-01-01T00:00:00Z"),
-        ),
+        rollout_policy_publication_marker("2026-01-02T00:00:00Z", Some("2026-01-01T00:00:00Z"),),
         Some("2026-01-02T00:00:00Z"),
     );
 }
@@ -2965,10 +2962,7 @@ fn rollout_publication_marker_enforces_prs_created_after_publication() {
 #[test]
 fn rollout_publication_marker_backfills_prs_created_before_publication() {
     assert_eq!(
-        rollout_policy_publication_marker(
-            "2025-12-31T23:59:59Z",
-            Some("2026-01-01T00:00:00Z"),
-        ),
+        rollout_policy_publication_marker("2025-12-31T23:59:59Z", Some("2026-01-01T00:00:00Z"),),
         None,
     );
     assert_eq!(

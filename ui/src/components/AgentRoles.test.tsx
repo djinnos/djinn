@@ -8,8 +8,6 @@ import {
   fetchAgents,
   fetchAvailableMcpServers,
   fetchAvailableSkills,
-  clearLearnedPrompt,
-  fetchLearnedPromptHistory,
   updateAgent,
   type Agent,
 } from "@/api/agents";
@@ -55,11 +53,9 @@ vi.mock("@/api/agents", async (importOriginal) => {
     fetchAgents: vi.fn(),
     fetchAvailableMcpServers: vi.fn(),
     fetchAvailableSkills: vi.fn(),
-    fetchLearnedPromptHistory: vi.fn(),
     createAgent: vi.fn(),
     updateAgent: vi.fn(),
     deleteAgent: vi.fn(),
-    clearLearnedPrompt: vi.fn(),
   };
 });
 
@@ -73,7 +69,6 @@ const makeAgent = (overrides: Partial<Agent>): Agent => ({
   skills: [],
   model_preference: null,
   is_default: false,
-  learned_prompt: null,
   ...overrides,
 });
 
@@ -114,8 +109,6 @@ describe("AgentRoles", () => {
     vi.mocked(createAgent).mockReset();
     vi.mocked(updateAgent).mockReset();
     vi.mocked(deleteAgent).mockReset();
-    vi.mocked(fetchLearnedPromptHistory).mockReset();
-    vi.mocked(clearLearnedPrompt).mockReset();
 
     mockState.selectedProject = {
       id: "project-1",
@@ -141,11 +134,6 @@ describe("AgentRoles", () => {
       { name: "rust-review", description: "Review Rust code" },
       { name: "testing-library", description: "Exercise UI flows" },
     ]);
-    vi.mocked(fetchLearnedPromptHistory).mockResolvedValue({
-      learned_prompt: null,
-      amendments: [],
-    });
-    vi.mocked(clearLearnedPrompt).mockResolvedValue(undefined);
   });
 
   it("groups project defaults separately from specialists with explanatory copy", async () => {
@@ -207,70 +195,6 @@ describe("AgentRoles", () => {
       /Create a specialist only when tasks should explicitly route to a custom agent type or name/i,
     );
     expect(specialistsSection).toHaveTextContent(/this does not edit project defaults/i);
-  });
-
-  it("shows learned prompts as machine-managed read-only content separate from authored instructions", async () => {
-    const user = userEvent.setup();
-    const learnedDefault = {
-      ...defaultWorker,
-      learned_prompt: "When tasks include database changes, inspect migrations before editing.",
-    };
-    vi.mocked(fetchAgents).mockResolvedValue([learnedDefault]);
-
-    render(<AgentRoles />);
-
-    const defaultsSection = await screen.findByRole("region", { name: "Project defaults" });
-    expect(within(defaultsSection).getByText("Machine-managed learned prompt")).toBeInTheDocument();
-    expect(within(defaultsSection).getByText("(active)")).toBeInTheDocument();
-    expect(
-      within(defaultsSection).getByText(
-        "When tasks include database changes, inspect migrations before editing.",
-      ),
-    ).toBeInTheDocument();
-    expect(defaultsSection).toHaveTextContent(/shown read-only/i);
-    expect(defaultsSection).toHaveTextContent(/Edit human-authored system prompt extensions separately/i);
-
-    await user.click(within(defaultsSection).getByRole("button", { name: "Edit instructions" }));
-
-    expect(await screen.findByLabelText("Default instructions")).toHaveValue(
-      "Prefer small, focused changes.",
-    );
-    expect(screen.getByText("Machine-managed learned prompt")).toBeInTheDocument();
-    expect(screen.getByLabelText("Current machine-managed learned prompt")).toHaveTextContent(
-      "When tasks include database changes, inspect migrations before editing.",
-    );
-  });
-
-  it("clears learned prompts through the existing helper and removes the active indicator", async () => {
-    const user = userEvent.setup();
-    const learnedDefault = {
-      ...defaultWorker,
-      learned_prompt: "Prefer repository-local examples when adding tests.",
-    };
-    vi.mocked(fetchAgents).mockResolvedValue([learnedDefault]);
-    vi.mocked(clearLearnedPrompt).mockResolvedValue(undefined);
-
-    render(<AgentRoles />);
-
-    const defaultsSection = await screen.findByRole("region", { name: "Project defaults" });
-    expect(within(defaultsSection).getByText("Machine-managed learned prompt")).toBeInTheDocument();
-    expect(within(defaultsSection).getByText("(active)")).toBeInTheDocument();
-
-    await user.click(within(defaultsSection).getByRole("button", { name: "Clear" }));
-    const dialog = await screen.findByRole("alertdialog");
-    expect(dialog).toHaveTextContent(/auto-improvement history will be preserved/i);
-    await user.click(within(dialog).getByRole("button", { name: "Clear" }));
-
-    await waitFor(() => {
-      expect(clearLearnedPrompt).toHaveBeenCalledWith("default-worker");
-    });
-    await waitFor(() => {
-      expect(within(defaultsSection).queryByText("Machine-managed learned prompt")).not.toBeInTheDocument();
-    });
-    expect(within(defaultsSection).queryByText("(active)")).not.toBeInTheDocument();
-    expect(
-      within(defaultsSection).queryByText("Prefer repository-local examples when adding tests."),
-    ).not.toBeInTheDocument();
   });
 
   it("creates a specialist from the form with selected capabilities", async () => {

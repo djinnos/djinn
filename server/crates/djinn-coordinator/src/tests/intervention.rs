@@ -1193,8 +1193,13 @@ async fn ci_loop_human_review_hold_excludes_source_from_ready_dispatch_tick() {
     let remediation = repo.get(&remediation_id).await.unwrap().unwrap();
     assert_eq!(remediation.issue_type, "review");
     assert!(
-        remediation.labels.contains("human-review-hold"),
-        "human-review remediation must carry the dispatch-hold label; labels={}",
+        remediation.labels.contains("planner-park-escalation"),
+        "CI-loop park must create an autonomous planner-park escalation; labels={}",
+        remediation.labels
+    );
+    assert!(
+        !remediation.labels.contains("human-review-hold"),
+        "CI-loop park must NOT create a human-review hold; labels={}",
         remediation.labels
     );
     assert!(
@@ -1213,15 +1218,15 @@ async fn ci_loop_human_review_hold_excludes_source_from_ready_dispatch_tick() {
         .unwrap();
     assert!(
         !ready.iter().any(|candidate| candidate.id == task.id),
-        "same list_ready path used by dispatch must exclude the source while the human-review hold is open"
+        "same list_ready path used by dispatch must exclude the source while the escalation blocker is open"
     );
 
     actor.dispatch_ready_tasks(Some(&task.project_id)).await;
 
-    assert_eq!(
-        actor.dispatched, 0,
-        "ready-dispatch tick must not spawn a worker for the source while the human-review hold is open"
-    );
+    // The SOURCE must never be worker-dispatched while blocked. (The planner
+    // escalation task IS legitimately dispatchable to the Planner role — this
+    // is the autonomous-remediation path — so the aggregate `dispatched`
+    // counter is not asserted here; the source-specific guards below are.)
     assert!(
         !actor.last_dispatched.contains_key(&task.id),
         "dispatch tick must not record a worker dispatch marker for the held source"
@@ -1921,15 +1926,15 @@ async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
     );
 
     // The escalation reason passed to create_remediation_task also
-    // includes the sections (visible via the HUMAN_REVIEW_HOLD comment that
-    // create_remediation_task logs on the source task).
+    // includes the sections (visible via the PLANNER_PARK_ESCALATION comment
+    // that create_remediation_task logs on the source task).
     let planner_comments: Vec<_> = comments
         .iter()
-        .filter(|c| c.payload.contains("HUMAN_REVIEW_HOLD"))
+        .filter(|c| c.payload.contains("PLANNER_PARK_ESCALATION"))
         .collect();
     assert!(
         !planner_comments.is_empty(),
-        "HUMAN_REVIEW_HOLD comment must be logged"
+        "PLANNER_PARK_ESCALATION comment must be logged"
     );
     let planner_comment = &planner_comments[0];
     assert!(
@@ -1990,11 +1995,11 @@ async fn escalate_ci_failure_with_empty_sections_omits_details() {
 
     let planner_comments: Vec<_> = comments
         .iter()
-        .filter(|c| c.payload.contains("HUMAN_REVIEW_HOLD"))
+        .filter(|c| c.payload.contains("PLANNER_PARK_ESCALATION"))
         .collect();
     assert!(
         !planner_comments.is_empty(),
-        "HUMAN_REVIEW_HOLD comment must be logged"
+        "PLANNER_PARK_ESCALATION comment must be logged"
     );
     assert!(
         !planner_comments[0]
@@ -5280,18 +5285,24 @@ async fn dispatch_pass_auto_parks_expired_unconsumed_arbiter_deadline() {
     let parked = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
         parked.status, "open",
-        "deadline auto-park parks the source behind a HumanReview blocker"
+        "deadline auto-park parks the source behind a planner-park escalation blocker"
     );
     let blockers = repo.list_blockers(&task.id).await.unwrap();
     assert!(
         !blockers.is_empty(),
-        "deadline auto-park must create a HumanReview blocker"
+        "deadline auto-park must create a planner-park escalation blocker"
     );
     let hold_task = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
     assert_eq!(hold_task.issue_type, "review");
     assert!(
-        hold_task.labels.contains("human-review-hold"),
-        "HumanReview hold task must carry human-review-hold label"
+        hold_task.labels.contains("planner-park-escalation"),
+        "deadline auto-park must create an autonomous planner-park escalation, got: {}",
+        hold_task.labels
+    );
+    assert!(
+        !hold_task.labels.contains("human-review-hold"),
+        "deadline auto-park must NOT create a human-review hold, got: {}",
+        hold_task.labels
     );
     assert!(
         hold_task.description.contains("arbiter_deadline_expired"),
@@ -5835,17 +5846,23 @@ async fn arbiter_failure_dossier_on_db_error_parks_with_evidence_fields() {
         "db error must park the task to open (human review)"
     );
 
-    // A human-review blocker was created.
+    // A planner-park escalation blocker was created (fail-closed, no human hold).
     let blockers = repo.list_blockers(&task.id).await.unwrap();
     assert!(
         !blockers.is_empty(),
-        "db error must create a human-review blocker"
+        "db error must create a planner-park escalation blocker"
     );
     let hold_task = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
     assert_eq!(hold_task.issue_type, "review");
     assert!(
-        hold_task.labels.contains("human-review-hold"),
-        "hold must carry human-review-hold label"
+        hold_task.labels.contains("planner-park-escalation"),
+        "hold must carry the planner-park-escalation label, got: {}",
+        hold_task.labels
+    );
+    assert!(
+        !hold_task.labels.contains("human-review-hold"),
+        "db-error park must NOT create a human-review hold, got: {}",
+        hold_task.labels
     );
 
     // The hold description contains the arbiter_failure_dossier with all
@@ -6295,13 +6312,19 @@ async fn enforce_expired_deadline_before_dispatch_auto_parks_with_dossier() {
     let blockers = repo.list_blockers(&task.id).await.unwrap();
     assert!(
         !blockers.is_empty(),
-        "deadline auto-park must create a human-review blocker"
+        "deadline auto-park must create a planner-park escalation blocker"
     );
     let hold_task = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
     assert_eq!(hold_task.issue_type, "review");
     assert!(
-        hold_task.labels.contains("human-review-hold"),
-        "hold must carry human-review-hold label"
+        hold_task.labels.contains("planner-park-escalation"),
+        "hold must carry the planner-park-escalation label, got: {}",
+        hold_task.labels
+    );
+    assert!(
+        !hold_task.labels.contains("human-review-hold"),
+        "deadline auto-park must NOT create a human-review hold, got: {}",
+        hold_task.labels
     );
     assert!(
         hold_task.description.contains("arbiter_deadline_expired"),

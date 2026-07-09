@@ -1870,26 +1870,49 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
         }
     };
 
+    // Outcome selection by reap reason. A `startup` reap fires immediately after
+    // this coordinator boots: any `pending` attempt with no live task_run and no
+    // running session at boot was orphaned because a DEPLOY/ROLLOUT killed its
+    // pod out from under it — an ENVIRONMENTAL interruption, not a task failure.
+    // Stamp it `Interrupted` so the dispatch reappearance path recognizes it and
+    // skips the failure streak / cooldown escalation ("treat like it never ran").
+    // The `periodic` reap is conservative — a pending attempt still orphaned after
+    // the periodic threshold with no live run is more likely a genuine mid-run
+    // loss, so it stays `Crashed` (both are is_infra ⇒ quality/park exempt; they
+    // differ only in whether the reappearance streak counts them).
+    let (orphan_outcome, orphan_failure_class, orphan_summary) = if reason == "startup" {
+        (
+            djinn_core::models::task_attempt::TaskAttemptOutcome::Interrupted,
+            "environmental_interrupt_startup_reap",
+            "orphaned pending attempt reaped at startup (deploy/rollout interrupted the run): \
+             environmental non-attempt, no dispatch penalty",
+        )
+    } else {
+        (
+            djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
+            "orphaned_pending_attempt",
+            "orphaned pending attempt reaped: no live task_run or running session",
+        )
+    };
+
     for orphan in orphans {
         let summary_json = serde_json::json!({
             "recovery_classifier": "orphaned_pending_attempt_reaper",
             "reason": reason,
             "threshold_secs": threshold_secs,
-            "failure_class": "orphaned_pending_attempt",
+            "failure_class": orphan_failure_class,
         })
         .to_string();
         match repo
             .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
                 id: &orphan.id,
-                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
+                outcome: orphan_outcome,
                 pr_url: None,
                 submit_ref: None,
                 checkpoint_ref: None,
                 mirror_head_sha: None,
                 github_head_sha: None,
-                summary: Some(
-                    "orphaned pending attempt reaped: no live task_run or running session",
-                ),
+                summary: Some(orphan_summary),
                 summary_json: Some(&summary_json),
                 log_tail: None,
             })

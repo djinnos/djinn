@@ -1684,6 +1684,40 @@ impl CoordinatorActor {
             //    already exists for this task+role, defer dispatch and record
             //    a guard-only audit row.  No dispatch / provider / reopen
             //    counters are incremented for the deferral.
+            // Same-signature CI remediation dead-end (incident ay3d): an open
+            // worker task whose failing required-CI PR already had a
+            // remediation run against the CURRENT head
+            // (`last_remediation_base_sha` == head) and whose failure signature
+            // has persisted past the threshold would be deferred by the respawn
+            // guard on EVERY ready pass forever — no new push to re-evaluate, no
+            // escalation, no strike accrual, and no manual lever from `open`.
+            // Break the wedge by routing it into the autonomous escalation
+            // ladder: a planner-park escalation below the ceiling, terminal-fail
+            // at it. Fires once — the escalation blocks + parks the source, so
+            // it leaves the ready set on the next pass.
+            if Self::ci_same_signature_deadlocked(&task, role) {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    same_signature_count = task.ci_same_signature_count,
+                    head = task.ci_github_head_sha.as_deref().or(task.ci_head_sha.as_deref()).unwrap_or("(unknown)"),
+                    "CoordinatorActor: same-signature CI remediation dead-end — routing to autonomous escalation instead of deferring worker forever"
+                );
+                let head = task
+                    .ci_github_head_sha
+                    .as_deref()
+                    .or(task.ci_head_sha.as_deref())
+                    .unwrap_or("(unknown)")
+                    .to_owned();
+                let reason = format!(
+                    "Required CI has failed on the same signature {} time(s) at head {} and a \
+                     remediation already ran against that exact head with no new push — the worker \
+                     cannot make forward progress by re-running. Escalating for terminal resolution.",
+                    task.ci_same_signature_count, head,
+                );
+                self.escalate_to_planner_or_terminally_fail(&task, &reason)
+                    .await;
+                continue;
+            }
             let pr_rework_signal = super::respawn_guard::PrReworkSignal::from_task_row(
                 task.ci_status.as_str(),
                 task.merge_conflict_metadata.as_deref(),
@@ -1784,187 +1818,229 @@ impl CoordinatorActor {
                 // in which case the ordinary streak/ladder logic applies
                 // unchanged.
                 let provider_failure = self.health.take_task_provider_failure(&task.id);
-                match classify_reappearing_dispatch(marker, role, current_streak) {
-                    Some(ReappearingDispatch::SameRoleFailure {
-                        next_streak,
-                        cooldown,
-                    }) => {
-                        // A3: a throttle/rate-limit reappearance is a transient
-                        // provider fault, NOT evidence the task is structurally
-                        // undispatchable — so it must not advance the terminal
-                        // `dispatch_failure_streak` toward MAX (which would close a
-                        // perfectly healthy task). The task still backs off (the
-                        // escalating cooldown below still grows with the
-                        // reappearance) and the per-(scope,model) breaker still
-                        // fails over; only the terminal-close counter is spared.
-                        let throttle = provider_failure.is_some_and(|f| f.throttle);
-
-                        // Second-strike Planner escalation for provider-error
-                        // FAILED sessions. A genuine (non-throttle) typed
-                        // provider failure that recurs for the same task is the
-                        // poisoned-transcript-400 / dead-credential / persistent
-                        // server-fault class: redispatch reproduces it
-                        // identically, so riding the backoff ladder toward the
-                        // streak-10 terminal close just burns attempts with
-                        // nobody deciding what to do. The cycling gate (trigger
-                        // B) below excludes provider faults by design, and the
-                        // stall-cancel escalation only covers coordinator stall
-                        // kills — so without this the failure has no Planner
-                        // path. Count consecutive such failures (reset when the
-                        // task's status advances, mirroring the stall streak)
-                        // and hand the task to the Planner on the
-                        // FAILURE_ESCALATION_THRESHOLD-th strike instead of
-                        // another doomed redispatch.
-                        if provider_failure.is_some()
-                            && !throttle
-                            && self
-                                .maybe_escalate_provider_failure_streak(&task, role)
-                                .await
-                        {
-                            // Bump the local cap to reflect the planner session
-                            // the intervention just dispatched (same as trigger
-                            // B and the stuck-task path).
-                            self.bump_local_cap_for_last_planner_admission(
-                                &mut running_by_user_model,
-                            )
-                            .await;
-                            continue;
-                        }
-
-                        // Trigger B: the task keeps reappearing for the SAME
-                        // role with no typed provider failure to blame — its
-                        // runs complete but the task never converges (the
-                        // review-cycle bounce that never passes through `open`,
-                        // so trigger A's reopen_count never arms). Route it to
-                        // a Planner intervention instead of riding the ladder
-                        // to the terminal close at MAX_DISPATCH_FAILURES, which
-                        // would force-close a task whose durable work may be
-                        // fine. Falls through to the ordinary ladder when the
-                        // Planner was already routed for this loop (idempotency
-                        // marker) — the terminal close then remains the final
-                        // backstop.
-                        if should_route_cycling_intervention(
-                            role,
+                let reappearing = classify_reappearing_dispatch(marker, role, current_streak);
+                // Environmental-interrupt exemption. A same-role reappearance is
+                // normally a failed attempt (streak++ + escalating cooldown). But
+                // when the prior session was killed by INFRASTRUCTURE — a
+                // coordinator deploy/rollout, a k8s pod eviction, or a startup
+                // reap of a run that deploy orphaned — the task did nothing wrong:
+                // the classifier/reaper terminalized its attempt as `Interrupted`
+                // (environmental non-attempt). Deploys happen many times a day, so
+                // without this every deploy would march innocent in-flight tasks up
+                // the cooldown ladder toward strikes/interventions/terminal close.
+                // Treat it as if the attempt never ran: clear any backoff state and
+                // dispatch immediately, contributing NO streak and NO cooldown.
+                // Genuine `crashed`/`timed_out` attempts are NOT environmental and
+                // still fall through to the ordinary failure accounting below.
+                if matches!(
+                    reappearing,
+                    Some(ReappearingDispatch::SameRoleFailure { .. })
+                ) && self
+                    .latest_attempt_was_environmental_interrupt(&task.id, role)
+                    .await
+                {
+                    self.dispatch_failure_streak.remove(&task.id);
+                    self.provider_failure_streak.remove(&task.id);
+                    self.dispatch_cooldowns.remove(&task.id);
+                    self.clear_durable_dispatch_backoff_state(
+                        &task.id,
+                        Some(&task.short_id),
+                        "environmental_interrupt_no_dispatch_penalty",
+                    )
+                    .await;
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        role,
+                        "CoordinatorActor: prior session ended in an environmental interruption \
+                         (deploy/rollout/pod-eviction/reap) — reappearance is NOT a dispatch \
+                         failure; dispatching without streak or cooldown"
+                    );
+                    // Fall through to dispatch (deliberately no `continue`).
+                } else {
+                    match reappearing {
+                        Some(ReappearingDispatch::SameRoleFailure {
                             next_streak,
-                            provider_failure.is_some(),
-                        ) && self
-                            .maybe_intervene_on_cycling_task(&task, role, next_streak)
-                            .await
-                        {
-                            self.dispatch_failure_streak.remove(&task.id);
-                            self.provider_failure_streak.remove(&task.id);
-                            self.dispatch_cooldowns.remove(&task.id);
-                            self.clear_durable_dispatch_backoff_state(
-                                &task.id,
-                                Some(&task.short_id),
-                                "cycling_planner_intervention_handoff_clear",
-                            )
-                            .await;
-                            // Bump local cap to reflect the planner session the
-                            // intervention just dispatched (same as Trigger A).
-                            self.bump_local_cap_for_last_planner_admission(
-                                &mut running_by_user_model,
-                            )
-                            .await;
-                            continue;
-                        }
+                            cooldown,
+                        }) => {
+                            // A3: a throttle/rate-limit reappearance is a transient
+                            // provider fault, NOT evidence the task is structurally
+                            // undispatchable — so it must not advance the terminal
+                            // `dispatch_failure_streak` toward MAX (which would close a
+                            // perfectly healthy task). The task still backs off (the
+                            // escalating cooldown below still grows with the
+                            // reappearance) and the per-(scope,model) breaker still
+                            // fails over; only the terminal-close counter is spared.
+                            let throttle = provider_failure.is_some_and(|f| f.throttle);
 
-                        // After MAX consecutive same-role failures the task is
-                        // structurally doomed (e.g. its run can never complete);
-                        // fail it terminally instead of looping forever. Skipped
-                        // for throttles (A3): a transient quota window must never
-                        // terminally close the task.
-                        if !throttle && next_streak >= MAX_DISPATCH_FAILURES {
-                            self.terminally_fail_task(
-                                &task,
+                            // Second-strike Planner escalation for provider-error
+                            // FAILED sessions. A genuine (non-throttle) typed
+                            // provider failure that recurs for the same task is the
+                            // poisoned-transcript-400 / dead-credential / persistent
+                            // server-fault class: redispatch reproduces it
+                            // identically, so riding the backoff ladder toward the
+                            // streak-10 terminal close just burns attempts with
+                            // nobody deciding what to do. The cycling gate (trigger
+                            // B) below excludes provider faults by design, and the
+                            // stall-cancel escalation only covers coordinator stall
+                            // kills — so without this the failure has no Planner
+                            // path. Count consecutive such failures (reset when the
+                            // task's status advances, mirroring the stall streak)
+                            // and hand the task to the Planner on the
+                            // FAILURE_ESCALATION_THRESHOLD-th strike instead of
+                            // another doomed redispatch.
+                            if provider_failure.is_some()
+                                && !throttle
+                                && self
+                                    .maybe_escalate_provider_failure_streak(&task, role)
+                                    .await
+                            {
+                                // Bump the local cap to reflect the planner session
+                                // the intervention just dispatched (same as trigger
+                                // B and the stuck-task path).
+                                self.bump_local_cap_for_last_planner_admission(
+                                    &mut running_by_user_model,
+                                )
+                                .await;
+                                continue;
+                            }
+
+                            // Trigger B: the task keeps reappearing for the SAME
+                            // role with no typed provider failure to blame — its
+                            // runs complete but the task never converges (the
+                            // review-cycle bounce that never passes through `open`,
+                            // so trigger A's reopen_count never arms). Route it to
+                            // a Planner intervention instead of riding the ladder
+                            // to the terminal close at MAX_DISPATCH_FAILURES, which
+                            // would force-close a task whose durable work may be
+                            // fine. Falls through to the ordinary ladder when the
+                            // Planner was already routed for this loop (idempotency
+                            // marker) — the terminal close then remains the final
+                            // backstop.
+                            if should_route_cycling_intervention(
                                 role,
-                                "repeated dispatch failures: the task could not complete after \
+                                next_streak,
+                                provider_failure.is_some(),
+                            ) && self
+                                .maybe_intervene_on_cycling_task(&task, role, next_streak)
+                                .await
+                            {
+                                self.dispatch_failure_streak.remove(&task.id);
+                                self.provider_failure_streak.remove(&task.id);
+                                self.dispatch_cooldowns.remove(&task.id);
+                                self.clear_durable_dispatch_backoff_state(
+                                    &task.id,
+                                    Some(&task.short_id),
+                                    "cycling_planner_intervention_handoff_clear",
+                                )
+                                .await;
+                                // Bump local cap to reflect the planner session the
+                                // intervention just dispatched (same as Trigger A).
+                                self.bump_local_cap_for_last_planner_admission(
+                                    &mut running_by_user_model,
+                                )
+                                .await;
+                                continue;
+                            }
+
+                            // After MAX consecutive same-role failures the task is
+                            // structurally doomed (e.g. its run can never complete);
+                            // fail it terminally instead of looping forever. Skipped
+                            // for throttles (A3): a transient quota window must never
+                            // terminally close the task.
+                            if !throttle && next_streak >= MAX_DISPATCH_FAILURES {
+                                self.terminally_fail_task(
+                                    &task,
+                                    role,
+                                    "repeated dispatch failures: the task could not complete after \
                                  multiple attempts. Resolve the underlying issue and reopen.",
-                            )
-                            .await;
-                            self.dispatch_failure_streak.remove(&task.id);
-                            self.provider_failure_streak.remove(&task.id);
-                            self.dispatch_cooldowns.remove(&task.id);
-                            self.inflight_dispatches.remove(&task.id);
-                            self.clear_durable_dispatch_backoff_state(
-                                &task.id,
-                                Some(&task.short_id),
-                                "same_role_terminal_close_clear",
-                            )
-                            .await;
-                            continue;
-                        }
+                                )
+                                .await;
+                                self.dispatch_failure_streak.remove(&task.id);
+                                self.provider_failure_streak.remove(&task.id);
+                                self.dispatch_cooldowns.remove(&task.id);
+                                self.inflight_dispatches.remove(&task.id);
+                                self.clear_durable_dispatch_backoff_state(
+                                    &task.id,
+                                    Some(&task.short_id),
+                                    "same_role_terminal_close_clear",
+                                )
+                                .await;
+                                continue;
+                            }
 
-                        // A3: leave the terminal streak at its current value on a
-                        // throttle (don't persist the advanced `next_streak`).
-                        let stored_streak =
-                            stored_streak_after_failure(current_streak, next_streak, throttle);
-                        if stored_streak > 0 {
-                            self.dispatch_failure_streak
-                                .insert(task.id.clone(), stored_streak);
-                        } else {
-                            self.dispatch_failure_streak.remove(&task.id);
-                        }
+                            // A3: leave the terminal streak at its current value on a
+                            // throttle (don't persist the advanced `next_streak`).
+                            let stored_streak =
+                                stored_streak_after_failure(current_streak, next_streak, throttle);
+                            if stored_streak > 0 {
+                                self.dispatch_failure_streak
+                                    .insert(task.id.clone(), stored_streak);
+                            } else {
+                                self.dispatch_failure_streak.remove(&task.id);
+                            }
 
-                        // A6: honor a provider-stated reset as a redispatch floor.
-                        // `cooldown` is the escalating ladder value for this
-                        // reappearance; when the provider stated a Retry-After /
-                        // rate-limit-reset that exceeds it, redispatch no earlier
-                        // than that reset (otherwise a 5-hour quota window would be
-                        // probed every ~30 min, burning failover). The provider
-                        // reset is deliberately allowed to EXCEED the ladder's
-                        // 30-min ceiling — that's the whole point — but is clamped
-                        // to a hard safety max so a malformed value can't wedge the
-                        // task forever.
-                        let retry_after_ms = provider_failure.and_then(|f| f.retry_after_ms);
-                        let effective_cooldown =
-                            apply_provider_retry_floor(cooldown, retry_after_ms);
-                        if effective_cooldown > cooldown {
-                            tracing::info!(
+                            // A6: honor a provider-stated reset as a redispatch floor.
+                            // `cooldown` is the escalating ladder value for this
+                            // reappearance; when the provider stated a Retry-After /
+                            // rate-limit-reset that exceeds it, redispatch no earlier
+                            // than that reset (otherwise a 5-hour quota window would be
+                            // probed every ~30 min, burning failover). The provider
+                            // reset is deliberately allowed to EXCEED the ladder's
+                            // 30-min ceiling — that's the whole point — but is clamped
+                            // to a hard safety max so a malformed value can't wedge the
+                            // task forever.
+                            let retry_after_ms = provider_failure.and_then(|f| f.retry_after_ms);
+                            let effective_cooldown =
+                                apply_provider_retry_floor(cooldown, retry_after_ms);
+                            if effective_cooldown > cooldown {
+                                tracing::info!(
+                                    task_id = %task.short_id,
+                                    role,
+                                    ladder_cooldown_secs = cooldown.as_secs(),
+                                    provider_floor_secs = effective_cooldown.as_secs(),
+                                    "CoordinatorActor: applying provider-stated retry-after as redispatch floor"
+                                );
+                            }
+
+                            tracing::warn!(
                                 task_id = %task.short_id,
                                 role,
-                                ladder_cooldown_secs = cooldown.as_secs(),
-                                provider_floor_secs = effective_cooldown.as_secs(),
-                                "CoordinatorActor: applying provider-stated retry-after as redispatch floor"
+                                streak = stored_streak,
+                                throttle,
+                                cooldown_secs = effective_cooldown.as_secs(),
+                                "CoordinatorActor: repeated task failure — backing off dispatch (escalating cooldown)"
                             );
+                            self.dispatch_cooldowns.insert(
+                                task.id.clone(),
+                                SystemClock::new().now_instant() + effective_cooldown,
+                            );
+                            self.persist_durable_dispatch_state_update(
+                                &task.id,
+                                Some(&task.short_id),
+                                "same_role_failure_backoff",
+                                DurableDispatchStateUpdate {
+                                    failure_streak: Some(stored_streak),
+                                    cooldown_until: Some(dispatch_wall_clock_after(
+                                        effective_cooldown,
+                                    )),
+                                    last_dispatched: Some(None),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                            continue;
                         }
-
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            role,
-                            streak = stored_streak,
-                            throttle,
-                            cooldown_secs = effective_cooldown.as_secs(),
-                            "CoordinatorActor: repeated task failure — backing off dispatch (escalating cooldown)"
-                        );
-                        self.dispatch_cooldowns.insert(
-                            task.id.clone(),
-                            SystemClock::new().now_instant() + effective_cooldown,
-                        );
-                        self.persist_durable_dispatch_state_update(
-                            &task.id,
-                            Some(&task.short_id),
-                            "same_role_failure_backoff",
-                            DurableDispatchStateUpdate {
-                                failure_streak: Some(stored_streak),
-                                cooldown_until: Some(dispatch_wall_clock_after(effective_cooldown)),
-                                last_dispatched: Some(None),
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-                        continue;
-                    }
-                    Some(ReappearingDispatch::RoleTransition) | None => {
-                        self.dispatch_failure_streak.remove(&task.id);
-                        self.provider_failure_streak.remove(&task.id);
-                        self.dispatch_cooldowns.remove(&task.id);
-                        self.clear_durable_dispatch_backoff_state(
-                            &task.id,
-                            Some(&task.short_id),
-                            "role_transition_dispatch_state_clear",
-                        )
-                        .await;
+                        Some(ReappearingDispatch::RoleTransition) | None => {
+                            self.dispatch_failure_streak.remove(&task.id);
+                            self.provider_failure_streak.remove(&task.id);
+                            self.dispatch_cooldowns.remove(&task.id);
+                            self.clear_durable_dispatch_backoff_state(
+                                &task.id,
+                                Some(&task.short_id),
+                                "role_transition_dispatch_state_clear",
+                            )
+                            .await;
+                        }
                     }
                 }
             }

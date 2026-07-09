@@ -16,21 +16,6 @@ export interface Agent {
   skills: string[];
   model_preference: string | null;
   is_default: boolean;
-  learned_prompt: string | null;
-}
-
-export interface LearnedPromptAmendment {
-  id: string;
-  proposed_text: string;
-  action: "keep" | "discard";
-  metrics_before: Record<string, number>;
-  metrics_after: Record<string, number>;
-  created_at: string;
-}
-
-export interface LearnedPromptHistory {
-  learned_prompt: string | null;
-  amendments: LearnedPromptAmendment[];
 }
 
 export interface CreateAgentRequest {
@@ -178,24 +163,4 @@ export async function fetchAgentMetrics(projectId: string): Promise<AgentMetrics
     throw new Error(`Failed to fetch agent metrics: ${response.status}`);
   }
   return response.json() as Promise<AgentMetricsResponse>;
-}
-
-export async function fetchLearnedPromptHistory(id: string): Promise<LearnedPromptHistory> {
-  const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/api/agents/${id}/learned-prompt/history`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch learned prompt history: ${response.status}`);
-  }
-  return response.json() as Promise<LearnedPromptHistory>;
-}
-
-export async function clearLearnedPrompt(id: string): Promise<void> {
-  const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/api/agents/${id}/learned-prompt`, {
-    method: "DELETE",
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Failed to clear learned prompt: ${text || response.status}`);
-  }
 }
