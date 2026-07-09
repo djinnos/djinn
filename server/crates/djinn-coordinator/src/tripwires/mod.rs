@@ -65,6 +65,7 @@ pub use reason_codes::{
 };
 #[allow(unused_imports)]
 pub use rules::{
-    all_rule_evaluators, evaluate_boundary_path_changes, evaluate_dependency_identity_changes,
+    all_rule_evaluators, evaluate_boundary_path_changes, evaluate_ci_workflow_changes,
+    evaluate_dependency_identity_changes, evaluate_large_delete_or_rewrite,
     evaluate_migration_changes, evaluate_network_egress_changes, evaluate_unsafe_code_changes,
 };
