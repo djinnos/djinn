@@ -1697,6 +1697,10 @@ impl CoordinatorActor {
         )
     }
 
+    pub(super) fn audit_sampler_repo(&self) -> djinn_db::AuditSamplerRepository {
+        djinn_db::AuditSamplerRepository::new(self.db.clone())
+    }
+
     /// Handle the end of a planner session by re-evaluating the epic its
     /// task was attached to.  Non-planner sessions and task-less sessions
     /// are ignored.
