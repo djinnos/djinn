@@ -91,6 +91,23 @@ pub use housekeeping::{
     LlmAnchorProposer, ProposedBackfillAnchor, propose_anchor_deterministic,
 };
 
+/// Compact scope-overlap candidate row used for retrieval tracing.
+///
+/// This intentionally carries ranking and scope/source metadata but omits note
+/// content so downstream trace classification can record why eligible notes
+/// were injected or skipped without changing production injection output.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct ScopeOverlapTraceCandidate {
+    pub id: String,
+    pub permalink: String,
+    pub title: String,
+    pub folder: String,
+    pub note_type: String,
+    pub scope_paths: String,
+    pub confidence: f64,
+    pub rank: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct NoteSearchParams<'a> {
     pub project_id: &'a str,
