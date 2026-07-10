@@ -190,6 +190,33 @@ fn numbered_window(content: &str, offset: usize, limit: usize, path: &str) -> se
 /// budgets in this crate (see `output_stash::MAX_TOTAL_BYTES`, 5 MB).
 const MAX_READ_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
 
+/// Does a requested path look like an attempt to read from the in-repo
+/// memory tree? We match `.djinn/memory/` in either the raw (possibly
+/// relative) request or the resolved (absolute) form, so the hint fires
+/// for `.djinn/memory/foo` and `/abs/.../.djinn/memory/foo` alike. The
+/// hint is only reached after `File::open` already returned NotFound, so
+/// genuinely readable ADR-057/FUSE memory-mount files never trigger it.
+fn is_memory_path(raw: &str, resolved: &Path) -> bool {
+    raw.contains(".djinn/memory/") || resolved.display().to_string().contains(".djinn/memory/")
+}
+
+/// Teaching error returned when a read of a `.djinn/memory/` path hits
+/// NotFound: memory notes are stored in the project database, not on the
+/// filesystem (the worker worktree is a bare clone with no note-tree
+/// expansion), so direct the agent to the `memory_read` / `memory_search`
+/// MCP tools with concrete example invocations.
+fn memory_not_found_hint(path: &Path) -> String {
+    format!(
+        "file not found: {}. Memory notes are not stored on the filesystem; they live in the \
+         project database and must be accessed with the memory MCP tools. To read a specific \
+         note, use memory_read(identifier=\"pitfalls/<slug>\") — for example \
+         memory_read(identifier=\"pitfalls/some-slug\"). To discover notes by content, use \
+         memory_search(query=\"...\") — for example \
+         memory_search(query=\"rate limiting\").",
+        path.display()
+    )
+}
+
 pub(crate) async fn call_read(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -228,6 +255,13 @@ pub(crate) async fn call_read(
 
     let file = tokio::fs::File::open(&path).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
+            // Memory-path teaching hint: `.djinn/memory/` reads that hit
+            // NotFound mean the agent tried to read a memory note off disk.
+            // Memory notes live in the project database, not the filesystem,
+            // so steer them to the `memory_read` / `memory_search` MCP tools.
+            if is_memory_path(&p.file_path, &path) {
+                return memory_not_found_hint(&path);
+            }
             let parent = path.parent().unwrap_or(worktree_path);
             let suggestions = std::fs::read_dir(parent)
                 .ok()

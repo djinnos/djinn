@@ -335,6 +335,11 @@ A baseline that passes `validate-fixtures` must:
   greater than zero.
 - Include `per_query_ranks` entries for both `all_queries` and
   `bad_cases` suites with counts matching the fixture file lengths.
+- Include a `bad_cases` entry in `suite_metrics` when the fixture
+  set contains any bad-case rows.
+- **Not** be an all-miss baseline: aggregate recall@1/5/10 all zero
+  with zero-result-rate 1.0 indicates a broken pipeline or bad fixtures.
+  (Test override: `DJINN_MEMORY_EVAL_TEST_OVERRIDE=allow_all_miss_baseline`.)
 - Be **produced by `cargo run -p djinn-memory-eval -- run` followed by
   `cargo run -p djinn-memory-eval -- refresh-baseline`** against the
   real `NoteRepository::search` and `build_context` paths — not by
@@ -346,6 +351,42 @@ The committed `baselines/phase1.json` was refreshed from a live run on
 2026-07-10 against the dedicated Postgres test cluster. Its
 `metadata.refresh_commit` field carries that run's HEAD SHA so reviewers
 can identify the exact ranking commit that produced the rank data.
+
+### Self-checking baseline invariants
+
+The `validate-fixtures` command enforces the following invariants that
+prevent the specific regressions found during planning:
+
+1. **Minimum fixture counts**: at least 25 total labeled queries, at
+   least 15 mined `memory_ref_queries`, and at least 10 `bad_cases`.
+   A committed fixture set below these thresholds fails validation.
+2. **Baseline fixture coverage**: the baseline's
+   `aggregate_metrics.query_count` must equal the sum of
+   `memory_ref_queries.len()` + `bad_cases.len()`. The baseline's
+   `per_query_ranks` must cover both suites with counts matching the
+   fixture file lengths. Bad-case rows **must not** be silently
+   dropped from aggregate computations.
+3. **Suite metrics completeness**: when fixtures contain bad-case rows,
+   the baseline's `suite_metrics` must include a `bad_cases` key.
+4. **No all-miss baselines**: aggregate recall@1/5/10 all zero with
+   zero-result-rate 1.0 is rejected. This catches broken pipelines,
+   meaningless fixtures, or queries that don't match the corpus. Each
+   non-empty suite is individually checked as well.
+5. **Hard signal coverage**: fixture validation fails (not warns) when
+   a retrieval signal is claimed on a fixture row but the required
+   supporting data is missing — graph signal without graph edges,
+   entity signal without labels, vector signal without embeddings,
+   or task-affinity signal without a task_id. These are hard errors
+   in `validate_fixtures`, not warn-only assertions.
+6. **Cross-reference integrity**: every memory_ref permalink, graph
+   edge endpoint, and bad-case reference must exist in the corpus.
+   Manifest counts must match actual fixture lengths.
+
+Fixture updates must preserve meaningful retrieval and hard
+graph/entity + task-affinity rank-change coverage before refreshing
+`baselines/phase1.json`. Adding rows without refreshing the baseline
+is safe (append-only); removing or modifying existing rows requires a
+baseline refresh with the updated fixture hashes.
 
 ### Fixture query-text constraints for retrieval
 
