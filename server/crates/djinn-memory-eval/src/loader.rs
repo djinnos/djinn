@@ -86,6 +86,13 @@ pub fn validate_fixtures(fixtures: &Phase1Fixtures) -> Result<()> {
     let ref_errors = fixtures.validate_references();
     errors.extend(ref_errors);
 
+    // Build a corpus note lookup for cross-reference signal checks.
+    let corpus_by_permalink: HashMap<&str, &CorpusNoteRow> = fixtures
+        .corpus_notes
+        .iter()
+        .map(|n| (n.permalink.as_str(), n))
+        .collect();
+
     // 2. Per-note validation
     for note in &fixtures.corpus_notes {
         // Lifecycle timestamps must be non-empty
@@ -155,6 +162,34 @@ pub fn validate_fixtures(fixtures: &Phase1Fixtures) -> Result<()> {
                 query.query_id
             ));
         }
+        // If graph signal is claimed, at least one memory_ref note must have graph_edges
+        if query.expected_signals.graph && !query.memory_refs.is_empty() {
+            let has_graph_note = query.memory_refs.iter().any(|p| {
+                corpus_by_permalink
+                    .get(p.as_str())
+                    .is_some_and(|n| !n.graph_edges.is_empty())
+            });
+            if !has_graph_note {
+                errors.push(format!(
+                    "query '{}': graph signal claimed but none of its memory_refs notes have graph_edges",
+                    query.query_id
+                ));
+            }
+        }
+        // If entity signal is claimed, at least one memory_ref note must have labels
+        if query.expected_signals.entity && !query.memory_refs.is_empty() {
+            let has_entity_note = query.memory_refs.iter().any(|p| {
+                corpus_by_permalink
+                    .get(p.as_str())
+                    .is_some_and(|n| !n.labels.is_empty())
+            });
+            if !has_entity_note {
+                errors.push(format!(
+                    "query '{}': entity signal claimed but none of its memory_refs notes have labels",
+                    query.query_id
+                ));
+            }
+        }
     }
 
     // 4. Per-bad-case validation
@@ -182,6 +217,34 @@ pub fn validate_fixtures(fixtures: &Phase1Fixtures) -> Result<()> {
                 errors.push(format!(
                     "bad-case '{}': task_affinity signal claimed for task_id '{}' but no memory_refs source was found",
                     case.case_id, task_id
+                ));
+            }
+        }
+        // If graph signal is claimed, at least one relevant note must have graph_edges
+        if case.expected_signals.graph && !case.relevant_note_permalinks.is_empty() {
+            let has_graph_note = case.relevant_note_permalinks.iter().any(|p| {
+                corpus_by_permalink
+                    .get(p.as_str())
+                    .is_some_and(|n| !n.graph_edges.is_empty())
+            });
+            if !has_graph_note {
+                errors.push(format!(
+                    "bad-case '{}': graph signal claimed but none of its relevant notes have graph_edges",
+                    case.case_id
+                ));
+            }
+        }
+        // If entity signal is claimed, at least one relevant note must have labels
+        if case.expected_signals.entity && !case.relevant_note_permalinks.is_empty() {
+            let has_entity_note = case.relevant_note_permalinks.iter().any(|p| {
+                corpus_by_permalink
+                    .get(p.as_str())
+                    .is_some_and(|n| !n.labels.is_empty())
+            });
+            if !has_entity_note {
+                errors.push(format!(
+                    "bad-case '{}': entity signal claimed but none of its relevant notes have labels",
+                    case.case_id
                 ));
             }
         }
@@ -597,7 +660,7 @@ mod tests {
 
     fn make_test_corpus_notes() -> Vec<CorpusNoteRow> {
         let json1 = r#"{"permalink":"cases/slot-lifecycle-race","title":"Slot lifecycle race condition","content":"When a slot is torn down while the supervisor is still processing setup callbacks, the lifecycle runner may observe a `SlotStatus::Released` guard violation.","note_type":"case","folder":"cases","status":"active","tags":["race-condition","slot","lifecycle"],"retrieval_anchor":"slot teardown race during supervisor setup","timestamps":{"created_at":"2026-06-01T10:00:00.000Z","updated_at":"2026-06-15T14:30:00.000Z","last_accessed":"2026-07-01T09:00:00.000Z"},"confidence":0.85,"embedding":{"content_hash":"abc123def456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.1,0.2,0.3]},"labels":[{"entity_type":"concept","name":"race condition"},{"entity_type":"file","name":"slot/lifecycle.rs"}],"graph_edges":[{"source_permalink":"cases/slot-lifecycle-race","target_permalink":"patterns/supervisor-guard","kind":"builds_on","weight":1.0}],"expected_signals":{"vector":true,"lexical":true,"temporal":true,"graph":true,"entity":true,"task_affinity":false}}"#;
-        let json2 = r#"{"permalink":"patterns/supervisor-guard","title":"Supervisor guard pattern","content":"Guard pattern content for supervisor lifecycle management","note_type":"pattern","folder":"patterns","status":"active","tags":["guard"],"timestamps":{"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","last_accessed":"2026-01-01T00:00:00.000Z"},"confidence":0.9,"embedding":{"content_hash":"hash456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.4,0.5,0.6]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":true,"task_affinity":false}}"#;
+        let json2 = r#"{"permalink":"patterns/supervisor-guard","title":"Supervisor guard pattern","content":"Guard pattern content for supervisor lifecycle management","note_type":"pattern","folder":"patterns","status":"active","tags":["guard"],"timestamps":{"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","last_accessed":"2026-01-01T00:00:00.000Z"},"confidence":0.9,"embedding":{"content_hash":"hash456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.4,0.5,0.6]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[{"source_permalink":"patterns/supervisor-guard","target_permalink":"cases/slot-lifecycle-race","kind":"derived_from","weight":1.0}],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":true,"task_affinity":false}}"#;
         vec![
             serde_json::from_str(json1).unwrap(),
             serde_json::from_str(json2).unwrap(),
@@ -712,8 +775,9 @@ mod tests {
     #[test]
     fn validate_fixtures_fails_when_graph_signal_claimed_but_no_edges() {
         let mut fixtures = make_test_fixtures();
-        // The second note (patterns/supervisor-guard) has graph=false, so no
-        // edges. Force graph=true.
+        // The second note (patterns/supervisor-guard) has graph=false.
+        // Clear its edges first, then force graph=true to trigger the error.
+        fixtures.corpus_notes[1].graph_edges.clear();
         fixtures.corpus_notes[1].expected_signals.graph = true;
         let result = validate_fixtures(&fixtures);
         assert!(result.is_err());
@@ -820,6 +884,57 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("query_text is empty")
+        );
+    }
+
+    #[test]
+    fn validate_fixtures_fails_when_graph_signal_claimed_on_query_but_no_notes_have_edges() {
+        let mut fixtures = make_test_fixtures();
+        // Both notes have graph_edges now, so remove them to trigger the error.
+        fixtures.corpus_notes[0].graph_edges.clear();
+        fixtures.corpus_notes[1].graph_edges.clear();
+        // The query claims graph=true but no memory_refs notes have edges.
+        let result = validate_fixtures(&fixtures);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains(
+                "graph signal claimed but none of its memory_refs notes have graph_edges"
+            )
+        );
+    }
+
+    #[test]
+    fn validate_fixtures_fails_when_entity_signal_claimed_on_query_but_no_notes_have_labels() {
+        let mut fixtures = make_test_fixtures();
+        // Clear labels from all corpus notes.
+        fixtures.corpus_notes[0].labels.clear();
+        fixtures.corpus_notes[1].labels.clear();
+        // The query claims entity=true but no memory_refs notes have labels.
+        let result = validate_fixtures(&fixtures);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("entity signal claimed but none of its memory_refs notes have labels")
+        );
+    }
+
+    #[test]
+    fn validate_fixtures_fails_when_graph_signal_claimed_on_bad_case_but_no_notes_have_edges() {
+        let mut fixtures = make_test_fixtures();
+        // Clear graph_edges from all notes so bc-002 (graph_entity_influenced) fails.
+        fixtures.corpus_notes[0].graph_edges.clear();
+        fixtures.corpus_notes[1].graph_edges.clear();
+        // Remove the query that also claims graph=true (to isolate the bad case check).
+        fixtures.memory_ref_queries.clear();
+        let result = validate_fixtures(&fixtures);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("graph signal claimed but none of its relevant notes have graph_edges")
         );
     }
 

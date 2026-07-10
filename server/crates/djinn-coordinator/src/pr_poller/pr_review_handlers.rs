@@ -354,6 +354,10 @@ impl CoordinatorActor {
                     "PR poller: failed to persist merge_commit_sha (task will still close)"
                 );
             }
+            // Best-effort: project the merged-change ledger row from
+            // merge facts + tripwire provenance.  Errors here must not
+            // block the merge close flow.
+            self.project_merged_change_to_ledger(task_id, sha).await;
         } else {
             tracing::warn!(
                 task_id,

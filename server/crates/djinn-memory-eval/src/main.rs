@@ -538,13 +538,37 @@ fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
     if baseline.suite_metrics.is_empty() {
         anyhow::bail!("baseline suite_metrics is empty");
     }
+    if baseline.signal_comparisons.is_empty() {
+        anyhow::bail!(
+            "baseline signal_comparisons is empty; graph/entity and task-affinity \
+             rank-change proof cases must be recorded. Re-run `run` then `refresh-baseline`."
+        );
+    }
 
     info!(
         baseline_commit = %baseline.metadata.refresh_commit,
         baseline_created = %baseline.metadata.created_at,
         suites = baseline.suite_metrics.len(),
         policy = %baseline.threshold_policy_version,
+        signal_comparisons = baseline.signal_comparisons.len(),
         "baseline validated"
+    );
+
+    // 5a2. Log signal comparison summary
+    let graph_changed = baseline
+        .signal_comparisons
+        .iter()
+        .filter(|c| c.signal == "graph" && c.rank_changed)
+        .count();
+    let ta_changed = baseline
+        .signal_comparisons
+        .iter()
+        .filter(|c| c.signal == "task_affinity" && c.rank_changed)
+        .count();
+    info!(
+        graph_rank_changes = graph_changed,
+        task_affinity_rank_changes = ta_changed,
+        "signal comparison rank-change summary"
     );
 
     // 5b. Verify baseline aggregate query count matches total fixture count.
