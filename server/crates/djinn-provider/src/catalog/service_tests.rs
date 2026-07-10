@@ -1164,3 +1164,253 @@ fn set_custom_providers_then_refresh_does_not_resurrect() {
         "keep must survive the refresh"
     );
 }
+
+// ── Freshness / source-tier metadata tests ──────────────────────────────────
+
+/// A freshly-seeded service exposes `Never` status, no error, no successful
+/// fetch age, and an `Embedded` source tier regardless of the requested max age.
+#[test]
+fn freshness_initial_state_is_never_and_embedded() {
+    let catalog = CatalogService::new();
+    assert_eq!(catalog.last_refresh_status(), RefreshStatus::Never);
+    assert!(catalog.last_refresh_error().is_none());
+    assert!(
+        catalog.last_successful_fetch_age().is_none(),
+        "no live fetch has occurred yet"
+    );
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Embedded,
+        "with no successful fetch the tier must be Embedded even for a large max age"
+    );
+}
+
+/// After a successful refresh, the status is `Success`, the error is cleared,
+/// a successful-fetch age is recorded, and the source tier is `Live` within the
+/// freshness window.  This exercises the accessors end-to-end without a network
+/// call by composing directly under the write lock (mirroring `refresh()`).
+#[test]
+fn freshness_after_success_is_live_with_age() {
+    let catalog = CatalogService::new();
+    {
+        let mut data = catalog.inner.write();
+        let providers = vec![mk_custom_provider("openai")];
+        let mut models_idx = HashMap::new();
+        models_idx.insert("openai".to_string(), vec![mk_seed_model("gpt-x", "openai")]);
+        compose_catalog(&mut data, providers, models_idx);
+        data.fetched_at = Some(SystemClock::new().now_instant());
+        data.last_refresh_status = RefreshStatus::Success;
+        data.last_refresh_error = None;
+    }
+
+    assert_eq!(catalog.last_refresh_status(), RefreshStatus::Success);
+    assert!(catalog.last_refresh_error().is_none());
+
+    let age = catalog
+        .last_successful_fetch_age()
+        .expect("age must be Some after a successful fetch");
+    assert!(
+        age <= Duration::from_secs(5),
+        "age should be near-zero immediately after success; got {age:?}"
+    );
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Live,
+        "within the freshness window the tier is Live"
+    );
+}
+
+/// A successful refresh followed by a failing refresh must keep serving the
+/// previous catalog data and transition the status to `Error` with a message,
+/// while the previously-recorded fetch age stays non-None (so the tier can be
+/// computed as Stale once the age exceeds the window).
+#[test]
+fn freshness_success_then_failure_preserves_catalog_and_records_error() {
+    let catalog = CatalogService::new();
+    // Seed a successful refresh.
+    {
+        let mut data = catalog.inner.write();
+        let providers = vec![mk_custom_provider("openai")];
+        let mut models_idx = HashMap::new();
+        models_idx.insert("openai".to_string(), vec![mk_seed_model("gpt-x", "openai")]);
+        compose_catalog(&mut data, providers, models_idx);
+        data.fetched_at = Some(SystemClock::new().now_instant());
+        data.last_refresh_status = RefreshStatus::Success;
+        data.last_refresh_error = None;
+    }
+    assert!(catalog.list_providers().iter().any(|p| p.id == "openai"));
+
+    // Now simulate a failing refresh (the Err arm): status flips to Error, an
+    // error message is recorded, but the active catalog is left untouched.
+    {
+        let mut data = catalog.inner.write();
+        data.last_refresh_status = RefreshStatus::Error;
+        data.last_refresh_error = Some("models.dev returned HTTP 503".to_string());
+        // fetched_at is intentionally NOT cleared — the last *successful* fetch
+        // time persists so the tier can be computed as Stale.
+    }
+
+    assert_eq!(catalog.last_refresh_status(), RefreshStatus::Error);
+    assert_eq!(
+        catalog.last_refresh_error().as_deref(),
+        Some("models.dev returned HTTP 503")
+    );
+    // The active catalog survived.
+    assert!(
+        catalog.list_providers().iter().any(|p| p.id == "openai"),
+        "the previous successful catalog must still be served after a failure"
+    );
+    // The last successful fetch age is still available.
+    assert!(
+        catalog.last_successful_fetch_age().is_some(),
+        "fetch age must persist after a failure so the tier can be computed"
+    );
+}
+
+/// `source_tier` reports `Stale` when a fetch previously succeeded but the
+/// recorded age exceeds the supplied max-age window.  This simulates the
+/// "serving stale data while recent refreshes fail" state.
+#[test]
+fn source_tier_reports_stale_when_age_exceeds_window() {
+    let catalog = CatalogService::new();
+    // Record a fetch that happened "in the past" by back-dating fetched_at.
+    {
+        let mut data = catalog.inner.write();
+        data.fetched_at = Some(SystemClock::new().now_instant() - Duration::from_secs(120));
+        data.last_refresh_status = RefreshStatus::Error;
+        data.last_refresh_error = Some("models.dev returned HTTP 503".to_string());
+    }
+
+    let age = catalog
+        .last_successful_fetch_age()
+        .expect("age must be Some because a fetch previously succeeded");
+    assert!(
+        age >= Duration::from_secs(120),
+        "age should reflect the back-dated fetch; got {age:?}"
+    );
+
+    // Within a 60s window the 120s-old data is Stale.
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Stale,
+        "data older than the window must be Stale"
+    );
+    // With a generous window it would be Live.
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(600)),
+        SourceTier::Live,
+        "data within a generous window is Live even if the last attempt failed"
+    );
+}
+
+/// Full status-metadata transition sequence end-to-end: Never → Success → Error
+/// → Success, asserting the metadata accessors at every step.
+#[test]
+fn status_metadata_full_transition_sequence() {
+    let catalog = CatalogService::new();
+
+    // 1. Initial: Never / no error / no age / Embedded.
+    assert_eq!(catalog.last_refresh_status(), RefreshStatus::Never);
+    assert!(catalog.last_refresh_error().is_none());
+    assert!(catalog.last_successful_fetch_age().is_none());
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Embedded
+    );
+
+    // 2. Success: clears error, records age, Live tier.
+    {
+        let mut data = catalog.inner.write();
+        compose_catalog(
+            &mut data,
+            vec![mk_custom_provider("openai")],
+            HashMap::new(),
+        );
+        data.fetched_at = Some(SystemClock::new().now_instant());
+        data.last_refresh_status = RefreshStatus::Success;
+        data.last_refresh_error = None;
+    }
+    assert_eq!(catalog.last_refresh_status(), RefreshStatus::Success);
+    assert!(catalog.last_refresh_error().is_none());
+    assert!(catalog.last_successful_fetch_age().is_some());
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Live
+    );
+
+    // 3. Error: records message, keeps prior catalog, fetch age persists.
+    {
+        let mut data = catalog.inner.write();
+        data.last_refresh_status = RefreshStatus::Error;
+        data.last_refresh_error = Some("connection refused".to_string());
+    }
+    assert_eq!(catalog.last_refresh_status(), RefreshStatus::Error);
+    assert_eq!(
+        catalog.last_refresh_error().as_deref(),
+        Some("connection refused")
+    );
+    assert!(
+        catalog.last_successful_fetch_age().is_some(),
+        "age persists across the failure"
+    );
+
+    // 4. Success again: clears the error and refreshes the fetch time.
+    {
+        let mut data = catalog.inner.write();
+        data.fetched_at = Some(SystemClock::new().now_instant());
+        data.last_refresh_status = RefreshStatus::Success;
+        data.last_refresh_error = None;
+    }
+    assert_eq!(catalog.last_refresh_status(), RefreshStatus::Success);
+    assert!(catalog.last_refresh_error().is_none());
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Live
+    );
+}
+
+/// The zero-provider rejection path must leave the source tier computable and
+/// the status as Error while the previous catalog is preserved.  Mirrors the
+/// guard inside `refresh()`.
+#[test]
+fn zero_provider_rejection_sets_error_status_and_preserves_catalog() {
+    let catalog = CatalogService::new();
+    // Seed a prior successful fetch so the tier is computable after the rejection.
+    {
+        let mut data = catalog.inner.write();
+        data.fetched_at = Some(SystemClock::new().now_instant() - Duration::from_secs(90));
+        data.last_refresh_status = RefreshStatus::Success;
+    }
+    let provider_ids_before = catalog.list_providers();
+    let live_tier_before = catalog.source_tier(Duration::from_secs(60));
+    assert_eq!(live_tier_before, SourceTier::Stale);
+
+    // Simulate the zero-provider rejection arm exactly as refresh() does.
+    {
+        let mut data = catalog.inner.write();
+        data.last_refresh_status = RefreshStatus::Error;
+        data.last_refresh_error =
+            Some("models.dev normalized payload had zero providers".to_string());
+        // Active catalog untouched.
+    }
+
+    assert_eq!(catalog.last_refresh_status(), RefreshStatus::Error);
+    assert_eq!(
+        catalog.last_refresh_error().as_deref(),
+        Some("models.dev normalized payload had zero providers")
+    );
+    // The active catalog is unchanged.
+    let provider_ids_after = catalog.list_providers();
+    let ids_before: Vec<String> = provider_ids_before.into_iter().map(|p| p.id).collect();
+    let ids_after: Vec<String> = provider_ids_after.into_iter().map(|p| p.id).collect();
+    assert_eq!(
+        ids_before, ids_after,
+        "zero-provider rejection must not mutate the active catalog"
+    );
+    // Tier is still computable because fetched_at persists.
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Stale,
+        "the tier must remain computable (Stale) after a zero-provider rejection"
+    );
+}
