@@ -1,15 +1,12 @@
-// This module is developed in slices. `synopsize` and its helpers are not yet
-// called from non-test code; integration happens in a follow-up task.
-// `push_str` and `Shape.root` are reserved for that integration.
-#![allow(dead_code)]
+// `synopsize` is called from `render_tool_result` in the parent module.
+// `push_str` is reserved for future integration and kept with a targeted
+// allow.
 
 //! Deterministic bounded synopses for oversized tool-result payloads.
 //!
-//! Phase 1 of proposal `01ik` covers the JSON classifier only. The function
-//! [`synopsize`] is the integration surface future slices will call from
-//! [`super::render_tool_result`]; in this slice it is exposed for testing and
-//! for the follow-up tasks (code/text/binary detection) to extend without
-//! changing the public signature.
+//! Phase 1 of proposal `01ik` covers JSON, code, text/log, and binary no-op
+//! classification. The function [`synopsize`] is the integration surface
+//! called from [`super::render_tool_result`] for oversized payloads.
 //!
 //! Design goals (locked in by the proposal and acceptance criteria):
 //!
@@ -158,6 +155,7 @@ enum RootKind {
 /// What the root container is, plus cheap pre-computed facts we want to show.
 #[derive(Debug, Clone)]
 struct Shape {
+    #[allow(dead_code)] // Reserved for future integration.
     root: RootKind,
     top_key_count: usize,
     top_array_len: Option<usize>,
@@ -367,6 +365,7 @@ impl Builder {
         self.budget.saturating_sub(self.out.len())
     }
 
+    #[allow(dead_code)] // Reserved for future integration; not yet called.
     fn push_str(&mut self, s: &str) -> bool {
         if s.len() <= self.remaining() {
             self.out.push_str(s);

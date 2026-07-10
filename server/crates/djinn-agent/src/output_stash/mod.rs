@@ -912,8 +912,9 @@ pub fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Opti
 ///
 /// Serializes `value` to text (raw string, or pretty JSON), and when that
 /// exceeds [`MAX_TOOL_RESULT_CHARS`] stashes the full output under
-/// `tool_use_id` and returns a `smart_truncate`d view with an
-/// `output_view`/`output_grep` navigation hint appended.
+/// `tool_use_id` and returns a `smart_truncate`d view with a typed synopsis
+/// (for JSON/code/text payloads) and an `output_view`/`output_grep`
+/// navigation hint appended.
 ///
 /// This is the single chokepoint both the worker reply loop and the chat loop
 /// route successful tool results through, so neither can ever ship an
@@ -936,7 +937,20 @@ pub fn render_tool_result(
             .unwrap()
             .insert(tool_use_id.to_string(), tool_name.to_string(), stash_text);
         let full_bytes = text.len();
-        text = crate::truncate::smart_truncate(&text, MAX_TOOL_RESULT_CHARS);
+        // Budget for the synopsis. Charged against the existing size envelope
+        // so the total rendered stub stays within current maximum-size
+        // expectations plus existing hint slack.
+        let synopsis_budget = 1_200;
+        // Generate the synopsis from the full text (before truncation) so
+        // JSON/code/text classifiers see the complete payload.
+        let synopsis = synopsis::synopsize(tool_name, &text, synopsis_budget);
+        // Reduce the smart_truncate budget to account for the synopsis.
+        let text_budget = MAX_TOOL_RESULT_CHARS.saturating_sub(synopsis_budget);
+        text = crate::truncate::smart_truncate(&text, text_budget);
+        if let Some(synopsis) = synopsis {
+            text.push_str("\n\nTool result synopsis:\n");
+            text.push_str(&synopsis);
+        }
         text.push_str(&format!(
             "\n\n[Full output stashed ({full_bytes} bytes). Use output_view(tool_use_id=\"{tool_use_id}\") to paginate or output_grep(tool_use_id=\"{tool_use_id}\", pattern=\"...\") to search.]"
         ));
