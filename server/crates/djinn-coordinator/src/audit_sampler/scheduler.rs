@@ -22,6 +22,7 @@
 //! - `max_open_audits`: 5
 //! - `slo_age_hours`: 336 (14 days)
 //! - `per_tick_budget`: 1
+//! - `min_materialization_interval_hours`: 84 (roughly 2/week)
 //! - `enabled`: true
 //!
 //! ## Events
@@ -50,8 +51,13 @@ pub struct AuditSchedulerConfig {
     /// Maximum age (in hours) for an unmaterialized selection before SLO
     /// overflow is declared. Set to 0 to disable the SLO check.
     pub slo_age_hours: i64,
-    /// Maximum number of audit tasks to create per scheduler tick.
+    /// Maximum number of audit tasks to create per scheduler tick once the
+    /// cadence gate has elapsed.
     pub per_tick_budget: usize,
+    /// Minimum time between materializing audit tasks. Production defaults to
+    /// 84 hours (roughly two audit tasks per week); tests may set this to 0 for
+    /// immediate materialization or to a shorter interval.
+    pub min_materialization_interval_hours: i64,
 }
 
 impl Default for AuditSchedulerConfig {
@@ -61,6 +67,7 @@ impl Default for AuditSchedulerConfig {
             max_open_audits: 5,
             slo_age_hours: 14 * 24, // 14 days
             per_tick_budget: 1,
+            min_materialization_interval_hours: 84,
         }
     }
 }
@@ -225,7 +232,18 @@ pub async fn run_audit_scheduler(
         return result;
     }
 
-    // 4. Materialize up to per_tick_budget selections.
+    // 4. Enforce persisted cadence/rate gate after backlog checks. SLO and
+    // max-open warnings intentionally still fire even when cadence has not
+    // elapsed.
+    if cadence_not_elapsed(config, audit_repo).await {
+        info!(
+            min_interval_hours = config.min_materialization_interval_hours,
+            "audit scheduler: cadence has not elapsed; preserving unmaterialized selections"
+        );
+        return result;
+    }
+
+    // 5. Materialize up to per_tick_budget selections.
     let budget = config.per_tick_budget.max(1);
     for item in unmaterialized.iter().take(budget) {
         match materialize_one(audit_repo, task_repo, epic_repo, item).await {
@@ -249,6 +267,37 @@ pub async fn run_audit_scheduler(
     }
 
     result
+}
+
+// ── Cadence check ────────────────────────────────────────────────────────────
+
+/// Return true when the persisted materialization cadence has not elapsed.
+async fn cadence_not_elapsed(
+    config: &AuditSchedulerConfig,
+    audit_repo: &AuditSamplerRepository,
+) -> bool {
+    if config.min_materialization_interval_hours <= 0 {
+        return false;
+    }
+
+    let latest = match audit_repo.latest_audit_materialized_at().await {
+        Ok(latest) => latest,
+        Err(e) => {
+            warn!(error = %e, "audit scheduler: failed to read latest materialization timestamp");
+            return true;
+        }
+    };
+
+    let Some(latest) = latest else {
+        return false;
+    };
+    let Some(latest_secs) = parse_iso_timestamp(&latest) else {
+        warn!(latest_materialized_at = %latest, "audit scheduler: could not parse latest materialization timestamp; allowing materialization");
+        return false;
+    };
+
+    let elapsed_hours = chrono_now_utc().saturating_sub(latest_secs) / 3600;
+    elapsed_hours < config.min_materialization_interval_hours as u64
 }
 
 // ── SLO check ────────────────────────────────────────────────────────────────
@@ -640,6 +689,7 @@ mod tests {
             max_open_audits: 3,
             slo_age_hours: 168, // 7 days
             per_tick_budget: 2,
+            min_materialization_interval_hours: 0,
         }
     }
 
@@ -658,15 +708,19 @@ mod tests {
     ) -> SelectionRow {
         let repo = AuditSamplerRepository::new(db.clone());
 
-        // Seed policy.
-        let policy = repo
-            .create_sample_policy(CreateSamplePolicyParams {
-                project_id,
-                revision: 1,
-                policy_json: &json!({"unflagged_rate": 0.02, "autonomous_rate": 0.10}),
-            })
-            .await
-            .unwrap();
+        // Seed or reuse one policy per project; repeated helper calls for the
+        // same project must not violate uq_audit_sample_policies_project_rev.
+        let policy = match repo.get_latest_sample_policy(project_id).await.unwrap() {
+            Some(policy) => policy,
+            None => repo
+                .create_sample_policy(CreateSamplePolicyParams {
+                    project_id,
+                    revision: 1,
+                    policy_json: &json!({"unflagged_rate": 0.02, "autonomous_rate": 0.10}),
+                })
+                .await
+                .unwrap(),
+        };
 
         // Seed frame.
         let frame = repo
@@ -831,6 +885,131 @@ mod tests {
         assert!(result2.materialized_items.is_empty());
         assert!(!result2.paused);
         assert_eq!(result2.total_unmaterialized, 0);
+    }
+
+    // ── Test: cadence/rate gate ────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cadence_gate_prevents_thirty_second_tick_overmaterialization() {
+        let db = test_db();
+        let project_id = uuid::Uuid::now_v7().to_string();
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
+
+        for i in 0..3 {
+            seed_selection(
+                &db,
+                &project_id,
+                &format!("sha-cadence-{i}"),
+                "unflagged_merged",
+                i,
+                "2026-07-09T12:00:00Z",
+            )
+            .await;
+        }
+
+        let config = AuditSchedulerConfig {
+            per_tick_budget: 1,
+            min_materialization_interval_hours: 84,
+            ..test_config()
+        };
+        let audit_repo = AuditSamplerRepository::new(db.clone());
+        let events = djinn_core::events::EventBus::noop();
+        let task_repo = TaskRepository::new(db.clone(), events.clone());
+        let epic_repo = EpicRepository::new(db.clone(), events);
+
+        let first = run_audit_scheduler(&config, &audit_repo, &task_repo, &epic_repo).await;
+        assert_eq!(first.materialized_items.len(), 1);
+
+        let second = run_audit_scheduler(&config, &audit_repo, &task_repo, &epic_repo).await;
+        assert!(second.materialized_items.is_empty());
+        assert!(!second.paused);
+        assert_eq!(second.total_unmaterialized, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn injectable_fast_cadence_allows_repeated_materialization() {
+        let db = test_db();
+        let project_id = uuid::Uuid::now_v7().to_string();
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
+
+        for i in 0..2 {
+            seed_selection(
+                &db,
+                &project_id,
+                &format!("sha-fast-cadence-{i}"),
+                "unflagged_merged",
+                i,
+                "2026-07-09T12:00:00Z",
+            )
+            .await;
+        }
+
+        let config = AuditSchedulerConfig {
+            per_tick_budget: 1,
+            min_materialization_interval_hours: 0,
+            ..test_config()
+        };
+        let audit_repo = AuditSamplerRepository::new(db.clone());
+        let events = djinn_core::events::EventBus::noop();
+        let task_repo = TaskRepository::new(db.clone(), events.clone());
+        let epic_repo = EpicRepository::new(db.clone(), events);
+
+        let first = run_audit_scheduler(&config, &audit_repo, &task_repo, &epic_repo).await;
+        let second = run_audit_scheduler(&config, &audit_repo, &task_repo, &epic_repo).await;
+
+        assert_eq!(first.materialized_items.len(), 1);
+        assert_eq!(second.materialized_items.len(), 1);
+        assert_ne!(
+            first.materialized_items[0].selection_id,
+            second.materialized_items[0].selection_id
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cadence_gate_recovers_when_persisted_interval_elapsed() {
+        let db = test_db();
+        let project_id = uuid::Uuid::now_v7().to_string();
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
+
+        let pending = seed_selection(
+            &db,
+            &project_id,
+            "sha-cadence-recovery-pending",
+            "unflagged_merged",
+            0,
+            "2026-07-09T12:00:00Z",
+        )
+        .await;
+
+        let old_task_id = create_open_task(&db, &project_id).await;
+        let old_selection = seed_selection(
+            &db,
+            &project_id,
+            "sha-cadence-recovery-old",
+            "unflagged_merged",
+            99,
+            "2025-01-01T00:00:00Z",
+        )
+        .await;
+        AuditSamplerRepository::new(db.clone())
+            .set_selection_audit_task(&old_selection.id, &old_task_id)
+            .await
+            .unwrap();
+        djinn_db::test_support::close_task_at(&db, &old_task_id, "2025-01-02T00:00:00Z").await;
+
+        let config = AuditSchedulerConfig {
+            per_tick_budget: 1,
+            min_materialization_interval_hours: 1,
+            ..test_config()
+        };
+        let audit_repo = AuditSamplerRepository::new(db.clone());
+        let events = djinn_core::events::EventBus::noop();
+        let task_repo = TaskRepository::new(db.clone(), events.clone());
+        let epic_repo = EpicRepository::new(db.clone(), events);
+
+        let result = run_audit_scheduler(&config, &audit_repo, &task_repo, &epic_repo).await;
+        assert_eq!(result.materialized_items.len(), 1);
+        assert_eq!(result.materialized_items[0].selection_id, pending.id);
     }
 
     // ── Test: max-open pause ──────────────────────────────────────────────────

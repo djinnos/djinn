@@ -716,6 +716,18 @@ impl AuditSamplerRepository {
         Ok(count)
     }
 
+    /// Return the creation timestamp for the most recently materialized audit
+    /// task, based only on persisted selection/task state.
+    ///
+    /// The scheduler uses this as its cadence anchor so a frequent coordinator
+    /// leader tick cannot drain persisted selections faster than policy allows.
+    pub async fn latest_audit_materialized_at(&self) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar(LATEST_AUDIT_MATERIALIZED_AT)
+            .fetch_one(self.db.pool())
+            .await?)
+    }
+
     /// Record an audit outcome for a selection. Each selection can have at
     /// most one outcome (unique constraint on selection_id).
     pub async fn record_outcome(&self, params: RecordOutcomeParams<'_>) -> Result<AuditOutcomeRow> {
@@ -920,6 +932,13 @@ const COUNT_OPEN_AUDIT_TASKS: &str = r#"
     JOIN tasks t ON t.id = asel.audit_task_id
     WHERE asel.audit_task_id IS NOT NULL
       AND t.closed_at IS NULL
+"#;
+
+const LATEST_AUDIT_MATERIALIZED_AT: &str = r#"
+    SELECT MAX(t.created_at)
+    FROM audit_selections asel
+    JOIN tasks t ON t.id = asel.audit_task_id
+    WHERE asel.audit_task_id IS NOT NULL
 "#;
 
 const MATERIALIZED_TASK_INSERT: &str = r#"
