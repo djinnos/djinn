@@ -378,38 +378,31 @@ async fn materialize_one(
     // Build the provenance-rich task description.
     let description = build_audit_task_description(item, audit_repo).await;
 
-    // Create the review task as an ordinary dispatchable task.
-    let task = task_repo
-        .create_in_project(
+    // Create the review task and link the selection atomically in a single
+    // database transaction. This guarantees restart-idempotency: if the
+    // coordinator crashes after the task INSERT but before the selection
+    // UPDATE, the transaction rolls back and the next tick retries cleanly.
+    let title = format!(
+        "Audit review: {} ({})",
+        &item.merge_commit_sha[..8.min(item.merge_commit_sha.len())],
+        item.stratum
+    );
+    let audit_task_id = audit_repo
+        .materialize_audit_task_atomic(
+            &item.selection_id,
             &item.project_id,
             Some(&epic_id),
-            &format!(
-                "Audit review: {} ({})",
-                &item.merge_commit_sha[..8.min(item.merge_commit_sha.len())],
-                item.stratum
-            ),
+            &title,
             &description,
-            "",     // design
-            "task", // issue_type — ordinary review task
-            2,      // priority
-            "",     // owner — unassigned, dispatchable
-            None,   // status — default (open)
-            None,   // acceptance_criteria
         )
         .await
-        .map_err(|e| format!("failed to create audit task: {e}"))?;
-
-    // Link the task id back to the selection.
-    audit_repo
-        .set_selection_audit_task(&item.selection_id, &task.id)
-        .await
-        .map_err(|e| format!("failed to link audit task to selection: {e}"))?;
+        .map_err(|e| format!("failed to materialize audit task atomically: {e}"))?;
 
     // Emit activity event.
     let payload = serde_json::json!({
         "event_type": EVENT_AUDIT_MATERIALIZED,
         "selection_id": item.selection_id,
-        "audit_task_id": task.id,
+        "audit_task_id": audit_task_id,
         "merged_change_id": item.merged_change_id,
         "frame_id": item.frame_id,
         "stratum": item.stratum,
@@ -418,7 +411,7 @@ async fn materialize_one(
     });
     let _ = task_repo
         .log_activity(
-            Some(&task.id),
+            Some(&audit_task_id),
             "coordinator",
             "system",
             EVENT_AUDIT_MATERIALIZED,
@@ -428,7 +421,7 @@ async fn materialize_one(
 
     Ok(MaterializedAuditItem {
         selection_id: item.selection_id.clone(),
-        audit_task_id: task.id,
+        audit_task_id,
         merged_change_id: item.merged_change_id.clone(),
         frame_id: item.frame_id.clone(),
         stratum: item.stratum.clone(),
@@ -1193,5 +1186,122 @@ mod tests {
         let recent = "2026-07-10T12:00:00Z";
         let result = check_slo_age(recent, 100_000);
         assert!(result.is_none());
+    }
+    // ── Test: crash-restart idempotency ──────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crash_restart_idempotency_atomic_materialization() {
+        // Simulates the crash-restart scenario: the scheduler materializes a
+        // selection, then a "restart" happens (second scheduler tick). The
+        // atomic transaction ensures the second tick creates zero duplicate
+        // tasks because list_unmaterialized_selections no longer returns the
+        // already-linked selection.
+        let db = test_db();
+        let project_id = uuid::Uuid::now_v7().to_string();
+        seed_project(&db, &project_id).await;
+
+        seed_selection(
+            &db,
+            &project_id,
+            "sha-crash-001",
+            "unflagged_merged",
+            0,
+            "2026-07-09T12:00:00Z",
+        )
+        .await;
+
+        let config = test_config();
+        let audit_repo = AuditSamplerRepository::new(db.clone());
+        let events = djinn_core::events::EventBus::noop();
+        let task_repo = TaskRepository::new(db.clone(), events.clone());
+        let epic_repo = EpicRepository::new(db.clone(), events);
+
+        // "Tick 1" — succeeds (simulates normal materialization before crash).
+        let result1 = run_audit_scheduler(&config, &audit_repo, &task_repo, &epic_repo).await;
+        assert_eq!(result1.materialized_items.len(), 1);
+        let first_task_id = result1.materialized_items[0].audit_task_id.clone();
+
+        // Verify the selection is now linked.
+        let sel_id = result1.materialized_items[0].selection_id.clone();
+        let updated = audit_repo
+            .get_selection_by_id(&sel_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.audit_task_id.as_deref(),
+            Some(first_task_id.as_str())
+        );
+
+        // "Tick 2" after restart — must not re-materialize.
+        let result2 = run_audit_scheduler(&config, &audit_repo, &task_repo, &epic_repo).await;
+        assert!(result2.materialized_items.is_empty());
+        assert_eq!(result2.total_unmaterialized, 0);
+
+        // Verify exactly one task exists (no duplicate).
+        let task = task_repo.get(&first_task_id).await.unwrap().unwrap();
+        assert_eq!(task.issue_type, "task");
+        assert!(task.description.contains("Audit Review"));
+    }
+
+    // ── Test: atomic materialization directly ────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn atomic_materialization_creates_task_and_links_in_one_tx() {
+        // Directly tests the materialize_audit_task_atomic method to verify
+        // the task and selection link are created atomically.
+        let db = test_db();
+        let project_id = uuid::Uuid::now_v7().to_string();
+        seed_project(&db, &project_id).await;
+
+        let sel = seed_selection(
+            &db,
+            &project_id,
+            "sha-atomic-001",
+            "unflagged_merged",
+            0,
+            "2026-07-09T12:00:00Z",
+        )
+        .await;
+
+        let events = djinn_core::events::EventBus::noop();
+        let epic_repo = EpicRepository::new(db.clone(), events.clone());
+        let task_repo = TaskRepository::new(db.clone(), events);
+        let audit_repo = AuditSamplerRepository::new(db.clone());
+
+        // Ensure the audit epic exists.
+        let epic_id = ensure_audit_epic(&epic_repo, &project_id).await.unwrap();
+
+        // Call the atomic method directly.
+        let task_id = audit_repo
+            .materialize_audit_task_atomic(
+                &sel.id,
+                &project_id,
+                Some(&epic_id),
+                "Audit review: test",
+                "test description",
+            )
+            .await
+            .unwrap();
+
+        // Verify the task exists.
+        let task = task_repo.get(&task_id).await.unwrap().unwrap();
+        assert_eq!(task.issue_type, "task");
+        assert_eq!(task.description, "test description");
+
+        // Verify the selection is linked.
+        let updated = audit_repo
+            .get_selection_by_id(&sel.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.audit_task_id.as_deref(), Some(task_id.as_str()));
+
+        // Verify list_unmaterialized no longer returns this selection.
+        let unmaterialized = audit_repo.list_unmaterialized_selections().await.unwrap();
+        assert!(
+            !unmaterialized.iter().any(|u| u.selection_id == sel.id),
+            "linked selection must not appear in unmaterialized list"
+        );
     }
 }

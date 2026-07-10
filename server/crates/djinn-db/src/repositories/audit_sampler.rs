@@ -582,6 +582,82 @@ impl AuditSamplerRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Create an audit review task and link it to a selection atomically in a
+    /// single database transaction.
+    ///
+    /// This guarantees restart-idempotency: the task INSERT and the selection
+    /// UPDATE happen in the same Postgres transaction. If the coordinator
+    /// process crashes at any point, the transaction either committed (both the
+    /// task row and the `audit_task_id` link are durable) or rolled back
+    /// (neither exists and the selection stays `audit_task_id IS NULL`). The
+    /// next leader tick retries cleanly — no duplicate tasks are ever created.
+    ///
+    /// The method generates a UUIDv7 task ID and a base-36 short_id. If the
+    /// short_id collides with an existing task in the same project (the
+    /// `(project_id, short_id)` UNIQUE constraint), the insert is retried with
+    /// a fresh ID (up to 16 attempts, mirroring `TaskRepository`).
+    ///
+    /// Returns the task ID on success.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn materialize_audit_task_atomic(
+        &self,
+        selection_id: &str,
+        project_id: &str,
+        epic_id: Option<&str>,
+        title: &str,
+        description: &str,
+    ) -> Result<String> {
+        self.db.ensure_initialized().await?;
+
+        for _attempt in 0..16u32 {
+            let task_id = uuid::Uuid::now_v7().to_string();
+            let short_id = compute_audit_short_id(&task_id);
+
+            let mut tx = self.db.pool().begin().await?;
+
+            let insert_result = sqlx::query(MATERIALIZED_TASK_INSERT)
+                .bind(&task_id)
+                .bind(project_id)
+                .bind(&short_id)
+                .bind(epic_id)
+                .bind(title)
+                .bind(description)
+                .execute(&mut *tx)
+                .await;
+
+            match insert_result {
+                Ok(_) => {
+                    // Link the selection in the same transaction.
+                    sqlx::query(MATERIALIZED_LINK_SELECTION)
+                        .bind(&task_id)
+                        .bind(selection_id)
+                        .execute(&mut *tx)
+                        .await?;
+
+                    tx.commit().await?;
+                    return Ok(task_id);
+                }
+                Err(e) => {
+                    // Roll back and check if this was a short_id collision.
+                    // If so, retry with a new task_id/short_id pair.
+                    let is_short_id_collision = e
+                        .as_database_error()
+                        .is_some_and(|e| e.is_unique_violation());
+                    drop(tx);
+
+                    if is_short_id_collision {
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+
+        Err(crate::Error::Internal(
+            "audit task short_id collision after 16 retries".into(),
+        ))
+    }
+
     /// List selections from non-superseded frames that have not yet been
     /// materialized (i.e., `audit_task_id IS NULL`), ordered by
     /// `created_at ASC` for FIFO materialization.
@@ -818,6 +894,45 @@ const COUNT_OPEN_AUDIT_TASKS: &str = r#"
       AND t.closed_at IS NULL
 "#;
 
+const MATERIALIZED_TASK_INSERT: &str = r#"
+    INSERT INTO tasks (
+        id, project_id, short_id, epic_id, title, description, design,
+        issue_type, priority, owner, status,
+        labels, acceptance_criteria, memory_refs
+    ) VALUES (
+        $1, $2, $3, $4, $5, $6, '',
+        'task', 2, '', 'open',
+        '[]'::jsonb, '[]'::jsonb, '[]'::jsonb
+    )
+"#;
+
+const MATERIALIZED_LINK_SELECTION: &str = r#"
+    UPDATE audit_selections
+    SET audit_task_id = $1
+    WHERE id = $2
+      AND audit_task_id IS NULL
+"#;
+
+/// Compute a 4-character base-36 short_id from a UUID.
+///
+/// Mirrors `short_id_from_uuid` in the task repository: takes the last 4 bytes
+/// of the UUID as a big-endian u32, reduces modulo 36^4, and encodes as
+/// base-36.
+fn compute_audit_short_id(seed_id: &str) -> String {
+    let Ok(seed) = uuid::Uuid::parse_str(seed_id) else {
+        return "0000".to_string();
+    };
+    let bytes = seed.as_bytes();
+    let n = u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) % 1_679_616;
+    const CHARS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut n = n;
+    let mut buf = [b'0'; 4];
+    for i in (0..4).rev() {
+        buf[i] = CHARS[(n % 36) as usize];
+        n /= 36;
+    }
+    String::from_utf8(buf.to_vec()).unwrap()
+}
 const OUTCOME_BY_ID: &str = r#"
     SELECT id, selection_id, outcome,
            miss_category, miss_severity, requires_rule_update,
