@@ -81,6 +81,16 @@ fn token_estimate(chars: usize) -> usize {
 /// Notes are processed in input order (which the caller controls; typically
 /// highest-confidence first).  The first note that would overflow the budget
 /// triggers pruning of that note and **all** remaining notes.
+///
+/// Once the budget is exhausted, subsequent notes are classified as
+/// `BudgetPruned` **without** computing their label, summary, or rendered
+/// line content.  This preserves the original formatter's break semantics:
+/// the old `format_knowledge_notes` loop broke on the first overflow and
+/// never inspected later notes, so any content slicing (e.g. fallback
+/// summary at a non-UTF-8 boundary) was unreachable.  Skipping content
+/// computation for exhausted-budget notes maintains that invariant and
+/// avoids panics on notes whose `content[..min(100)]` would land on a
+/// non-byte-boundary.
 pub fn pack_knowledge_notes(
     notes: &[djinn_memory::Note],
     budget_chars: usize,
@@ -91,6 +101,23 @@ pub fn pack_knowledge_notes(
     let mut budget_exhausted = false;
 
     for note in notes {
+        // Once the budget is exhausted, push a budget-pruned outcome
+        // immediately without computing label/summary/line content.
+        // This preserves the original formatter's break semantics: the old
+        // loop broke on the first overflow and never inspected later notes,
+        // so any content slicing (e.g. fallback summary at a non-UTF-8
+        // boundary) was unreachable.
+        if budget_exhausted {
+            outcomes.push(NotePackOutcome {
+                permalink: note.permalink.clone(),
+                title: note.title.clone(),
+                disposition: NotePackDisposition::BudgetPruned,
+                estimated_rendered_chars: None,
+                estimated_rendered_tokens: None,
+            });
+            continue;
+        }
+
         let label = match note.note_type.as_str() {
             "pitfall" => "Pitfall",
             "pattern" => "Pattern",
@@ -119,7 +146,7 @@ pub fn pack_knowledge_notes(
             label, note.title, summary, note.permalink
         );
 
-        if budget_exhausted || used + line.len() > budget_chars {
+        if used + line.len() > budget_chars {
             budget_exhausted = true;
             outcomes.push(NotePackOutcome {
                 permalink: note.permalink.clone(),
@@ -166,62 +193,6 @@ pub fn pack_knowledge_notes(
 /// Now implemented as a compatibility wrapper around [`pack_knowledge_notes`].
 pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize) -> String {
     pack_knowledge_notes(notes, budget_chars).rendered
-}
-
-/// Extract crate/module path prefixes from a task's description, design, and epic context.
-pub fn derive_task_scope_paths(
-    task: &djinn_core::models::Task,
-    epic_context: Option<&str>,
-) -> Vec<String> {
-    use regex::Regex;
-    use std::sync::OnceLock;
-    // Match paths like: crates/foo, src/bar/baz, server/crates/djinn-db
-    // Looking for patterns with at least 2 slash-separated segments
-    static TASK_SCOPE_PATH_RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
-    let re = match TASK_SCOPE_PATH_RE.get_or_init(|| {
-        Regex::new(r#"(?:^|[\s`"(])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_.-]+){1,6})(?:[\s`")\.,:]|$)"#)
-    }) {
-        Ok(re) => re,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "failed to compile task-scope path regex; skipping scope derivation"
-            );
-            return Vec::new();
-        }
-    };
-    let mut paths = std::collections::HashSet::new();
-    for text in [&task.description, &task.design] {
-        for cap in re.captures_iter(text) {
-            if let Some(m) = cap.get(1) {
-                let path = m.as_str();
-                // Filter to paths that look like code paths (not URLs, not short fragments)
-                if path.contains('/') && !path.starts_with("http") && !path.starts_with("//") {
-                    // Derive scope: split on /src/ or take up to 3 components
-                    if let Some(idx) = path.find("/src/") {
-                        paths.insert(path[..idx].to_string());
-                    } else {
-                        paths.insert(path.to_string());
-                    }
-                }
-            }
-        }
-    }
-    if let Some(epic) = epic_context {
-        for cap in re.captures_iter(epic) {
-            if let Some(m) = cap.get(1) {
-                let path = m.as_str();
-                if path.contains('/') && !path.starts_with("http") && !path.starts_with("//") {
-                    if let Some(idx) = path.find("/src/") {
-                        paths.insert(path[..idx].to_string());
-                    } else {
-                        paths.insert(path.to_string());
-                    }
-                }
-            }
-        }
-    }
-    paths.into_iter().collect()
 }
 
 /// Returns true when the given role name is opted-in to auto-injected
@@ -281,6 +252,62 @@ fn format_related_names(syms: &[djinn_control_plane::bridge::RelatedSymbol], max
         .map(|s| s.name.clone())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Extract crate/module path prefixes from a task's description, design, and epic context.
+pub fn derive_task_scope_paths(
+    task: &djinn_core::models::Task,
+    epic_context: Option<&str>,
+) -> Vec<String> {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    // Match paths like: crates/foo, src/bar/baz, server/crates/djinn-db
+    // Looking for patterns with at least 2 slash-separated segments
+    static TASK_SCOPE_PATH_RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+    let re = match TASK_SCOPE_PATH_RE.get_or_init(|| {
+        Regex::new(r#"(?:^|[\s`"(])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_.-]+){1,6})(?:[\s`")\.,:]|$)"#)
+    }) {
+        Ok(re) => re,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to compile task-scope path regex; skipping scope derivation"
+            );
+            return Vec::new();
+        }
+    };
+    let mut paths = std::collections::HashSet::new();
+    for text in [&task.description, &task.design] {
+        for cap in re.captures_iter(text) {
+            if let Some(m) = cap.get(1) {
+                let path = m.as_str();
+                // Filter to paths that look like code paths (not URLs, not short fragments)
+                if path.contains('/') && !path.starts_with("http") && !path.starts_with("//") {
+                    // Derive scope: split on /src/ or take up to 3 components
+                    if let Some(idx) = path.find("/src/") {
+                        paths.insert(path[..idx].to_string());
+                    } else {
+                        paths.insert(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if let Some(epic) = epic_context {
+        for cap in re.captures_iter(epic) {
+            if let Some(m) = cap.get(1) {
+                let path = m.as_str();
+                if path.contains('/') && !path.starts_with("http") && !path.starts_with("//") {
+                    if let Some(idx) = path.find("/src/") {
+                        paths.insert(path[..idx].to_string());
+                    } else {
+                        paths.insert(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+    paths.into_iter().collect()
 }
 
 /// Build the auto-injected `code_graph context` block for `role_name`.

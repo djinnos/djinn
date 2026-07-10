@@ -1295,3 +1295,53 @@ fn pack_knowledge_notes_budget_permalink_overflow_prunes() {
     );
     assert!(packed.outcomes[0].estimated_rendered_chars.is_none());
 }
+
+/// Regression: once the budget is exhausted, subsequent notes must be
+/// classified as budget-pruned **without** computing their label, summary,
+/// or rendered line content.  The old buggy version would continue
+/// evaluating the fallback summary for later notes, panicking on notes
+/// whose `content[..min(100)]` lands on a non-UTF-8 byte boundary.
+#[test]
+fn pack_knowledge_notes_budget_exhausted_skips_content_for_later_notes() {
+    // Note 1: overflows budget → triggers budget_exhausted.
+    let notes = vec![
+        fixture_note(
+            "note",
+            "overflow",
+            "a/overflow",
+            Some("This abstract is intentionally long enough to overflow the tiny budget."),
+            None,
+            "",
+            0.5,
+        ),
+        // Note 2: no abstract/overview, content whose byte 100 is a
+        // non-UTF-8 boundary.  The fallback summary `content[..min(100)]`
+        // would panic if reached.
+        fixture_note(
+            "note",
+            "utf8-trap",
+            "b/trap",
+            None,
+            None,
+            &("a".repeat(99) + "é"), // byte index 100 = inside 'é' (2 bytes)
+            0.3,
+        ),
+    ];
+
+    let budget = 50; // tiny budget; nothing fits
+    let packed = pack_knowledge_notes(&notes, budget);
+
+    assert_eq!(packed.outcomes.len(), 2);
+    // Both notes must be budget-pruned.
+    assert_eq!(
+        packed.outcomes[0].disposition,
+        NotePackDisposition::BudgetPruned
+    );
+    assert_eq!(
+        packed.outcomes[1].disposition,
+        NotePackDisposition::BudgetPruned
+    );
+    // Rendered output is empty.
+    assert!(packed.rendered.is_empty());
+    // Crucially: the function must not panic on note 2's non-UTF-8 boundary.
+}

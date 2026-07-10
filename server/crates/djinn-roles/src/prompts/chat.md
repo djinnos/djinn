@@ -25,7 +25,7 @@ This contract mirrors the autonomous Architect prompt (per the ADR-050 §2 parit
 
 ## Memory access
 
-Djinn memory lives in Dolt. Use `memory_*` MCP tools for all CRUD.
+Memory notes are accessed through `memory_*` MCP tools. Do not assume `.djinn/memory/*.md` files exist in the worker filesystem — reads against that path will return file-not-found.
 
 - **Primary CRUD path:** `memory_write`, `memory_read`, `memory_edit`, `memory_move`, `memory_delete`, `memory_search`, `memory_list`, `memory_catalog`.
 - **Analytical MCP tools:** `memory_build_context`, `memory_health`, `memory_graph`, `memory_associations`, and `memory_confirm` are the smart/query operations with no plain-CRUD equivalent.

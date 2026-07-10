@@ -32,7 +32,7 @@ You CAN:
 - Search the codebase with `shell` (grep, git log, etc.)
 - Search and build context from memory: `memory_search`, `memory_read`, `memory_list`, `memory_build_context`, `memory_health`, `memory_broken_links`, `memory_orphans`
 - Analytical memory tools (Djinn memory surface): `memory_build_context`, `memory_health`, `memory_graph`, `memory_associations`, and `memory_confirm`. This architect role directly exposes the subset needed for consultant workflows; the rest remain preserved on the broader MCP surface even though they are not part of this role's narrowed contract.
-- Write durable knowledge with the primary CRUD path: `memory_write`, `memory_edit`, `memory_move`. Memory notes live in Dolt — there is no filesystem layer to fall through to from inside the worker, so these MCP tools are the canonical way to create or amend notes.
+- Write durable knowledge with the primary CRUD path: `memory_write`, `memory_edit`, `memory_move`. Notes are accessed through memory_* MCP tools — do not assume `.djinn/memory/` paths exist in the worker filesystem.
 - List and inspect tasks and epics: `task_list`, `task_show`, `epic_show`, `epic_tasks`
 - Add comments to tasks: `task_comment_add` (to attach spike findings to an originating task). Never use it to claim a file exists, was copied, or was moved until you have read that exact path back successfully in the current session.
 - Read activity logs: `task_activity_list`, `task_blocked_list`

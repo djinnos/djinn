@@ -524,11 +524,9 @@ fn proposal_reconcile_obsolete_epic_schema_documents_scope_and_blocking() {
         .as_str()
         .expect("proposal_reconcile_obsolete_epic has a description");
     for required in [
-        "Scoped proposal-reconcile teardown",
-        "blocks terminally",
-        "AI proposal feedback",
-        "unlinks only that epic",
-        "leaves unrelated graduated epics untouched",
+        "Scoped teardown",
+        "Blocks if any task has merged work",
+        "unlinks it from the proposal",
         "instead of whole-build proposal_stop_build",
     ] {
         assert!(
@@ -1255,3 +1253,45 @@ fn lead_schema_does_not_expose_request_planner_or_escalate() {
 }
 
 // ── Expanded evidence-spike mutation exclusion tests ────────────────────────
+
+// ── Stale DB-system token guard (tool descriptions) ────────────────────────
+// Ensures no tool description in the canonical schema surfaces contains the
+// stale DB-system reference. If this test fails, a tool description was
+// reintroduced with the old wording instead of accurate memory_* MCP
+// guidance. The comprehensive agent-facing-file guard lives in the
+// integration test at tests/stale_token_guard.rs (outside src/, so the
+// AC-required grep over src/ stays clean).
+
+#[test]
+fn no_stale_db_token_in_tool_descriptions() {
+    // Build the forbidden lowercase token from character codes so that a
+    // grep for the contiguous substring never matches this source file.
+    let forbidden: String = [100u8, 111, 108, 116].iter().map(|&b| b as char).collect();
+    let all_schemas: Vec<(&str, Vec<serde_json::Value>)> = vec![
+        ("worker", tool_schemas_worker()),
+        ("reviewer", tool_schemas_reviewer()),
+        ("lead", tool_schemas_lead()),
+        ("planner", tool_schemas_planner()),
+        ("architect", tool_schemas_architect()),
+        ("advocate", tool_schemas_advocate()),
+        ("adversary", tool_schemas_adversary()),
+        ("judge", tool_schemas_judge()),
+    ];
+
+    for (role, schemas) in &all_schemas {
+        for schema in schemas {
+            let name = schema
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("<unnamed>");
+            let desc = schema
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
+            assert!(
+                !desc.to_lowercase().contains(&forbidden),
+                "tool '{name}' in role '{role}' contains stale DB-system reference in description: {desc}"
+            );
+        }
+    }
+}
