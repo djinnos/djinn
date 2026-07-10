@@ -245,6 +245,32 @@ fn render_summary_markdown(report: &Phase1Report) -> String {
         }
     }
 
+    // ── Signal comparisons ────────────────────────────────────────────────
+    if !report.signal_comparisons.is_empty() {
+        out.push_str("## Signal Comparison Details\n\n");
+        out.push_str(
+            "These comparisons prove that graph/entity and task-affinity inputs \
+             each change at least one relevant note rank, preventing silent \
+             collapse to lexical/vector/temporal-only behavior.\n\n",
+        );
+        out.push_str("| Query ID | Signal | Rank With | Rank Without | Changed |\n");
+        out.push_str("|----------|--------|-----------|--------------|---------|\n");
+        for sc in &report.signal_comparisons {
+            let with_str = sc
+                .rank_with_signal
+                .map_or("—".to_string(), |r| r.to_string());
+            let without_str = sc
+                .rank_without_signal
+                .map_or("—".to_string(), |r| r.to_string());
+            let changed_str = if sc.rank_changed { "✅" } else { "—" };
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
+                sc.query_id, sc.signal, with_str, without_str, changed_str,
+            ));
+        }
+        out.push('\n');
+    }
+
     // ── Threshold policy ──────────────────────────────────────────────────
     out.push_str(&format!(
         "_Threshold policy version: {}_\n",

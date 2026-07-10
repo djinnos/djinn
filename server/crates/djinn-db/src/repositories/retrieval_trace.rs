@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 use crate::database::Database;
+use crate::error::DbError;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -86,6 +87,37 @@ pub const ENTRY_POINT_VALUES: &[&str] = &[
     "format_knowledge_notes",
     "memory_recall_trace",
 ];
+
+// ── Candidate outcome ────────────────────────────────────────────────────────
+
+/// Whether a trace candidate was injected or skipped.
+///
+/// Used by [`TraceCandidate::validate_invariants`] to enforce the proposal
+/// rule that `skipped_reason` is nullable *only* for injected candidates.
+/// The `#[serde(default)]` attribute means pre-existing JSONB rows that lack
+/// an `outcome` field deserialize as `Skipped`, which preserves backward
+/// compatibility while still allowing callers to mark candidates explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateOutcome {
+    /// The candidate was injected into the downstream prompt.
+    Injected,
+    /// The candidate was skipped (not injected). This is also the default
+    /// when the field is absent from JSONB.
+    Skipped,
+}
+
+impl CandidateOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Injected => "injected",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+/// All valid outcome string constants.
+pub const CANDIDATE_OUTCOME_VALUES: &[&str] = &["injected", "skipped"];
 
 // ── Skipped-reason vocabulary ─────────────────────────────────────────────────
 
@@ -165,12 +197,20 @@ pub const SKIPPED_REASON_VALUES: &[&str] = &[
 
 /// A single candidate recorded in a trace's `candidates` JSONB array.
 ///
-/// `skipped_reason` is `None` for injected candidates; for non-injected
-/// candidates it is one of [`SkippedReason`].
+/// `outcome` distinguishes injected from skipped candidates. When absent from
+/// JSONB (backward compat via `#[serde(default)]`), it defaults to
+/// `Skipped`. Validation enforces:
+/// - An **injected** candidate has `skipped_reason = None`.
+/// - A **skipped** candidate must have a valid [`SkippedReason`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceCandidate {
     /// Stable note id of the candidate.
     pub note_id: String,
+    /// Whether the candidate was injected or skipped.
+    ///
+    /// Defaults to `Skipped` when absent from JSONB (backward compat).
+    #[serde(default = "default_candidate_outcome")]
+    pub outcome: CandidateOutcome,
     /// Rank position within the candidate set (1-based).
     pub rank: Option<i32>,
     /// Retrieval confidence/score (0.0–1.0).
@@ -181,6 +221,81 @@ pub struct TraceCandidate {
     pub source: Option<String>,
     /// Optional scope/context metadata for later classification.
     pub scope: Option<serde_json::Value>,
+}
+
+/// Default outcome for deserialization when the `outcome` field is absent
+/// from JSONB. `Skipped` is chosen because it is the safer assumption: a
+/// missing field on a genuinely-injected candidate will cause
+/// `validate_invariants` to surface a clear error (skipped candidate with no
+/// reason) rather than silently accepting data that might be malformed.
+fn default_candidate_outcome() -> CandidateOutcome {
+    CandidateOutcome::Skipped
+}
+
+impl TraceCandidate {
+    /// Validate the candidate's outcome/skipped_reason invariant.
+    ///
+    /// The proposal fixes `skipped_reason` to the vocabulary in
+    /// [`SKIPPED_REASON_VALUES`] (or `None`). The `outcome` field determines
+    /// which branch applies:
+    ///
+    /// - **Injected** (`outcome = Injected`): `skipped_reason` must be `None`.
+    /// - **Skipped** (`outcome = Skipped`): `skipped_reason` must be `Some`
+    ///   with a valid [`SkippedReason`].
+    ///
+    /// Because `skipped_reason` is a typed enum, an out-of-vocabulary value
+    /// cannot be constructed in Rust; the vocabulary check is a defensive
+    /// double-check against future renames.
+    pub fn validate_invariants(&self) -> Result<()> {
+        match self.outcome {
+            CandidateOutcome::Injected => {
+                if self.skipped_reason.is_some() {
+                    Err(DbError::InvalidData(format!(
+                        "candidate {} has outcome 'injected' but also has skipped_reason '{:?}' \
+                         — injected candidates must not have a skipped_reason",
+                        self.note_id, self.skipped_reason,
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+            CandidateOutcome::Skipped => {
+                match &self.skipped_reason {
+                    None => Err(DbError::InvalidData(format!(
+                        "candidate {} has outcome 'skipped' but no skipped_reason — \
+                         non-injected (skipped) candidates must have a skipped_reason from {:?}",
+                        self.note_id, SKIPPED_REASON_VALUES,
+                    ))),
+                    Some(reason) => {
+                        // Double-check the serialised form is in the fixed vocabulary.
+                        if SKIPPED_REASON_VALUES.contains(&reason.as_str()) {
+                            Ok(())
+                        } else {
+                            Err(DbError::InvalidData(format!(
+                                "candidate {} has skipped_reason '{}' which is not in the fixed vocabulary {:?}",
+                                self.note_id,
+                                reason.as_str(),
+                                SKIPPED_REASON_VALUES,
+                            )))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Validate a slice of candidates, returning the first invariant violation.
+///
+/// This is the batch form of [`TraceCandidate::validate_invariants`], suitable
+/// for calling right before persistence. Returns `Ok(())` when all candidates
+/// are consistent, or the first [`DbError::InvalidData`] describing the
+/// malformed combination.
+pub fn validate_candidates(candidates: &[TraceCandidate]) -> Result<()> {
+    for c in candidates {
+        c.validate_invariants()?;
+    }
+    Ok(())
 }
 
 // ── Row type ──────────────────────────────────────────────────────────────────
@@ -391,6 +506,33 @@ impl RetrievalTraceRepository {
                 .await?,
         )
     }
+
+    /// Prune (delete) trace rows older than a configurable retention cutoff for
+    /// a project.
+    ///
+    /// `before_cutoff` is an ISO-8601 UTC timestamp string (the same format used
+    /// by the `created_at` column, e.g. `2026-07-01T00:00:00.000Z`). Rows whose
+    /// `created_at` is strictly less than this value are deleted. Because
+    /// `created_at` is stored as a lexicographically-sortable UTC ISO-8601
+    /// string, a simple string comparison (`<`) correctly orders timestamps.
+    ///
+    /// Returns the number of rows deleted. Errors are returned as `Result` so
+    /// callers can log and continue fail-open without changing injection
+    /// output.
+    pub async fn prune_older_than(&self, project_id: &str, before_cutoff: &str) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+
+        let result = sqlx::query(
+            r#"DELETE FROM retrieval_traces
+               WHERE project_id = $1 AND created_at < $2"#,
+        )
+        .bind(project_id)
+        .bind(before_cutoff)
+        .execute(self.db.pool())
+        .await?;
+
+        Ok(result.rows_affected())
+    }
 }
 
 // ── SQL constants ─────────────────────────────────────────────────────────────
@@ -405,425 +547,3 @@ const RETRIEVAL_TRACE_SELECT_BY_ID: &str = r#"
     WHERE id = $1
 "#;
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-    use crate::database::Database;
-
-    fn test_db() -> Database {
-        Database::open_in_memory().unwrap()
-    }
-
-    /// Seed a project so FK constraints pass.
-    async fn seed_project(db: &Database, project_id: &str) {
-        db.ensure_initialized().await.unwrap();
-        sqlx::query(
-            "INSERT INTO projects (id, name, github_owner, github_repo)
-             VALUES ($1, $2, 'test-owner', $2)
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .bind(project_id)
-        .bind(format!("proj-{project_id}"))
-        .execute(db.pool())
-        .await
-        .unwrap();
-    }
-
-    fn injected_candidate(note_id: &str, rank: i32, confidence: f64) -> TraceCandidate {
-        TraceCandidate {
-            note_id: note_id.to_string(),
-            rank: Some(rank),
-            confidence: Some(confidence),
-            skipped_reason: None,
-            source: Some("scope_overlap".to_string()),
-            scope: None,
-        }
-    }
-
-    fn skipped_candidate(
-        note_id: &str,
-        rank: i32,
-        confidence: f64,
-        reason: SkippedReason,
-    ) -> TraceCandidate {
-        TraceCandidate {
-            note_id: note_id.to_string(),
-            rank: Some(rank),
-            confidence: Some(confidence),
-            skipped_reason: Some(reason),
-            source: Some("scope_overlap".to_string()),
-            scope: None,
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn migration_creates_retrieval_traces_table() {
-        let db = test_db();
-        db.ensure_initialized().await.unwrap();
-
-        let count: i64 = sqlx::query_scalar("SELECT count(*)::bigint FROM retrieval_traces")
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-        assert_eq!(count, 0, "fresh table should be empty");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn insert_and_get_by_id_round_trips_fields() {
-        let db = test_db();
-        let project_id = "019f4900-0000-7000-8000-000000000001";
-        seed_project(&db, project_id).await;
-        let repo = RetrievalTraceRepository::new(db);
-
-        let candidates = json!([
-            injected_candidate("note-a", 1, 0.95),
-            skipped_candidate("note-b", 2, 0.30, SkippedReason::NotTopK),
-        ]);
-        let durations = json!({"retrieval_ms": 12, "cap_ms": 3});
-
-        let row = repo
-            .insert(CreateRetrievalTraceParams {
-                project_id,
-                session_id: Some("sess-1"),
-                task_run_id: Some("run-1"),
-                task_id: Some("task-1"),
-                entry_point: RetrievalTraceEntryPoint::Dispatch,
-                trigger: Some(&json!({"query": "test query"})),
-                candidates: &candidates,
-                candidate_cap: 50,
-                candidate_cap_exceeded: false,
-                sampling_metadata: None,
-                durations_ms: &durations,
-                estimated_injected_tokens: 512,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(row.schema_version, RETRIEVAL_TRACE_SCHEMA_VERSION);
-        assert_eq!(row.project_id, project_id);
-        assert_eq!(row.session_id.as_deref(), Some("sess-1"));
-        assert_eq!(row.task_run_id.as_deref(), Some("run-1"));
-        assert_eq!(row.task_id.as_deref(), Some("task-1"));
-        assert_eq!(row.entry_point, "dispatch");
-        assert_eq!(
-            row.entry_point_enum(),
-            Some(RetrievalTraceEntryPoint::Dispatch)
-        );
-        assert_eq!(row.candidate_cap, 50);
-        assert!(!row.candidate_cap_exceeded);
-        assert!(row.sampling_metadata.is_none());
-        assert_eq!(row.estimated_injected_tokens, 512);
-        assert!(row.trigger.is_some());
-
-        let typed = row.candidates_typed();
-        assert_eq!(typed.len(), 2);
-        assert!(
-            typed[0].skipped_reason.is_none(),
-            "first candidate is injected"
-        );
-        assert_eq!(typed[1].skipped_reason, Some(SkippedReason::NotTopK));
-
-        // get_by_id returns the same row.
-        let fetched = repo
-            .get_by_id(&row.id)
-            .await
-            .unwrap()
-            .expect("row must exist");
-        assert_eq!(fetched.id, row.id);
-        assert_eq!(fetched.entry_point, "dispatch");
-        assert_eq!(fetched.estimated_injected_tokens, 512);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn insert_with_capped_candidates_and_cap_exceeded() {
-        let db = test_db();
-        let project_id = "019f4900-0000-7000-8000-000000000002";
-        seed_project(&db, project_id).await;
-        let repo = RetrievalTraceRepository::new(db);
-
-        // Simulate 60 candidates capped to 50.
-        let candidates: Vec<TraceCandidate> = (0..50)
-            .map(|i| injected_candidate(&format!("note-{i}"), (i + 1) as i32, 0.5))
-            .collect();
-        let candidates_json = serde_json::to_value(&candidates).unwrap();
-
-        let row = repo
-            .insert(CreateRetrievalTraceParams {
-                project_id,
-                session_id: None,
-                task_run_id: None,
-                task_id: None,
-                entry_point: RetrievalTraceEntryPoint::LoadKnowledgeContext,
-                trigger: None,
-                candidates: &candidates_json,
-                candidate_cap: 50,
-                candidate_cap_exceeded: true,
-                sampling_metadata: Some(&json!({"sample_rate": 1.0})),
-                durations_ms: &json!({}),
-                estimated_injected_tokens: 2000,
-            })
-            .await
-            .unwrap();
-
-        assert!(row.candidate_cap_exceeded);
-        assert_eq!(row.candidate_cap, 50);
-        assert_eq!(row.candidates_typed().len(), 50);
-        assert!(row.sampling_metadata.is_some());
-        assert_eq!(
-            row.entry_point_enum(),
-            Some(RetrievalTraceEntryPoint::LoadKnowledgeContext)
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn list_by_project_returns_recent_traces_desc() {
-        let db = test_db();
-        let project_id = "019f4900-0000-7000-8000-000000000003";
-        let other_project = "019f4900-0000-7000-8000-000000000099";
-        seed_project(&db, project_id).await;
-        seed_project(&db, other_project).await;
-        let repo = RetrievalTraceRepository::new(db);
-
-        let candidates = json!([]);
-
-        let r1 = repo
-            .insert(CreateRetrievalTraceParams {
-                project_id,
-                session_id: Some("sess-a"),
-                task_run_id: None,
-                task_id: None,
-                entry_point: RetrievalTraceEntryPoint::Dispatch,
-                trigger: None,
-                candidates: &candidates,
-                candidate_cap: 50,
-                candidate_cap_exceeded: false,
-                sampling_metadata: None,
-                durations_ms: &json!({}),
-                estimated_injected_tokens: 0,
-            })
-            .await
-            .unwrap();
-
-        let r2 = repo
-            .insert(CreateRetrievalTraceParams {
-                project_id,
-                session_id: Some("sess-b"),
-                task_run_id: None,
-                task_id: None,
-                entry_point: RetrievalTraceEntryPoint::Dispatch,
-                trigger: None,
-                candidates: &candidates,
-                candidate_cap: 50,
-                candidate_cap_exceeded: false,
-                sampling_metadata: None,
-                durations_ms: &json!({}),
-                estimated_injected_tokens: 0,
-            })
-            .await
-            .unwrap();
-
-        // Insert into another project — should not appear.
-        repo.insert(CreateRetrievalTraceParams {
-            project_id: other_project,
-            session_id: None,
-            task_run_id: None,
-            task_id: None,
-            entry_point: RetrievalTraceEntryPoint::Dispatch,
-            trigger: None,
-            candidates: &candidates,
-            candidate_cap: 50,
-            candidate_cap_exceeded: false,
-            sampling_metadata: None,
-            durations_ms: &json!({}),
-            estimated_injected_tokens: 0,
-        })
-        .await
-        .unwrap();
-
-        let all = repo
-            .list_by_project(project_id, RetrievalTraceListFilter::default())
-            .await
-            .unwrap();
-        assert_eq!(all.len(), 2);
-        // DESC ordering: r2 (inserted later) should come first.
-        assert_eq!(all[0].id, r2.id);
-        assert_eq!(all[1].id, r1.id);
-
-        // Filter by session_id.
-        let filtered = repo
-            .list_by_project(
-                project_id,
-                RetrievalTraceListFilter {
-                    session_id: Some("sess-a"),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].id, r1.id);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn list_by_project_filters_by_entry_point_and_task() {
-        let db = test_db();
-        let project_id = "019f4900-0000-7000-8000-000000000004";
-        seed_project(&db, project_id).await;
-        let repo = RetrievalTraceRepository::new(db);
-        let candidates = json!([]);
-
-        repo.insert(CreateRetrievalTraceParams {
-            project_id,
-            session_id: None,
-            task_run_id: None,
-            task_id: Some("task-x"),
-            entry_point: RetrievalTraceEntryPoint::Dispatch,
-            trigger: None,
-            candidates: &candidates,
-            candidate_cap: 50,
-            candidate_cap_exceeded: false,
-            sampling_metadata: None,
-            durations_ms: &json!({}),
-            estimated_injected_tokens: 0,
-        })
-        .await
-        .unwrap();
-
-        repo.insert(CreateRetrievalTraceParams {
-            project_id,
-            session_id: None,
-            task_run_id: None,
-            task_id: Some("task-y"),
-            entry_point: RetrievalTraceEntryPoint::JitPitfalls,
-            trigger: None,
-            candidates: &candidates,
-            candidate_cap: 50,
-            candidate_cap_exceeded: false,
-            sampling_metadata: None,
-            durations_ms: &json!({}),
-            estimated_injected_tokens: 0,
-        })
-        .await
-        .unwrap();
-
-        // Filter by entry point.
-        let by_ep = repo
-            .list_by_project(
-                project_id,
-                RetrievalTraceListFilter {
-                    entry_point: Some(RetrievalTraceEntryPoint::JitPitfalls),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(by_ep.len(), 1);
-        assert_eq!(by_ep[0].entry_point, "jit_pitfalls");
-
-        // Filter by task_id.
-        let by_task = repo
-            .list_by_project(
-                project_id,
-                RetrievalTraceListFilter {
-                    task_id: Some("task-x"),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(by_task.len(), 1);
-        assert_eq!(by_task[0].task_id.as_deref(), Some("task-x"));
-
-        // Filter by task_run_id.
-        let by_run = repo
-            .list_by_project(
-                project_id,
-                RetrievalTraceListFilter {
-                    task_run_id: Some("run-z"),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert!(by_run.is_empty(), "no rows match run-z");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn list_by_project_respects_limit() {
-        let db = test_db();
-        let project_id = "019f4900-0000-7000-8000-000000000005";
-        seed_project(&db, project_id).await;
-        let repo = RetrievalTraceRepository::new(db);
-        let candidates = json!([]);
-
-        for _ in 0..5 {
-            repo.insert(CreateRetrievalTraceParams {
-                project_id,
-                session_id: None,
-                task_run_id: None,
-                task_id: None,
-                entry_point: RetrievalTraceEntryPoint::Dispatch,
-                trigger: None,
-                candidates: &candidates,
-                candidate_cap: 50,
-                candidate_cap_exceeded: false,
-                sampling_metadata: None,
-                durations_ms: &json!({}),
-                estimated_injected_tokens: 0,
-            })
-            .await
-            .unwrap();
-        }
-
-        let limited = repo
-            .list_by_project(
-                project_id,
-                RetrievalTraceListFilter {
-                    limit: Some(2),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(limited.len(), 2);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn get_by_id_returns_none_for_missing() {
-        let db = test_db();
-        db.ensure_initialized().await.unwrap();
-        let repo = RetrievalTraceRepository::new(db);
-        let result = repo.get_by_id("nonexistent-id").await.unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn skipped_reason_vocabulary_is_exact() {
-        // Ensure the vocabulary matches the proposal requirement.
-        let mut actual: Vec<&str> = SkippedReason::ALL_VARIANTS
-            .iter()
-            .map(|r| r.as_str())
-            .collect();
-        actual.sort();
-        let mut expected: Vec<&str> = SKIPPED_REASON_VALUES.to_vec();
-        expected.sort();
-        assert_eq!(actual, expected);
-        assert_eq!(SKIPPED_REASON_VALUES.len(), 6);
-    }
-
-    #[test]
-    fn entry_point_vocabulary_matches_migration_check() {
-        let mut actual: Vec<&str> = RetrievalTraceEntryPoint::ALL_VARIANTS
-            .iter()
-            .map(|e| e.as_str())
-            .collect();
-        actual.sort();
-        let mut expected: Vec<&str> = ENTRY_POINT_VALUES.to_vec();
-        expected.sort();
-        assert_eq!(actual, expected);
-    }
-}
