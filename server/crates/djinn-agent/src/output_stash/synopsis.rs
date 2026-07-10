@@ -16,9 +16,10 @@
 //! * **No LLM calls, no IO, no durable state.** Pure, deterministic string
 //!   transform; safe to call from the hot `render_tool_result` chokepoint.
 //! * **Bounded behavior on pathological input.** Never panic. On huge or
-//!   deeply-nested JSON the parser either succeeds with a `serde_json::Value`
-//!   (serde_json's default recursion limit of 128 is the hard safety net) or
-//!   returns `None` / a minimal fallback so the caller can degrade gracefully.
+//!   deeply-nested JSON a streaming structural scan rejects the input
+//!   *before* any [`serde_json::Value`] is allocated, so pathological
+//!   large-but-valid blobs never cause unbounded time/memory. `serde_json`'s
+//!   own recursion limit is the backstop for any nesting the scan might miss.
 //! * **Stable bullet labels.** Downstream tests/proposals depend on labels
 //!   like `kind`, `root`, `arrays`, `object shape depth 2`, `scalar examples`,
 //!   and `suggested grep terms` appearing verbatim.
@@ -85,6 +86,12 @@ const MAX_WALK_DEPTH: usize = 2;
 /// have a parsed `Value` in hand.
 const MAX_WALK_NODES: usize = 4_096;
 
+/// Maximum nesting depth allowed by the streaming structural scanner. This
+/// mirrors `serde_json`'s default recursion limit (128); deeper nesting is
+/// rejected *before* the deserializer runs, so pathological deeply-nested
+/// JSON never allocates a `Value` tree.
+const MAX_JSON_DEPTH: usize = 128;
+
 /// Bounded synopsis entry point.
 ///
 /// Returns a deterministic, bullet-formatted synopsis of `text` if it is
@@ -121,14 +128,9 @@ pub fn synopsize(_tool_name: &str, text: &str, budget_chars: usize) -> Option<St
         return None;
     }
 
-    // Bounded parse: deserialize into a `serde_json::Value` then walk the
-    // tree to count nodes. `serde_json`'s default recursion limit (128) is
-    // the hard safety net for adversarial nesting; the node count is the
-    // safety net for adversarial breadth. We never `unwrap` here.
-    let value = match parse_bounded(trimmed) {
-        Some(v) => v,
-        None => return None,
-    };
+    // Bounded parse: reject oversized/pathological inputs via a streaming
+    // structural scan *before* any Value allocation, then deserialize.
+    let value = parse_bounded(trimmed)?;
 
     let mut b = Builder::new(budget_chars);
     b.push_kind(&value);
@@ -214,55 +216,126 @@ fn classify_root(value: &serde_json::Value) -> RootKind {
 /// allocation inside `serde_json::from_str`. We never unwrap the
 /// deserializer; both syntax errors and recursion-limit errors collapse to
 /// `None` so the caller can fall back to the byte-for-byte truncated stub.
+///
+/// The streaming structural scan ([`count_tokens_streaming`]) is the critical
+/// bound: it runs in O(n) time and O(1) memory *before* the deserializer, so
+/// a pathological large-but-valid blob (e.g. `[1,1,…,1]` with 250k elements)
+/// is rejected without ever materializing a huge `Value` tree.
 fn parse_bounded(text: &str) -> Option<serde_json::Value> {
-    // Pre-parse ceiling: reject oversized inputs before touching the
-    // deserializer. This caps worst-case memory to ≈ 2–3× MAX_PARSE_BYTES
-    // (serde_json::Value typically uses more memory than the source text).
+    // Pre-parse ceiling #1: reject oversized inputs by byte length before
+    // touching the deserializer. This caps worst-case parse memory to
+    // ≈ 2–3× MAX_PARSE_BYTES (serde_json::Value typically uses more memory
+    // than the source text).
     if text.len() > MAX_PARSE_BYTES {
         return None;
     }
 
-    // Parse into a Value. `serde_json`'s default recursion limit (128) is
-    // the hard safety net for adversarial nesting; both syntax errors and
-    // recursion-limit errors collapse to `None` so the caller degrades.
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    // Pre-parse ceiling #2: streaming structural scan. Count JSON value
+    // tokens by iterating raw bytes in O(n) time and O(1) memory — *without*
+    // deserializing. If the token count or nesting depth exceeds bounds, we
+    // return None *before* serde_json::from_str ever runs, so a pathological
+    // large-but-valid blob (e.g. `[1,1,…,1]` with 250k elements) can never
+    // force the deserializer to materialize a huge Value tree.
+    count_tokens_streaming(text)?;
 
-    // Walk the resulting Value to count nodes. If the total exceeds
-    // MAX_JSON_TOKENS the input is too large/broad to summarize safely —
-    // return None rather than spending cycles building the synopsis.
-    let mut node_count = 0usize;
-    if !count_value_nodes(&value, &mut node_count) {
-        return None;
-    }
-
-    Some(value)
+    // Safe to deserialize: the input is within MAX_PARSE_BYTES, the streaming
+    // scan confirmed the token count and depth are bounded, and serde_json's
+    // own recursion limit (128) guards nesting. Both syntax errors and
+    // recursion-limit errors collapse to None so the caller degrades
+    // gracefully.
+    serde_json::from_str(text).ok()
 }
 
-/// Recursively count nodes in a parsed [`serde_json::Value`]. Returns `false`
-/// if the count exceeds [`MAX_JSON_TOKENS`], short-circuiting the walk.
-fn count_value_nodes(value: &serde_json::Value, count: &mut usize) -> bool {
-    *count += 1;
-    if *count > MAX_JSON_TOKENS {
-        return false;
-    }
-    match value {
-        serde_json::Value::Array(a) => {
-            for v in a {
-                if !count_value_nodes(v, count) {
-                    return false;
+/// Streaming structural scan: count JSON value tokens by iterating the raw
+/// bytes *without* deserializing. This runs in O(n) time and O(1) memory and
+/// is the primary defence against pathological inputs that would force
+/// [`serde_json::from_str`] to allocate a huge [`serde_json::Value`] tree
+/// before any post-hoc node-count check could bail out.
+///
+/// Returns `Some(count)` if the input is structurally well-formed enough to
+/// count (balanced brackets, properly closed strings) and the token count and
+/// depth are within bounds. Returns `None` if the input is structurally
+/// broken, exceeds [`MAX_JSON_DEPTH`], or exceeds [`MAX_JSON_TOKENS`].
+///
+/// The count is an **upper bound** on the number of `serde_json::Value`
+/// nodes: object keys are counted as string tokens even though they are not
+/// separate nodes in the `Value` tree. Overcounting is safe — if the upper
+/// bound is within budget, the actual parse is guaranteed to be within budget
+/// too.
+fn count_tokens_streaming(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut tokens: usize = 0;
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    // After we count a scalar token (number/bool/null), we skip its remaining
+    // bytes until a structural delimiter, to avoid double-counting.
+    let mut in_scalar_body = false;
+
+    for &b in bytes {
+        // --- Inside a string literal ---
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else {
+                match b {
+                    b'\\' => escaped = true,
+                    b'"' => in_string = false,
+                    _ => {}
                 }
             }
+            continue;
         }
-        serde_json::Value::Object(map) => {
-            for v in map.values() {
-                if !count_value_nodes(v, count) {
-                    return false;
+
+        // --- Inside a scalar body (already counted) ---
+        if in_scalar_body {
+            if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-') {
+                continue;
+            }
+            in_scalar_body = false;
+            // Fall through to process the terminating byte.
+        }
+
+        // --- Structural scanning ---
+        match b {
+            b' ' | b'\t' | b'\n' | b'\r' => {}
+            b'{' | b'[' => {
+                tokens += 1;
+                depth += 1;
+                if depth > MAX_JSON_DEPTH || tokens > MAX_JSON_TOKENS {
+                    return None;
                 }
             }
+            b'}' | b']' => {
+                if depth == 0 {
+                    return None; // unbalanced closing bracket
+                }
+                depth -= 1;
+            }
+            b',' | b':' => {}
+            b'"' => {
+                tokens += 1;
+                if tokens > MAX_JSON_TOKENS {
+                    return None;
+                }
+                in_string = true;
+            }
+            // Scalar value start: true, false, null, or a number.
+            b't' | b'f' | b'n' | b'-' | b'0'..=b'9' => {
+                tokens += 1;
+                if tokens > MAX_JSON_TOKENS {
+                    return None;
+                }
+                in_scalar_body = true;
+            }
+            _ => return None, // unexpected byte — not valid JSON structure
         }
-        _ => {}
     }
-    true
+
+    if in_string || depth != 0 {
+        return None; // unterminated string or unbalanced brackets
+    }
+    Some(tokens)
 }
 
 /// Budgeted builder for the bullet-formatted synopsis.
@@ -361,7 +434,7 @@ impl Builder {
             serde_json::Value::String(s) => {
                 format!("string ({})", truncate_chars(s, MAX_SCALAR_EXAMPLE_CHARS))
             }
-            serde_json::Value::Number(n) => format!("number ({})", n),
+            serde_json::Value::Number(n) => format!("number ({n})"),
             serde_json::Value::Bool(b) => format!("bool ({b})"),
             serde_json::Value::Null => "null".to_string(),
         };
@@ -512,14 +585,12 @@ fn preview_keys(keys: &[String], max: usize) -> Vec<String> {
 /// if we had to cut. Never panics on multi-byte input.
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     let mut out = String::new();
-    let mut count = 0usize;
-    for c in s.chars() {
+    for (count, c) in s.chars().enumerate() {
         if count == max_chars {
             out.push('…');
             return out;
         }
         out.push(c);
-        count += 1;
     }
     out
 }
@@ -771,8 +842,9 @@ mod tests {
 
     #[test]
     fn pathological_depth_does_not_panic() {
-        // 10,000 nested arrays. serde_json's default recursion limit (128)
-        // kicks in long before we get a Value, so synopsize returns None.
+        // 10,000 nested arrays. The streaming structural scanner rejects this
+        // at MAX_JSON_DEPTH (128) *before* the deserializer runs, so synopsize
+        // returns None without ever materializing a Value tree.
         let mut s = String::new();
         for _ in 0..10_000 {
             s.push('[');
@@ -806,12 +878,34 @@ mod tests {
     }
 
     #[test]
+    fn pathological_breadth_over_token_limit_returns_none() {
+        // Construct valid JSON whose token count *exceeds* MAX_JSON_TOKENS.
+        // Each element contributes one number token; with MAX_JSON_TOKENS+1
+        // elements the streaming scan rejects it before the deserializer runs.
+        // This is under MAX_PARSE_BYTES, so the token limit is what trips.
+        let n = MAX_JSON_TOKENS + 10;
+        let raw: String =
+            std::iter::once('[')
+                .chain((0..n).flat_map(|i| {
+                    std::iter::once('1').chain(if i + 1 < n { Some(',') } else { None })
+                }))
+                .chain(std::iter::once(']'))
+                .collect();
+        assert!(
+            raw.len() < MAX_PARSE_BYTES,
+            "test setup: raw.len()={} should be under MAX_PARSE_BYTES for this test to exercise the token limit",
+            raw.len()
+        );
+        assert_eq!(synopsize("shell", &raw, 4096), None);
+    }
+
+    #[test]
     fn pathological_breadth_does_not_panic() {
-        // 50,000 top-level keys. synopsize must not panic or OOM — it may
-        // either return None (if the node cap trips) or a bounded synopsis
-        // (the node count is under the cap but the output is still budget-
-        // constrained). Either outcome is acceptable; the invariant is no
-        // panic and a result that respects the budget.
+        // 50,000 top-level keys with boolean values: ~100k tokens — under
+        // MAX_JSON_TOKENS. The streaming scan accepts it and the synopsis is
+        // built. The invariant is *no panic* and *respects budget*. (Truly
+        // hostile breadth, e.g. 250k+ scalar tokens, is rejected by the
+        // streaming scan — see `oversized_valid_json_returns_none` for that.)
         let mut map = serde_json::Map::with_capacity(50_000);
         for i in 0..50_000 {
             map.insert(format!("k{i}"), serde_json::Value::Bool(i % 2 == 0));
@@ -820,9 +914,8 @@ mod tests {
         let raw = serde_json::to_string(&value).unwrap();
         let result = synopsize("shell", &raw, 4096);
         match result {
-            None => {} // Node cap tripped — fine.
+            None => {} // token cap tripped — fine.
             Some(s) => {
-                // Bounded synopsis must respect the budget.
                 assert!(
                     s.len() <= 4096,
                     "synopsis exceeded budget: len={}, {s}",
@@ -830,6 +923,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn pathological_breadth_just_under_limit_returns_bounded_synopsis() {
+        // A valid JSON object with many keys but still under MAX_JSON_TOKENS.
+        // The streaming scan accepts it; the deserializer runs; the synopsis
+        // is emitted and must respect the budget. This guards against the
+        // scanner being overly aggressive (rejecting valid moderate inputs).
+        let n = 5_000;
+        let mut map = serde_json::Map::with_capacity(n);
+        for i in 0..n {
+            map.insert(format!("k{i}"), serde_json::Value::Number(i.into()));
+        }
+        let value = serde_json::Value::Object(map);
+        let raw = serde_json::to_string(&value).unwrap();
+        let out = synopsize("shell", &raw, 4096).expect("synopsis for large-but-valid JSON");
+        assert!(
+            out.len() <= 4096,
+            "synopsis exceeded budget: len={}, {out}",
+            out.len()
+        );
+        assert!(has_label(&out, "kind"));
+        assert!(has_label(&out, "root"));
     }
 
     #[test]
@@ -914,5 +1030,34 @@ mod tests {
         let a = synopsize("shell", raw, 1024).unwrap();
         let b = synopsize("task_list", raw, 1024).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn streaming_scan_rejects_unterminated_string() {
+        // Structurally broken — the streaming scanner returns None before
+        // the deserializer ever runs.
+        assert_eq!(count_tokens_streaming("{\"a\": \"oops"), None);
+    }
+
+    #[test]
+    fn streaming_scan_rejects_unbalanced_brackets() {
+        assert_eq!(count_tokens_streaming("[1,2,3"), None);
+        assert_eq!(count_tokens_streaming("1,2,3]"), None);
+    }
+
+    #[test]
+    fn streaming_scan_counts_simple_object() {
+        // {"a":1,"b":2} -> tokens: {, "a", 1, "b", 2 = 5
+        assert_eq!(count_tokens_streaming("{\"a\":1,\"b\":2}"), Some(5));
+    }
+
+    #[test]
+    fn streaming_scan_handles_escaped_quotes_in_strings() {
+        // String containing an escaped quote — must not terminate early.
+        let raw = "{\"msg\":\"he said \\\"hi\\\"\"}";
+        assert!(count_tokens_streaming(raw).is_some());
+        // And the full synopsis path works end-to-end.
+        let out = synopsize("shell", raw, 1024).expect("synopsis present");
+        assert!(has_label(&out, "kind"));
     }
 }
