@@ -162,7 +162,9 @@ pub fn validate_fixtures(fixtures: &Phase1Fixtures) -> Result<()> {
         if case.query_text.is_empty() {
             errors.push(format!("bad-case '{}': query_text is empty", case.case_id));
         }
-        if case.relevant_note_permalinks.is_empty() {
+        if case.relevant_note_permalinks.is_empty()
+            && case.case_type != crate::fixtures::BadCaseType::ZeroResult
+        {
             errors.push(format!(
                 "bad-case '{}': no relevant_note_permalinks (no ground truth)",
                 case.case_id

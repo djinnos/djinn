@@ -34,6 +34,9 @@ enum Commands {
     MineMemoryRefs,
     /// Refresh the committed baseline with current metric results.
     RefreshBaseline,
+    /// Validate committed fixtures and baseline without running the pipeline.
+    /// No LLM calls or external network required.
+    ValidateFixtures,
 }
 
 #[tokio::main]
@@ -57,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Compare => cmd_compare(&crate_root).await,
         Commands::MineMemoryRefs => not_yet_implemented("mine-memory-refs", "qmzw"),
         Commands::RefreshBaseline => cmd_refresh_baseline(&crate_root).await,
+        Commands::ValidateFixtures => cmd_validate_fixtures(&crate_root),
     }
 }
 
@@ -411,6 +415,155 @@ fn parse_iso8601_epoch(s: &str) -> Result<u64> {
 
 /// Returns a clear not-yet-implemented error identifying the downstream
 /// task that will provide the real implementation.
+/// Validate committed fixtures and baseline without running the pipeline.
+///
+/// This is a focused validation command that checks:
+/// 1. All fixture JSONL files parse correctly under the loader schema.
+/// 2. Fixture cross-references are valid (permalinks, graph edges).
+/// 3. Signal coverage data is present for all claimed signals.
+/// 4. The committed baseline exists and has correct structure.
+/// 5. Fixture hashes in the baseline match the committed manifest.
+///
+/// No LLM calls or external network are required.
+fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
+    info!("=== Validate Fixtures ===");
+
+    // 1. Load fixtures from disk
+    let fixtures =
+        loader::load_fixtures_from_disk(crate_root).context("loading fixtures from disk")?;
+
+    info!(
+        corpus = fixtures.corpus_notes.len(),
+        queries = fixtures.memory_ref_queries.len(),
+        bad_cases = fixtures.bad_cases.len(),
+        "fixtures loaded"
+    );
+
+    // 2. Validate fixtures (schema, cross-references, signal coverage)
+    loader::validate_fixtures(&fixtures).context("fixture validation failed")?;
+
+    info!("fixture validation passed");
+
+    // 3. Check query counts
+    let task_affinity_queries = fixtures
+        .memory_ref_queries
+        .iter()
+        .filter(|q| q.task_id.is_some())
+        .count();
+    let total_queries = fixtures.memory_ref_queries.len() + fixtures.bad_cases.len();
+    info!(
+        total_labeled = total_queries,
+        memory_ref = fixtures.memory_ref_queries.len(),
+        task_affinity = task_affinity_queries,
+        bad_cases = fixtures.bad_cases.len(),
+        "query counts"
+    );
+
+    // Require at least 25 total labeled queries
+    if total_queries < 25 {
+        anyhow::bail!(
+            "expected at least 25 total labeled queries, got {}",
+            total_queries
+        );
+    }
+
+    // Require at least 15 mined memory_refs rows
+    if fixtures.memory_ref_queries.len() < 15 {
+        anyhow::bail!(
+            "expected at least 15 mined memory_refs queries, got {}",
+            fixtures.memory_ref_queries.len()
+        );
+    }
+
+    // Require at least 10 bad-case rows
+    if fixtures.bad_cases.len() < 10 {
+        anyhow::bail!(
+            "expected at least 10 bad-case rows, got {}",
+            fixtures.bad_cases.len()
+        );
+    }
+
+    // 4. Check required coverage types
+    let has_over_decay = fixtures
+        .bad_cases
+        .iter()
+        .any(|c| c.case_type == fixtures::BadCaseType::OverDecayThreshold);
+    let has_graph_entity = fixtures
+        .bad_cases
+        .iter()
+        .any(|c| c.case_type == fixtures::BadCaseType::GraphEntityInfluenced);
+    let has_task_affinity = fixtures
+        .bad_cases
+        .iter()
+        .any(|c| c.case_type == fixtures::BadCaseType::TaskAffinityInfluenced);
+
+    if !has_over_decay {
+        anyhow::bail!("missing over-decay-threshold bad case");
+    }
+    if !has_graph_entity {
+        anyhow::bail!("missing graph/entity-influenced bad case");
+    }
+    if !has_task_affinity {
+        anyhow::bail!("missing task-affinity-influenced bad case");
+    }
+
+    info!(
+        over_decay = has_over_decay,
+        graph_entity = has_graph_entity,
+        task_affinity = has_task_affinity,
+        "required coverage types present"
+    );
+
+    // 5. Validate baseline
+    let baseline_path = crate_root
+        .join(fixtures::FixturePaths::BASELINES_DIR)
+        .join("phase1.json");
+    if !baseline_path.exists() {
+        anyhow::bail!(
+            "baseline not found at {}. Run `djinn-memory-eval run` then `refresh-baseline`.",
+            baseline_path.display()
+        );
+    }
+
+    let baseline = report::load_baseline(crate_root).context("loading baseline")?;
+
+    // Verify baseline has required fields
+    if baseline.metadata.refresh_commit.is_empty() {
+        anyhow::bail!("baseline refresh_commit is empty");
+    }
+    if baseline.threshold_policy_version.is_empty() {
+        anyhow::bail!("baseline threshold_policy_version is empty");
+    }
+    if baseline.suite_metrics.is_empty() {
+        anyhow::bail!("baseline suite_metrics is empty");
+    }
+
+    info!(
+        baseline_commit = %baseline.metadata.refresh_commit,
+        baseline_created = %baseline.metadata.created_at,
+        suites = baseline.suite_metrics.len(),
+        policy = %baseline.threshold_policy_version,
+        "baseline validated"
+    );
+
+    // 6. Verify fixture hashes match manifest (if both exist)
+    if let Some(ref manifest) = fixtures.manifest {
+        if let Some(ref baseline_hashes) = baseline.metadata.fixture_hashes {
+            if manifest.file_hashes != *baseline_hashes {
+                anyhow::bail!(
+                    "fixture hashes in baseline do not match manifest. \
+                     Re-run `refresh-baseline` after updating fixtures."
+                );
+            }
+            info!("fixture hashes match baseline");
+        } else {
+            tracing::warn!("baseline has no fixture hashes; run `refresh-baseline` to add them");
+        }
+    }
+
+    info!("=== All validations passed ===");
+    Ok(())
+}
 fn not_yet_implemented(subcommand: &str, task_ref: &str) -> anyhow::Result<()> {
     anyhow::bail!(
         "Subcommand `{subcommand}` is not yet implemented. \
