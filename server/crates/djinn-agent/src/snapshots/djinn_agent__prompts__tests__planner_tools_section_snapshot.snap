@@ -2,51 +2,51 @@
 source: crates/djinn-agent/src/prompts/tests.rs
 expression: section
 ---
-- `task_show(id)` — Show details of a work item including recent activity and blockers.
-- `task_list(issue_type?, label?, limit?, offset?, parent?, priority?, sort?, status?, text?)` — List tasks with optional filters and pagination.
-- `task_activity_list(id, actor_role?, event_type?, limit?)` — Query a task's activity log with optional filters. Returns comments, status transitions, and other events. Use to inspect Lead guidance, reviewer feedback, or history.
-- `memory_read(identifier)` — Read a note by permalink or title.
-- `memory_search(query, edge_kinds?, entity_types?, folder?, limit?, task_id?, type?)` — Search notes and proposals in project memory. Returns a unified result set interleaved by relevance.
-- `memory_list(depth?, folder?, status?, type?)` — List notes in project memory. Returns compact summaries without full content.
-- `shell(command, timeout_ms?)` — Execute shell commands in the task worktree. Commands always run from the worktree root.
-- `read(file_path, limit?, offset?, project?)` — Read a file with line numbers and pagination. Rejects binary files. Pass `project` (UUID or owner/repo slug) to read a file from ANOTHER registered repo — served read-only from its default branch (no checkout); omit it to read your task worktree.
-- `code_search(query, ignore_case?, max_results?, path?, project?)` — Search code across registered repos with `git grep` (basic regex). Pass `project` (UUID or owner/repo slug) to search one repo, or omit it (or pass "*") to search ALL registered projects at once — e.g. find every caller of a gRPC service org-wide. Served from each repo's default branch (no checkout). For your own task repo's working tree (your uncommitted changes), use shell grep instead.
-- `skill_read(name)` — Load the full content of an assigned skill by name. Under progressive skill disclosure the system prompt lists each non-required skill's name and description only; call this to fetch the complete skill body on demand. Errors if the name is not an assigned skill.
-- `lsp(file_path, operation, character?, depth?, kind?, line?, name_filter?, symbol?)` — Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.
-- `ci_job_log(job_id, step?)` — Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.
-- `github_search(query, language?, path?, repo?)` — Search GitHub code across public repositories using the GitHub Code Search API. Returns compact, navigable matches with snippets, file paths, URLs, and metadata. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result.
-- `output_view(tool_use_id, limit?, offset?)` — Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.
-- `output_grep(pattern, tool_use_id, context_lines?)` — Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.
-- `write(content, path)` — Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.
-- `edit(new_text, old_text, path)` — Edit a file by replacing text. Provide path, old_text, and new_text. The implementation may safely rescue common whitespace, indentation, escape, boundary, and Unicode drift between old_text and the file, but it fails instead of guessing when the match is ambiguous (multiple candidates) or rejected by a safety guard (e.g. CRLF or UTF-8 boundary corruption).
-- `task_create(acceptance_criteria, epic_id, title, blocked_by?, description?, design?, issue_type?, labels?, owner?, parent_id?, priority?, status?)` — Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.
-- `task_update(id, acceptance_criteria?, blocked_by_add?, blocked_by_remove?, description?, design?, epic_id?, memory_refs_add?, memory_refs_remove?, owner?, priority?, status?, title?)` — Update task fields and manage blocker relationships. Use blocked_by_add/blocked_by_remove to enforce task sequencing — a task with unresolved blockers will not be dispatched.
-- `task_blocked_list(id)` — List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.
-- `epic_show(id)` — Show details for an epic by UUID or short ID.
-- `epic_update(id, blocked_by_add?, blocked_by_remove?, description?, memory_refs_add?, memory_refs_remove?, status?, title?)` — Update epic fields (title/description/status), memory ref deltas, and epic dependencies (blocked_by) for planner workflows.
-- `epic_tasks(id, limit?, offset?)` — List tasks for an epic with pagination.
-- `epic_close(id)` — Close an epic. Use when all work is complete and no further waves are needed.
-- `epic_create(title, auto_breakdown?, blocked_by?, description?, memory_refs?, project?, proposal_id?, read_sources?)` — Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — e.g. when decomposing a graduated proposal (Planner Mode D) or when a health sweep identifies a gap that needs its own delivery container. Returns the created epic.
-- `proposal_show(id, fields?, revision_bodies?)` — Show a proposal's full detail by UUID or short_id. Returns title, body, status, acceptance_criteria, targets, and optionally revisions, feedback, signoffs, debate, epics, and gate_status. Use `fields` to select only the sections you need (accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all). Use `revision_bodies` to control revision verbosity: `excerpt` (default, 512-char body_excerpt + body_truncated), `full` (complete body text), or `omit` (no body data). Ignored when `fields` omits `revisions`.
-- `proposal_ac_set(acceptance_criteria, id)` — Reconcile a proposal's acceptance-criteria `met` flags (Planner Workflow E) as graduated epics land. Send the FULL list in order — one entry per criterion, each `{"met": true|false}` (criterion text is preserved automatically). A status annotation only: it does not edit the spec, bump a revision, or clear sign-offs. Returns {met, total}.
-- `proposal_ac_amend(amendments, id, reason)` — Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index and uses operation `rewrite`, `drop`, or `waive`: rewrite replaces criterion text and requires `criterion`; drop removes the criterion; waive keeps the criterion visible with `waived: true`. Requires a non-empty top-level reason. This is a real spec edit: it bumps the proposal revision, retains sign-offs, and records feedback/audit. Use proposal_ac_set instead when only reconciling met flags.
-- `proposal_complete(id, summary?)` — Mark a `building` proposal as `done` (Planner Workflow E). Call this only after reviewing a proposal whose every graduated epic has closed and confirming the delivered work meets the acceptance criteria. If work remains instead, create more epics with epic_create(proposal_id=...) rather than completing.
-- `proposal_reconcile_obsolete_epic(epic_id, proposal_id, reason?)` — Scoped proposal-reconcile teardown for one obsolete graduated epic. Lists/validates only the requested proposal+epic link, blocks terminally if any task in that subtree has merged work (recording AI proposal feedback), otherwise force-closes only that epic's tasks, closes the epic, unlinks only that epic from the proposal, and leaves unrelated graduated epics untouched. Use this instead of whole-build proposal_stop_build during Reconcile proposal tasks.
-- `epic_blockers_list(id)` — List the epics that BLOCK a given epic (its dependencies — they must close before this epic's breakdown auto-dispatches).
-- `epic_blocked_list(id)` — List the epics blocked BY a given epic (its dependents — epics whose breakdown waits on this one).
-- `task_transition(action, id, reason?, replacement_task_ids?)` — Transition a task using a named workflow action.
-- `task_comment_add(body, id)` — Add a comment or strategic observation to a task's activity log.
-- `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)` — Build a curated memory context pack for a task or query by combining note retrieval and ranking. Relevant proposals are surfaced alongside notes so a planner/worker sees the motivating proposal.
-- `memory_health()` — Returns aggregate health report: total notes, broken link count, orphan note count, low-confidence note count, stale note count, stale notes by folder, lifecycle counts, and recent lifecycle sweep metrics.
-- `memory_extracted_audit()` — Audit existing extracted case/pattern/pitfall notes against ADR-054 taxonomy and required structure. Returns grouped cleanup backlogs for merge candidates, underspecified notes, demotion-to-working-spec candidates, and archive candidates, plus rerun guidance.
-- `memory_broken_links(folder?)` — Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).
-- `memory_orphans(folder?)` — Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap).
-- `memory_write(content, title, type, status?, tags?)` — Create a new memory note. Memory notes live in Dolt — this is the canonical way to author them; do not attempt filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief [singleton], roadmap [singleton]). Use [[wikilinks]] in content to connect notes.
-- `memory_edit(content, identifier, operation, find_text?, section?, type?)` — Edit an existing memory note in-place. Memory notes live in Dolt — this is the canonical way to amend them; do not attempt filesystem writes. Operations: "append" (add to end), "prepend" (add after frontmatter), "find_replace" (exact text replacement, requires find_text), "replace_section" (replace content under a markdown heading, requires section).
-- `agent_metrics(role)` — Show execution quality metrics for a role to support prompt tuning and intervention decisions.
-- `agent_create(base_role, name, description?, model_preference?, system_prompt_extensions?)` — Create a new specialist agent extending a base role (worker or reviewer). Use when existing agents lack capabilities for a specific domain.
-- `task_delete_branch(id)` — Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.
-- `task_archive_activity(id)` — Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.
-- `task_reset_counters(id)` — Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.
-- `task_kill_session(id)` — Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.
-- `submit_grooming(blocked_on?, decision?, summary?, tasks_reviewed?)` — Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.
+- `task_show(id)`
+- `task_list(issue_type?, label?, limit?, offset?, parent?, priority?, sort?, status?, text?)`
+- `task_activity_list(id, actor_role?, event_type?, limit?)`
+- `memory_read(identifier)`
+- `memory_search(query, edge_kinds?, entity_types?, folder?, limit?, task_id?, type?)`
+- `memory_list(depth?, folder?, status?, type?)`
+- `shell(command, timeout_ms?)`
+- `read(file_path, limit?, offset?, project?)`
+- `code_search(query, ignore_case?, max_results?, path?, project?)`
+- `skill_read(name)`
+- `lsp(file_path, operation, character?, depth?, kind?, line?, name_filter?, symbol?)`
+- `ci_job_log(job_id, step?)`
+- `github_search(query, language?, path?, repo?)`
+- `output_view(tool_use_id, limit?, offset?)`
+- `output_grep(pattern, tool_use_id, context_lines?)`
+- `write(content, path)`
+- `edit(new_text, old_text, path)`
+- `task_create(acceptance_criteria, epic_id, title, blocked_by?, description?, design?, issue_type?, labels?, owner?, parent_id?, priority?, status?)`
+- `task_update(id, acceptance_criteria?, blocked_by_add?, blocked_by_remove?, description?, design?, epic_id?, memory_refs_add?, memory_refs_remove?, owner?, priority?, status?, title?)`
+- `task_blocked_list(id)`
+- `epic_show(id)`
+- `epic_update(id, blocked_by_add?, blocked_by_remove?, description?, memory_refs_add?, memory_refs_remove?, status?, title?)`
+- `epic_tasks(id, limit?, offset?)`
+- `epic_close(id)`
+- `epic_create(title, auto_breakdown?, blocked_by?, description?, memory_refs?, project?, proposal_id?, read_sources?)`
+- `proposal_show(id, fields?, revision_bodies?)`
+- `proposal_ac_set(acceptance_criteria, id)`
+- `proposal_ac_amend(amendments, id, reason)`
+- `proposal_complete(id, summary?)`
+- `proposal_reconcile_obsolete_epic(epic_id, proposal_id, reason?)`
+- `epic_blockers_list(id)`
+- `epic_blocked_list(id)`
+- `task_transition(action, id, reason?, replacement_task_ids?)`
+- `task_comment_add(body, id)`
+- `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)`
+- `memory_health()`
+- `memory_extracted_audit()`
+- `memory_broken_links(folder?)`
+- `memory_orphans(folder?)`
+- `memory_write(content, title, type, status?, tags?)`
+- `memory_edit(content, identifier, operation, find_text?, section?, type?)`
+- `agent_metrics(role)`
+- `agent_create(base_role, name, description?, model_preference?, system_prompt_extensions?)`
+- `task_delete_branch(id)`
+- `task_archive_activity(id)`
+- `task_reset_counters(id)`
+- `task_kill_session(id)`
+- `submit_grooming(blocked_on?, decision?, summary?, tasks_reviewed?)`

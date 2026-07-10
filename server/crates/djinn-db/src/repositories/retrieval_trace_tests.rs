@@ -33,6 +33,8 @@ async fn seed_project(db: &Database, project_id: &str) {
 fn injected_candidate(note_id: &str, rank: i32, confidence: f64) -> TraceCandidate {
     TraceCandidate {
         note_id: note_id.to_string(),
+        permalink: None,
+        title: None,
         outcome: CandidateOutcome::Injected,
         rank: Some(rank),
         confidence: Some(confidence),
@@ -50,6 +52,8 @@ fn skipped_candidate(
 ) -> TraceCandidate {
     TraceCandidate {
         note_id: note_id.to_string(),
+        permalink: None,
+        title: None,
         outcome: CandidateOutcome::Skipped,
         rank: Some(rank),
         confidence: Some(confidence),
@@ -78,10 +82,31 @@ async fn insert_and_get_by_id_round_trips_fields() {
     seed_project(&db, project_id).await;
     let repo = RetrievalTraceRepository::new(db);
 
-    let candidates = json!([
-        injected_candidate("note-a", 1, 0.95),
-        skipped_candidate("note-b", 2, 0.30, SkippedReason::NotTopK),
-    ]);
+    let candidates = serde_json::to_value(vec![
+        TraceCandidate {
+            note_id: "note-a".to_string(),
+            permalink: Some("notes/note-a".to_string()),
+            title: Some("Injected Note A".to_string()),
+            outcome: CandidateOutcome::Injected,
+            rank: Some(1),
+            confidence: Some(0.95),
+            skipped_reason: None,
+            source: Some("scope_overlap".to_string()),
+            scope: Some(json!({"matched_scopes": ["backend"], "query_scope": "server"})),
+        },
+        TraceCandidate {
+            note_id: "note-b".to_string(),
+            permalink: Some("notes/note-b".to_string()),
+            title: Some("Skipped Note B".to_string()),
+            outcome: CandidateOutcome::Skipped,
+            rank: Some(2),
+            confidence: Some(0.30),
+            skipped_reason: Some(SkippedReason::NotTopK),
+            source: Some("scope_overlap".to_string()),
+            scope: Some(json!({"matched_scopes": ["frontend"], "query_scope": "ui"})),
+        },
+    ])
+    .unwrap();
     let durations = json!({"retrieval_ms": 12, "cap_ms": 3});
 
     let row = repo
@@ -118,14 +143,6 @@ async fn insert_and_get_by_id_round_trips_fields() {
     assert_eq!(row.estimated_injected_tokens, 512);
     assert!(row.trigger.is_some());
 
-    let typed = row.candidates_typed();
-    assert_eq!(typed.len(), 2);
-    assert!(
-        typed[0].skipped_reason.is_none(),
-        "first candidate is injected"
-    );
-    assert_eq!(typed[1].skipped_reason, Some(SkippedReason::NotTopK));
-
     // get_by_id returns the same row.
     let fetched = repo
         .get_by_id(&row.id)
@@ -135,6 +152,37 @@ async fn insert_and_get_by_id_round_trips_fields() {
     assert_eq!(fetched.id, row.id);
     assert_eq!(fetched.entry_point, "dispatch");
     assert_eq!(fetched.estimated_injected_tokens, 512);
+
+    let typed = fetched.candidates_typed();
+    assert_eq!(typed.len(), 2);
+
+    let injected = &typed[0];
+    assert_eq!(injected.note_id, "note-a");
+    assert_eq!(injected.permalink.as_deref(), Some("notes/note-a"));
+    assert_eq!(injected.title.as_deref(), Some("Injected Note A"));
+    assert_eq!(injected.outcome, CandidateOutcome::Injected);
+    assert_eq!(injected.rank, Some(1));
+    assert_eq!(injected.confidence, Some(0.95));
+    assert_eq!(injected.skipped_reason, None);
+    assert_eq!(injected.source.as_deref(), Some("scope_overlap"));
+    assert_eq!(
+        injected.scope.as_ref(),
+        Some(&json!({"matched_scopes": ["backend"], "query_scope": "server"}))
+    );
+
+    let skipped = &typed[1];
+    assert_eq!(skipped.note_id, "note-b");
+    assert_eq!(skipped.permalink.as_deref(), Some("notes/note-b"));
+    assert_eq!(skipped.title.as_deref(), Some("Skipped Note B"));
+    assert_eq!(skipped.outcome, CandidateOutcome::Skipped);
+    assert_eq!(skipped.rank, Some(2));
+    assert_eq!(skipped.confidence, Some(0.30));
+    assert_eq!(skipped.skipped_reason, Some(SkippedReason::NotTopK));
+    assert_eq!(skipped.source.as_deref(), Some("scope_overlap"));
+    assert_eq!(
+        skipped.scope.as_ref(),
+        Some(&json!({"matched_scopes": ["frontend"], "query_scope": "ui"}))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -778,6 +826,8 @@ fn validate_candidates_rejects_skipped_candidate_without_reason() {
     // A candidate marked as skipped but missing its skipped_reason.
     let candidate = TraceCandidate {
         note_id: "bad-1".to_string(),
+        permalink: None,
+        title: None,
         outcome: CandidateOutcome::Skipped,
         rank: Some(1),
         confidence: Some(0.5),
@@ -802,6 +852,8 @@ fn validate_candidates_rejects_injected_candidate_with_reason() {
     // A candidate marked as injected but carrying a skipped_reason.
     let candidate = TraceCandidate {
         note_id: "bad-2".to_string(),
+        permalink: None,
+        title: None,
         outcome: CandidateOutcome::Injected,
         rank: Some(1),
         confidence: Some(0.5),
@@ -854,6 +906,9 @@ fn outcome_defaults_to_skipped_when_absent_from_json() {
         CandidateOutcome::Skipped,
         "absent outcome should default to Skipped"
     );
+    assert_eq!(candidate.permalink, None);
+    assert_eq!(candidate.title, None);
+    assert_eq!(candidate.skipped_reason, Some(SkippedReason::NotTopK));
     // Should pass validation because skipped + reason is consistent.
     assert!(candidate.validate_invariants().is_ok());
 }

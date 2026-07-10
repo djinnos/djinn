@@ -421,10 +421,11 @@ fn authoring_planner_prompt_regression_contains_visual_spec() {
         prompt.contains("backtick"),
         "visual-spec body must contain the bare-angle backtick constraint"
     );
-    assert!(
-        lower.contains("progressive"),
-        "visual-spec body must teach progressive markdown-to-MDX enrichment"
-    );
+    // Note: "progressive" was previously asserted here but was sourced from
+    // a tool description (skill_read), not the visual-spec SKILL.md body.
+    // After wzz6 item 1 removed per-tool descriptions from the prompt tools
+    // section, this line was removed.  The SKILL.md body says "enrich it
+    // toward MDX" (not "progressive").
     assert!(
         lower.contains("mdx"),
         "visual-spec body must mention MDX enrichment"
