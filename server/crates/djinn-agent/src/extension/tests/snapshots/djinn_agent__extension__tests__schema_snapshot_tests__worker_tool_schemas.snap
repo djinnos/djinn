@@ -26,7 +26,7 @@ expression: tool_schemas_worker()
   },
   {
     "name": "task_list",
-    "description": "List tasks with optional filters and pagination.",
+    "description": "List tasks with optional filters for status, priority, label, and text search. Supports pagination.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -104,7 +104,7 @@ expression: tool_schemas_worker()
   },
   {
     "name": "memory_read",
-    "description": "Read a note by permalink or title.",
+    "description": "Read a memory note by permalink or title from the database-backed memory store. Returns full content and metadata.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -696,7 +696,7 @@ expression: tool_schemas_worker()
   },
   {
     "name": "request_planner",
-    "description": "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs to be split or merged, or has failed multiple Lead interventions. The Planner owns the board and decides whether to reshape the work, dedupe it, or — if the issue requires deeper code-structural reasoning — dispatch an Architect spike. Adds a comment and dispatches the Planner. Your session should end after this call.",
+    "description": "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs splitting/merging, or has failed multiple Lead interventions. Adds a comment and dispatches the Planner; your session should end after this call.",
     "inputSchema": {
       "type": "object",
       "required": [

@@ -237,7 +237,7 @@ fn worker_prompt_routes_memory_crud_through_mcp() {
     let prompt = render_prompt(AgentType::Worker, &task, &ctx);
 
     assert!(
-        prompt.contains("memory_*") && prompt.contains("Memory notes live in Dolt"),
+        prompt.contains("memory_*") && prompt.contains("Notes are accessed through"),
         "worker prompt should direct note CRUD through the memory_* MCP tools"
     );
     assert!(

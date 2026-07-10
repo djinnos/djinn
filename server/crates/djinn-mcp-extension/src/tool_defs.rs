@@ -59,7 +59,7 @@ pub fn tool_request_lead() -> RmcpTool {
 pub fn tool_request_planner() -> RmcpTool {
     RmcpTool::new(
         "request_planner".to_string(),
-        "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs to be split or merged, or has failed multiple Lead interventions. The Planner owns the board and decides whether to reshape the work, dedupe it, or — if the issue requires deeper code-structural reasoning — dispatch an Architect spike. Adds a comment and dispatches the Planner. Your session should end after this call."
+        "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs splitting/merging, or has failed multiple Lead interventions. Adds a comment and dispatches the Planner; your session should end after this call."
             .to_string(),
         object!({
             "type": "object",

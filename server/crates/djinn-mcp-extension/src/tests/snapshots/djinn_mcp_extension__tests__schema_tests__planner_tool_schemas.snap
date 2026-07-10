@@ -26,7 +26,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "task_list",
-    "description": "List tasks with optional filters and pagination.",
+    "description": "List tasks with optional filters for status, priority, label, and text search. Supports pagination.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -104,7 +104,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "memory_read",
-    "description": "Read a note by permalink or title.",
+    "description": "Read a memory note by permalink or title from the database-backed memory store. Returns full content and metadata.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -714,7 +714,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "epic_show",
-    "description": "Show details for an epic by UUID or short ID.",
+    "description": "Show full details of an epic by UUID or short ID, including its task breakdown and blocker status.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -791,7 +791,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "epic_tasks",
-    "description": "List tasks for an epic with pagination.",
+    "description": "List tasks belonging to an epic, showing status and assignee. Supports pagination.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -818,7 +818,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "epic_close",
-    "description": "Close an epic. Use when all work is complete and no further waves are needed.",
+    "description": "Close an epic when all work is complete and no further task waves are needed. Marks the epic as done.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1148,7 +1148,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "task_transition",
-    "description": "Transition a task using a named workflow action.",
+    "description": "Transition a task to a new status using a named workflow action. Valid transitions depend on the current status.",
     "inputSchema": {
       "type": "object",
       "required": [

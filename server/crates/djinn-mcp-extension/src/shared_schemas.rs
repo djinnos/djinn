@@ -161,7 +161,7 @@ pub fn tool_epic_create() -> RmcpTool {
 pub fn tool_epic_close() -> RmcpTool {
     RmcpTool::new(
         "epic_close".to_string(),
-        "Close an epic. Use when all work is complete and no further waves are needed.".to_string(),
+        "Close an epic when all work is complete and no further task waves are needed. Marks the epic as done.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -175,7 +175,7 @@ pub fn tool_epic_close() -> RmcpTool {
 pub fn tool_epic_show() -> RmcpTool {
     RmcpTool::new(
         "epic_show".to_string(),
-        "Show details for an epic by UUID or short ID.".to_string(),
+        "Show full details of an epic by UUID or short ID, including its task breakdown and blocker status.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -210,7 +210,8 @@ pub fn tool_epic_update() -> RmcpTool {
 pub fn tool_epic_tasks() -> RmcpTool {
     RmcpTool::new(
         "epic_tasks".to_string(),
-        "List tasks for an epic with pagination.".to_string(),
+        "List tasks belonging to an epic, showing status and assignee. Supports pagination."
+            .to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -522,7 +523,7 @@ pub fn tool_proposal_reconcile_obsolete_epic() -> RmcpTool {
 pub fn tool_task_list() -> RmcpTool {
     RmcpTool::new(
         "task_list".to_string(),
-        "List tasks with optional filters and pagination.".to_string(),
+        "List tasks with optional filters for status, priority, label, and text search. Supports pagination.".to_string(),
         object!({
             "type": "object",
             "properties": {
@@ -588,7 +589,7 @@ pub fn tool_task_show() -> RmcpTool {
 pub fn tool_memory_read() -> RmcpTool {
     RmcpTool::new(
         "memory_read".to_string(),
-        "Read a note by permalink or title.".to_string(),
+        "Read a memory note by permalink or title from the database-backed memory store. Returns full content and metadata.".to_string(),
         object!({
             "type": "object",
             "required": ["identifier"],
@@ -826,7 +827,7 @@ pub fn tool_task_update() -> RmcpTool {
 pub fn tool_task_transition() -> RmcpTool {
     RmcpTool::new(
         "task_transition".to_string(),
-        "Transition a task using a named workflow action.".to_string(),
+        "Transition a task to a new status using a named workflow action. Valid transitions depend on the current status.".to_string(),
         object!({
             "type": "object",
             "required": ["id", "action"],
