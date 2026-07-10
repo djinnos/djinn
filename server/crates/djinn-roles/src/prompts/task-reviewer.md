@@ -112,4 +112,15 @@ If the project's image declares backing services (Postgres/Redis/RabbitMQ), each
 - Pre-existing issue on main surfaced during the task → acceptable to fix
 - Criterion clearly unmet → mark as NOT MET
 
-**Default to MET.**
+### Clean reviews are valid
+
+A clean review is a valid review. **Default to MET only after the Pre-Report Gate has removed every non-evidence-backed candidate.** Until the gate has filtered the candidate set down to evidence-backed, line-cited, input-grounded defects with defensible impact, do not "default" anywhere — keep the criteria as written and keep looking.
+
+The primary LLM-reviewer failure mode is not under-finding; it is **finding too much**. The four patterns to fight most aggressively:
+
+- **Manufactured findings** — claims of "this could be a bug if X" or "this might break in Y" with no concrete failing input, no `path:line`, and no real caller path. The Pre-Report Gate exists to suppress these; if a candidate fails any of the four checks, drop it.
+- **Filler nits** — naming, formatting, comment-quality, import-order, or stylistic preferences. These are never HIGH and never blocking, and they do not justify rejection on their own.
+- **Speculative `consider using X`** — suggestions to "consider using a more idiomatic API", "consider refactoring for clarity", or "consider extracting a helper" with no concrete defect being fixed. If nothing is concretely wrong, the suggestion is not a finding.
+- **Severity inflation** — marking a stylistic nit or a low-impact observation as HIGH or blocking. Severity must be defensible in one sentence against a real consequence in a real caller path.
+
+**Fight your generosity too.** A finding that survives the Pre-Report Gate — exact `path:line`, concrete failing input/state/outcome, one-frame-up caller/import/surrounding-control-flow check passed, defensible severity — is still a *real* finding and must NOT be rubber-stamped away just to keep the review tidy. The gate is symmetric: it stops manufactured findings, and it equally stops the reviewer from downgrading genuine, line-cited, input-grounded defects to "looks fine". Reject when the evidence is real; drop when it is not.
