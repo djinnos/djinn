@@ -88,6 +88,37 @@ pub const ENTRY_POINT_VALUES: &[&str] = &[
     "memory_recall_trace",
 ];
 
+// ── Candidate outcome ────────────────────────────────────────────────────────
+
+/// Whether a trace candidate was injected or skipped.
+///
+/// Used by [`TraceCandidate::validate_invariants`] to enforce the proposal
+/// rule that `skipped_reason` is nullable *only* for injected candidates.
+/// The `#[serde(default)]` attribute means pre-existing JSONB rows that lack
+/// an `outcome` field deserialize as `Skipped`, which preserves backward
+/// compatibility while still allowing callers to mark candidates explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateOutcome {
+    /// The candidate was injected into the downstream prompt.
+    Injected,
+    /// The candidate was skipped (not injected). This is also the default
+    /// when the field is absent from JSONB.
+    Skipped,
+}
+
+impl CandidateOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Injected => "injected",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+/// All valid outcome string constants.
+pub const CANDIDATE_OUTCOME_VALUES: &[&str] = &["injected", "skipped"];
+
 // ── Skipped-reason vocabulary ─────────────────────────────────────────────────
 
 /// Reason a candidate was skipped (not injected).
@@ -166,12 +197,20 @@ pub const SKIPPED_REASON_VALUES: &[&str] = &[
 
 /// A single candidate recorded in a trace's `candidates` JSONB array.
 ///
-/// `skipped_reason` is `None` for injected candidates; for non-injected
-/// candidates it is one of [`SkippedReason`].
+/// `outcome` distinguishes injected from skipped candidates. When absent from
+/// JSONB (backward compat via `#[serde(default)]`), it defaults to
+/// `Skipped`. Validation enforces:
+/// - An **injected** candidate has `skipped_reason = None`.
+/// - A **skipped** candidate must have a valid [`SkippedReason`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceCandidate {
     /// Stable note id of the candidate.
     pub note_id: String,
+    /// Whether the candidate was injected or skipped.
+    ///
+    /// Defaults to `Skipped` when absent from JSONB (backward compat).
+    #[serde(default = "default_candidate_outcome")]
+    pub outcome: CandidateOutcome,
     /// Rank position within the candidate set (1-based).
     pub rank: Option<i32>,
     /// Retrieval confidence/score (0.0–1.0).
@@ -184,34 +223,62 @@ pub struct TraceCandidate {
     pub scope: Option<serde_json::Value>,
 }
 
+/// Default outcome for deserialization when the `outcome` field is absent
+/// from JSONB. `Skipped` is chosen because it is the safer assumption: a
+/// missing field on a genuinely-injected candidate will cause
+/// `validate_invariants` to surface a clear error (skipped candidate with no
+/// reason) rather than silently accepting data that might be malformed.
+fn default_candidate_outcome() -> CandidateOutcome {
+    CandidateOutcome::Skipped
+}
+
 impl TraceCandidate {
     /// Validate the candidate's outcome/skipped_reason invariant.
     ///
     /// The proposal fixes `skipped_reason` to the vocabulary in
-    /// [`SKIPPED_REASON_VALUES`] (or `None`). An injected candidate has
-    /// `skipped_reason = None`; a non-injected (skipped) candidate must have a
-    /// valid [`SkippedReason`]. Because `skipped_reason` is a typed enum, an
-    /// out-of-vocabulary value cannot be constructed; this helper is provided so
-    /// callers can check the invariant explicitly and surface a clear error
-    /// before persistence rather than silently persisting inconsistent data.
+    /// [`SKIPPED_REASON_VALUES`] (or `None`). The `outcome` field determines
+    /// which branch applies:
     ///
-    /// A non-injected candidate without a `skipped_reason` is rejected: only
-    /// injected candidates may omit it.
+    /// - **Injected** (`outcome = Injected`): `skipped_reason` must be `None`.
+    /// - **Skipped** (`outcome = Skipped`): `skipped_reason` must be `Some`
+    ///   with a valid [`SkippedReason`].
+    ///
+    /// Because `skipped_reason` is a typed enum, an out-of-vocabulary value
+    /// cannot be constructed in Rust; the vocabulary check is a defensive
+    /// double-check against future renames.
     pub fn validate_invariants(&self) -> Result<()> {
-        match &self.skipped_reason {
-            None => Ok(()), // injected candidate — nullable per design
-            Some(reason) => {
-                // The enum guarantees membership, but double-check the serialised
-                // form is in the fixed vocabulary so a future rename is caught.
-                if SKIPPED_REASON_VALUES.contains(&reason.as_str()) {
-                    Ok(())
-                } else {
+        match self.outcome {
+            CandidateOutcome::Injected => {
+                if self.skipped_reason.is_some() {
                     Err(DbError::InvalidData(format!(
-                        "candidate {} has skipped_reason '{}' which is not in the fixed vocabulary {:?}",
-                        self.note_id,
-                        reason.as_str(),
-                        SKIPPED_REASON_VALUES,
+                        "candidate {} has outcome 'injected' but also has skipped_reason '{:?}' \
+                         — injected candidates must not have a skipped_reason",
+                        self.note_id, self.skipped_reason,
                     )))
+                } else {
+                    Ok(())
+                }
+            }
+            CandidateOutcome::Skipped => {
+                match &self.skipped_reason {
+                    None => Err(DbError::InvalidData(format!(
+                        "candidate {} has outcome 'skipped' but no skipped_reason — \
+                         non-injected (skipped) candidates must have a skipped_reason from {:?}",
+                        self.note_id, SKIPPED_REASON_VALUES,
+                    ))),
+                    Some(reason) => {
+                        // Double-check the serialised form is in the fixed vocabulary.
+                        if SKIPPED_REASON_VALUES.contains(&reason.as_str()) {
+                            Ok(())
+                        } else {
+                            Err(DbError::InvalidData(format!(
+                                "candidate {} has skipped_reason '{}' which is not in the fixed vocabulary {:?}",
+                                self.note_id,
+                                reason.as_str(),
+                                SKIPPED_REASON_VALUES,
+                            )))
+                        }
+                    }
                 }
             }
         }
@@ -511,6 +578,7 @@ mod tests {
     fn injected_candidate(note_id: &str, rank: i32, confidence: f64) -> TraceCandidate {
         TraceCandidate {
             note_id: note_id.to_string(),
+            outcome: CandidateOutcome::Injected,
             rank: Some(rank),
             confidence: Some(confidence),
             skipped_reason: None,
@@ -527,6 +595,7 @@ mod tests {
     ) -> TraceCandidate {
         TraceCandidate {
             note_id: note_id.to_string(),
+            outcome: CandidateOutcome::Skipped,
             rank: Some(rank),
             confidence: Some(confidence),
             skipped_reason: Some(reason),
@@ -1029,16 +1098,44 @@ mod tests {
         let repo = RetrievalTraceRepository::new(db.clone());
 
         // Two "old" rows in the target project.
-        let old1 = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None)
-            .await;
-        let old2 = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None)
-            .await;
+        let old1 = insert_trace(
+            &repo,
+            project_id,
+            &json!([]),
+            DEFAULT_CANDIDATE_CAP,
+            false,
+            None,
+        )
+        .await;
+        let old2 = insert_trace(
+            &repo,
+            project_id,
+            &json!([]),
+            DEFAULT_CANDIDATE_CAP,
+            false,
+            None,
+        )
+        .await;
         // One "new" row that should survive.
-        let keep = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None)
-            .await;
+        let keep = insert_trace(
+            &repo,
+            project_id,
+            &json!([]),
+            DEFAULT_CANDIDATE_CAP,
+            false,
+            None,
+        )
+        .await;
         // An old row in a *different* project — must NOT be pruned by this call.
-        let other_old =
-            insert_trace(&repo, other_project, &json!([]), DEFAULT_CANDIDATE_CAP, false, None).await;
+        let other_old = insert_trace(
+            &repo,
+            other_project,
+            &json!([]),
+            DEFAULT_CANDIDATE_CAP,
+            false,
+            None,
+        )
+        .await;
 
         // Backdate: old rows → 2026-01-01, keep row → 2026-12-01.
         backdate_created_at(&db, &old1.id, "2026-01-01T00:00:00.000Z").await;
@@ -1079,10 +1176,24 @@ mod tests {
         seed_project(&db, project_id).await;
         let repo = RetrievalTraceRepository::new(db.clone());
 
-        let r1 = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None)
-            .await;
-        let r2 = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None)
-            .await;
+        let r1 = insert_trace(
+            &repo,
+            project_id,
+            &json!([]),
+            DEFAULT_CANDIDATE_CAP,
+            false,
+            None,
+        )
+        .await;
+        let r2 = insert_trace(
+            &repo,
+            project_id,
+            &json!([]),
+            DEFAULT_CANDIDATE_CAP,
+            false,
+            None,
+        )
+        .await;
         backdate_created_at(&db, &r1.id, "2026-11-01T00:00:00.000Z").await;
         backdate_created_at(&db, &r2.id, "2026-12-01T00:00:00.000Z").await;
 
@@ -1185,8 +1296,10 @@ mod tests {
         assert!(typed[0].skipped_reason.is_none());
 
         // The remaining six each carry a distinct, valid skipped_reason.
-        let reasons: Vec<SkippedReason> =
-            typed[1..].iter().map(|c| c.skipped_reason.unwrap()).collect();
+        let reasons: Vec<SkippedReason> = typed[1..]
+            .iter()
+            .map(|c| c.skipped_reason.unwrap())
+            .collect();
         assert_eq!(
             reasons,
             vec![
@@ -1201,5 +1314,92 @@ mod tests {
 
         // Every round-tripped candidate passes the invariant check.
         assert!(validate_candidates(&typed).is_ok());
+    }
+
+    // ── Outcome-based invariant tests (qmel) ────────────────────────────────
+
+    #[test]
+    fn validate_candidates_rejects_skipped_candidate_without_reason() {
+        // A candidate marked as skipped but missing its skipped_reason.
+        let candidate = TraceCandidate {
+            note_id: "bad-1".to_string(),
+            outcome: CandidateOutcome::Skipped,
+            rank: Some(1),
+            confidence: Some(0.5),
+            skipped_reason: None, // malformed: skipped candidate must have a reason
+            source: None,
+            scope: None,
+        };
+        let result = validate_candidates(&[candidate]);
+        assert!(
+            result.is_err(),
+            "skipped candidate without skipped_reason must be rejected"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("outcome 'skipped' but no skipped_reason"),
+            "error should describe the invariant violation: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn validate_candidates_rejects_injected_candidate_with_reason() {
+        // A candidate marked as injected but carrying a skipped_reason.
+        let candidate = TraceCandidate {
+            note_id: "bad-2".to_string(),
+            outcome: CandidateOutcome::Injected,
+            rank: Some(1),
+            confidence: Some(0.5),
+            skipped_reason: Some(SkippedReason::NotTopK), // malformed: injected must not have a reason
+            source: None,
+            scope: None,
+        };
+        let result = validate_candidates(&[candidate]);
+        assert!(
+            result.is_err(),
+            "injected candidate with skipped_reason must be rejected"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("outcome 'injected' but also has skipped_reason"),
+            "error should describe the invariant violation: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn candidate_outcome_vocabulary_matches_constants() {
+        // Ensure the vocabulary matches the constants.
+        assert_eq!(CANDIDATE_OUTCOME_VALUES, &["injected", "skipped"]);
+        assert_eq!(CandidateOutcome::Injected.as_str(), "injected");
+        assert_eq!(CandidateOutcome::Skipped.as_str(), "skipped");
+    }
+
+    #[test]
+    fn outcome_round_trips_through_serde_json() {
+        let candidate = injected_candidate("note-x", 1, 0.9);
+        let json = serde_json::to_string(&candidate).unwrap();
+        let deserialized: TraceCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.outcome, CandidateOutcome::Injected);
+        assert!(deserialized.skipped_reason.is_none());
+
+        let candidate2 = skipped_candidate("note-y", 2, 0.3, SkippedReason::Dedupe);
+        let json2 = serde_json::to_string(&candidate2).unwrap();
+        let deserialized2: TraceCandidate = serde_json::from_str(&json2).unwrap();
+        assert_eq!(deserialized2.outcome, CandidateOutcome::Skipped);
+        assert_eq!(deserialized2.skipped_reason, Some(SkippedReason::Dedupe));
+    }
+
+    #[test]
+    fn outcome_defaults_to_skipped_when_absent_from_json() {
+        // Simulate legacy JSONB data without an "outcome" field.
+        let json_str = r#"{"note_id":"legacy","rank":1,"confidence":0.5,"skipped_reason":"not_top_k","source":null,"scope":null}"#;
+        let candidate: TraceCandidate = serde_json::from_str(json_str).unwrap();
+        assert_eq!(
+            candidate.outcome,
+            CandidateOutcome::Skipped,
+            "absent outcome should default to Skipped"
+        );
+        // Should pass validation because skipped + reason is consistent.
+        assert!(candidate.validate_invariants().is_ok());
     }
 }
