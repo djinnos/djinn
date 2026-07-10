@@ -861,7 +861,30 @@ impl CoordinatorActor {
 
         let project_id = match proposal_repo.targets(proposal_id).await {
             Ok(targets) if !targets.is_empty() => targets[0].project_id.clone(),
-            _ => return None,
+            Ok(_) => {
+                // No target project → the refinement task cannot be placed in a
+                // repo and the loop terminates. This is a fail-fast that should
+                // have been caught at start time (proposal_refinement_start);
+                // log it here so a leak past that gate is observable rather than
+                // surfacing only as an opaque agent_failure with zero entries.
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    agent_type,
+                    "Cannot create refinement task: proposal has no target project \
+                     (add one with proposal_add_target); terminating refinement"
+                );
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    agent_type,
+                    error = %e,
+                    "Cannot create refinement task: failed to query proposal targets; \
+                     terminating refinement"
+                );
+                return None;
+            }
         };
 
         match task_repo

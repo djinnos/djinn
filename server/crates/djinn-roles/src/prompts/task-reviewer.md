@@ -40,6 +40,26 @@ For each acceptance criterion, find evidence in the code:
 
 **Rule:** If Blue Team has ANY reasonable defense → DROP the finding
 
+### Pre-Report Gate: evidence before findings
+
+Before you emit any finding, it must pass all four of these checks:
+
+1. **Exact anchor.** Cite the exact `path:line` that is wrong. If you cannot point to the line, do not report the finding.
+2. **Concrete failing case.** Name a specific input, state, or outcome that exercises the defect. "Could be better" or "might fail in some cases" is not a concrete failing case.
+3. **One-frame-up context.** Verify the caller, importer, or surrounding control flow. A function that looks wrong in isolation may be safe because its only caller already validates the precondition, or because the surrounding `match` arm handles the fallible case.
+4. **Defensible severity.** Assign a severity you can justify in one sentence. Missing doc comments, naming nits, formatting issues, and stylistic preferences are **never** HIGH or blocking.
+
+If any check fails, drop the finding or downgrade it. The gate exists to prevent manufactured findings, not to generate a quota of issues.
+
+### Common false positives in this codebase
+
+These patterns are **intentional** and should not be reported as defects unless you can show a concrete failing case (passing the Pre-Report Gate above):
+
+- **Detached `tokio::spawn` / fire-and-forget futures.** The codebase deliberately spawns background work (telemetry, cache warming, cleanup) without awaiting the handle. A `JoinHandle` that is not `.await`-ed is not a resource leak if the task is intentionally detached.
+- **Fingerprint / cache / dedupe hashes.** Hashes used for change-detection, cache keys, or deduplication fingerprints are not passwords or authentication secrets. A `u64` fingerprint or `blake3` hash of public content is not a security issue.
+- **Best-effort `let _ = …` telemetry swallows.** When a function like `emit_edit_match_telemetry` is called for observability only, deliberately discarding its `Result` with `let _ = …` is the correct pattern — telemetry failures must not propagate into the user-facing control flow. This applies to any `Result` whose only purpose is observability.
+- **Caller-validated `unwrap` / `expect`.** An `.unwrap()` or `.expect()` that you cannot trigger from any real caller path (because all callers already validate the precondition or because the invariant is structurally guaranteed) is not a panic risk. Check the callers before reporting it.
+
 ### Step 4: Submit Review
 
 **MANDATORY**: Call `submit_review(task_id="{{task_id}}", approved=true/false, criteria_verdicts=[...], comment="...")` with:
@@ -92,4 +112,15 @@ If the project's image declares backing services (Postgres/Redis/RabbitMQ), each
 - Pre-existing issue on main surfaced during the task → acceptable to fix
 - Criterion clearly unmet → mark as NOT MET
 
-**Default to MET.**
+### Clean reviews are valid
+
+A clean review is a valid review. **Default to MET only after the Pre-Report Gate has removed every non-evidence-backed candidate.** Until the gate has filtered the candidate set down to evidence-backed, line-cited, input-grounded defects with defensible impact, do not "default" anywhere — keep the criteria as written and keep looking.
+
+The primary LLM-reviewer failure mode is not under-finding; it is **finding too much**. The four patterns to fight most aggressively:
+
+- **Manufactured findings** — claims of "this could be a bug if X" or "this might break in Y" with no concrete failing input, no `path:line`, and no real caller path. The Pre-Report Gate exists to suppress these; if a candidate fails any of the four checks, drop it.
+- **Filler nits** — naming, formatting, comment-quality, import-order, or stylistic preferences. These are never HIGH and never blocking, and they do not justify rejection on their own.
+- **Speculative `consider using X`** — suggestions to "consider using a more idiomatic API", "consider refactoring for clarity", or "consider extracting a helper" with no concrete defect being fixed. If nothing is concretely wrong, the suggestion is not a finding.
+- **Severity inflation** — marking a stylistic nit or a low-impact observation as HIGH or blocking. Severity must be defensible in one sentence against a real consequence in a real caller path.
+
+**Fight your generosity too.** A finding that survives the Pre-Report Gate — exact `path:line`, concrete failing input/state/outcome, one-frame-up caller/import/surrounding-control-flow check passed, defensible severity — is still a *real* finding and must NOT be rubber-stamped away just to keep the review tidy. The gate is symmetric: it stops manufactured findings, and it equally stops the reviewer from downgrading genuine, line-cited, input-grounded defects to "looks fine". Reject when the evidence is real; drop when it is not.
