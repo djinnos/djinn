@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::context::AgentContext;
+use crate::file_time::DestructiveClass;
 
 /// Investigation prompt shown to the worker on the FIRST covered edit per
 /// (path, live-session). Demands the four facts the arbiter needs before
@@ -75,6 +76,70 @@ pub(crate) async fn gate_guard_edit_check(
         // No read record at all should have been caught by the earlier
         // `file_time.assert(...)` call, but guard defensively.
         Ok(())
+    }
+}
+
+/// Map a classifier `ShellDestructiveClass` label to the colocated
+/// `DestructiveClass` used by `FileTime`'s `bash_soft_forced` set.
+///
+/// The classifier's `as_str()` labels are documented to match
+/// `destructive_class::*` constants 1:1; `DestructiveClass::from_owned`
+/// interns the static label so equality/hashing works across code paths.
+fn map_shell_class_to_destructive_class(
+    class: djinn_mcp_extension::command_classifier::ShellDestructiveClass,
+) -> DestructiveClass {
+    DestructiveClass::from_owned(class.as_str().to_owned())
+}
+
+/// GateGuard shell-check helper for worker sessions.
+///
+/// Returns `Ok(())` to allow shell execution, or `Err(String)` to deny it.
+/// Non-worker roles and missing roles pass through unconditionally.
+///
+/// Call this AFTER cargo steering (`cargo_check_denied`) and BEFORE shell
+/// process construction/execution.
+pub(crate) async fn gate_guard_shell_check(
+    state: &AgentContext,
+    session_role: Option<&str>,
+    session_id: &str,
+    command: &str,
+) -> Result<(), String> {
+    // Only gate worker sessions; all other roles keep current behavior.
+    if session_role != Some("worker") {
+        return Ok(());
+    }
+
+    use djinn_mcp_extension::command_classifier::{
+        ShellDestructiveDecision, classify_destructive_shell_command,
+    };
+
+    match classify_destructive_shell_command(command) {
+        ShellDestructiveDecision::Allow => Ok(()),
+        ShellDestructiveDecision::HardDeny { reason } => {
+            // Hard-denied commands are unconditionally forbidden.
+            // Never recorded in bash_soft_forced — no retry will help.
+            Err(format!(
+                "GateGuard: This shell command is forbidden and cannot be \
+                 unlocked by FORCE or retry. {reason}"
+            ))
+        }
+        ShellDestructiveDecision::SoftGate { class, reason } => {
+            let dc = map_shell_class_to_destructive_class(class);
+            if state.file_time.has_bash_soft_forced(session_id, &dc).await {
+                // Already forced for this class in this live session — allow.
+                Ok(())
+            } else {
+                // First occurrence: mark it and return a FORCE prompt.
+                state.file_time.mark_bash_soft_forced(session_id, dc).await;
+                Err(format!(
+                    "GateGuard: This shell command is gated — {reason}. \
+                     Before executing, provide:\n\
+                     1. What files or data will be deleted or mutated.\n\
+                     2. A one-line rollback or recreation plan.\n\
+                     After providing this information, retry the command."
+                ))
+            }
+        }
     }
 }
 
