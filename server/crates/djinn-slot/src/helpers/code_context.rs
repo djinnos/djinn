@@ -1,5 +1,40 @@
 use super::*;
 
+// ── Trace-aware knowledge-note formatting ──────────────────────────────────
+
+/// Per-note outcome reported by the trace-aware formatter.
+///
+/// Reuses the data-layer vocabulary from the retrieval-trace foundation
+/// (`djinn_db::repositories::retrieval_trace`) so downstream consumers
+/// can map directly to [`TraceCandidate`] fields without a second
+/// vocabulary layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotePackingOutcome {
+    /// Stable note identifier (from `Note.id`).
+    pub note_id: String,
+    /// Permalink slug (from `Note.permalink`).
+    pub permalink: String,
+    /// Whether the note was injected or skipped.
+    pub outcome: djinn_db::repositories::retrieval_trace::CandidateOutcome,
+    /// For skipped notes, the specific reason. Always `None` for injected
+    /// notes.
+    pub skipped_reason: Option<djinn_db::repositories::retrieval_trace::SkippedReason>,
+}
+
+/// Result of [`format_knowledge_notes_with_trace`]: the same rendered
+/// prompt string the non-trace formatter would return, plus one
+/// [`NotePackingOutcome`] per input note describing whether it was
+/// injected or budget-pruned.
+#[derive(Clone, Debug)]
+pub struct FormatKnowledgeNotesTrace {
+    /// The rendered knowledge-note block, byte-identical to what
+    /// [`format_knowledge_notes`] returns for the same inputs.
+    pub rendered: String,
+    /// Per-input-note packing outcomes, in the same order as the input
+    /// slice.
+    pub outcomes: Vec<NotePackingOutcome>,
+}
+
 /// Extract crate/module path prefixes from a task's description, design, and epic context.
 pub fn derive_task_scope_paths(
     task: &djinn_core::models::Task,
@@ -69,8 +104,29 @@ pub fn derive_task_scope_paths(
 /// the appended `permalink` is included in that budget accounting rather than
 /// being layered on after truncation.
 pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize) -> String {
+    format_knowledge_notes_with_trace(notes, budget_chars).rendered
+}
+
+/// Trace-aware variant of [`format_knowledge_notes`].
+///
+/// Returns the same rendered prompt string (byte-identical for the same
+/// inputs) plus a [`NotePackingOutcome`] for every input note indicating
+/// whether it was injected into the rendered output or budget-pruned.
+///
+/// This is the implementation primitive consumed by the
+/// `load_knowledge_context` instrumentation task; callers that only need
+/// the rendered string continue using [`format_knowledge_notes`] which
+/// delegates here.
+pub fn format_knowledge_notes_with_trace(
+    notes: &[djinn_memory::Note],
+    budget_chars: usize,
+) -> FormatKnowledgeNotesTrace {
+    use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+
     let mut lines = Vec::new();
+    let mut outcomes = Vec::with_capacity(notes.len());
     let mut used = 0;
+    let mut budget_exhausted = false;
     for note in notes {
         let label = match note.note_type.as_str() {
             "pitfall" => "Pitfall",
@@ -99,13 +155,29 @@ pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize)
             "- **[{}] {}**: {} (permalink: {})",
             label, note.title, summary, note.permalink
         );
-        if used + line.len() > budget_chars {
-            break;
+        if budget_exhausted || used + line.len() > budget_chars {
+            budget_exhausted = true;
+            outcomes.push(NotePackingOutcome {
+                note_id: note.id.clone(),
+                permalink: note.permalink.clone(),
+                outcome: CandidateOutcome::Skipped,
+                skipped_reason: Some(SkippedReason::BudgetPruned),
+            });
+        } else {
+            used += line.len() + 1; // +1 for newline
+            lines.push(line);
+            outcomes.push(NotePackingOutcome {
+                note_id: note.id.clone(),
+                permalink: note.permalink.clone(),
+                outcome: CandidateOutcome::Injected,
+                skipped_reason: None,
+            });
         }
-        used += line.len() + 1; // +1 for newline
-        lines.push(line);
     }
-    lines.join("\n")
+    FormatKnowledgeNotesTrace {
+        rendered: lines.join("\n"),
+        outcomes,
+    }
 }
 
 /// Returns true when the given role name is opted-in to auto-injected

@@ -1006,3 +1006,206 @@ fn format_knowledge_notes_budget_rejects_line_whose_permalink_itself_overflows()
         "overflow line must not leak, got: {rendered}"
     );
 }
+
+// ── Trace-aware formatter tests ─────────────────────────────────────────────
+
+#[test]
+fn format_knowledge_notes_with_trace_renders_identically_to_non_trace() {
+    use djinn_db::repositories::retrieval_trace::CandidateOutcome;
+
+    let notes = vec![
+        fixture_note(
+            "pitfall",
+            "Refinement target-less",
+            "pitfalls/refinement-target-less",
+            Some("Refinements on proposals without a target project die as opaque agent_failure."),
+            None,
+            "Long body content that should NOT appear because abstract wins.",
+            0.5,
+        ),
+        fixture_note(
+            "pattern",
+            "Anchor Note",
+            "patterns/anchor",
+            Some("Use anchors for retrieval."),
+            None,
+            "Body remains separate from the retrieval anchor.",
+            0.9,
+        ),
+    ];
+
+    let non_trace = format_knowledge_notes(&notes, 2000);
+    let trace_result = format_knowledge_notes_with_trace(&notes, 2000);
+
+    assert_eq!(
+        non_trace, trace_result.rendered,
+        "trace-aware formatter must produce byte-identical rendered output"
+    );
+    assert_eq!(trace_result.outcomes.len(), 2);
+    assert_eq!(trace_result.outcomes[0].outcome, CandidateOutcome::Injected);
+    assert_eq!(trace_result.outcomes[0].skipped_reason, None);
+    assert_eq!(trace_result.outcomes[1].outcome, CandidateOutcome::Injected);
+    assert_eq!(trace_result.outcomes[1].skipped_reason, None);
+}
+
+#[test]
+fn format_knowledge_notes_with_trace_reports_budget_pruned_for_later_notes() {
+    use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+
+    let notes = vec![
+        fixture_note("note", "short", "a/short", Some("a"), None, "", 0.5),
+        fixture_note(
+            "note",
+            "medium-summary-text",
+            "b/medium-summary",
+            Some("b"),
+            None,
+            "",
+            0.5,
+        ),
+    ];
+    let first_line = "- **[Note] short**: a (permalink: a/short)";
+    let second_line = "- **[Note] medium-summary-text**: b (permalink: b/medium-summary)";
+    let used_after_first = first_line.len() + 1;
+    let budget = used_after_first + second_line.len() - 1;
+
+    let trace_result = format_knowledge_notes_with_trace(&notes, budget);
+
+    assert_eq!(
+        trace_result.rendered, first_line,
+        "rendered output must match non-trace formatter"
+    );
+    assert_eq!(trace_result.outcomes.len(), 2);
+    assert_eq!(trace_result.outcomes[0].outcome, CandidateOutcome::Injected);
+    assert_eq!(trace_result.outcomes[0].skipped_reason, None);
+    assert_eq!(trace_result.outcomes[0].permalink, "a/short");
+    assert_eq!(trace_result.outcomes[1].outcome, CandidateOutcome::Skipped);
+    assert_eq!(
+        trace_result.outcomes[1].skipped_reason,
+        Some(SkippedReason::BudgetPruned)
+    );
+    assert_eq!(trace_result.outcomes[1].permalink, "b/medium-summary");
+}
+
+#[test]
+fn format_knowledge_notes_with_trace_empty_input() {
+    let trace_result = format_knowledge_notes_with_trace(&[], 2000);
+    assert!(trace_result.rendered.is_empty());
+    assert!(trace_result.outcomes.is_empty());
+}
+
+#[test]
+fn format_knowledge_notes_with_trace_all_budget_pruned_when_budget_too_small() {
+    use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+
+    let notes = vec![
+        fixture_note(
+            "pattern",
+            "Long",
+            "patterns/this-permalink-slug-is-intentionally-very-long-on-purpose",
+            Some("summary"),
+            None,
+            "",
+            0.5,
+        ),
+        fixture_note("note", "short", "a/short", Some("x"), None, "", 0.5),
+    ];
+
+    let trace_result = format_knowledge_notes_with_trace(&notes, 100);
+
+    assert!(
+        trace_result.rendered.is_empty(),
+        "rendered output must be empty when nothing fits: {:?}",
+        trace_result.rendered
+    );
+    assert_eq!(trace_result.outcomes.len(), 2);
+    for (i, outcome) in trace_result.outcomes.iter().enumerate() {
+        assert_eq!(
+            outcome.outcome,
+            CandidateOutcome::Skipped,
+            "note {i} should be skipped"
+        );
+        assert_eq!(
+            outcome.skipped_reason,
+            Some(SkippedReason::BudgetPruned),
+            "note {i} should be budget-pruned"
+        );
+    }
+}
+
+#[test]
+fn format_knowledge_notes_with_trace_preserves_ordering_and_break_behavior() {
+    // When a note exceeds the budget, the original formatter `break`s —
+    // meaning ALL subsequent notes are also skipped, even if they individually
+    // would fit.  The trace-aware variant must behave identically.
+    use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+
+    let notes = vec![
+        fixture_note("note", "first", "a/first", Some("f"), None, "", 0.5),
+        // A note that is too big for the remaining budget.
+        fixture_note(
+            "note",
+            "second-with-long-title",
+            "b/second-with-long-title",
+            Some("s"),
+            None,
+            "",
+            0.5,
+        ),
+        // A short note that would fit if the break hadn't happened.
+        fixture_note("note", "tiny", "c/tiny", Some("t"), None, "", 0.5),
+    ];
+
+    let first_line = "- **[Note] first**: f (permalink: a/first)";
+    let second_line =
+        "- **[Note] second-with-long-title**: s (permalink: b/second-with-long-title)";
+    // Budget fits first line + second line but NOT third.
+    let budget = first_line.len() + 1 + second_line.len() + 1 + 1;
+
+    let trace_result = format_knowledge_notes_with_trace(&notes, budget);
+
+    // First two notes fit; third is pruned because the break fires on the
+    // second note's successor iteration.
+    assert_eq!(trace_result.outcomes[0].outcome, CandidateOutcome::Injected);
+    assert_eq!(trace_result.outcomes[1].outcome, CandidateOutcome::Injected);
+    // The third note is beyond the break and must be budget-pruned.
+    assert_eq!(trace_result.outcomes[2].outcome, CandidateOutcome::Skipped);
+    assert_eq!(
+        trace_result.outcomes[2].skipped_reason,
+        Some(SkippedReason::BudgetPruned)
+    );
+}
+
+#[test]
+fn format_knowledge_notes_delegates_to_trace_variant() {
+    // Verify the compatibility wrapper returns the same string as
+    // the trace-aware helper for a representative input.
+    let notes = vec![
+        fixture_note(
+            "pitfall",
+            "Refinement target-less",
+            "pitfalls/refinement-target-less",
+            Some("Refinements on proposals without a target project die as opaque agent_failure."),
+            None,
+            "Body.",
+            0.5,
+        ),
+        fixture_note(
+            "pattern",
+            "Anchor Note",
+            "patterns/anchor",
+            Some("Use anchors for retrieval."),
+            None,
+            "Body.",
+            0.9,
+        ),
+    ];
+
+    let wrapper_output = format_knowledge_notes(&notes, 2000);
+    let trace_output = format_knowledge_notes_with_trace(&notes, 2000);
+
+    assert_eq!(
+        wrapper_output, trace_output.rendered,
+        "format_knowledge_notes must delegate to format_knowledge_notes_with_trace"
+    );
+}

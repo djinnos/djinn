@@ -57,7 +57,8 @@ mod reviewer_diff;
 mod tests;
 
 pub use code_context::{
-    build_role_code_graph_context, derive_task_scope_paths, format_knowledge_notes,
+    FormatKnowledgeNotesTrace, NotePackingOutcome, build_role_code_graph_context,
+    derive_task_scope_paths, format_knowledge_notes, format_knowledge_notes_with_trace,
     is_role_auto_code_context_enabled,
 };
 #[cfg(test)]
