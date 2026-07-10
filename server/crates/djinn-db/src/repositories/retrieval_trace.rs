@@ -165,21 +165,36 @@ pub const SKIPPED_REASON_VALUES: &[&str] = &[
 
 /// A single candidate recorded in a trace's `candidates` JSONB array.
 ///
+/// This is the canonical data-layer contract consumed by downstream epics:
+/// - **mwtv** (dispatch instrumentation) writes `TraceCandidate` entries with
+///   `skipped_reason` set per the drop-reason taxonomy after applying
+///   production top-K, min-confidence, and budget pruning.
+/// - **liso** (`memory_recall_trace` MCP tool) reads persisted entries in
+///   detail mode, exposing `note_id`, `rank`, `confidence`, `skipped_reason`,
+///   `source`, and `scope` to the caller.
+///
 /// `skipped_reason` is `None` for injected candidates; for non-injected
 /// candidates it is one of [`SkippedReason`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceCandidate {
-    /// Stable note id of the candidate.
+    /// Stable note id of the candidate (matches `notes.id`).
     pub note_id: String,
-    /// Rank position within the candidate set (1-based).
+    /// Rank position within the candidate set (1-based), derived from the
+    /// same production ordering (`confidence DESC, updated_at DESC`).
     pub rank: Option<i32>,
-    /// Retrieval confidence/score (0.0–1.0).
+    /// Retrieval confidence/score (0.0–1.0) persisted for downstream
+    /// classification (e.g. `min_confidence` drop reason).
     pub confidence: Option<f64>,
     /// Reason the candidate was skipped, or `null` for injected candidates.
+    /// Downstream dispatch instrumentation sets this to one of the
+    /// fixed vocabulary values: `not_top_k`, `min_confidence`,
+    /// `budget_pruned`, `superseded_pruned`, `dedupe`, `search_error`.
     pub skipped_reason: Option<SkippedReason>,
-    /// Optional source identifier (e.g. "scope_overlap").
+    /// Identifier of the retrieval source (e.g. `"scope_overlap"`).
     pub source: Option<String>,
-    /// Optional scope/context metadata for later classification.
+    /// Scope/context metadata carried from the source query for later
+    /// classification.  For scope-overlap candidates this is the note's
+    /// `scope_paths` JSONB value.
     pub scope: Option<serde_json::Value>,
 }
 
