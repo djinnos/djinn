@@ -1006,3 +1006,292 @@ fn format_knowledge_notes_budget_rejects_line_whose_permalink_itself_overflows()
         "overflow line must not leak, got: {rendered}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// pack_knowledge_notes tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pack_knowledge_notes_rendered_matches_format_knowledge_notes() {
+    // The rendered output of pack_knowledge_notes must be byte-identical to
+    // format_knowledge_notes for the same inputs, at every budget size.
+    let notes = vec![
+        fixture_note(
+            "pitfall",
+            "Refinement target-less",
+            "pitfalls/refinement-target-less",
+            Some("Refinements on proposals without a target project die as opaque agent_failure."),
+            None,
+            "Long body content that should NOT appear because abstract wins.",
+            0.5,
+        ),
+        fixture_note(
+            "pattern",
+            "Anchor Note",
+            "patterns/anchor",
+            Some("Use anchors for retrieval."),
+            None,
+            "Body remains separate from the retrieval anchor.",
+            0.9,
+        ),
+    ];
+
+    // Generous budget: both fit.
+    assert_eq!(
+        pack_knowledge_notes(&notes, 2000).rendered,
+        format_knowledge_notes(&notes, 2000),
+    );
+
+    // Tight budget: only first fits.
+    let first_line = "- **[Pitfall] Refinement target-less**: Refinements on proposals without a target project die as opaque agent_failure. (permalink: pitfalls/refinement-target-less)";
+    let budget = first_line.len();
+    assert_eq!(
+        pack_knowledge_notes(&notes, budget).rendered,
+        format_knowledge_notes(&notes, budget),
+    );
+
+    // Zero budget: nothing fits.
+    assert_eq!(
+        pack_knowledge_notes(&notes, 0).rendered,
+        format_knowledge_notes(&notes, 0),
+    );
+}
+
+#[test]
+fn pack_knowledge_notes_empty_input_returns_empty() {
+    let packed = pack_knowledge_notes(&[], 2000);
+    assert!(packed.rendered.is_empty(), "expected empty rendered text");
+    assert!(packed.outcomes.is_empty(), "expected empty outcomes");
+    assert_eq!(packed.total_injected_chars, 0);
+    assert_eq!(packed.total_injected_tokens, 0);
+}
+
+#[test]
+fn pack_knowledge_notes_all_injected_when_budget_generous() {
+    let notes = vec![
+        fixture_note(
+            "pitfall",
+            "Pit One",
+            "pitfalls/one",
+            Some("Abstract one."),
+            None,
+            "",
+            0.5,
+        ),
+        fixture_note(
+            "pattern",
+            "Pat Two",
+            "patterns/two",
+            Some("Abstract two."),
+            None,
+            "",
+            0.5,
+        ),
+        fixture_note(
+            "case",
+            "Case Three",
+            "cases/three",
+            Some("Abstract three."),
+            None,
+            "",
+            0.5,
+        ),
+    ];
+
+    let packed = pack_knowledge_notes(&notes, 5000);
+    assert_eq!(packed.outcomes.len(), 3);
+    for outcome in &packed.outcomes {
+        assert_eq!(outcome.disposition, NotePackDisposition::Injected);
+        assert!(
+            outcome.estimated_rendered_chars.is_some(),
+            "injected note must have char estimate"
+        );
+        assert!(
+            outcome.estimated_rendered_tokens.is_some(),
+            "injected note must have token estimate"
+        );
+    }
+    assert!(packed.total_injected_chars > 0);
+    assert!(packed.total_injected_tokens > 0);
+}
+
+#[test]
+fn pack_knowledge_notes_budget_prunes_first_overflow_and_all_subsequent() {
+    let notes = vec![
+        fixture_note("note", "short", "a/short", Some("a"), None, "", 0.5),
+        fixture_note(
+            "note",
+            "medium-summary-text",
+            "b/medium-summary",
+            Some("b"),
+            None,
+            "",
+            0.5,
+        ),
+        fixture_note("note", "third-note", "c/third", Some("c"), None, "", 0.5),
+    ];
+
+    // Budget only fits the first line.
+    let first_line = "- **[Note] short**: a (permalink: a/short)";
+    let budget = first_line.len();
+
+    let packed = pack_knowledge_notes(&notes, budget);
+    assert_eq!(packed.outcomes.len(), 3);
+
+    // First note injected.
+    assert_eq!(
+        packed.outcomes[0].disposition,
+        NotePackDisposition::Injected
+    );
+    assert_eq!(packed.outcomes[0].permalink, "a/short");
+    assert_eq!(packed.outcomes[0].title, "short");
+
+    // Second note budget-pruned (first overflow).
+    assert_eq!(
+        packed.outcomes[1].disposition,
+        NotePackDisposition::BudgetPruned
+    );
+    assert_eq!(packed.outcomes[1].permalink, "b/medium-summary");
+    assert_eq!(packed.outcomes[1].title, "medium-summary-text");
+    assert!(packed.outcomes[1].estimated_rendered_chars.is_none());
+    assert!(packed.outcomes[1].estimated_rendered_tokens.is_none());
+
+    // Third note also budget-pruned (cascade after first overflow).
+    assert_eq!(
+        packed.outcomes[2].disposition,
+        NotePackDisposition::BudgetPruned
+    );
+    assert_eq!(packed.outcomes[2].permalink, "c/third");
+
+    // Rendered text only has the first note.
+    assert_eq!(packed.rendered, first_line);
+}
+
+#[test]
+fn pack_knowledge_notes_zero_budget_prunes_all() {
+    let notes = vec![
+        fixture_note("note", "A", "a/a", Some("a"), None, "", 0.5),
+        fixture_note("note", "B", "b/b", Some("b"), None, "", 0.5),
+    ];
+
+    let packed = pack_knowledge_notes(&notes, 0);
+    assert_eq!(packed.outcomes.len(), 2);
+    for outcome in &packed.outcomes {
+        assert_eq!(outcome.disposition, NotePackDisposition::BudgetPruned);
+        assert!(outcome.estimated_rendered_chars.is_none());
+        assert!(outcome.estimated_rendered_tokens.is_none());
+    }
+    assert!(packed.rendered.is_empty());
+    assert_eq!(packed.total_injected_chars, 0);
+    assert_eq!(packed.total_injected_tokens, 0);
+}
+
+#[test]
+fn pack_knowledge_notes_outcome_metadata_matches_permalink_and_title() {
+    let notes = vec![
+        fixture_note(
+            "pitfall",
+            "Refinement target-less",
+            "pitfalls/refinement-target-less",
+            Some("Refinements on proposals without a target project die as opaque agent_failure."),
+            None,
+            "",
+            0.5,
+        ),
+        fixture_note(
+            "pattern",
+            "Anchor Note",
+            "patterns/anchor",
+            Some("Use anchors for retrieval."),
+            None,
+            "",
+            0.9,
+        ),
+    ];
+
+    let packed = pack_knowledge_notes(&notes, 2000);
+    assert_eq!(
+        packed.outcomes[0].permalink,
+        "pitfalls/refinement-target-less"
+    );
+    assert_eq!(packed.outcomes[0].title, "Refinement target-less");
+    assert_eq!(packed.outcomes[1].permalink, "patterns/anchor");
+    assert_eq!(packed.outcomes[1].title, "Anchor Note");
+}
+
+#[test]
+fn pack_knowledge_notes_injected_char_estimate_matches_rendered_line_length() {
+    let notes = vec![fixture_note(
+        "case",
+        "Sample Case",
+        "cases/sample-case",
+        Some("Short case abstract."),
+        None,
+        "Body text.",
+        0.6,
+    )];
+
+    let packed = pack_knowledge_notes(&notes, 2000);
+    let expected_line =
+        "- **[Case] Sample Case**: Short case abstract. (permalink: cases/sample-case)";
+    assert_eq!(packed.rendered, expected_line);
+    assert_eq!(
+        packed.outcomes[0].estimated_rendered_chars,
+        Some(expected_line.len()),
+        "char estimate must match the actual rendered line length"
+    );
+}
+
+#[test]
+fn pack_knowledge_notes_token_estimate_is_ceil_of_chars_divided_by_four() {
+    let notes = vec![fixture_note(
+        "note",
+        "Tok",
+        "t/tok",
+        Some("x"),
+        None,
+        "",
+        0.5,
+    )];
+
+    let packed = pack_knowledge_notes(&notes, 2000);
+    let chars = packed.outcomes[0].estimated_rendered_chars.unwrap();
+    let expected_tokens = ((chars as f64) / 4.0).ceil() as usize;
+    assert_eq!(
+        packed.outcomes[0].estimated_rendered_tokens,
+        Some(expected_tokens),
+        "token estimate must be ceil(chars / 4.0)"
+    );
+    // Verify aggregate totals are consistent.
+    assert_eq!(packed.total_injected_chars, chars + 1); // +1 for newline
+    let expected_total_tokens = ((packed.total_injected_chars as f64) / 4.0).ceil() as usize;
+    assert_eq!(packed.total_injected_tokens, expected_total_tokens);
+}
+
+#[test]
+fn pack_knowledge_notes_budget_permalink_overflow_prunes() {
+    // Mirrors the existing format_knowledge_notes_budget_rejects_line_whose_permalink_itself_overflows
+    // test, ensuring pack_knowledge_notes behaves identically.
+    let notes = vec![fixture_note(
+        "pattern",
+        "Long",
+        "patterns/this-permalink-slug-is-intentionally-very-long-on-purpose",
+        Some("summary"),
+        None,
+        "",
+        0.5,
+    )];
+
+    let packed = pack_knowledge_notes(&notes, 100);
+    assert!(
+        packed.rendered.is_empty(),
+        "single-line overflow must drop the note, got: {:?}",
+        packed.rendered
+    );
+    assert_eq!(packed.outcomes.len(), 1);
+    assert_eq!(
+        packed.outcomes[0].disposition,
+        NotePackDisposition::BudgetPruned
+    );
+    assert!(packed.outcomes[0].estimated_rendered_chars.is_none());
+}
