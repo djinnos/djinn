@@ -265,7 +265,7 @@ const DENIED_CARGO_SUBCOMMANDS: &[&str] = &[
 
 /// SQL keywords that indicate DML/DDL mutation when used as a command
 /// prefix (e.g. `psql -c "DELETE ..."`).
-const SQL_MUTATION_KEYWORDS: &[&str] = &[
+pub(crate) const SQL_MUTATION_KEYWORDS: &[&str] = &[
     "insert", "update", "delete", "drop", "create", "alter", "truncate", "grant", "revoke",
     "rename", "replace", "merge", "upsert",
 ];
@@ -379,7 +379,7 @@ fn check_heredoc_writes(cmd: &str, violations: &mut Vec<CommandViolation>) {
 }
 
 /// Split a command into pipeline segments on `|` (but not `||`).
-fn split_pipeline(cmd: &str) -> Vec<String> {
+pub(crate) fn split_pipeline(cmd: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let chars: Vec<char> = cmd.chars().collect();
@@ -422,7 +422,7 @@ fn split_pipeline(cmd: &str) -> Vec<String> {
 }
 
 /// Simple tokenizer that respects single and double quotes.
-fn tokenize(cmd: &str) -> Vec<String> {
+pub(crate) fn tokenize(cmd: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let chars: Vec<char> = cmd.chars().collect();
@@ -848,42 +848,8 @@ fn check_redis_cli(tokens: &[String], violations: &mut Vec<CommandViolation>) {
     }
 }
 
-fn is_redis_write_command(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "set"
-            | "del"
-            | "hset"
-            | "hdel"
-            | "lpush"
-            | "rpush"
-            | "lpop"
-            | "rpop"
-            | "sadd"
-            | "srem"
-            | "zadd"
-            | "zrem"
-            | "incr"
-            | "decr"
-            | "incrby"
-            | "decrby"
-            | "expire"
-            | "persist"
-            | "rename"
-            | "flushdb"
-            | "flushall"
-            | "mset"
-            | "append"
-            | "bitfield"
-            | "xadd"
-            | "xdel"
-            | "xtrim"
-            | "unlink"
-            | "move"
-            | "swapdb"
-            | "select"
-    )
-}
+// Shared helper — canonical definition lives in command_classifier.
+use crate::command_classifier::is_redis_write_command;
 
 /// Check for suspicious command chains.
 fn check_chains(cmd: &str, violations: &mut Vec<CommandViolation>) {
@@ -907,6 +873,19 @@ fn check_chains(cmd: &str, violations: &mut Vec<CommandViolation>) {
         }
     }
 }
+
+// ── Production destructive-command classifier ────────────────────────────
+//
+// Extracted into its own sibling module for size-guard compliance and
+// standalone testability.  The public API is re-exported here so that
+// existing callers see no path change.
+
+// Re-export the production classifier's public types and entry-point
+// so callers can use `command_validator::classify_destructive_shell_command`
+// (or import the crate-level `command_classifier` module directly).
+pub use crate::command_classifier::{
+    ShellDestructiveClass, ShellDestructiveDecision, classify_destructive_shell_command,
+};
 
 #[cfg(test)]
 #[path = "command_validator_tests.rs"]
