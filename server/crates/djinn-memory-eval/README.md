@@ -310,6 +310,75 @@ case was made worse. To add a new bad case:
 3. Run the benchmark and refresh the baseline.
 4. Commit the updated fixtures and baseline together.
 
+### Aggregate metrics scope
+
+The aggregate metrics include **all labeled Phase 1 queries** — both
+mined `memory_ref_queries` and append-only `bad_cases` — so
+`aggregate_metrics.query_count` always equals the total number of
+labeled queries in the committed fixtures. This prevents silent count
+mismatches where bad-case rows could be dropped from aggregate
+computations without detection.
+
+The `validate-fixtures` command verifies that the baseline's
+`aggregate_metrics.query_count` matches the sum of
+`memory_ref_queries.len()` + `bad_cases.len()`, and that
+`per_query_ranks` covers both suites.
+
+### Minimum useful-baseline expectations
+
+A baseline that passes `validate-fixtures` must:
+
+- Have `aggregate_metrics.query_count` equal to the total fixture
+  query count (memory_ref + bad_cases).
+- Have `aggregate_metrics.zero_result_rate < 1.0` (not all-miss).
+- Have at least one gating retrieval metric (recall@k or MRR)
+  greater than zero.
+- Include `per_query_ranks` entries for both `all_queries` and
+  `bad_cases` suites with counts matching the fixture file lengths.
+- Be **produced by `cargo run -p djinn-memory-eval -- run` followed by
+  `cargo run -p djinn-memory-eval -- refresh-baseline`** against the
+  real `NoteRepository::search` and `build_context` paths — not by
+  hand-computing synthetic ranks. The committed `metadata.refresh_commit`
+  must equal the git HEAD SHA at the time of refresh so reviewers can
+  reproduce the pipeline path that produced the file.
+
+The committed `baselines/phase1.json` was refreshed from a live run on
+2026-07-10 against the dedicated Postgres test cluster. Its
+`metadata.refresh_commit` field carries that run's HEAD SHA so reviewers
+can identify the exact ranking commit that produced the rank data.
+
+### Fixture query-text constraints for retrieval
+
+The committed `fixtures/memory-ref-queries.jsonl` and
+`fixtures/bad-cases.jsonl` rows use **concise keyword queries** rather
+than verbose natural-language questions. The lexical search path in
+`djinn-db::repositories::note::lexical_search` builds a `to_tsquery`
+expression by tokenizing the query text and AND-joining all tokens
+(with `:*` prefix matching for tokens ≥ 3 chars). When verbose natural
+language ("How to handle slot lifecycle race conditions?") is fed to
+that pipeline, common English filler words ("how", "handle") have no
+matching stems in the fixture corpus, so the strict AND query returns
+zero candidates and the search fails to surface any relevant note.
+
+For the real-pipeline baseline to be non-all-miss, fixture queries must
+use terms that actually appear in the committed corpus notes. Examples
+of the rewrite pattern:
+
+| Verbose form                          | Concise fixture form           |
+|---------------------------------------|--------------------------------|
+| "How to handle slot lifecycle race..."| "slot lifecycle race"          |
+| "Supervisor guard pattern..."          | "supervisor guard"             |
+| "Memory note decay tuning and..."     | "memory decay"                 |
+| "What API methods are available..."    | "slot api"                     |
+
+The minimum useful-baseline expectations above require the queries to
+match at least one term per expected note via the real pipeline. Future
+fixture expansions should follow the same concise-keyword convention
+or commit to extending the lexical-search tokenizer (e.g. websearch
+operator) — the current fixture queries are deliberately short so the
+Phase 1 baseline is anchored on **real** pipeline recall, not synthetic
+plausibility.
+
 ### First-snapshot signal exclusions
 
 The Phase 1 initial fixture snapshot has the following limitations:
@@ -320,11 +389,6 @@ The Phase 1 initial fixture snapshot has the following limitations:
   assertion is deferred to the CI gate task (1tk3). The fixture data
   includes graph edges and signal coverage declarations; signal
   comparisons are recorded but do not gate the initial baseline.
-
-- **Full-text search coverage**: Some fixture queries return zero
-  results because PostgreSQL `tsvector` full-text search requires
-  exact token/stem matches. Query texts are designed to exercise the
-  pipeline; a follow-up corpus refinement can improve lexical recall.
 
 These exclusions are documented here per the design requirement:
 "If first-snapshot exclusions remain for a retrieval signal, document
