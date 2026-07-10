@@ -822,4 +822,51 @@ mod tests {
                 .contains("query_text is empty")
         );
     }
+
+    /// Verify that the total labeled query count (memory_ref + bad_cases)
+    /// is consistent and can be used for aggregate metric computation.
+    #[test]
+    fn total_labeled_query_count_includes_bad_cases() {
+        let fixtures = make_test_fixtures();
+        let total = fixtures.memory_ref_queries.len() + fixtures.bad_cases.len();
+        assert!(
+            total >= 4,
+            "expected at least 4 total labeled queries, got {}",
+            total
+        );
+        assert_eq!(
+            fixtures.memory_ref_queries.len() + fixtures.bad_cases.len(),
+            total,
+            "total count must equal memory_ref + bad_cases"
+        );
+    }
+
+    /// Verify that fixture counts match manifest when manifest is present.
+    #[test]
+    fn manifest_counts_match_fixture_lengths() {
+        let mut fixtures = make_test_fixtures();
+        fixtures.manifest = Some(FixtureManifest {
+            schema_version: "1.0.0".to_string(),
+            created_at: "2026-07-10T00:00:00.000Z".to_string(),
+            corpus_note_count: fixtures.corpus_notes.len(),
+            memory_ref_query_count: fixtures.memory_ref_queries.len(),
+            bad_case_count: fixtures.bad_cases.len(),
+            file_hashes: FixtureFileHashes {
+                corpus_notes: "test-hash".to_string(),
+                memory_ref_queries: "test-hash".to_string(),
+                bad_cases: "test-hash".to_string(),
+            },
+        });
+        // Should pass validation
+        validate_fixtures(&fixtures).expect("manifest counts should match fixture lengths");
+
+        // Now break the count — validation must fail with explicit error
+        fixtures.manifest.as_mut().unwrap().bad_case_count = 999;
+        let result = validate_fixtures(&fixtures);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("bad_case_count"),
+            "error should name the mismatched field"
+        );
+    }
 }

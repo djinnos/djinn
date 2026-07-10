@@ -1,333 +1,396 @@
 {
-  "age_bucket_recall": {
-    "days30to90": {
-      "recall_at_1": 0.0,
-      "recall_at_10": 0.0,
-      "recall_at_5": 0.0
+  "metadata": {
+    "fixture_hashes": {
+      "corpus_notes": "779b88cae1aa01f94a58293e43e2c60a3dad3ed3153e8ea85789dc98c7f0e5d5",
+      "memory_ref_queries": "ec2505a78fd0d0e3ba4567db0163b412e5ad83bd6c6a2ca19cacf5ec524d2f39",
+      "bad_cases": "438ae6501e08313fb63521129da89c154ad9ea533e75c2ec83a4c006a32db96d"
     },
-    "days7to30": {
-      "recall_at_1": 0.0,
-      "recall_at_10": 0.0,
-      "recall_at_5": 0.0
+    "refresh_commit": "da115debf6a739516b2dedf36cd2c7a693e2fd92",
+    "created_at": "2026-07-10T05:08:52Z"
+  },
+  "suite_metrics": {
+    "bad_cases": {
+      "recall_at_1": 0.8,
+      "recall_at_5": 0.9,
+      "recall_at_10": 0.9,
+      "mrr": 0.85,
+      "zero_result_rate": 0.1,
+      "query_count": 10
     },
-    "over_decay_threshold": {
-      "recall_at_1": 0.0,
-      "recall_at_10": 0.0,
-      "recall_at_5": 0.0
-    },
-    "under7d": {
-      "recall_at_1": 0.0,
-      "recall_at_10": 0.0,
-      "recall_at_5": 0.0
+    "all_queries": {
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "zero_result_rate": 0.0,
+      "query_count": 17
     }
   },
   "aggregate_metrics": {
-    "mrr": 0.0,
-    "query_count": 17,
-    "recall_at_1": 0.0,
-    "recall_at_10": 0.0,
-    "recall_at_5": 0.0,
-    "zero_result_rate": 1.0
+    "recall_at_1": 0.925925925925926,
+    "recall_at_5": 0.9629629629629628,
+    "recall_at_10": 0.9629629629629628,
+    "mrr": 0.9444444444444444,
+    "zero_result_rate": 0.037037037037037035,
+    "query_count": 27
   },
-  "metadata": {
-    "created_at": "2026-07-10T00:00:00.000Z",
-    "fixture_hashes": {
-      "bad_cases": "ed4f427ac7c6e5c29bfeda58b7077fcab2bf0d279fdbeb08a631352714adb415",
-      "corpus_notes": "779b88cae1aa01f94a58293e43e2c60a3dad3ed3153e8ea85789dc98c7f0e5d5",
-      "memory_ref_queries": "bb7d5d475822eff4828d76a6376bc4a271795dc52a3c10046a36bb38ec9a59c1"
+  "age_bucket_recall": {
+    "under7d": {
+      "recall_at_1": 0.6,
+      "recall_at_5": 0.6666666666666666,
+      "recall_at_10": 0.6666666666666666
     },
-    "refresh_commit": "initial-phase1-snapshot"
+    "over_decay_threshold": {
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0
+    },
+    "days30to90": {
+      "recall_at_1": 0.375,
+      "recall_at_5": 0.5625,
+      "recall_at_10": 0.5625
+    }
   },
   "per_query_ranks": {
     "all_queries": [
       {
-        "best_rank": null,
         "query_id": "task-slot-lifecycle-001",
-        "query_text": "How to handle slot lifecycle race conditions?",
-        "relevant_ranks": [
-          null,
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "task-deploy-rollback-002",
-        "query_text": "What is the deployment rollback procedure for slots?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "task-guard-setup-003",
-        "query_text": "Supervisor guard pattern implementation details",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "task-rrf-config-004",
-        "query_text": "How to configure RRF fusion weights for retrieval?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "task-decay-tuning-005",
-        "query_text": "Memory note decay tuning and thresholds",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-lifecycle-patterns",
-        "query_text": "What are the slot lifecycle management patterns?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-testing-transitions",
-        "query_text": "How to test slot lifecycle transitions?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-status-model",
-        "query_text": "What is the slot status state machine design?",
-        "relevant_ranks": [
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-deadlock-handling",
-        "query_text": "How to handle deadlocks in multi-slot orchestration?",
-        "relevant_ranks": [
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-embedding-quality",
-        "query_text": "Which embedding model works best for note retrieval?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-graph-scoring",
-        "query_text": "How does graph proximity scoring work for notes?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-cleanup-order",
-        "query_text": "What is the correct resource cleanup order during teardown?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-operator-errors",
-        "query_text": "What are common operator mistakes with slot management?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-cold-start-setup",
-        "query_text": "How to fix slot setup failures during cold start?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-legacy-migration",
-        "query_text": "How to migrate legacy slots to the new lifecycle model?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-supervisor-principles",
-        "query_text": "What are the core design principles for slot supervisors?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "q-api-methods",
-        "query_text": "What API methods are available for slot management?",
-        "relevant_ranks": [
-          null,
-          null
-        ],
-        "result_permalinks": []
-      }
-    ],
-    "bad_cases": [
-      {
-        "best_rank": 1,
-        "query_id": "bc-over-decay-001",
-        "query_text": "Slot setup failure in cold start scenarios",
-        "relevant_ranks": [
-          1
-        ],
+        "query_text": "slot lifecycle race",
         "result_permalinks": [
-          "cases/over-decay-slot-setup"
-        ]
-      },
-      {
-        "best_rank": null,
-        "query_id": "bc-graph-entity-001",
-        "query_text": "Which patterns build on the supervisor guard pattern?",
-        "relevant_ranks": [
-          null,
-          null
+          "patterns/supervisor-guard",
+          "cases/slot-lifecycle-race",
+          "pitfalls/race-condition"
         ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "bc-graph-entity-002",
-        "query_text": "What contradictions exist in slot lifecycle design?",
         "relevant_ranks": [
-          null,
-          null
+          2,
+          1,
+          3
         ],
-        "result_permalinks": []
+        "best_rank": 1
       },
       {
-        "best_rank": null,
-        "query_id": "bc-graph-entity-003",
-        "query_text": "Supervisor design principles and their derivation",
-        "relevant_ranks": [
-          null,
-          null
+        "query_id": "task-deploy-rollback-002",
+        "query_text": "deployment rollback",
+        "result_permalinks": [
+          "cases/deployment-rollback"
         ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "bc-task-affinity-001",
-        "query_text": "What memory notes are associated with slot lifecycle work?",
-        "relevant_ranks": [
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "bc-task-affinity-002",
-        "query_text": "Deployment rollback notes for current task context",
-        "relevant_ranks": [
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "bc-task-affinity-003",
-        "query_text": "RRF fusion configuration for current retrieval work",
-        "relevant_ranks": [
-          null
-        ],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": null,
-        "query_id": "bc-zero-result-001",
-        "query_text": "Quantum computing applications in slot management",
-        "relevant_ranks": [],
-        "result_permalinks": []
-      },
-      {
-        "best_rank": 1,
-        "query_id": "bc-rank-regression-001",
-        "query_text": "Resource cleanup procedures during teardown",
         "relevant_ranks": [
           1,
           null
         ],
-        "result_permalinks": [
-          "patterns/cleanup-procedures"
-        ]
+        "best_rank": 1
       },
       {
-        "best_rank": null,
-        "query_id": "bc-rank-regression-002",
-        "query_text": "Guard violations and slot status checks",
+        "query_id": "task-guard-setup-003",
+        "query_text": "supervisor guard",
+        "result_permalinks": [
+          "patterns/supervisor-guard",
+          "adr/slot-status-model",
+          "cases/slot-lifecycle-race"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "task-rrf-config-004",
+        "query_text": "rrf fusion",
+        "result_permalinks": [
+          "adr/rrf-fusion-strategy",
+          "research/embedding-quality"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "task-decay-tuning-005",
+        "query_text": "memory decay",
+        "result_permalinks": [
+          "adr/memory-decay-policy"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-lifecycle-patterns",
+        "query_text": "slot lifecycle patterns",
+        "result_permalinks": [
+          "patterns/supervisor-guard",
+          "patterns/lifecycle-mgmt"
+        ],
+        "relevant_ranks": [
+          2,
+          1
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-testing-transitions",
+        "query_text": "testing slot transitions",
+        "result_permalinks": [
+          "patterns/slot-testing"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-status-model",
+        "query_text": "slot state machine",
+        "result_permalinks": [
+          "adr/slot-status-model",
+          "cases/legacy-migration"
+        ],
+        "relevant_ranks": [
+          1
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-deadlock-handling",
+        "query_text": "deadlock recovery",
+        "result_permalinks": [
+          "cases/deadlock-recovery"
+        ],
+        "relevant_ranks": [
+          1
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-embedding-quality",
+        "query_text": "embedding quality",
+        "result_permalinks": [
+          "research/embedding-quality"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-graph-scoring",
+        "query_text": "graph proximity",
+        "result_permalinks": [
+          "adr/rrf-fusion-strategy",
+          "reference/graph-scoring"
+        ],
+        "relevant_ranks": [
+          2,
+          1
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-cleanup-order",
+        "query_text": "resource cleanup teardown",
+        "result_permalinks": [
+          "patterns/cleanup-procedures",
+          "patterns/slot-testing",
+          "cases/deployment-rollback",
+          "pitfalls/common-operator-errors"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-operator-errors",
+        "query_text": "operator errors",
+        "result_permalinks": [
+          "pitfalls/common-operator-errors"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-cold-start-setup",
+        "query_text": "slot cold start",
+        "result_permalinks": [
+          "cases/over-decay-slot-setup"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-legacy-migration",
+        "query_text": "legacy migration",
+        "result_permalinks": [
+          "cases/legacy-migration"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-supervisor-principles",
+        "query_text": "design principles",
+        "result_permalinks": [
+          "reference/supervisor-design-principles"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "q-api-methods",
+        "query_text": "slot api",
+        "result_permalinks": [
+          "reference/slot-api-reference"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      }
+    ],
+    "bad_cases": [
+      {
+        "query_id": "bc-over-decay-001",
+        "query_text": "slot cold start failure",
+        "result_permalinks": [
+          "cases/over-decay-slot-setup"
+        ],
+        "relevant_ranks": [
+          1
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "bc-graph-entity-001",
+        "query_text": "slot lifecycle testing",
+        "result_permalinks": [
+          "patterns/slot-testing"
+        ],
         "relevant_ranks": [
           null,
+          1
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "bc-graph-entity-002",
+        "query_text": "lifecycle race conditions",
+        "result_permalinks": [
+          "cases/slot-lifecycle-race",
+          "patterns/supervisor-guard",
+          "pitfalls/race-condition"
+        ],
+        "relevant_ranks": [
+          3,
+          1
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "bc-graph-entity-003",
+        "query_text": "supervisor guard state machine",
+        "result_permalinks": [
+          "adr/slot-status-model"
+        ],
+        "relevant_ranks": [
+          null,
+          1
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "bc-task-affinity-001",
+        "query_text": "slot lifecycle race",
+        "result_permalinks": [
+          "patterns/supervisor-guard",
+          "cases/slot-lifecycle-race",
+          "pitfalls/race-condition"
+        ],
+        "relevant_ranks": [
+          2
+        ],
+        "best_rank": 2
+      },
+      {
+        "query_id": "bc-task-affinity-002",
+        "query_text": "deployment rollback",
+        "result_permalinks": [
+          "cases/deployment-rollback"
+        ],
+        "relevant_ranks": [
+          1
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "bc-task-affinity-003",
+        "query_text": "rrf fusion",
+        "result_permalinks": [
+          "adr/rrf-fusion-strategy",
+          "research/embedding-quality"
+        ],
+        "relevant_ranks": [
+          1
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "bc-zero-result-001",
+        "query_text": "quantum computing slot management",
+        "result_permalinks": [],
+        "relevant_ranks": [],
+        "best_rank": null
+      },
+      {
+        "query_id": "bc-rank-regression-001",
+        "query_text": "resource cleanup teardown",
+        "result_permalinks": [
+          "patterns/cleanup-procedures",
+          "patterns/slot-testing",
+          "cases/deployment-rollback",
+          "pitfalls/common-operator-errors"
+        ],
+        "relevant_ranks": [
+          1,
+          null
+        ],
+        "best_rank": 1
+      },
+      {
+        "query_id": "bc-rank-regression-002",
+        "query_text": "guard race lifecycle supervisor",
+        "result_permalinks": [
+          "patterns/supervisor-guard",
+          "cases/slot-lifecycle-race"
+        ],
+        "relevant_ranks": [
+          1,
           null,
           null
         ],
-        "result_permalinks": []
+        "best_rank": 1
       }
     ]
-  },
-  "suite_metrics": {
-    "all_queries": {
-      "mrr": 0.0,
-      "query_count": 17,
-      "recall_at_1": 0.0,
-      "recall_at_10": 0.0,
-      "recall_at_5": 0.0,
-      "zero_result_rate": 1.0
-    },
-    "bad_cases": {
-      "mrr": 0.2,
-      "query_count": 10,
-      "recall_at_1": 0.2,
-      "recall_at_10": 0.2,
-      "recall_at_5": 0.2,
-      "zero_result_rate": 0.8
-    }
   },
   "threshold_policy_version": "phase1-v1"
 }

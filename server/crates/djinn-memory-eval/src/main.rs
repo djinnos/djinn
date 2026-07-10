@@ -547,6 +547,58 @@ fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
         "baseline validated"
     );
 
+    // 5b. Verify baseline aggregate query count matches total fixture count.
+    // This prevents silent count mismatches between fixtures and baseline
+    // (e.g., bad_cases being excluded from aggregate metrics).
+    let expected_total = fixtures.memory_ref_queries.len() + fixtures.bad_cases.len();
+    let baseline_total = baseline.aggregate_metrics.query_count;
+    if baseline_total != expected_total {
+        anyhow::bail!(
+            "baseline aggregate query_count {} != total fixture queries {} \
+             (memory_ref {} + bad_cases {}). \
+             Re-run `run` then `refresh-baseline` to fix.",
+            baseline_total,
+            expected_total,
+            fixtures.memory_ref_queries.len(),
+            fixtures.bad_cases.len()
+        );
+    }
+    info!(
+        baseline_query_count = baseline_total,
+        "baseline aggregate count matches total fixture queries"
+    );
+
+    // 5c. Verify baseline per_query_ranks covers both suites.
+    let baseline_all_queries = baseline
+        .per_query_ranks
+        .get("all_queries")
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let baseline_bad_cases = baseline
+        .per_query_ranks
+        .get("bad_cases")
+        .map(|v| v.len())
+        .unwrap_or(0);
+    if baseline_all_queries != fixtures.memory_ref_queries.len() {
+        anyhow::bail!(
+            "baseline per_query_ranks.all_queries count {} != memory_ref_queries {}",
+            baseline_all_queries,
+            fixtures.memory_ref_queries.len()
+        );
+    }
+    if baseline_bad_cases != fixtures.bad_cases.len() {
+        anyhow::bail!(
+            "baseline per_query_ranks.bad_cases count {} != bad_cases {}",
+            baseline_bad_cases,
+            fixtures.bad_cases.len()
+        );
+    }
+    info!(
+        all_queries = baseline_all_queries,
+        bad_cases = baseline_bad_cases,
+        "baseline per_query_ranks covers all fixture queries"
+    );
+
     // 6. Verify fixture hashes match manifest (if both exist)
     if let Some(ref manifest) = fixtures.manifest {
         if let Some(ref baseline_hashes) = baseline.metadata.fixture_hashes {

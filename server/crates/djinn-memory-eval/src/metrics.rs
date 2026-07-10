@@ -297,20 +297,20 @@ pub fn compute_suite_metrics(records: &[QueryRankRecord]) -> SuiteMetrics {
 
 /// Compute aggregate metrics from per-suite metrics (weighted by query count).
 ///
-/// Only non-bad-case suites contribute to the aggregate.
+/// **All suites contribute to the aggregate**, including `bad_cases`. The
+/// aggregate reflects the full labeled Phase 1 query set (memory-ref queries
+/// *and* append-only bad cases) so that `aggregate_metrics.query_count`
+/// matches the total number of labeled queries. The compare policy still
+/// gates each suite independently (including the bad_cases suite) and can
+/// additionally gate aggregate-level thresholds.
 pub fn compute_aggregate_metrics(suites: &[(&str, &SuiteMetrics)]) -> AggregateMetrics {
-    let non_bad: Vec<_> = suites
-        .iter()
-        .filter(|(name, _)| *name != "bad_cases")
-        .collect();
-
-    let total_queries: usize = non_bad.iter().map(|(_, m)| m.query_count).sum();
+    let total_queries: usize = suites.iter().map(|(_, m)| m.query_count).sum();
     if total_queries == 0 {
         return AggregateMetrics::default();
     }
 
     let weighted = |f: fn(&SuiteMetrics) -> f64| -> f64 {
-        non_bad
+        suites
             .iter()
             .map(|(_, m)| f(m) * m.query_count as f64)
             .sum::<f64>()
@@ -912,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_excludes_bad_cases() {
+    fn aggregate_includes_bad_cases() {
         let suite_good = SuiteMetrics {
             recall_at_1: 1.0,
             recall_at_5: 1.0,
@@ -931,9 +931,44 @@ mod tests {
         };
         let suites = vec![("good", &suite_good), ("bad_cases", &suite_bad)];
         let agg = compute_aggregate_metrics(&suites);
-        // Should only include "good" suite
-        assert!((agg.recall_at_1 - 1.0).abs() < 1e-10);
-        assert_eq!(agg.query_count, 5);
+        // Aggregate now includes ALL suites (good + bad_cases).
+        // Weighted recall@1: (1.0*5 + 0.0*100) / 105 = 5/105
+        let expected_r1 = 5.0 / 105.0;
+        assert!(
+            (agg.recall_at_1 - expected_r1).abs() < 1e-10,
+            "expected aggregate recall@1 = {expected_r1}, got {}",
+            agg.recall_at_1
+        );
+        assert_eq!(agg.query_count, 105);
+    }
+
+    /// Aggregate count must equal the sum of ALL suite query counts,
+    /// including bad_cases. This is the critical regression guard.
+    #[test]
+    fn aggregate_count_equals_sum_of_all_suites() {
+        let suite_queries = SuiteMetrics {
+            recall_at_1: 0.0,
+            recall_at_5: 0.0,
+            recall_at_10: 0.0,
+            mrr: 0.0,
+            zero_result_rate: 1.0,
+            query_count: 17,
+        };
+        let suite_bad = SuiteMetrics {
+            recall_at_1: 0.2,
+            recall_at_5: 0.2,
+            recall_at_10: 0.2,
+            mrr: 0.2,
+            zero_result_rate: 0.8,
+            query_count: 10,
+        };
+        let suites = vec![("all_queries", &suite_queries), ("bad_cases", &suite_bad)];
+        let agg = compute_aggregate_metrics(&suites);
+        assert_eq!(
+            agg.query_count, 27,
+            "aggregate query_count must be 17 + 10 = 27, got {}",
+            agg.query_count
+        );
     }
 
     // ── compare policy ────────────────────────────────────────────────────

@@ -6,7 +6,7 @@
   "bad_case_count": 10,
   "file_hashes": {
     "corpus_notes": "779b88cae1aa01f94a58293e43e2c60a3dad3ed3153e8ea85789dc98c7f0e5d5",
-    "memory_ref_queries": "bb7d5d475822eff4828d76a6376bc4a271795dc52a3c10046a36bb38ec9a59c1",
-    "bad_cases": "ed4f427ac7c6e5c29bfeda58b7077fcab2bf0d279fdbeb08a631352714adb415"
+    "memory_ref_queries": "ec2505a78fd0d0e3ba4567db0163b412e5ad83bd6c6a2ca19cacf5ec524d2f39",
+    "bad_cases": "438ae6501e08313fb63521129da89c154ad9ea533e75c2ec83a4c006a32db96d"
   }
 }
