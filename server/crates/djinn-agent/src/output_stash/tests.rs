@@ -818,3 +818,195 @@ fn in_memory_output_still_wins_when_durable_pointer_is_stale() {
         .expect("durable fallback resolves after clear");
     assert!(durable_path.contains("stale durable output"));
 }
+
+// ─── Synopsis integration ───────────────────────────────────────────────
+
+#[test]
+fn render_oversized_json_gets_synopsis() {
+    let stash = Mutex::new(OutputStash::new());
+    // A JSON object large enough to exceed MAX_TOOL_RESULT_CHARS.
+    let mut data = serde_json::Map::new();
+    data.insert(
+        "items".to_string(),
+        serde_json::json!(
+            (0..1000)
+                .map(|i| {
+                    serde_json::json!({"id": i, "name": format!("item-{i}"), "active": i % 2 == 0})
+                })
+                .collect::<Vec<_>>()
+        ),
+    );
+    data.insert("total".to_string(), serde_json::json!(1000));
+    data.insert("status".to_string(), serde_json::json!("ok"));
+    let value = serde_json::Value::Object(data);
+    let text = render_tool_result(&stash, "syn-1", "task_list", &value);
+
+    // Synopsis header and labels present for JSON payload.
+    assert!(
+        text.contains("Tool result synopsis:"),
+        "expected synopsis header: {text}"
+    );
+    assert!(text.contains("- kind:"), "expected kind label: {text}");
+    assert!(text.contains("- root:"), "expected root label: {text}");
+    // Navigation hint still at the bottom.
+    assert!(text.contains("Full output stashed"));
+    assert!(text.contains("output_view(tool_use_id=\"syn-1\")"));
+}
+
+#[test]
+fn render_oversized_json_array_gets_synopsis() {
+    let stash = Mutex::new(OutputStash::new());
+    let value = serde_json::json!(
+        (0..2000)
+            .map(|i| serde_json::json!({"id": i, "value": format!("val-{i}")}))
+            .collect::<Vec<_>>()
+    );
+    let text = render_tool_result(&stash, "syn-arr-1", "task_list", &value);
+
+    assert!(
+        text.contains("Tool result synopsis:"),
+        "expected synopsis header for JSON array: {text}"
+    );
+    assert!(text.contains("- kind:"), "expected kind label: {text}");
+    assert!(text.contains("- root:"), "expected root label: {text}");
+    assert!(text.contains("Full output stashed"));
+}
+
+#[test]
+fn render_oversized_non_json_no_synopsis() {
+    let stash = Mutex::new(OutputStash::new());
+    // A non-JSON string payload ("xxx..." does not start with {, [, ", etc.)
+    let big = "x".repeat(MAX_TOOL_RESULT_CHARS * 2);
+    let value = serde_json::Value::String(big.clone());
+    let text = render_tool_result(&stash, "syn-bin-1", "shell", &value);
+
+    // No synopsis header — non-JSON binary-like payload.
+    assert!(
+        !text.contains("Tool result synopsis:"),
+        "should not have synopsis for binary/non-JSON: {text}"
+    );
+    // Existing behavior preserved.
+    assert!(text.contains("Full output stashed"));
+    assert!(text.contains("output_view(tool_use_id=\"syn-bin-1\")"));
+
+    // Byte-for-byte compatibility with the pre-synopsis truncated-stub surface.
+    // The no-synopsis path must use the full MAX_TOOL_RESULT_CHARS budget, not
+    // the reduced budget, so the excerpt and omitted-byte marker are identical
+    // to what the old code produced.
+    let expected_truncated = crate::truncate::smart_truncate(&big, MAX_TOOL_RESULT_CHARS);
+    let expected = format!(
+        "{expected_truncated}\n\n[Full output stashed ({} bytes). Use output_view(tool_use_id=\"syn-bin-1\") to paginate or output_grep(tool_use_id=\"syn-bin-1\", pattern=\"...\") to search.]",
+        big.len()
+    );
+    assert_eq!(
+        text, expected,
+        "no-synopsis oversized stub must be byte-for-byte identical to the old truncated-stub surface"
+    );
+}
+
+#[test]
+fn render_synopsis_reduces_truncated_text_budget() {
+    // A JSON payload that barely exceeds MAX_TOOL_RESULT_CHARS.
+    // With the reduced budget, less text should appear before the synopsis.
+    let big_value = serde_json::json!({
+        "data": "y".repeat(MAX_TOOL_RESULT_CHARS)
+    });
+    let with_synopsis_stash = Mutex::new(OutputStash::new());
+    let with_synopsis =
+        render_tool_result(&with_synopsis_stash, "budget-syn", "task_list", &big_value);
+
+    // The synopsis should be present (it's JSON).
+    assert!(
+        with_synopsis.contains("Tool result synopsis:"),
+        "expected synopsis: {with_synopsis}"
+    );
+
+    // Measure how much text appears before the synopsis header.
+    let text_before_synopsis = with_synopsis.split("Tool result synopsis:").next().unwrap();
+    // With the reduced budget, the text portion should be noticeably
+    // smaller than MAX_TOOL_RESULT_CHARS.
+    assert!(
+        text_before_synopsis.len() < MAX_TOOL_RESULT_CHARS,
+        "text before synopsis should be budget-reduced: {} chars",
+        text_before_synopsis.len()
+    );
+}
+
+#[test]
+fn render_synopsis_full_output_still_retrievable() {
+    let stash = Mutex::new(OutputStash::new());
+    let mut data = serde_json::Map::new();
+    data.insert(
+        "records".to_string(),
+        serde_json::json!(
+            (0..2000)
+                .map(|i| { serde_json::json!({"idx": i, "label": format!("record-{i}")}) })
+                .collect::<Vec<_>>()
+        ),
+    );
+    let value = serde_json::Value::Object(data);
+    render_tool_result(&stash, "syn-retrieve-1", "task_list", &value);
+
+    // Full output is retrievable via output_view.
+    let viewed = handle_stash_tool(
+        &stash,
+        "output_view",
+        Some(
+            &serde_json::json!({"tool_use_id": "syn-retrieve-1"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+    )
+    .unwrap();
+    // The stash holds the full pretty-printed JSON, not the synopsis.
+    assert!(viewed.contains("records"));
+    assert!(viewed.contains("\"idx\": 0"));
+    assert!(!viewed.contains("Tool result synopsis:"));
+}
+
+#[test]
+fn render_synopsis_navigation_hint_at_bottom_with_synopsis() {
+    let stash = Mutex::new(OutputStash::new());
+    let mut data = serde_json::Map::new();
+    data.insert(
+        "big_array".to_string(),
+        serde_json::json!(
+            (0..2000)
+                .map(|i| { serde_json::json!({"id": i, "name": format!("name-{i}")}) })
+                .collect::<Vec<_>>()
+        ),
+    );
+    let value = serde_json::Value::Object(data);
+    let text = render_tool_result(&stash, "syn-nav-1", "task_list", &value);
+
+    // Navigation hint appears after the synopsis.
+    assert!(
+        text.contains("output_view(tool_use_id=\"syn-nav-1\")"),
+        "hint references the tool_use_id: {text}"
+    );
+    assert!(
+        text.contains("output_grep(tool_use_id=\"syn-nav-1\""),
+        "hint references output_grep: {text}"
+    );
+    // The navigation hint is the last section (after the synopsis).
+    let hint_pos = text.find("[Full output stashed").unwrap();
+    let synopsis_pos = text.find("Tool result synopsis:");
+    if let Some(sp) = synopsis_pos {
+        assert!(hint_pos > sp, "navigation hint should come after synopsis");
+    }
+}
+
+#[test]
+fn render_synopsis_does_not_appear_for_small_json() {
+    let stash = Mutex::new(OutputStash::new());
+    // Small JSON — under MAX_TOOL_RESULT_CHARS, so no truncation.
+    let value = serde_json::json!({"ok": true, "count": 42});
+    let text = render_tool_result(&stash, "syn-small-1", "task_list", &value);
+
+    assert!(
+        !text.contains("Tool result synopsis:"),
+        "small passthrough should not have synopsis: {text}"
+    );
+    assert!(!text.contains("Full output stashed"));
+}
