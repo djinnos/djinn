@@ -246,6 +246,7 @@ async fn cmd_compare(crate_root: &std::path::Path) -> Result<()> {
             .get("bad_cases")
             .map(|m| m.zero_result_rate)
             .unwrap_or(0.0),
+        &baseline.per_query_ranks,
     );
 
     info!(
