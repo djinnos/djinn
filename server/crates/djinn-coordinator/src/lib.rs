@@ -46,6 +46,7 @@ use djinn_slot::{PoolError, SlotPoolHandle};
 use actor::CoordinatorActor;
 use types::*;
 
+pub mod audit_sampler;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;
 pub mod context;
