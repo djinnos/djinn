@@ -222,6 +222,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         // Start refinement (always checkpoint-gated).
         server
@@ -291,6 +292,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         // First start succeeds.
         let resp1 = server
@@ -373,6 +375,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         let resp = server
             .dispatch_tool(
@@ -501,6 +504,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         repo.record_refinement_lifecycle(&proposal.id, "refinement_start", None)
             .await
@@ -970,5 +974,100 @@
         assert_eq!(
             reopened.get("blocking").and_then(|v| v.as_bool()),
             Some(true)
+        );
+    }
+
+    // ── Missing-target fail-fast at start time ────────────────────────────────
+
+    /// Starting refinement on a proposal with no target project must be
+    /// rejected up front with an actionable message, rather than silently
+    /// terminating the tribunal with an opaque agent_failure once the
+    /// coordinator fails to place the first tribunal task (prod incident,
+    /// proposal t7lh, 2026-07-10). No refinement_start lifecycle entry should
+    /// be recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refinement_start_rejects_proposal_without_target() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "No Target Start",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: Some("draft"),
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Intentionally do NOT link a target project.
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_start",
+                serde_json::json!({ "proposal_id": proposal.id }),
+            )
+            .await
+            .expect("tool should be registered");
+
+        let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(
+            error.contains("no target project"),
+            "should mention missing target: {error}"
+        );
+        assert!(
+            error.contains("proposal_add_target"),
+            "should tell the operator how to fix it: {error}"
+        );
+
+        // Fail-fast means no refinement lifecycle entry was written.
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        assert_eq!(
+            revisions
+                .iter()
+                .filter(|r| r.event_kind == "refinement_start")
+                .count(),
+            0,
+            "no refinement_start should be recorded when the target check fails"
+        );
+    }
+
+    /// Demanding a refinement round on a proposal with no target project is
+    /// rejected with the same actionable message.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demand_round_rejects_proposal_without_target() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "No Target Demand",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: Some("draft"),
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Intentionally do NOT link a target project.
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_demand_round",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "reason": "another round",
+                }),
+            )
+            .await
+            .expect("tool should be registered");
+
+        assert_eq!(resp.get("accepted").and_then(|v| v.as_bool()), Some(false));
+        let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(
+            error.contains("no target project"),
+            "should mention missing target: {error}"
+        );
+        assert!(
+            error.contains("proposal_add_target"),
+            "should tell the operator how to fix it: {error}"
         );
     }

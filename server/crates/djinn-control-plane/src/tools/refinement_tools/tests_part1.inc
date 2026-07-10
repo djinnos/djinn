@@ -19,6 +19,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         let resp = server
             .dispatch_tool(
@@ -122,6 +123,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         // Start refinement.
         server
@@ -294,6 +296,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         let resp = server
             .dispatch_tool(
@@ -373,6 +376,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         let resp = server
             .dispatch_tool(
@@ -416,6 +420,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         // 1. Start refinement (checkpoint mode).
         let start_resp = server
@@ -554,6 +559,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         // Start refinement.
         server
@@ -609,6 +615,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         server
             .dispatch_tool(
@@ -657,6 +664,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         server
             .dispatch_tool(
@@ -705,6 +713,7 @@
             })
             .await
             .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
 
         server
             .dispatch_tool(
