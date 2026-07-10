@@ -21,6 +21,8 @@ pub mod project_workspace_graph;
 pub mod proposal;
 pub mod repo_graph_cache;
 pub mod retrieval_trace;
+#[cfg(test)]
+pub mod retrieval_trace_tests;
 pub mod service;
 pub mod session;
 pub mod session_auth;
