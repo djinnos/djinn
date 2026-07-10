@@ -728,6 +728,93 @@ impl NoteRepository {
         Ok(query.fetch_all(self.db.pool()).await?)
     }
 
+    /// Query unfiltered scope-overlap candidates for retrieval tracing.
+    ///
+    /// Uses the same eligibility and ordering as [`Self::query_by_scope_overlap`]
+    /// (project, active status, note type, global-note handling, and
+    /// bidirectional scope overlap), but intentionally omits the production
+    /// confidence threshold and production injection limit. The only cap applied
+    /// here is `trace_candidate_cap`, allowing downstream trace classifiers to
+    /// label `min_confidence` and `not_top_k` drop reasons from the full ordered
+    /// candidate set.
+    pub async fn query_by_scope_overlap_trace_candidates(
+        &self,
+        project_id: &str,
+        task_paths: &[String],
+        note_types: &[&str],
+        trace_candidate_cap: usize,
+    ) -> Result<Vec<ScopeOverlapTraceCandidate>> {
+        self.db.ensure_initialized().await?;
+
+        // Build the note_type IN clause — these are controlled strings, safe to interpolate.
+        let types_in = note_types
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // Postgres positional binds. Fixed param: $1 = project_id. Per-task-path
+        // EXISTS binds start at $2 and each path consumes three placeholders
+        // (LIKE/LIKE/=), matching `query_by_scope_overlap` without its
+        // confidence bind.
+        let mut path_binds: Vec<String> = Vec::new();
+        let mut next = 2;
+
+        let scope_clause = if task_paths.is_empty() {
+            // Only global notes (empty JSONB array → length 0).
+            "jsonb_array_length(n.scope_paths) = 0".to_string()
+        } else {
+            // Global notes OR bidirectional scope overlap:
+            // - task path is under note scope (note is more general — parent match)
+            // - note scope is under task path (note is more specific — child match)
+            let mut exists_parts = Vec::new();
+            for task_path in task_paths {
+                let p_like_task = next;
+                let p_like_scope = next + 1;
+                let p_eq = next + 2;
+                next += 3;
+                path_binds.push(task_path.clone());
+                path_binds.push(task_path.clone());
+                path_binds.push(task_path.clone());
+                exists_parts.push(format!(
+                    "EXISTS (SELECT 1 FROM jsonb_array_elements_text(n.scope_paths) AS sp(value) \
+                     WHERE ${p_like_task} LIKE sp.value || '/%' \
+                        OR sp.value LIKE ${p_like_scope} || '/%' \
+                        OR sp.value = ${p_eq})"
+                ));
+            }
+            let exists_or = exists_parts.join(" OR ");
+            format!("(jsonb_array_length(n.scope_paths) = 0 OR {exists_or})")
+        };
+
+        // NOTE: dynamic SQL (note_type IN list and per-task-path EXISTS clauses built at runtime) — compile-time check not possible.
+        // Non-macro `query_as::<_, ScopeOverlapTraceCandidate>`: JSONB columns
+        // must be cast to text with plain aliases so `FromRow` maps them onto
+        // the `String` fields. Row rank is 1-based and derived from the exact
+        // production ordering.
+        let sql = format!(
+            "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,
+                    n.scope_paths::text AS scope_paths, n.confidence,
+                    ROW_NUMBER() OVER (ORDER BY n.confidence DESC, n.updated_at DESC) AS rank
+             FROM notes n
+             WHERE n.project_id = $1
+               AND n.status = 'active'
+               AND n.note_type IN ({types_in})
+               AND n.status = 'active'
+               AND {scope_clause}
+             ORDER BY n.confidence DESC, n.updated_at DESC
+             LIMIT {trace_candidate_cap}"
+        );
+
+        let mut query = sqlx::query_as::<_, ScopeOverlapTraceCandidate>(&sql);
+        query = query.bind(project_id); // $1
+        for val in &path_binds {
+            query = query.bind(val);
+        }
+
+        Ok(query.fetch_all(self.db.pool()).await?)
+    }
+
     /// Query notes whose non-empty `scope_paths` overlap with the given code paths.
     ///
     /// Unlike [`Self::query_by_scope_overlap`], this excludes global notes so callers
@@ -1138,5 +1225,263 @@ mod scope_overlap_decay_tests {
             .await
             .unwrap();
         assert!(matches.is_empty());
+    }
+
+    async fn set_scope_trace_signals(
+        repo: &NoteRepository,
+        note_id: &str,
+        confidence: f64,
+        updated_at: &str,
+    ) {
+        sqlx::query("UPDATE notes SET confidence = $1, updated_at = $2 WHERE id = $3")
+            .bind(confidence)
+            .bind(updated_at)
+            .bind(note_id)
+            .execute(repo.db.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn query_by_scope_overlap_trace_candidates_keeps_unfiltered_ordered_candidates() {
+        let (repo, _tmp, project_id) = make_repo_and_project().await;
+        let other_project_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&other_project_id)
+        .bind("other")
+        .bind("test")
+        .bind(format!("scope-overlap-other-{other_project_id}"))
+        .execute(repo.db.pool())
+        .await
+        .unwrap();
+
+        let task_paths = vec!["server/src/server/state/mod.rs".to_string()];
+        let cases = [
+            (
+                "High Parent",
+                0.95,
+                "2026-01-07T00:00:00.000Z",
+                r#"["server/src"]"#,
+            ),
+            (
+                "Recent Tie",
+                0.90,
+                "2026-01-08T00:00:00.000Z",
+                r#"["server/src/server/state"]"#,
+            ),
+            (
+                "Older Tie",
+                0.90,
+                "2026-01-06T00:00:00.000Z",
+                r#"["server/src/server/state"]"#,
+            ),
+            (
+                "Below Production Limit",
+                0.80,
+                "2026-01-05T00:00:00.000Z",
+                "[]",
+            ),
+            (
+                "Below Threshold",
+                0.40,
+                "2026-01-04T00:00:00.000Z",
+                r#"["server/src/server/state/mod.rs"]"#,
+            ),
+            (
+                "Capped Out",
+                0.30,
+                "2026-01-03T00:00:00.000Z",
+                r#"["server/src"]"#,
+            ),
+        ];
+
+        let mut notes = Vec::new();
+        for (title, confidence, updated_at, scope_paths) in cases {
+            let note = repo
+                .create_with_scope(
+                    &project_id,
+                    title,
+                    "content",
+                    "pattern",
+                    None,
+                    "[]",
+                    scope_paths,
+                )
+                .await
+                .unwrap();
+            set_scope_trace_signals(&repo, &note.id, confidence, updated_at).await;
+            notes.push(note);
+        }
+
+        let unrelated = repo
+            .create_with_scope(
+                &project_id,
+                "Unrelated Scope",
+                "content",
+                "pattern",
+                None,
+                "[]",
+                r#"["desktop/src"]"#,
+            )
+            .await
+            .unwrap();
+        set_scope_trace_signals(&repo, &unrelated.id, 0.99, "2026-01-09T00:00:00.000Z").await;
+
+        let archived = repo
+            .create_with_scope(
+                &project_id,
+                "Archived Scope",
+                "content",
+                "pattern",
+                None,
+                "[]",
+                r#"["server/src"]"#,
+            )
+            .await
+            .unwrap();
+        set_scope_trace_signals(&repo, &archived.id, 0.98, "2026-01-09T00:00:00.000Z").await;
+        sqlx::query("UPDATE notes SET status = 'archived' WHERE id = $1")
+            .bind(&archived.id)
+            .execute(repo.db.pool())
+            .await
+            .unwrap();
+
+        let wrong_type = repo
+            .create_with_scope(
+                &project_id,
+                "Wrong Type",
+                "content",
+                "adr",
+                None,
+                "[]",
+                r#"["server/src"]"#,
+            )
+            .await
+            .unwrap();
+        set_scope_trace_signals(&repo, &wrong_type.id, 0.97, "2026-01-09T00:00:00.000Z").await;
+
+        let other_project = repo
+            .create_with_scope(
+                &other_project_id,
+                "Other Project",
+                "content",
+                "pattern",
+                None,
+                "[]",
+                r#"["server/src"]"#,
+            )
+            .await
+            .unwrap();
+        set_scope_trace_signals(&repo, &other_project.id, 0.96, "2026-01-09T00:00:00.000Z").await;
+
+        let production = repo
+            .query_by_scope_overlap(&project_id, &task_paths, &["pattern"], 0.5, 3)
+            .await
+            .unwrap();
+        let production_titles: Vec<_> = production.iter().map(|note| note.title.as_str()).collect();
+        assert_eq!(
+            production_titles,
+            vec!["High Parent", "Recent Tie", "Older Tie"]
+        );
+
+        let candidates = repo
+            .query_by_scope_overlap_trace_candidates(&project_id, &task_paths, &["pattern"], 5)
+            .await
+            .unwrap();
+        let candidate_titles: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.title.as_str())
+            .collect();
+        assert_eq!(
+            candidate_titles,
+            vec![
+                "High Parent",
+                "Recent Tie",
+                "Older Tie",
+                "Below Production Limit",
+                "Below Threshold",
+            ]
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.rank)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(candidates[4].confidence, 0.40);
+        assert_eq!(candidates[3].scope_paths, "[]");
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.note_type == "pattern")
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.id != unrelated.id)
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.id != archived.id)
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.id != wrong_type.id)
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.id != other_project.id)
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.id != notes[5].id)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn query_by_scope_overlap_trace_candidates_empty_task_paths_matches_global_only() {
+        let (repo, _tmp, project_id) = make_repo_and_project().await;
+        let global = repo
+            .create_with_scope(
+                &project_id,
+                "Global Trace Candidate",
+                "content",
+                "pattern",
+                None,
+                "[]",
+                "[]",
+            )
+            .await
+            .unwrap();
+        set_scope_trace_signals(&repo, &global.id, 0.20, "2026-01-01T00:00:00.000Z").await;
+        let scoped = repo
+            .create_with_scope(
+                &project_id,
+                "Scoped Trace Candidate",
+                "content",
+                "pattern",
+                None,
+                "[]",
+                r#"["server/src"]"#,
+            )
+            .await
+            .unwrap();
+        set_scope_trace_signals(&repo, &scoped.id, 0.99, "2026-01-02T00:00:00.000Z").await;
+
+        let candidates = repo
+            .query_by_scope_overlap_trace_candidates(&project_id, &[], &["pattern"], 10)
+            .await
+            .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, global.id);
+        assert_eq!(candidates[0].rank, 1);
     }
 }
