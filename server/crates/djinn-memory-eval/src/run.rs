@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use tracing::{info, warn};
+use tracing::info;
 
 use djinn_db::database::Database;
 use djinn_db::repositories::note::{NoteRepository, NoteSearchParams};
@@ -686,9 +686,11 @@ fn find_best_graph_rank(
 /// Assert that at least one graph/entity signal comparison changed a rank,
 /// and at least one task-affinity signal comparison changed a rank.
 ///
-/// Both graph/entity and task-affinity are **hard assertions**: if comparisons
-/// are present but none changed rank, the run fails. This prevents silent
-/// collapse to lexical/vector/temporal-only behavior.
+/// Both graph/entity and task-affinity are **hard assertions**: the run fails
+/// if comparisons are absent (no queries claimed the signal) OR if comparisons
+/// exist but none changed rank. This prevents silent collapse to
+/// lexical/vector/temporal-only behavior and enforces Phase 1 coverage
+/// invariants.
 fn assert_signal_effects(output: &RunOutput) -> Result<()> {
     // Check graph/entity signal
     let graph_changed = output
@@ -703,8 +705,11 @@ fn assert_signal_effects(output: &RunOutput) -> Result<()> {
         .collect();
 
     if graph_comparisons.is_empty() {
-        warn!(
-            "no graph/entity signal comparisons were generated (no queries claimed graph/entity signals)"
+        bail!(
+            "no graph/entity signal comparisons were generated \
+             (no queries claimed graph/entity signals); \
+             Phase 1 requires at least one graph/entity comparison \
+             with rank_changed=true"
         );
     } else if !graph_changed {
         let details = graph_comparisons
@@ -739,8 +744,11 @@ fn assert_signal_effects(output: &RunOutput) -> Result<()> {
         .collect();
 
     if task_affinity_comparisons.is_empty() {
-        warn!(
-            "no task-affinity signal comparisons were generated (no queries claimed task-affinity signals)"
+        bail!(
+            "no task-affinity signal comparisons were generated \
+             (no queries claimed task-affinity signals); \
+             Phase 1 requires at least one task-affinity comparison \
+             with rank_changed=true"
         );
     } else if !task_affinity_changed {
         let details = task_affinity_comparisons
@@ -761,13 +769,6 @@ fn assert_signal_effects(output: &RunOutput) -> Result<()> {
     } else {
         info!("task-affinity signal assertion passed: at least one rank changed");
     }
-
-    // At least one of each signal type should have been compared
-    // (this validates the test infrastructure)
-    assert!(
-        !graph_comparisons.is_empty() || !task_affinity_comparisons.is_empty(),
-        "at least one signal comparison must be generated"
-    );
 
     Ok(())
 }
@@ -1077,5 +1078,133 @@ mod tests {
                 sc.rank_changed
             );
         }
+    }
+
+    // ── assert_signal_effects focused tests ──────────────────────────────
+
+    /// Helper to build a minimal RunOutput with specified signal comparisons.
+    fn make_run_output_with_comparisons(comparisons: Vec<SignalRankComparison>) -> RunOutput {
+        RunOutput {
+            query_records: vec![],
+            bad_case_records: vec![],
+            signal_comparisons: comparisons,
+            corpus_note_count: 0,
+            query_count: 0,
+            bad_case_count: 0,
+        }
+    }
+
+    /// Helper to build a graph signal comparison.
+    fn graph_comparison(query_id: &str, rank_changed: bool) -> SignalRankComparison {
+        SignalRankComparison {
+            query_id: query_id.to_string(),
+            signal: "graph".to_string(),
+            rank_with_signal: Some(1),
+            rank_without_signal: if rank_changed { Some(5) } else { Some(1) },
+            rank_changed,
+        }
+    }
+
+    /// Helper to build a task-affinity signal comparison.
+    fn task_affinity_comparison(query_id: &str, rank_changed: bool) -> SignalRankComparison {
+        SignalRankComparison {
+            query_id: query_id.to_string(),
+            signal: "task_affinity".to_string(),
+            rank_with_signal: Some(1),
+            rank_without_signal: if rank_changed { Some(5) } else { Some(1) },
+            rank_changed,
+        }
+    }
+
+    #[test]
+    fn assert_signal_effects_hard_fails_when_graph_comparisons_missing() {
+        // Only task-affinity comparisons present; graph is entirely absent.
+        let output =
+            make_run_output_with_comparisons(vec![task_affinity_comparison("q-ta-1", true)]);
+        let result = assert_signal_effects(&output);
+        assert!(
+            result.is_err(),
+            "should hard-fail when graph/entity comparisons are absent"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("no graph/entity signal comparisons"),
+            "error should mention missing graph comparisons: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn assert_signal_effects_hard_fails_when_task_affinity_comparisons_missing() {
+        // Only graph comparisons present; task-affinity is entirely absent.
+        let output = make_run_output_with_comparisons(vec![graph_comparison("q-g-1", true)]);
+        let result = assert_signal_effects(&output);
+        assert!(
+            result.is_err(),
+            "should hard-fail when task-affinity comparisons are absent"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("no task-affinity signal comparisons"),
+            "error should mention missing task-affinity comparisons: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn assert_signal_effects_hard_fails_when_graph_comparisons_no_rank_change() {
+        // Graph comparisons exist but none have rank_changed=true.
+        let output = make_run_output_with_comparisons(vec![
+            graph_comparison("q-g-1", false),
+            task_affinity_comparison("q-ta-1", true),
+        ]);
+        let result = assert_signal_effects(&output);
+        assert!(
+            result.is_err(),
+            "should hard-fail when graph comparisons have no rank change"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("none showed rank change"),
+            "error should mention no rank change: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn assert_signal_effects_hard_fails_when_task_affinity_comparisons_no_rank_change() {
+        // Task-affinity comparisons exist but none have rank_changed=true.
+        let output = make_run_output_with_comparisons(vec![
+            graph_comparison("q-g-1", true),
+            task_affinity_comparison("q-ta-1", false),
+        ]);
+        let result = assert_signal_effects(&output);
+        assert!(
+            result.is_err(),
+            "should hard-fail when task-affinity comparisons have no rank change"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("none showed rank change"),
+            "error should mention no rank change: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn assert_signal_effects_passes_with_both_changed_proof_families() {
+        // Both graph and task-affinity have at least one rank_changed=true.
+        let output = make_run_output_with_comparisons(vec![
+            graph_comparison("q-g-1", true),
+            graph_comparison("q-g-2", false), // non-changed is fine
+            task_affinity_comparison("q-ta-1", true),
+            task_affinity_comparison("q-ta-2", false), // non-changed is fine
+        ]);
+        let result = assert_signal_effects(&output);
+        assert!(
+            result.is_ok(),
+            "should pass when both signal families have rank_changed proof: {:?}",
+            result.err()
+        );
     }
 }

@@ -420,20 +420,28 @@ operator) — the current fixture queries are deliberately short so the
 Phase 1 baseline is anchored on **real** pipeline recall, not synthetic
 plausibility.
 
-### First-snapshot signal exclusions
+### Required Phase 1 signal invariants
 
-The Phase 1 initial fixture snapshot has the following limitations:
+Both **graph/entity** and **task-affinity** rank-change proof cases are
+**hard Phase 1 invariants**. The run, baseline validation, and PR gate
+all require:
 
-- **Graph proximity signal**: The initial corpus fixtures produce search
-  results where graph proximity does not change the rank of relevant
-  notes in the signal comparison step. The `assert_signal_effects`
-  assertion is deferred to the CI gate task (1tk3). The fixture data
-  includes graph edges and signal coverage declarations; signal
-  comparisons are recorded but do not gate the initial baseline.
+1. At least one graph/entity signal comparison with `rank_changed=true`
+   in `signal_comparisons`.
+2. At least one task-affinity signal comparison with `rank_changed=true`
+   in `signal_comparisons`.
 
-These exclusions are documented here per the design requirement:
-"If first-snapshot exclusions remain for a retrieval signal, document
-them explicitly in README; do not claim full five-signal coverage."
+`assert_signal_effects` (called by `run`) **hard-fails** — not warns —
+when either required comparison family is absent or when no comparison
+in the family shows a rank change. Committed-baseline validation
+likewise rejects `baselines/phase1.json` if it lacks at least one
+changed graph/entity comparison and at least one changed task-affinity
+comparison.
+
+This prevents silent collapse to lexical/vector/temporal-only retrieval
+behavior. Fixture data must include graph edges, entity labels, and
+task-affinity memory_refs that produce observable rank changes in the
+signal comparison step.
 
 ### Reviewer baseline-update workflow (detailed)
 
