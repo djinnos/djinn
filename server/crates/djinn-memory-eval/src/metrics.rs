@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::fixtures::BadCaseType;
+use crate::report::QueryRankBaseline;
 use crate::run::QueryRankRecord;
 
 // ── Age bucketing ─────────────────────────────────────────────────────────
@@ -440,6 +441,7 @@ pub fn evaluate_compare_policy(
     baseline_suites: &HashMap<String, SuiteMetrics>,
     baseline_aggregate: &AggregateMetrics,
     baseline_bad_case_zero_result_rate: f64,
+    baseline_per_query_ranks: &HashMap<String, Vec<QueryRankBaseline>>,
 ) -> CompareResult {
     let mut failures = Vec::new();
     let mut query_regressions = Vec::new();
@@ -477,19 +479,45 @@ pub fn evaluate_compare_policy(
 
     // 2. Bad-case hit-to-miss regressions → fail
     //    A bad case that previously had at least one hit now has zero hits.
+    //    Populate old_rank from baseline per-query rank data.
+    //    Only flag regressions where the baseline actually had a hit —
+    //    skip bad cases that were zero-result in the baseline too.
     for record in current_bad_case_records {
         if record.is_bad_case {
             let has_hit = record.relevant_ranks.iter().any(|r| r.is_some());
             if !has_hit && !record.expected_permalinks.is_empty() {
-                // This is a zero-result bad case — report as a query regression
-                for permalink in record.expected_permalinks.iter() {
+                // Look up baseline per-query rank for this query.
+                let baseline_entry = baseline_per_query_ranks
+                    .values()
+                    .flatten()
+                    .find(|b| b.query_id == record.query_id);
+
+                // Only flag if the baseline had at least one hit for this query.
+                let baseline_had_hit = baseline_entry
+                    .map(|b| b.relevant_ranks.iter().any(|r| r.is_some()))
+                    .unwrap_or(false);
+
+                if !baseline_had_hit {
+                    continue;
+                }
+
+                // This is an actual hit-to-miss regression.
+                for (idx, permalink) in record.expected_permalinks.iter().enumerate() {
+                    let old_rank =
+                        baseline_entry.and_then(|b| b.relevant_ranks.get(idx).copied().flatten());
+                    let new_rank = record.relevant_ranks.get(idx).and_then(|r| *r);
+                    let metric_delta = match (old_rank, new_rank) {
+                        (Some(old), Some(new)) => (1.0 / new as f64) - (1.0 / old as f64),
+                        (Some(_old), None) => -1.0, // hit-to-miss: worst case
+                        _ => 0.0,
+                    };
                     query_regressions.push(QueryRegressionDetail {
                         query_id: record.query_id.clone(),
                         query_text: record.query_text.clone(),
                         relevant_permalink: permalink.clone(),
-                        old_rank: None, // we don't have per-query baseline rank here
-                        new_rank: None,
-                        metric_delta: -1.0, // sentinel for hit-to-miss
+                        old_rank,
+                        new_rank,
+                        metric_delta,
                     });
                 }
                 failures.push(RegressionDetail {
@@ -944,8 +972,15 @@ mod tests {
         };
         let baseline_agg = current_agg.clone();
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         assert!(result.passed, "should pass with no regressions");
         assert!(result.failures.is_empty());
     }
@@ -980,8 +1015,15 @@ mod tests {
             query_count: 10,
         };
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         // recall@1 dropped 0.05 (> 0.02 threshold)
         assert!(!result.passed, "should fail on recall@1 drop > 0.02");
         assert!(
@@ -1022,8 +1064,15 @@ mod tests {
             query_count: 10,
         };
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         // MRR dropped 0.07 (> 0.02 suite threshold)
         assert!(!result.passed, "should fail on suite MRR drop > 0.02");
         assert!(
@@ -1065,8 +1114,15 @@ mod tests {
             query_count: 10,
         };
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         // Aggregate MRR dropped 0.015 (> 0.01 aggregate threshold)
         assert!(!result.passed, "should fail on aggregate MRR drop > 0.01");
         assert!(
@@ -1093,8 +1149,15 @@ mod tests {
         let current_agg = AggregateMetrics::default();
         let baseline_agg = AggregateMetrics::default();
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         // Bad-case zero-result went from 0.0 to 0.5 (any increase fails)
         assert!(
             !result.passed,
@@ -1125,8 +1188,15 @@ mod tests {
         };
 
         // Zero-result increased by 0.02 (> 0.01 threshold)
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         assert!(
             !result.passed,
             "should fail on aggregate zero-result increase > 0.01"
@@ -1172,8 +1242,15 @@ mod tests {
             query_count: 10,
         };
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         // Drops smaller than threshold should pass
         assert!(
             result.passed,
@@ -1196,6 +1273,19 @@ mod tests {
         let current_agg = AggregateMetrics::default();
         let baseline_agg = AggregateMetrics::default();
 
+        // Provide baseline per-query ranks showing this bad case was a hit at rank 3.
+        let mut baseline_per_query = HashMap::new();
+        baseline_per_query.insert(
+            "bad_cases".to_string(),
+            vec![QueryRankBaseline {
+                query_id: "bc-001".to_string(),
+                query_text: "query for bc-001".to_string(),
+                result_permalinks: vec!["note-a".to_string()],
+                relevant_ranks: vec![Some(3)],
+                best_rank: Some(3),
+            }],
+        );
+
         let result = evaluate_compare_policy(
             &current,
             &current_agg,
@@ -1203,6 +1293,7 @@ mod tests {
             &baseline,
             &baseline_agg,
             0.0,
+            &baseline_per_query,
         );
         assert!(!result.passed, "should fail on bad-case hit-to-miss");
         assert!(
@@ -1212,6 +1303,56 @@ mod tests {
                 .any(|f| f.metric == "bad_case_hit_to_miss")
         );
         assert!(!result.query_regressions.is_empty());
+        // Verify old_rank is populated from the baseline
+        let reg = &result.query_regressions[0];
+        assert_eq!(reg.old_rank, Some(3), "old_rank should come from baseline");
+        assert_eq!(reg.new_rank, None, "new_rank should be None (miss)");
+    }
+
+    /// A bad case that was also zero in the baseline should NOT trigger a
+    /// hit-to-miss regression (it was never a hit).
+    #[test]
+    fn compare_skips_bad_case_that_was_also_miss_in_baseline() {
+        let bad_records = vec![make_record(
+            "bc-002",
+            vec!["note-b"],
+            vec![None], // miss in current
+            true,
+        )];
+
+        let current = HashMap::new();
+        let baseline = HashMap::new();
+        let current_agg = AggregateMetrics::default();
+        let baseline_agg = AggregateMetrics::default();
+
+        // Provide baseline per-query ranks showing this bad case was ALSO a miss.
+        let mut baseline_per_query = HashMap::new();
+        baseline_per_query.insert(
+            "bad_cases".to_string(),
+            vec![QueryRankBaseline {
+                query_id: "bc-002".to_string(),
+                query_text: "query for bc-002".to_string(),
+                result_permalinks: vec![],
+                relevant_ranks: vec![None], // baseline also had no hit
+                best_rank: None,
+            }],
+        );
+
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &bad_records,
+            &baseline,
+            &baseline_agg,
+            1.0, // baseline also had 100% zero-result bad cases
+            &baseline_per_query,
+        );
+        // Should NOT fail: the bad case was already a miss in the baseline.
+        assert!(
+            result.passed,
+            "should pass when bad case was also a miss in baseline"
+        );
+        assert!(result.query_regressions.is_empty());
     }
 
     #[test]
@@ -1235,6 +1376,7 @@ mod tests {
             &baseline,
             &baseline_agg,
             0.0,
+            &HashMap::new(),
         );
         assert!(result.passed, "should pass when bad case still has a hit");
     }

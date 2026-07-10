@@ -126,8 +126,96 @@ The existing replay-validation gate in
 `djinn-db::repositories::note::replay_validation` validates
 anchor-cutover embeddings with a static fixture.  Phase 1's benchmark
 **supplements** (does not replace) that gate.  The replay-validation
-gate remains in place for anchor-cutover regression detection; Phase 1
-covers aggregate corpus-level rank quality.
+gate remains the **anchor-cutover replay gate** — it is NOT the general
+memory-quality benchmark. Phase 1 covers aggregate corpus-level rank
+quality across recall/MRR/zero-result dimensions; the replay gate
+covers embedding cutover fidelity. The two are complementary: a ranking
+change that shifts aggregate recall without touching the embedding
+model should pass replay-validation and be judged by Phase 1; an
+embedding model change should be judged by both.
+
+## CI integration
+
+The deterministic Phase 1 benchmark is wired as a required PR gate in
+`.github/workflows/quality-gate.yml` (the `memory-eval` job). It runs on
+PRs and merge-queue submissions that touch the ranking-path files:
+
+- `server/crates/djinn-db/src/repositories/note/search.rs`
+- `server/crates/djinn-db/src/repositories/note/rrf.rs`
+- `server/crates/djinn-db/src/repositories/note/scoring.rs`
+- `server/crates/djinn-db/src/repositories/note/context.rs`
+- `server/crates/djinn-memory-eval/**` (fixtures, baseline, code)
+
+The job provisions the same Postgres `:5433` service, applies djinn-db
+migrations, and builds the `djinn_test_template` clone database used by
+`Database::open_in_memory()` — identical to the `server-test` job setup.
+It runs `validate-fixtures`, then `run`, then `compare`. The `compare`
+command exits non-zero on any unapproved threshold regression, failing
+the job.
+
+**Artifacts and job summary:** the job uploads
+`target/memory-eval/phase1-report.json` and
+`target/memory-eval/phase1-summary.md` as GitHub Actions artifacts
+(retained 30 days) and appends the Markdown summary to the Actions job
+summary so it renders inline on the run page. A failed compare includes
+per-query regression details (query id, query text, relevant permalink,
+old rank, new rank, metric delta) directly in the summary.
+
+**No LLM, no external network:** the benchmark uses deterministic
+embeddings and committed fixtures only. If a future change introduces a
+network call, CI fails the gate.
+
+### Coordination policy
+
+#### Ranking-behavior PRs own baseline refresh
+
+A PR that intentionally changes ranking behavior **must** refresh
+`baselines/phase1.json` in the same commit and include a rationale in
+the PR description explaining why the metric change is expected. The
+workflow:
+
+1. Run `cargo run -p djinn-memory-eval -- run` (Postgres on `:5433`).
+2. Run `cargo run -p djinn-memory-eval -- compare` — expect it to fail
+   with the old baseline (that's the change you're shipping).
+3. Run `cargo run -p djinn-memory-eval -- refresh-baseline`.
+4. Commit `baselines/phase1.json` alongside the ranking change.
+5. Document the rationale (which signals changed, expected metric
+   direction) in the PR description.
+
+**Unexplained threshold failures block merging.** If `compare` fails and
+the PR does not include a refreshed baseline with a rationale, the
+Quality Gate stays red.
+
+#### Fixture-only PRs
+
+A PR that only adds or changes fixture rows (queries, bad-cases, corpus
+notes) **may** refresh only the added/changed rows in the baseline. It
+does not need to re-justify unrelated suite metrics. Append-only bad-case
+additions are always safe: they can only add new hit-to-miss checks, not
+remove existing coverage.
+
+The fixture manifest hashes (`fixtures/manifest.json`) and baseline
+`metadata.fixture_hashes` must be consistent after any fixture change —
+the loader validates this.
+
+#### Reviewer checklist for baseline updates
+
+- [ ] Fixture manifest hashes match the committed fixtures.
+- [ ] Baseline `metadata.fixture_hashes` match the manifest.
+- [ ] If a suite metric dropped, the PR description explains the
+      expected direction and which signal caused it.
+- [ ] If a bad-case changed from hit to miss without explanation, the
+      compare fails and the PR cannot merge until addressed.
+
+#### Worker-facing search caveat
+
+Worker-facing memory search may use a **lexical-only** retrieval path
+that differs from the host pipeline exercised by this benchmark. Until
+the host ranking pipeline (RRF, scoring, graph, task-affinity) is routed
+to the worker-facing search endpoint, metrics from this benchmark
+describe the **host** retrieval quality, not necessarily what an
+individual worker agent sees. A worker reporting different search
+results than the benchmark predicts may be hitting the lexical-only path.
 
 ## Running
 
@@ -164,7 +252,7 @@ cargo test -p djinn-memory-eval
 | Real Postgres fixture loader | qmzw  | ✅ done        |
 | Metrics & compare policy     | zd4o  | ✅ done        |
 | Fixture snapshot & baseline  | 77sm  | ✅ done        |
-| CI gate wiring & final docs  | 1tk3  | planned        |
+| CI gate wiring & final docs  | 1tk3  | ✅ done        |
 
 ## Phase 2 (out of scope)
 
