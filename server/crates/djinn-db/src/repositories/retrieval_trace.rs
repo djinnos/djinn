@@ -170,8 +170,8 @@ pub const SKIPPED_REASON_VALUES: &[&str] = &[
 ///   `skipped_reason` set per the drop-reason taxonomy after applying
 ///   production top-K, min-confidence, and budget pruning.
 /// - **liso** (`memory_recall_trace` MCP tool) reads persisted entries in
-///   detail mode, exposing `note_id`, `rank`, `confidence`, `skipped_reason`,
-///   `source`, and `scope` to the caller.
+///   detail mode, exposing `note_id`, `permalink`, `title`, `rank`,
+///   `confidence`, `skipped_reason`, `source`, and `scope` to the caller.
 ///
 /// `skipped_reason` is `None` for injected candidates; for non-injected
 /// candidates it is one of [`SkippedReason`].
@@ -179,6 +179,16 @@ pub const SKIPPED_REASON_VALUES: &[&str] = &[
 pub struct TraceCandidate {
     /// Stable note id of the candidate (matches `notes.id`).
     pub note_id: String,
+    /// Note permalink, persisted so downstream `memory_recall_trace` detail
+    /// mode can expose a human-readable reference without joining `notes`.
+    ///
+    /// Optional for backward-compatibility with traces persisted before
+    /// permalink/title were added to the candidate contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permalink: Option<String>,
+    /// Note title, persisted so downstream detail mode can surface it directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Rank position within the candidate set (1-based), derived from the
     /// same production ordering (`confidence DESC, updated_at DESC`).
     pub rank: Option<i32>,
@@ -451,6 +461,8 @@ mod tests {
     fn injected_candidate(note_id: &str, rank: i32, confidence: f64) -> TraceCandidate {
         TraceCandidate {
             note_id: note_id.to_string(),
+            permalink: Some(format!("/{note_id}")),
+            title: Some(format!("Note {note_id}")),
             rank: Some(rank),
             confidence: Some(confidence),
             skipped_reason: None,
@@ -467,6 +479,8 @@ mod tests {
     ) -> TraceCandidate {
         TraceCandidate {
             note_id: note_id.to_string(),
+            permalink: Some(format!("/{note_id}")),
+            title: Some(format!("Note {note_id}")),
             rank: Some(rank),
             confidence: Some(confidence),
             skipped_reason: Some(reason),

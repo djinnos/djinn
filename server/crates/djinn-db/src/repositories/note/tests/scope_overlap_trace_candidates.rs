@@ -402,6 +402,8 @@ fn scope_overlap_candidates_to_trace_candidates(
         .iter()
         .map(|c| TraceCandidate {
             note_id: c.id.clone(),
+            permalink: Some(c.permalink.clone()),
+            title: Some(c.title.clone()),
             rank: Some(c.rank as i32),
             confidence: Some(c.confidence),
             skipped_reason: None,
@@ -545,6 +547,17 @@ async fn trace_candidates_persist_and_fetch_detail_with_full_metadata() {
     );
     assert_eq!(c0.source.as_deref(), Some("scope_overlap"));
     assert_eq!(c0.note_id, raw_candidates[0].id);
+    // Permalink/title persisted for downstream memory_recall_trace detail mode.
+    assert_eq!(
+        c0.permalink.as_deref(),
+        Some(raw_candidates[0].permalink.as_str()),
+        "permalink must round-trip through JSONB"
+    );
+    assert_eq!(
+        c0.title.as_deref(),
+        Some(raw_candidates[0].title.as_str()),
+        "title must round-trip through JSONB"
+    );
     // Scope metadata carried through for later classification.
     assert!(
         c0.scope.is_some(),
@@ -561,6 +574,16 @@ async fn trace_candidates_persist_and_fetch_detail_with_full_metadata() {
         over_a.skipped_reason.is_none(),
         "trace persists all candidates; classification happens downstream"
     );
+    // Permalink/title also present on non-injected-bound candidates.
+    assert!(
+        over_a.permalink.is_some(),
+        "over-limit candidates must have permalink persisted"
+    );
+    assert!(
+        over_a.title.is_some(),
+        "over-limit candidates must have title persisted"
+    );
+    assert_eq!(over_a.title.as_deref(), Some("Over Limit A"));
 
     // Rank 5: Over Limit B (confidence 0.55) — also outside production limit.
     assert_eq!(persisted[4].rank, Some(5));
@@ -571,15 +594,28 @@ async fn trace_candidates_persist_and_fetch_detail_with_full_metadata() {
     // as `min_confidence` by downstream dispatch instrumentation.
     assert_eq!(persisted[5].rank, Some(6));
     assert_eq!(persisted[5].confidence, Some(0.40));
+    assert_eq!(persisted[5].title.as_deref(), Some("Below Threshold"));
+    assert!(
+        persisted[5].permalink.is_some(),
+        "below-threshold candidates must have permalink persisted"
+    );
 
-    // Verify detail fetch returns the same row.
+    // Verify detail fetch returns the same row with all candidate fields intact.
     let detail = trace_repo
         .get_by_id(&trace_row.id)
         .await
         .unwrap()
         .expect("row must exist");
     assert_eq!(detail.id, trace_row.id);
-    assert_eq!(detail.candidates_typed().len(), 6);
+    let detail_candidates = detail.candidates_typed();
+    assert_eq!(detail_candidates.len(), 6);
+    // Permalink/title survive the detail round-trip.
+    assert_eq!(detail_candidates[0].permalink, persisted[0].permalink);
+    assert_eq!(detail_candidates[0].title, persisted[0].title);
+    assert_eq!(
+        detail_candidates[5].title.as_deref(),
+        Some("Below Threshold")
+    );
 }
 
 /// Regression test (AC2): production `query_by_scope_overlap` remains
