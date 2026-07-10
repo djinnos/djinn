@@ -335,6 +335,49 @@ A baseline that passes `validate-fixtures` must:
   greater than zero.
 - Include `per_query_ranks` entries for both `all_queries` and
   `bad_cases` suites with counts matching the fixture file lengths.
+- Be **produced by `cargo run -p djinn-memory-eval -- run` followed by
+  `cargo run -p djinn-memory-eval -- refresh-baseline`** against the
+  real `NoteRepository::search` and `build_context` paths — not by
+  hand-computing synthetic ranks. The committed `metadata.refresh_commit`
+  must equal the git HEAD SHA at the time of refresh so reviewers can
+  reproduce the pipeline path that produced the file.
+
+The committed `baselines/phase1.json` was refreshed from a live run on
+2026-07-10 against the dedicated Postgres test cluster. Its
+`metadata.refresh_commit` field carries that run's HEAD SHA so reviewers
+can identify the exact ranking commit that produced the rank data.
+
+### Fixture query-text constraints for retrieval
+
+The committed `fixtures/memory-ref-queries.jsonl` and
+`fixtures/bad-cases.jsonl` rows use **concise keyword queries** rather
+than verbose natural-language questions. The lexical search path in
+`djinn-db::repositories::note::lexical_search` builds a `to_tsquery`
+expression by tokenizing the query text and AND-joining all tokens
+(with `:*` prefix matching for tokens ≥ 3 chars). When verbose natural
+language ("How to handle slot lifecycle race conditions?") is fed to
+that pipeline, common English filler words ("how", "handle") have no
+matching stems in the fixture corpus, so the strict AND query returns
+zero candidates and the search fails to surface any relevant note.
+
+For the real-pipeline baseline to be non-all-miss, fixture queries must
+use terms that actually appear in the committed corpus notes. Examples
+of the rewrite pattern:
+
+| Verbose form                          | Concise fixture form           |
+|---------------------------------------|--------------------------------|
+| "How to handle slot lifecycle race..."| "slot lifecycle race"          |
+| "Supervisor guard pattern..."          | "supervisor guard"             |
+| "Memory note decay tuning and..."     | "memory decay"                 |
+| "What API methods are available..."    | "slot api"                     |
+
+The minimum useful-baseline expectations above require the queries to
+match at least one term per expected note via the real pipeline. Future
+fixture expansions should follow the same concise-keyword convention
+or commit to extending the lexical-search tokenizer (e.g. websearch
+operator) — the current fixture queries are deliberately short so the
+Phase 1 baseline is anchored on **real** pipeline recall, not synthetic
+plausibility.
 
 ### First-snapshot signal exclusions
 
