@@ -371,7 +371,16 @@ async fn task_list_status_merged() {
 
     // 1. Closed with a landed merge-commit SHA → included (SHA branch).
     let merged_sha = repo
-        .create(&epic.id, "merged via sha", "", "", "task", 0, "", Some("open"))
+        .create(
+            &epic.id,
+            "merged via sha",
+            "",
+            "",
+            "task",
+            0,
+            "",
+            Some("open"),
+        )
         .await
         .unwrap();
     repo.set_status_with_reason(&merged_sha.id, "closed", Some("completed"))
@@ -384,7 +393,16 @@ async fn task_list_status_merged() {
     // 2. Legacy row: closed as completed with a PR URL but NO SHA → included
     //    (pr_url + completed branch).
     let merged_legacy = repo
-        .create(&epic.id, "merged legacy pr", "", "", "task", 0, "", Some("open"))
+        .create(
+            &epic.id,
+            "merged legacy pr",
+            "",
+            "",
+            "task",
+            0,
+            "",
+            Some("open"),
+        )
         .await
         .unwrap();
     repo.set_status_with_reason(&merged_legacy.id, "closed", Some("completed"))
@@ -396,7 +414,16 @@ async fn task_list_status_merged() {
 
     // 3. Force-closed without merging (no SHA, no PR URL) → excluded.
     let force_closed = repo
-        .create(&epic.id, "force closed unmerged", "", "", "task", 0, "", Some("open"))
+        .create(
+            &epic.id,
+            "force closed unmerged",
+            "",
+            "",
+            "task",
+            0,
+            "",
+            Some("open"),
+        )
         .await
         .unwrap();
     repo.set_status_with_reason(&force_closed.id, "closed", Some("force_closed"))
@@ -406,7 +433,16 @@ async fn task_list_status_merged() {
     // 4. Closed as completed but never opened a PR (no SHA, no pr_url) →
     //    excluded: the completed branch also requires pr_url.
     let completed_no_pr = repo
-        .create(&epic.id, "completed no pr", "", "", "task", 0, "", Some("open"))
+        .create(
+            &epic.id,
+            "completed no pr",
+            "",
+            "",
+            "task",
+            0,
+            "",
+            Some("open"),
+        )
         .await
         .unwrap();
     repo.set_status_with_reason(&completed_no_pr.id, "closed", Some("completed"))

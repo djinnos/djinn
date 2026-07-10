@@ -33,6 +33,12 @@ pub use repositories::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,
         AgentUpdateInput, VALID_BASE_ROLES,
     },
+    audit_sampler::{
+        AuditOutcomeKind, AuditOutcomeReportRow, AuditOutcomeRow, AuditSamplerRepository,
+        AuditStratum, CreateSampleFrameParams, CreateSamplePolicyParams, CreateSelectionParams,
+        MergedChangeRow, RecordOutcomeParams, SampleFrameRow, SamplePolicyRow, SelectionRow,
+        UpsertMergedChangeParams,
+    },
     code_chunk::{
         ChunkAndEmbedReport, CodeChunk, CodeChunkEmbeddingProvider, CodeChunkRepairEmbeddingRow,
         CodeChunkRepository, CodeChunkSearchHit, CodeChunkVectorBackend, CodeChunkVectorMatch,
