@@ -116,6 +116,21 @@ impl EpicRepository {
         .await?)
     }
 
+    /// List epics for a specific project, ordered by creation time.
+    pub async fn list_for_project(&self, project_id: &str) -> Result<Vec<Epic>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Epic>(
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    status, owner, created_at, updated_at, closed_at,
+                    memory_refs::text, auto_breakdown,
+                    originating_adr_id, created_by_user_id
+             FROM epics WHERE project_id = $1 ORDER BY created_at"#,
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<Epic>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(

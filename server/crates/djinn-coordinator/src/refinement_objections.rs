@@ -161,7 +161,11 @@ mod tests {
 
         let (objections, carried_over) = collect_adversary_round_objections(&entries, 1, run_start);
         assert!(!carried_over, "current-run set is non-empty: no carry-over");
-        assert_eq!(objections.len(), 1, "only the current-run objection returns");
+        assert_eq!(
+            objections.len(),
+            1,
+            "only the current-run objection returns"
+        );
         assert_eq!(
             objections[0].entry_id.as_deref(),
             Some("objection/2026-07-09T12:00:30.000Z")

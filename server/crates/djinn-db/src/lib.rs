@@ -37,7 +37,7 @@ pub use repositories::{
         AuditOutcomeKind, AuditOutcomeReportRow, AuditOutcomeRow, AuditSamplerRepository,
         AuditStratum, CreateSampleFrameParams, CreateSamplePolicyParams, CreateSelectionParams,
         MergedChangeRow, RecordOutcomeParams, SampleFrameRow, SamplePolicyRow, SelectionRow,
-        UpsertMergedChangeParams,
+        UnmaterializedSelection, UpsertMergedChangeParams,
     },
     code_chunk::{
         ChunkAndEmbedReport, CodeChunk, CodeChunkEmbeddingProvider, CodeChunkRepairEmbeddingRow,
