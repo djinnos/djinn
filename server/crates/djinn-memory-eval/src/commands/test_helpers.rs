@@ -151,7 +151,7 @@ pub fn make_baseline_with_counts(all_queries: usize, bad_cases: usize) -> Phase1
     Phase1Baseline {
         metadata: BaselineMetadata {
             fixture_hashes: None,
-            refresh_commit: "test-commit-sha".to_string(),
+            refresh_commit: "aabbccdd00112233445566778899aabbccddeeff".to_string(),
             created_at: "2026-07-10T00:00:00Z".to_string(),
         },
         suite_metrics,

@@ -59,7 +59,7 @@ pub fn tool_request_lead() -> RmcpTool {
 pub fn tool_request_planner() -> RmcpTool {
     RmcpTool::new(
         "request_planner".to_string(),
-        "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs to be split or merged, or has failed multiple Lead interventions. The Planner owns the board and decides whether to reshape the work, dedupe it, or — if the issue requires deeper code-structural reasoning — dispatch an Architect spike. Adds a comment and dispatches the Planner. Your session should end after this call."
+        "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs splitting/merging, or has failed multiple Lead interventions. Adds a comment and dispatches the Planner; your session should end after this call."
             .to_string(),
         object!({
             "type": "object",
@@ -108,7 +108,7 @@ pub fn tool_read() -> RmcpTool {
 pub fn tool_code_search() -> RmcpTool {
     RmcpTool::new(
         "code_search".to_string(),
-        "Search code across registered repos with `git grep` (basic regex). Pass `project` (UUID or owner/repo slug) to search one repo, or omit it (or pass \"*\") to search ALL registered projects at once — e.g. find every caller of a gRPC service org-wide. Served from each repo's default branch (no checkout). For your own task repo's working tree (your uncommitted changes), use shell grep instead.".to_string(),
+        "Search code across registered repos with `git grep` (basic regex). Pass `project` to search one repo, or omit it to search ALL projects at once. Served from each repo's default branch (no checkout); use shell grep for local changes.".to_string(),
         object!({
             "type": "object",
             "required": ["query"],
@@ -159,7 +159,7 @@ pub fn tool_write() -> RmcpTool {
 pub fn tool_edit() -> RmcpTool {
     RmcpTool::new(
         "edit".to_string(),
-        "Edit a file by replacing text. Provide path, old_text, and new_text. The implementation may safely rescue common whitespace, indentation, escape, boundary, and Unicode drift between old_text and the file, but it fails instead of guessing when the match is ambiguous (multiple candidates) or rejected by a safety guard (e.g. CRLF or UTF-8 boundary corruption).".to_string(),
+        "Edit a file by replacing text. Provide path, old_text, and new_text. Rescues common whitespace/indentation drift automatically; fails on ambiguous matches or safety-guard rejections.".to_string(),
         object!({
             "type": "object",
             "required": ["path", "old_text", "new_text"],
@@ -497,8 +497,7 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
 }
 
 /// Tool schemas for Planner: base + task/epic management tools + memory/role
-/// management tools (per ADR-051 §1) + submit_grooming
-/// finalize tool.
+/// management tools (per ADR-051 §1) + submit_grooming finalize tool.
 ///
 /// The Planner now runs in two modes: (a) per-epic decomposition (the legacy
 /// mode) and (b) board-health maintenance (migrated from Architect). The tool
