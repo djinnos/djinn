@@ -46,16 +46,29 @@ async fn seed_selection(
             .unwrap(),
     };
 
-    // Seed frame.
+    // Seed a deterministic frame per helper invocation. Several scheduler
+    // tests intentionally create multiple pending selections for one project,
+    // so reusing the same (project, window, revision) would violate the frame
+    // uniqueness constraint before the scheduler gets to exercise cadence or
+    // backlog behavior.
+    let window_start = "2026-06-24T00:00:00Z";
+    let window_end = "2026-07-01T00:00:00Z";
+    let frame_revision = repo
+        .list_sample_frames_in_window(project_id, window_start, window_end)
+        .await
+        .unwrap()
+        .len() as i32
+        + 1;
+    let content_hash = format!("test-frame-{merge_sha}-{frame_revision}");
     let frame = repo
         .create_sample_frame(CreateSampleFrameParams {
             project_id,
             policy_id: &policy.id,
-            window_start: "2026-06-24T00:00:00Z",
-            window_end: "2026-07-01T00:00:00Z",
-            revision: 1,
+            window_start,
+            window_end,
+            revision: frame_revision,
             eligible_change_ids: &json!([merge_sha]),
-            content_hash: Some("abc123"),
+            content_hash: Some(&content_hash),
             exclusion_counts: &json!({}),
             exclusion_reasons: &json!([]),
             sealed_at: "2026-07-01T00:05:00Z",
