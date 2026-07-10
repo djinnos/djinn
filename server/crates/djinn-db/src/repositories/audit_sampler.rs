@@ -268,6 +268,10 @@ pub struct CreateSelectionParams<'a> {
     pub seed_reveal: Option<&'a str>,
     pub replay_data: &'a serde_json::Value,
     pub audit_task_id: Option<&'a str>,
+    /// Override the DB-default `created_at` timestamp. When `None`, the
+    /// database generates the timestamp (via its column default). Test helpers
+    /// use this to backdate selections for SLO-age testing.
+    pub created_at: Option<&'a str>,
 }
 
 /// Parameters for recording an audit outcome.
@@ -522,26 +526,50 @@ impl AuditSamplerRepository {
     ) -> Result<SelectionRow> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            r#"INSERT INTO audit_selections (
-                    id, frame_id, merged_change_id, stratum,
-                    selected_position, algorithm,
-                    seed_commitment, seed_reveal, replay_data,
-                    audit_task_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
-        )
-        .bind(&id)
-        .bind(params.frame_id)
-        .bind(params.merged_change_id)
-        .bind(params.stratum.as_str())
-        .bind(params.selected_position)
-        .bind(params.algorithm)
-        .bind(params.seed_commitment)
-        .bind(params.seed_reveal)
-        .bind(params.replay_data)
-        .bind(params.audit_task_id)
-        .execute(self.db.pool())
-        .await?;
+        if let Some(created_at) = params.created_at {
+            sqlx::query(
+                r#"INSERT INTO audit_selections (
+                        id, frame_id, merged_change_id, stratum,
+                        selected_position, algorithm,
+                        seed_commitment, seed_reveal, replay_data,
+                        audit_task_id, created_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+            )
+            .bind(&id)
+            .bind(params.frame_id)
+            .bind(params.merged_change_id)
+            .bind(params.stratum.as_str())
+            .bind(params.selected_position)
+            .bind(params.algorithm)
+            .bind(params.seed_commitment)
+            .bind(params.seed_reveal)
+            .bind(params.replay_data)
+            .bind(params.audit_task_id)
+            .bind(created_at)
+            .execute(self.db.pool())
+            .await?;
+        } else {
+            sqlx::query(
+                r#"INSERT INTO audit_selections (
+                        id, frame_id, merged_change_id, stratum,
+                        selected_position, algorithm,
+                        seed_commitment, seed_reveal, replay_data,
+                        audit_task_id
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
+            )
+            .bind(&id)
+            .bind(params.frame_id)
+            .bind(params.merged_change_id)
+            .bind(params.stratum.as_str())
+            .bind(params.selected_position)
+            .bind(params.algorithm)
+            .bind(params.seed_commitment)
+            .bind(params.seed_reveal)
+            .bind(params.replay_data)
+            .bind(params.audit_task_id)
+            .execute(self.db.pool())
+            .await?;
+        }
 
         Ok(self
             .get_selection_by_id(&id)
@@ -1365,6 +1393,7 @@ mod tests {
                 seed_reveal: None,
                 replay_data: &json!({"counter_seq": [0]}),
                 audit_task_id: None,
+                created_at: None,
             })
             .await
             .unwrap();
@@ -1444,6 +1473,7 @@ mod tests {
                 seed_reveal: Some(&"cc".repeat(32)),
                 replay_data: &json!({}),
                 audit_task_id: None,
+                created_at: None,
             })
             .await
             .unwrap();

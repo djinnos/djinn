@@ -630,7 +630,7 @@ mod tests {
     use super::*;
     use djinn_db::{
         AuditSamplerRepository, AuditStratum, CreateSampleFrameParams, CreateSamplePolicyParams,
-        Database, EpicRepository, SelectionRow,
+        CreateSelectionParams, Database, EpicRepository, SelectionRow,
     };
     use serde_json::json;
 
@@ -645,21 +645,6 @@ mod tests {
 
     fn test_db() -> Database {
         Database::open_in_memory().expect("in-memory db")
-    }
-
-    /// Seed a project so FK constraints pass.
-    async fn seed_project(db: &Database, project_id: &str) {
-        db.ensure_initialized().await.unwrap();
-        sqlx::query(
-            "INSERT INTO projects (id, name, github_owner, github_repo)
-             VALUES ($1, $2, 'test-owner', $2)
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .bind(project_id)
-        .bind(format!("proj-{project_id}"))
-        .execute(db.pool())
-        .await
-        .unwrap();
     }
 
     /// Seed a policy, frame, merged change, and selection for testing.
@@ -723,85 +708,39 @@ mod tests {
             .await
             .unwrap();
 
-        // Seed selection (with specific created_at via direct SQL).
-        let selection_id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            r#"INSERT INTO audit_selections (
-                id, frame_id, merged_change_id, stratum,
-                selected_position, algorithm,
-                seed_commitment, seed_reveal, replay_data,
-                audit_task_id, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10)"#,
-        )
-        .bind(&selection_id)
-        .bind(&frame.id)
-        .bind(&mc.id)
-        .bind(stratum)
-        .bind(position)
-        .bind("hmac-sha256-counter-v1")
-        .bind("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
-        .bind(Some(
-            "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321",
-        ))
-        .bind(json!([]))
-        .bind(created_at)
-        .execute(db.pool())
+        // Seed selection via repository with specific created_at.
+        repo.create_selection(CreateSelectionParams {
+            frame_id: &frame.id,
+            merged_change_id: &mc.id,
+            stratum: if stratum == "autonomous_release" {
+                AuditStratum::AutonomousRelease
+            } else {
+                AuditStratum::UnflaggedMerged
+            },
+            selected_position: position,
+            algorithm: "hmac-sha256-counter-v1",
+            seed_commitment: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            seed_reveal: Some("fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"),
+            replay_data: &json!([]),
+            audit_task_id: None,
+            created_at: Some(created_at),
+        })
         .await
-        .unwrap();
-
-        repo.get_selection_by_id(&selection_id)
-            .await
-            .unwrap()
-            .unwrap()
+        .unwrap()
     }
 
     /// Create an open task to count toward max_open_audits.
     async fn create_open_task(db: &Database, project_id: &str) -> String {
-        db.ensure_initialized().await.unwrap();
-        let task_id = uuid::Uuid::now_v7().to_string();
-        let epic_id = ensure_audit_epic_exists(db, project_id).await;
-        sqlx::query(
-            r#"INSERT INTO tasks (
-                id, project_id, epic_id, title, description, design,
-                issue_type, priority, owner, status, continuation_count, memory_refs
-            ) VALUES ($1, $2, $3, 'test', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb)"#,
-        )
-        .bind(&task_id)
-        .bind(project_id)
-        .bind(&epic_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        task_id
-    }
-
-    /// Helper to get or create an audit epic id for testing.
-    async fn ensure_audit_epic_exists(db: &Database, project_id: &str) -> String {
-        let events = djinn_core::events::EventBus::noop();
-        let epic_repo = EpicRepository::new(db.clone(), events);
-        let epics = epic_repo.list_for_project(project_id).await.unwrap();
-        if let Some(existing) = epics.iter().find(|e| e.title == AUDIT_EPIC_TITLE) {
-            return existing.id.clone();
-        }
-        let epic = epic_repo
-            .create_for_project(
+        djinn_db::test_support::seed_task_row(
+            db,
+            djinn_db::test_support::UsageTestTaskSeed {
                 project_id,
-                djinn_db::EpicCreateInput {
-                    title: AUDIT_EPIC_TITLE,
-                    description: "test",
-                    emoji: "🔍",
-                    color: "#FF6B35",
-                    owner: "",
-                    memory_refs: None,
-                    status: None,
-                    auto_breakdown: Some(false),
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
-        epic.id
+                status: "open",
+                close_reason: None,
+                total_reopen_count: 0,
+            },
+        )
+        .await
     }
 
     // ── Test: normal materialization ──────────────────────────────────────────
@@ -810,7 +749,7 @@ mod tests {
     async fn normal_materialization_creates_task_and_links_selection() {
         let db = test_db();
         let project_id = uuid::Uuid::now_v7().to_string();
-        seed_project(&db, &project_id).await;
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
 
         // Seed one selection.
         let sel = seed_selection(
@@ -865,7 +804,7 @@ mod tests {
     async fn repeated_tick_does_not_rematerialize() {
         let db = test_db();
         let project_id = uuid::Uuid::now_v7().to_string();
-        seed_project(&db, &project_id).await;
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
 
         seed_selection(
             &db,
@@ -900,7 +839,7 @@ mod tests {
     async fn max_open_audits_triggers_pause() {
         let db = test_db();
         let project_id = uuid::Uuid::now_v7().to_string();
-        seed_project(&db, &project_id).await;
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
 
         // Seed a selection that won't be materialized because cap is hit.
         seed_selection(
@@ -953,7 +892,7 @@ mod tests {
     async fn slo_age_exceeded_triggers_pause() {
         let db = test_db();
         let project_id = uuid::Uuid::now_v7().to_string();
-        seed_project(&db, &project_id).await;
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
 
         // Seed a selection with created_at 20 days ago (exceeds 7-day SLO).
         seed_selection(
@@ -992,7 +931,7 @@ mod tests {
     async fn recovery_after_backlog_falls_below_cap() {
         let db = test_db();
         let project_id = uuid::Uuid::now_v7().to_string();
-        seed_project(&db, &project_id).await;
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
 
         // Seed a selection.
         let sel = seed_selection(
@@ -1038,12 +977,8 @@ mod tests {
             Some(BacklogPauseReason::MaxOpenAudits)
         );
 
-        // Close the existing task (set closed_at).
-        sqlx::query("UPDATE tasks SET closed_at = '2026-07-10T00:00:00Z' WHERE id = $1")
-            .bind(&existing_task_id)
-            .execute(db.pool())
-            .await
-            .unwrap();
+        // Close the existing task.
+        djinn_db::test_support::close_task_at(&db, &existing_task_id, "2026-07-10T00:00:00Z").await;
 
         // Second tick: should succeed (cap no longer exceeded).
         let result2 = run_audit_scheduler(&config, &audit_repo, &task_repo, &epic_repo).await;
@@ -1058,7 +993,7 @@ mod tests {
     async fn disabled_scheduler_does_nothing() {
         let db = test_db();
         let project_id = uuid::Uuid::now_v7().to_string();
-        seed_project(&db, &project_id).await;
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
 
         seed_selection(
             &db,
@@ -1091,7 +1026,7 @@ mod tests {
     async fn task_description_includes_provenance_data() {
         let db = test_db();
         let project_id = uuid::Uuid::now_v7().to_string();
-        seed_project(&db, &project_id).await;
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
 
         seed_selection(
             &db,
@@ -1198,7 +1133,7 @@ mod tests {
         // already-linked selection.
         let db = test_db();
         let project_id = uuid::Uuid::now_v7().to_string();
-        seed_project(&db, &project_id).await;
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
 
         seed_selection(
             &db,
@@ -1252,7 +1187,7 @@ mod tests {
         // the task and selection link are created atomically.
         let db = test_db();
         let project_id = uuid::Uuid::now_v7().to_string();
-        seed_project(&db, &project_id).await;
+        djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
 
         let sel = seed_selection(
             &db,
