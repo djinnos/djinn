@@ -1116,4 +1116,3 @@ mod contradiction_tests {
         );
     }
 }
-
