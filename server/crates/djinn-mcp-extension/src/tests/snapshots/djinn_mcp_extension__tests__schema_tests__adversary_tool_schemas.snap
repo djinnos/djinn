@@ -26,7 +26,7 @@ expression: tool_schemas_adversary()
   },
   {
     "name": "task_list",
-    "description": "List tasks with optional filters and pagination.",
+    "description": "List tasks with optional filters for status, priority, label, and text search. Supports pagination.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -104,7 +104,7 @@ expression: tool_schemas_adversary()
   },
   {
     "name": "memory_read",
-    "description": "Read a note by permalink or title.",
+    "description": "Read a memory note by permalink or title from the database-backed memory store. Returns full content and metadata.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -259,7 +259,7 @@ expression: tool_schemas_adversary()
   },
   {
     "name": "code_search",
-    "description": "Search code across registered repos with `git grep` (basic regex). Pass `project` (UUID or owner/repo slug) to search one repo, or omit it (or pass \"*\") to search ALL registered projects at once — e.g. find every caller of a gRPC service org-wide. Served from each repo's default branch (no checkout). For your own task repo's working tree (your uncommitted changes), use shell grep instead.",
+    "description": "Search code across registered repos with `git grep` (basic regex). Pass `project` to search one repo, or omit it to search ALL projects at once. Served from each repo's default branch (no checkout); use shell grep for local changes.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -533,7 +533,7 @@ expression: tool_schemas_adversary()
   },
   {
     "name": "proposal_show",
-    "description": "Show a proposal's full detail by UUID or short_id. Returns title, body, status, acceptance_criteria, targets, and optionally revisions, feedback, signoffs, debate, epics, and gate_status. Use `fields` to select only the sections you need (accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all). Use `revision_bodies` to control revision verbosity: `excerpt` (default, 512-char body_excerpt + body_truncated), `full` (complete body text), or `omit` (no body data). Ignored when `fields` omits `revisions`.",
+    "description": "Show a proposal's full detail by UUID or short_id. Use `fields` to select sections (proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all) and `revision_bodies` to control verbosity (excerpt/full/omit).",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -573,7 +573,7 @@ expression: tool_schemas_adversary()
   },
   {
     "name": "proposal_debate_list",
-    "description": "List the tribunal debate trail for a proposal: every objection, rebuttal, and verdict across all rounds, with `round`, `agent_role`, `kind`, `blocking`, `resolved`, `against_revision_seq`, and `body`. Read this FIRST: the Adversary uses it to avoid re-raising objections already filed in prior rounds; the Advocate uses it to see exactly which objections it must address; the Judge uses it to verify each blocking objection was resolved or rebutted.",
+    "description": "List the tribunal debate trail for a proposal: every objection, rebuttal, and verdict across all rounds. The Adversary reads this to avoid re-raising objections; the Advocate reads it to address objections; the Judge reads it to verify resolution.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -594,7 +594,7 @@ expression: tool_schemas_adversary()
   },
   {
     "name": "proposal_debate_append",
-    "description": "Record a tribunal debate-trail entry against a proposal. This is the ONLY channel the refinement loop reads: an Adversary's objections and a Judge's verdict MUST be filed here — text placed in `submit_review`/`submit_decision` is NOT read by the loop. File one entry per objection. `kind` is `objection` (Adversary), `verdict` (Judge), or `rebuttal`. `blocking=true` means it blocks readiness (use for blocking objections and for a not-ready verdict). Read `proposal_id`, `round`, and `against_revision_seq` from your task description and pass them on every call; `agent_role` is your role (`adversary` or `judge`).",
+    "description": "Record a tribunal debate-trail entry. This is the ONLY channel the refinement loop reads. `kind` is `objection` (Adversary), `verdict` (Judge), or `rebuttal`. `blocking=true` blocks readiness. Read `proposal_id`, `round`, `against_revision_seq` from your task description; `agent_role` is `adversary` or `judge`.",
     "inputSchema": {
       "type": "object",
       "required": [

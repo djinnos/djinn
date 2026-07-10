@@ -152,9 +152,9 @@ impl CoordinatorActor {
              Call `epic_show({})` to load the epic's memory_refs, then \
              `memory_read(identifier=<each-ref>)` for each one to pull context. \
              Call `build_context` for session reflections from previously \
-             completed tasks under this epic. Memory notes live in Dolt — \
-             reach them only through the `memory_*` MCP tools, not by reading \
-             files.",
+             completed tasks under this epic. Notes are accessed through \
+             the `memory_*` MCP tools — do not read `.djinn/memory/` files \
+             from the worker filesystem.",
             epic.title, epic.short_id, originating_adr_section, epic.short_id
         );
 

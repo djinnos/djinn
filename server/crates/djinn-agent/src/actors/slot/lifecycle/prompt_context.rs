@@ -365,7 +365,7 @@ async fn load_epic_context(
         format!("**Epic:** {} ({})", epic.title, epic.short_id),
         format!("**Description:** {}", epic.description),
         format!(
-            "**Memory refs:** call `epic_show({})` then `memory_read(identifier=<ref>)` for each — memory notes live in Dolt, not on disk.",
+            "**Memory refs:** call `epic_show({})` then `memory_read(identifier=<ref>)` for each — use the memory_* MCP tools; do not read `.djinn/memory/` files from the worker filesystem.",
             epic.short_id
         ),
     ];
