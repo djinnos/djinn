@@ -623,7 +623,28 @@ fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
         "baseline per_query_ranks covers all fixture queries"
     );
 
-    // 6. Verify fixture hashes match manifest (if both exist)
+    // 6. Verify suite_metrics includes bad_cases suite when fixtures have bad cases
+    if !fixtures.bad_cases.is_empty() && !baseline.suite_metrics.contains_key("bad_cases") {
+        anyhow::bail!(
+            "baseline suite_metrics is missing 'bad_cases' key but fixtures have {} bad-case rows. \
+             Re-run `run` then `refresh-baseline` to fix.",
+            fixtures.bad_cases.len()
+        );
+    }
+    info!(
+        has_bad_cases_suite = baseline.suite_metrics.contains_key("bad_cases"),
+        "baseline suite_metrics bad_cases key check passed"
+    );
+
+    // 7. Reject all-zero/all-miss Phase 1 gating baseline unless test override is set.
+    //
+    // An all-miss baseline (recall@1/5/10 all zero and zero-result-rate 1.0) means
+    // the retrieval pipeline returned no relevant results for any query — this is
+    // either a broken pipeline, bad fixtures, or both. Committed baselines MUST
+    // demonstrate meaningful retrieval.
+    validate_baseline_not_all_miss(&baseline.aggregate_metrics, &baseline.suite_metrics)?;
+
+    // 8. Verify fixture hashes match manifest (if both exist)
     if let Some(ref manifest) = fixtures.manifest {
         if let Some(ref baseline_hashes) = baseline.metadata.fixture_hashes {
             if manifest.file_hashes != *baseline_hashes {
@@ -641,10 +662,638 @@ fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
     info!("=== All validations passed ===");
     Ok(())
 }
+
+/// Reject an all-zero/all-miss Phase 1 gating baseline.
+///
+/// A baseline where recall@1/5/10 are all zero and zero-result-rate is 1.0
+/// indicates the retrieval pipeline returned no relevant results for any query.
+/// This is never a valid committed baseline — it represents a broken pipeline,
+/// bad fixtures, or both.
+///
+/// Test override: set `DJINN_MEMORY_EVAL_TEST_OVERRIDE=allow_all_miss_baseline`
+/// to bypass this check (only outside committed CI paths).
+pub fn validate_baseline_not_all_miss(
+    aggregate: &metrics::AggregateMetrics,
+    suite_metrics: &HashMap<String, metrics::SuiteMetrics>,
+) -> Result<()> {
+    // Check if the test override is set
+    if std::env::var("DJINN_MEMORY_EVAL_TEST_OVERRIDE").as_deref() == Ok("allow_all_miss_baseline")
+    {
+        tracing::warn!(
+            "DJINN_MEMORY_EVAL_TEST_OVERRIDE=allow_all_miss_baseline is set — \
+             skipping all-miss baseline check"
+        );
+        return Ok(());
+    }
+
+    let all_recall_zero = aggregate.recall_at_1.abs() < 1e-10
+        && aggregate.recall_at_5.abs() < 1e-10
+        && aggregate.recall_at_10.abs() < 1e-10;
+    let all_miss = all_recall_zero && (aggregate.zero_result_rate - 1.0).abs() < 1e-10;
+
+    if all_miss {
+        anyhow::bail!(
+            "committed baseline is all-miss: aggregate recall@1/5/10 all zero \
+             and zero-result-rate is 1.0. This indicates the retrieval pipeline \
+             returned no relevant results for any query. \
+             Re-run against a working pipeline with meaningful fixtures. \
+             (Test override: DJINN_MEMORY_EVAL_TEST_OVERRIDE=allow_all_miss_baseline)"
+        );
+    }
+
+    // Also reject if any non-empty suite has all-zero recall and 1.0 zero-result-rate
+    for (suite_name, sm) in suite_metrics {
+        if sm.query_count == 0 {
+            continue;
+        }
+        let suite_all_recall_zero = sm.recall_at_1.abs() < 1e-10
+            && sm.recall_at_5.abs() < 1e-10
+            && sm.recall_at_10.abs() < 1e-10;
+        let suite_all_miss = suite_all_recall_zero && (sm.zero_result_rate - 1.0).abs() < 1e-10;
+        if suite_all_miss {
+            anyhow::bail!(
+                "committed baseline suite '{}' is all-miss ({} queries, \
+                 recall@1/5/10 all zero, zero-result-rate 1.0). \
+                 This indicates no relevant results were returned for this suite. \
+                 Re-run against a working pipeline with meaningful fixtures. \
+                 (Test override: DJINN_MEMORY_EVAL_TEST_OVERRIDE=allow_all_miss_baseline)",
+                suite_name,
+                sm.query_count,
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn not_yet_implemented(subcommand: &str, task_ref: &str) -> anyhow::Result<()> {
     anyhow::bail!(
         "Subcommand `{subcommand}` is not yet implemented. \
          Tracked by task {task_ref} in epic nih4 (Phase 1). \
          See the djinn-memory-eval README for the implementation roadmap."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::*;
+    use crate::report::{BaselineMetadata, Phase1Baseline};
+
+    /// Helper: write a Phase1Fixtures to a temp directory structure on disk.
+    fn write_fixtures_to_disk(crate_root: &std::path::Path, fixtures: &Phase1Fixtures) {
+        let fixtures_dir = crate_root.join(FixturePaths::FIXTURES_DIR);
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+
+        let corpus_jsonl = fixtures::to_jsonl(&fixtures.corpus_notes).unwrap();
+        std::fs::write(fixtures_dir.join("corpus-notes.jsonl"), &corpus_jsonl).unwrap();
+
+        let queries_jsonl = fixtures::to_jsonl(&fixtures.memory_ref_queries).unwrap();
+        std::fs::write(
+            fixtures_dir.join("memory-ref-queries.jsonl"),
+            &queries_jsonl,
+        )
+        .unwrap();
+
+        let bad_cases_jsonl = fixtures::to_jsonl(&fixtures.bad_cases).unwrap();
+        std::fs::write(fixtures_dir.join("bad-cases.jsonl"), &bad_cases_jsonl).unwrap();
+    }
+
+    /// Helper: write a Phase1Baseline to a temp directory on disk.
+    fn write_baseline_to_disk(crate_root: &std::path::Path, baseline: &Phase1Baseline) {
+        let baselines_dir = crate_root.join(FixturePaths::BASELINES_DIR);
+        std::fs::create_dir_all(&baselines_dir).unwrap();
+        let json = serde_json::to_string_pretty(baseline).unwrap();
+        std::fs::write(baselines_dir.join("phase1.json"), &json).unwrap();
+    }
+
+    /// Minimal corpus notes for testing (enough for fixture validation).
+    fn minimal_corpus_notes() -> Vec<CorpusNoteRow> {
+        vec![
+            serde_json::from_str(
+                r#"{"permalink":"notes/a","title":"Note A","content":"Note A content about searching","note_type":"case","folder":"notes","status":"active","tags":[],"timestamps":{"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":0.8,"embedding":{"content_hash":"h1","model_version":"deterministic-v1","embedding_dim":3,"vector":[0.1,0.2,0.3]},"labels":[{"entity_type":"concept","name":"search"}],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":false}}"#,
+            ).unwrap(),
+            serde_json::from_str(
+                r#"{"permalink":"notes/b","title":"Note B","content":"Note B content about ranking","note_type":"pattern","folder":"notes","status":"active","tags":[],"timestamps":{"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":0.8,"embedding":{"content_hash":"h2","model_version":"deterministic-v1","embedding_dim":3,"vector":[0.4,0.5,0.6]},"labels":[{"entity_type":"concept","name":"ranking"}],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":false}}"#,
+            ).unwrap(),
+        ]
+    }
+
+    /// Generate N memory-ref query rows.
+    fn make_n_queries(n: usize) -> Vec<MinedMemoryRefRow> {
+        (0..n)
+            .map(|i| {
+                serde_json::from_str(&format!(
+                    r#"{{"query_id":"q-{:03}","query_text":"query {}","task_id":null,"memory_refs":["notes/a"],"expected_signals":{{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":false}}}}"#,
+                    i, i
+                ))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    /// Generate N bad-case rows (alternating types to satisfy coverage requirements).
+    fn make_n_bad_cases(n: usize) -> Vec<BadCaseRow> {
+        let case_types = [
+            BadCaseType::OverDecayThreshold,
+            BadCaseType::GraphEntityInfluenced,
+            BadCaseType::TaskAffinityInfluenced,
+        ];
+        let permalinks = ["notes/a", "notes/b", "notes/a"];
+        (0..n)
+            .map(|i| {
+                let idx = i % case_types.len();
+                BadCaseRow {
+                    case_id: format!("bc-{:03}", i),
+                    query_text: format!("bad case {}", i),
+                    case_type: case_types[idx].clone(),
+                    expected_behavior: "test".to_string(),
+                    task_id: if case_types[idx] == BadCaseType::TaskAffinityInfluenced {
+                        Some("test-task".to_string())
+                    } else {
+                        None
+                    },
+                    relevant_note_permalinks: vec![permalinks[idx].to_string()],
+                    expected_signals: SignalCoverage {
+                        vector: false,
+                        lexical: true,
+                        temporal: false,
+                        graph: false,
+                        entity: false,
+                        task_affinity: false,
+                    },
+                    tags: vec![],
+                }
+            })
+            .collect()
+    }
+
+    /// Make a baseline with explicit suite counts (matching fixture counts).
+    fn make_baseline_with_counts(all_queries: usize, bad_cases: usize) -> Phase1Baseline {
+        let total = all_queries + bad_cases;
+
+        let mut suite_metrics = HashMap::new();
+        suite_metrics.insert(
+            "all_queries".to_string(),
+            metrics::SuiteMetrics {
+                recall_at_1: 0.5,
+                recall_at_5: 0.7,
+                recall_at_10: 0.9,
+                mrr: 0.6,
+                zero_result_rate: 0.1,
+                query_count: all_queries,
+            },
+        );
+        suite_metrics.insert(
+            "bad_cases".to_string(),
+            metrics::SuiteMetrics {
+                recall_at_1: 0.3,
+                recall_at_5: 0.5,
+                recall_at_10: 0.7,
+                mrr: 0.4,
+                zero_result_rate: 0.2,
+                query_count: bad_cases,
+            },
+        );
+
+        let mut per_query_ranks = HashMap::new();
+        per_query_ranks.insert(
+            "all_queries".to_string(),
+            (0..all_queries)
+                .map(|i| report::QueryRankBaseline {
+                    query_id: format!("q-{:03}", i),
+                    query_text: format!("query {}", i),
+                    result_permalinks: vec!["notes/a".to_string()],
+                    relevant_ranks: vec![Some(1)],
+                    best_rank: Some(1),
+                })
+                .collect(),
+        );
+        per_query_ranks.insert(
+            "bad_cases".to_string(),
+            (0..bad_cases)
+                .map(|i| report::QueryRankBaseline {
+                    query_id: format!("bc-{:03}", i),
+                    query_text: format!("bad case {}", i),
+                    result_permalinks: vec!["notes/a".to_string()],
+                    relevant_ranks: vec![Some(1)],
+                    best_rank: Some(1),
+                })
+                .collect(),
+        );
+
+        Phase1Baseline {
+            metadata: BaselineMetadata {
+                fixture_hashes: None,
+                refresh_commit: "test-commit-sha".to_string(),
+                created_at: "2026-07-10T00:00:00Z".to_string(),
+            },
+            suite_metrics,
+            aggregate_metrics: metrics::AggregateMetrics {
+                recall_at_1: 0.5,
+                recall_at_5: 0.7,
+                recall_at_10: 0.9,
+                mrr: 0.6,
+                zero_result_rate: 0.1,
+                query_count: total,
+            },
+            age_bucket_recall: HashMap::new(),
+            per_query_ranks,
+            // Non-empty so baselines pass the signal_comparisons.is_empty() gate
+            // in cmd_validate_fixtures. Tests checking for "all-miss" or "missing
+            // bad_cases key" must reach those checks rather than bail here.
+            signal_comparisons: vec![run::SignalRankComparison {
+                query_id: "q-000".to_string(),
+                signal: "graph".to_string(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(5),
+                rank_changed: true,
+            }],
+            threshold_policy_version: metrics::THRESHOLD_POLICY_VERSION.to_string(),
+        }
+    }
+
+    // ── AC: Low query count ──────────────────────────────────────────────────
+
+    #[test]
+    fn validate_fixtures_rejects_low_total_query_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        // Only 10 queries + 3 bad cases = 13 total (< 25)
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(10);
+        let bad_cases = make_n_bad_cases(3);
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        let baseline = make_baseline_with_counts(10, 3);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(result.is_err(), "should fail for < 25 total queries");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("expected at least 25 total labeled queries"),
+            "error should mention 25 total queries: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_fixtures_rejects_low_memory_ref_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        // 12 queries (< 15) + 13 bad cases = 25 total (≥ 25) but memory_ref < 15
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(12);
+        let bad_cases = make_n_bad_cases(13);
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        let baseline = make_baseline_with_counts(12, 13);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(result.is_err(), "should fail for < 15 memory_ref queries");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("expected at least 15 mined memory_refs queries"),
+            "error should mention 15 memory_refs: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_fixtures_rejects_low_bad_case_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        // 20 queries + 5 bad cases (< 10) = 25 total (≥ 25) but bad_cases < 10
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(20);
+        let bad_cases = make_n_bad_cases(5);
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        let baseline = make_baseline_with_counts(20, 5);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(result.is_err(), "should fail for < 10 bad cases");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("expected at least 10 bad-case rows"),
+            "error should mention 10 bad-case rows: {}",
+            err
+        );
+    }
+
+    // ── AC: Dropped bad-case aggregation ─────────────────────────────────────
+
+    #[test]
+    fn validate_fixtures_rejects_missing_bad_cases_in_suite_metrics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(20);
+        let bad_cases = make_n_bad_cases(10);
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        // Build baseline with NO bad_cases key in suite_metrics
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.suite_metrics.remove("bad_cases");
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(
+            result.is_err(),
+            "should fail when bad_cases absent from suite_metrics"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("missing 'bad_cases' key"),
+            "error should mention missing bad_cases key: {}",
+            err
+        );
+    }
+
+    // ── AC: All-miss baseline ────────────────────────────────────────────────
+
+    #[test]
+    fn validate_fixtures_rejects_all_miss_aggregate_baseline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(20);
+        let bad_cases = make_n_bad_cases(10);
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        // Build baseline with all-miss aggregate metrics
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.aggregate_metrics = metrics::AggregateMetrics {
+            recall_at_1: 0.0,
+            recall_at_5: 0.0,
+            recall_at_10: 0.0,
+            mrr: 0.0,
+            zero_result_rate: 1.0,
+            query_count: 30,
+        };
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(
+            result.is_err(),
+            "should fail for all-miss aggregate baseline"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("all-miss"),
+            "error should mention all-miss: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_fixtures_rejects_all_miss_suite_baseline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(20);
+        let bad_cases = make_n_bad_cases(10);
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        // Build baseline with all-miss bad_cases suite
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.suite_metrics.insert(
+            "bad_cases".to_string(),
+            metrics::SuiteMetrics {
+                recall_at_1: 0.0,
+                recall_at_5: 0.0,
+                recall_at_10: 0.0,
+                mrr: 0.0,
+                zero_result_rate: 1.0,
+                query_count: 10,
+            },
+        );
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(result.is_err(), "should fail for all-miss suite baseline");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("all-miss"),
+            "error should mention all-miss: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_baseline_not_all_miss_allows_test_override() {
+        let aggregate = metrics::AggregateMetrics {
+            recall_at_1: 0.0,
+            recall_at_5: 0.0,
+            recall_at_10: 0.0,
+            mrr: 0.0,
+            zero_result_rate: 1.0,
+            query_count: 30,
+        };
+        let suite_metrics = HashMap::new();
+
+        // Without override, should fail
+        let result = validate_baseline_not_all_miss(&aggregate, &suite_metrics);
+        assert!(result.is_err(), "should fail without test override");
+
+        // With override, should pass
+        // SAFETY: this test runs single-threaded and only touches the specific env var.
+        unsafe {
+            std::env::set_var("DJINN_MEMORY_EVAL_TEST_OVERRIDE", "allow_all_miss_baseline");
+        }
+        let result = validate_baseline_not_all_miss(&aggregate, &suite_metrics);
+        assert!(result.is_ok(), "should pass with test override");
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("DJINN_MEMORY_EVAL_TEST_OVERRIDE");
+        }
+    }
+
+    // ── AC: Missing hard signal coverage ─────────────────────────────────────
+
+    /// Fixture validation fails when graph signal is claimed on a note
+    /// but the note has no graph edges (hard error, not warn-only).
+    #[test]
+    fn validate_fixtures_hard_fails_on_missing_graph_signal_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let mut corpus = minimal_corpus_notes();
+        // Claim graph signal on note A but provide no graph edges
+        corpus[0].expected_signals.graph = true;
+        corpus[0].graph_edges = vec![];
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: make_n_queries(1),
+            bad_cases: make_n_bad_cases(1),
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        let baseline = make_baseline_with_counts(1, 1);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(
+            result.is_err(),
+            "should hard-fail when graph signal claimed but no edges"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("graph signal claimed but no graph_edges"),
+            "error should mention missing graph_edges: {}",
+            err
+        );
+    }
+
+    /// Fixture validation fails when entity signal is claimed but no labels.
+    #[test]
+    fn validate_fixtures_hard_fails_on_missing_entity_signal_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let mut corpus = minimal_corpus_notes();
+        corpus[1].expected_signals.entity = true;
+        corpus[1].labels = vec![];
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: make_n_queries(1),
+            bad_cases: make_n_bad_cases(1),
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        let baseline = make_baseline_with_counts(1, 1);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(
+            result.is_err(),
+            "should hard-fail when entity signal claimed but no labels"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("entity signal claimed but no labels"),
+            "error should mention missing labels: {}",
+            err
+        );
+    }
+
+    /// Fixture validation fails when task-affinity signal is claimed on a
+    /// query but no task_id is provided.
+    #[test]
+    fn validate_fixtures_hard_fails_on_missing_task_affinity_signal_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let corpus = minimal_corpus_notes();
+        let mut queries = make_n_queries(1);
+        queries[0].expected_signals.task_affinity = true;
+        queries[0].task_id = None;
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases: make_n_bad_cases(1),
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        let baseline = make_baseline_with_counts(1, 1);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(
+            result.is_err(),
+            "should hard-fail when task_affinity signal claimed but no task_id"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("task_affinity signal claimed but no task_id"),
+            "error should mention missing task_id: {}",
+            err
+        );
+    }
+
+    /// Fixture validation passes with minimum valid fixtures and baseline.
+    #[test]
+    fn validate_fixtures_passes_with_minimum_valid_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(20);
+        let bad_cases = make_n_bad_cases(10);
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        let baseline = make_baseline_with_counts(20, 10);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(
+            result.is_ok(),
+            "should pass with valid fixtures and baseline: {:?}",
+            result.err()
+        );
+    }
 }
