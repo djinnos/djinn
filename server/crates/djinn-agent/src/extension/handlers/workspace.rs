@@ -1,4 +1,4 @@
-use super::gate_guard::gate_guard_edit_check;
+use super::gate_guard::{gate_guard_edit_check, gate_guard_shell_check};
 use super::workspace_helpers::{cargo_check_denied, emit_edit_match_telemetry};
 use super::*;
 
@@ -66,6 +66,12 @@ pub(crate) async fn call_shell(
     {
         return Err(msg.to_string());
     }
+
+    // GateGuard shell policy: classify destructive commands for workers.
+    // Runs after cargo steering and before any subprocess execution.
+    // Non-worker roles pass through unconditionally.
+    let session_id = worktree_path.display().to_string();
+    gate_guard_shell_check(state, session_role, &session_id, &p.command).await?;
 
     let timeout_ms = effective_shell_timeout_ms(p.timeout_ms, &p.command);
 
