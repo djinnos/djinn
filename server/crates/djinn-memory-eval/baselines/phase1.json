@@ -36,9 +36,19 @@
   },
   "age_bucket_recall": {
     "under7d": {
-      "recall_at_1": 0.5151515151515151,
-      "recall_at_5": 0.6363636363636364,
-      "recall_at_10": 0.6363636363636364
+      "recall_at_1": 0.5555555555555556,
+      "recall_at_5": 0.6481481481481481,
+      "recall_at_10": 0.6481481481481481
+    },
+    "30-90d": {
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0
+    },
+    "over_decay_threshold": {
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0
     }
   },
   "per_query_ranks": {

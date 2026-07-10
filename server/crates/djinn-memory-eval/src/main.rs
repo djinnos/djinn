@@ -126,8 +126,16 @@ async fn cmd_run(crate_root: &std::path::Path) -> Result<()> {
         suite_metrics.iter().map(|(k, v)| (k.as_str(), v)).collect();
     let aggregate_metrics = metrics::compute_aggregate_metrics(&agg_suites);
 
-    // Age-bucket recall
-    let age_bucket_recall = metrics::compute_age_bucket_recall(&output.query_records, &note_ages);
+    // Age-bucket recall — include both memory-ref queries AND bad-case
+    // records so that over-decay fixture cases (e.g. bc-over-decay-001)
+    // contribute to the age-bucket recall curves.
+    let all_records_for_age: Vec<run::QueryRankRecord> = output
+        .query_records
+        .iter()
+        .chain(output.bad_case_records.iter())
+        .cloned()
+        .collect();
+    let age_bucket_recall = metrics::compute_age_bucket_recall(&all_records_for_age, &note_ages);
 
     // Directional metrics (non-gating)
     let directional = metrics::directional_metrics(&output.query_records);
@@ -545,6 +553,24 @@ fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
         );
     }
 
+    // 5a1. Verify over-decay age-bucket recall is present in baseline.
+    // If the committed fixtures include an over-decay-threshold bad case, the
+    // committed baseline MUST include the `over_decay_threshold` age-bucket
+    // recall entry. This catches stale baselines that predate the over-decay
+    // fixture addition or were refreshed without including bad-case records
+    // in the age-bucket computation.
+    if has_over_decay
+        && !baseline
+            .age_bucket_recall
+            .contains_key(&metrics::AgeBucket::OverDecayThreshold)
+    {
+        anyhow::bail!(
+            "fixtures include an over-decay-threshold bad case but baseline \
+             age_bucket_recall is missing the 'over_decay_threshold' bucket. \
+             Re-run `run` then `refresh-baseline` to include over-decay recall data."
+        );
+    }
+
     info!(
         baseline_commit = %baseline.metadata.refresh_commit,
         baseline_created = %baseline.metadata.created_at,
@@ -897,7 +923,21 @@ mod tests {
                 zero_result_rate: 0.1,
                 query_count: total,
             },
-            age_bucket_recall: HashMap::new(),
+            age_bucket_recall: {
+                // Include over-decay bucket so that tests using
+                // make_n_bad_cases() (which always includes OverDecayThreshold
+                // type) pass the new over-decay bucket validation.
+                let mut m = HashMap::new();
+                m.insert(
+                    metrics::AgeBucket::OverDecayThreshold,
+                    metrics::RecallAtK {
+                        recall_at_1: 1.0,
+                        recall_at_5: 1.0,
+                        recall_at_10: 1.0,
+                    },
+                );
+                m
+            },
             per_query_ranks,
             // Non-empty so baselines pass the signal_comparisons.is_empty() gate
             // in cmd_validate_fixtures. Tests checking for "all-miss" or "missing
@@ -1294,6 +1334,47 @@ mod tests {
             result.is_ok(),
             "should pass with valid fixtures and baseline: {:?}",
             result.err()
+        );
+    }
+
+    // ── AC: Over-decay age-bucket missing from baseline ─────────────────────
+
+    /// Validation fails when over-decay-threshold fixtures exist but the
+    /// baseline age_bucket_recall omits the over_decay_threshold bucket.
+    #[test]
+    fn validate_fixtures_fails_when_over_decay_bucket_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(20);
+        let bad_cases = make_n_bad_cases(10);
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        // Build a valid baseline then remove the over_decay_threshold bucket
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline
+            .age_bucket_recall
+            .remove(&metrics::AgeBucket::OverDecayThreshold);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(
+            result.is_err(),
+            "should fail when over-decay fixtures exist but baseline omits over_decay_threshold bucket"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("over_decay_threshold"),
+            "error should mention over_decay_threshold: {}",
+            err
         );
     }
 }

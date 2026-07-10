@@ -1420,4 +1420,49 @@ mod tests {
     fn threshold_policy_version_is_set() {
         assert_eq!(THRESHOLD_POLICY_VERSION, "phase1-v1");
     }
+
+    /// An over-decay note referenced by a bad-case record must contribute
+    /// to the over_decay_threshold age bucket in age-bucket recall curves.
+    /// This test verifies that bad-case records (not just memory-ref queries)
+    /// are included when computing age-bucket recall.
+    #[test]
+    fn over_decay_bad_case_contributes_to_age_bucket_recall() {
+        // Simulate a bad-case record for the over-decay fixture
+        let bad_record = QueryRankRecord {
+            query_id: "bc-over-decay-001".to_string(),
+            query_text: "slot cold start failure".to_string(),
+            task_id: None,
+            result_permalinks: vec!["cases/over-decay-slot-setup".to_string()],
+            relevant_ranks: vec![Some(1)],
+            expected_permalinks: vec!["cases/over-decay-slot-setup".to_string()],
+            is_bad_case: true,
+            bad_case_type: Some(BadCaseType::OverDecayThreshold),
+        };
+
+        // Also include a fresh note from a memory-ref query
+        let query_record = make_record("q-001", vec!["fresh-note"], vec![Some(1)], false);
+
+        let all_records = vec![query_record, bad_record];
+        let mut note_ages = HashMap::new();
+        note_ages.insert("fresh-note".to_string(), 3); // <7d
+        note_ages.insert("cases/over-decay-slot-setup".to_string(), 200); // >90d
+
+        let buckets = compute_age_bucket_recall(&all_records, &note_ages);
+
+        // The over-decay bucket MUST be present
+        assert!(
+            buckets.contains_key(&AgeBucket::OverDecayThreshold),
+            "over_decay_threshold bucket must be present when bad-case record \
+             references a note older than 90 days"
+        );
+
+        let over_decay = buckets.get(&AgeBucket::OverDecayThreshold).unwrap();
+        assert!(
+            (over_decay.recall_at_1 - 1.0).abs() < 1e-10,
+            "over-decay note found at rank 1 should have recall@1 = 1.0"
+        );
+
+        // The fresh bucket should also be present
+        assert!(buckets.contains_key(&AgeBucket::Under7d));
+    }
 }
