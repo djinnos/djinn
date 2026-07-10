@@ -438,12 +438,20 @@ async fn load_knowledge_context(
             // candidates we have (if any) classifying them as search_error.
             if let Ok(ref candidates) = trace_candidates_result {
                 let error_candidates = classify_knowledge_candidates_for_error(candidates);
+                let cap_exceeded = candidates.len()
+                    >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
                 persist_knowledge_trace(
                     task,
                     &task_paths,
                     &error_candidates,
                     0,
-                    candidate_fetch_ms,
+                    KnowledgeTraceDurations {
+                        candidate_fetch_ms,
+                        classify_ms: 0,
+                        prompt_pack_ms: 0,
+                        persist_ms: 0,
+                    },
+                    cap_exceeded,
                     &app_state.db,
                 )
                 .await;
@@ -475,23 +483,26 @@ async fn load_knowledge_context(
     let trace_candidates_final = apply_budget_outcomes(classified, &packed, &notes);
     let estimated_injected_tokens = packed.total_injected_tokens as i32;
 
-    // Suppress unused warning for cap metadata — it's used in persist_knowledge_trace.
-    let _ = candidate_cap_exceeded;
-
     let rendered = if notes.is_empty() {
         None
     } else {
         Some(packed.rendered)
     };
 
-    // Persist the trace (fail-open).
-    let pre_persist_ms = candidate_fetch_ms + classification_ms + pack_ms;
+    // Persist the trace (fail-open). Measure the persist phase separately.
+    let persist_start = tokio::time::Instant::now();
     persist_knowledge_trace(
         task,
         &task_paths,
         &trace_candidates_final,
         estimated_injected_tokens,
-        pre_persist_ms,
+        KnowledgeTraceDurations {
+            candidate_fetch_ms,
+            classify_ms: classification_ms,
+            prompt_pack_ms: pack_ms,
+            persist_ms: persist_start.elapsed().as_millis() as i64,
+        },
+        candidate_cap_exceeded,
         &app_state.db,
     )
     .await;
@@ -520,7 +531,10 @@ fn classify_knowledge_candidates(
         .iter()
         .map(|c| {
             let (outcome, skipped_reason) = if c.confidence < KNOWLEDGE_MIN_CONFIDENCE {
-                (CandidateOutcome::Skipped, Some(SkippedReason::MinConfidence))
+                (
+                    CandidateOutcome::Skipped,
+                    Some(SkippedReason::MinConfidence),
+                )
             } else if !production_ids.contains(c.id.as_str()) {
                 (CandidateOutcome::Skipped, Some(SkippedReason::NotTopK))
             } else {
@@ -635,6 +649,14 @@ fn apply_budget_outcomes(
     candidates
 }
 
+/// Per-phase durations (milliseconds) for the knowledge-context retrieval trace.
+struct KnowledgeTraceDurations {
+    candidate_fetch_ms: i64,
+    classify_ms: i64,
+    prompt_pack_ms: i64,
+    persist_ms: i64,
+}
+
 /// Persist a `LoadKnowledgeContext` retrieval trace row. Fail-open: logs and
 /// swallows all errors, never propagating them to the caller.
 async fn persist_knowledge_trace(
@@ -642,7 +664,8 @@ async fn persist_knowledge_trace(
     task_paths: &[String],
     candidates: &[djinn_db::repositories::retrieval_trace::TraceCandidate],
     estimated_injected_tokens: i32,
-    pre_persist_ms: i64,
+    durations: KnowledgeTraceDurations,
+    candidate_cap_exceeded: bool,
     db: &djinn_db::Database,
 ) {
     use djinn_db::repositories::retrieval_trace::{
@@ -681,11 +704,13 @@ async fn persist_knowledge_trace(
         "task_paths": task_paths,
     });
     let durations_ms = serde_json::json!({
-        "candidate_fetch_classify_pack_ms": pre_persist_ms,
+        "candidate_fetch_ms": durations.candidate_fetch_ms,
+        "classify_ms": durations.classify_ms,
+        "prompt_pack_ms": durations.prompt_pack_ms,
+        "persist_ms": durations.persist_ms,
     });
 
     let cap = djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP;
-    let cap_exceeded = candidates.len() >= cap as usize;
 
     let repo = RetrievalTraceRepository::new(db.clone());
     let params = CreateRetrievalTraceParams {
@@ -697,7 +722,7 @@ async fn persist_knowledge_trace(
         trigger: Some(&trigger),
         candidates: &candidates_json,
         candidate_cap: cap,
-        candidate_cap_exceeded: cap_exceeded,
+        candidate_cap_exceeded,
         sampling_metadata: None,
         durations_ms: &durations_ms,
         estimated_injected_tokens,

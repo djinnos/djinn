@@ -9,8 +9,8 @@ use super::*;
 use djinn_core::events::EventBus;
 use djinn_db::NoteRepository;
 use djinn_db::repositories::retrieval_trace::{
-    CandidateOutcome, RetrievalTraceEntryPoint, RetrievalTraceListFilter,
-    RetrievalTraceRepository, SkippedReason,
+    CandidateOutcome, RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceRepository,
+    SkippedReason,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -114,7 +114,10 @@ async fn load_knowledge_context_prompt_output_unchanged_with_tracing() {
     // Verify the prompt is produced and contains the note.
     assert!(result.is_some(), "knowledge context should be Some");
     let prompt = result.unwrap();
-    assert!(prompt.contains("Global Pattern"), "prompt should contain the note");
+    assert!(
+        prompt.contains("Global Pattern"),
+        "prompt should contain the note"
+    );
 
     // Verify a trace row was persisted.
     let trace = latest_trace(&db, &project_id).await;
@@ -307,11 +310,23 @@ async fn trace_includes_estimated_injected_tokens_and_cap_metadata() {
         djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP
     );
 
-    // Durations should be present.
+    // Durations should be present with separate per-phase keys.
     let durations = &trace.durations_ms;
     assert!(
-        durations.get("candidate_fetch_classify_pack_ms").is_some(),
-        "durations should include candidate_fetch_classify_pack_ms"
+        durations.get("candidate_fetch_ms").is_some(),
+        "durations should include candidate_fetch_ms"
+    );
+    assert!(
+        durations.get("classify_ms").is_some(),
+        "durations should include classify_ms"
+    );
+    assert!(
+        durations.get("prompt_pack_ms").is_some(),
+        "durations should include prompt_pack_ms"
+    );
+    assert!(
+        durations.get("persist_ms").is_some(),
+        "durations should include persist_ms"
     );
 }
 
@@ -375,4 +390,146 @@ async fn trace_trigger_uses_scope_paths_shape() {
     // Verify trigger shape.
     let trigger = trace.trigger.expect("trigger present");
     assert_eq!(trigger["shape"], "scope_paths");
+}
+
+// ── Pure classification unit tests (no database required) ────────────────────
+//
+// These exercise the deterministic drop-reason classification helpers directly,
+// covering `dedupe` and `superseded_pruned` paths that are hard to trigger via
+// seeded database rows alone.
+
+use djinn_db::repositories::note::ScopeOverlapTraceCandidate;
+
+/// Build a `ScopeOverlapTraceCandidate` for testing.
+fn tc(
+    id: &str,
+    permalink: &str,
+    title: &str,
+    confidence: f64,
+    rank: i64,
+) -> ScopeOverlapTraceCandidate {
+    ScopeOverlapTraceCandidate {
+        id: id.to_string(),
+        permalink: permalink.to_string(),
+        title: title.to_string(),
+        folder: "patterns".to_string(),
+        note_type: "pattern".to_string(),
+        scope_paths: "[]".to_string(),
+        confidence,
+        rank,
+    }
+}
+
+#[test]
+fn classify_below_threshold_is_min_confidence() {
+    let candidates = vec![tc("n1", "p/n1", "Note 1", 0.1, 1)];
+    let production_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let result = classify_knowledge_candidates(&candidates, &production_ids);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].outcome, CandidateOutcome::Skipped);
+    assert_eq!(result[0].skipped_reason, Some(SkippedReason::MinConfidence));
+}
+
+#[test]
+fn classify_above_threshold_not_in_production_is_not_top_k() {
+    let candidates = vec![tc("n1", "p/n1", "Note 1", 0.5, 1)];
+    let production_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let result = classify_knowledge_candidates(&candidates, &production_ids);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].outcome, CandidateOutcome::Skipped);
+    assert_eq!(result[0].skipped_reason, Some(SkippedReason::NotTopK));
+}
+
+#[test]
+fn classify_in_production_set_is_injected() {
+    let candidates = vec![tc("n1", "p/n1", "Note 1", 0.9, 1)];
+    let production_ids: std::collections::HashSet<&str> = std::collections::HashSet::from(["n1"]);
+    let result = classify_knowledge_candidates(&candidates, &production_ids);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].outcome, CandidateOutcome::Injected);
+    assert_eq!(result[0].skipped_reason, None);
+}
+
+#[test]
+fn apply_budget_outcomes_dedupe_duplicate_permalink() {
+    // Two candidates with the same permalink that are both in the production set
+    // — the second should be dedupe'd.
+    let candidates_raw = vec![
+        tc("n1", "p/dup", "Dup 1", 0.9, 1),
+        tc("n2", "p/dup", "Dup 2", 0.8, 2),
+    ];
+    let production_ids: std::collections::HashSet<&str> =
+        std::collections::HashSet::from(["n1", "n2"]);
+    let classified = classify_knowledge_candidates(&candidates_raw, &production_ids);
+
+    // Build a packed result where both notes are injected (within budget).
+    let packed = crate::actors::slot::helpers::PackedKnowledgeNotes {
+        rendered: String::new(),
+        outcomes: vec![crate::actors::slot::helpers::NotePackOutcome {
+            permalink: "p/dup".to_string(),
+            title: "Dup 1".to_string(),
+            disposition: crate::actors::slot::helpers::NotePackDisposition::Injected,
+            estimated_rendered_chars: Some(100),
+            estimated_rendered_tokens: Some(25),
+        }],
+        total_injected_chars: 100,
+        total_injected_tokens: 25,
+    };
+
+    let notes: Vec<djinn_memory::Note> = Vec::new();
+    let result = apply_budget_outcomes(classified, &packed, &notes);
+
+    // First should be injected, second should be dedupe.
+    let injected = result
+        .iter()
+        .filter(|c| c.outcome == CandidateOutcome::Injected)
+        .count();
+    let deduped = result
+        .iter()
+        .filter(|c| c.skipped_reason == Some(SkippedReason::Dedupe))
+        .count();
+    assert_eq!(injected, 1, "one should remain injected");
+    assert_eq!(deduped, 1, "one should be dedupe'd");
+}
+
+#[test]
+fn apply_budget_outcomes_budget_pruned_injected_candidate() {
+    // A candidate in the production set whose packed disposition is BudgetPruned.
+    let candidates_raw = vec![tc("n1", "p/n1", "Note 1", 0.9, 1)];
+    let production_ids: std::collections::HashSet<&str> = std::collections::HashSet::from(["n1"]);
+    let classified = classify_knowledge_candidates(&candidates_raw, &production_ids);
+
+    let packed = crate::actors::slot::helpers::PackedKnowledgeNotes {
+        rendered: String::new(),
+        outcomes: vec![crate::actors::slot::helpers::NotePackOutcome {
+            permalink: "p/n1".to_string(),
+            title: "Note 1".to_string(),
+            disposition: crate::actors::slot::helpers::NotePackDisposition::BudgetPruned,
+            estimated_rendered_chars: None,
+            estimated_rendered_tokens: None,
+        }],
+        total_injected_chars: 0,
+        total_injected_tokens: 0,
+    };
+
+    let notes: Vec<djinn_memory::Note> = Vec::new();
+    let result = apply_budget_outcomes(classified, &packed, &notes);
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].outcome, CandidateOutcome::Skipped);
+    assert_eq!(result[0].skipped_reason, Some(SkippedReason::BudgetPruned));
+}
+
+#[test]
+fn classify_candidates_for_error_marks_all_search_error() {
+    let candidates = vec![
+        tc("n1", "p/n1", "Note 1", 0.9, 1),
+        tc("n2", "p/n2", "Note 2", 0.5, 2),
+    ];
+    let result = classify_knowledge_candidates_for_error(&candidates);
+    assert_eq!(result.len(), 2);
+    for c in &result {
+        assert_eq!(c.outcome, CandidateOutcome::Skipped);
+        assert_eq!(c.skipped_reason, Some(SkippedReason::SearchError));
+    }
 }
