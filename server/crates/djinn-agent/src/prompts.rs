@@ -10,6 +10,7 @@
 
 pub use djinn_roles::prompts::MAX_SYSTEM_PROMPT_CHARS;
 pub use djinn_roles::prompts::TaskContext;
+pub use djinn_roles::prompts::format_tool_line_with_description;
 pub use djinn_roles::prompts::format_tools_section;
 pub use djinn_roles::prompts::{
     ADVERSARY_TEMPLATE, ADVOCATE_TEMPLATE, ARCHITECT_TEMPLATE, BASE_TEMPLATE, CLUSTER_DOC_TEMPLATE,

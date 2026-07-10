@@ -911,3 +911,151 @@ fn proposal_address_prompt_preserves_existing_feedback_rules() {
         "proposal_address.md must keep the PROPOSAL_CONTEXT substitution marker"
     );
 }
+
+// ── Tool section: signatures only (wzz6 item 1) ─────────────────────────
+
+/// AC2: A known tool description string is absent from the prompt-side tools
+/// section while the signature (name + parameters) remains present.
+#[test]
+fn tools_section_omits_descriptions_and_retains_signatures() {
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Worker);
+    let section = format_tools_section(&schemas);
+
+    // A known tool description should NOT appear in the section.
+    assert!(
+        !section.contains("Execute shell commands in the task worktree"),
+        "tools section must omit tool descriptions; found 'Execute shell commands'"
+    );
+    assert!(
+        !section.contains("Show details of a work item"),
+        "tools section must omit task_show description"
+    );
+    assert!(
+        !section.contains("Search notes and proposals"),
+        "tools section must omit memory_search description"
+    );
+
+    // Tool signatures (name + params) must still be present.
+    assert!(
+        section.contains("`shell(command, timeout_ms?)`"),
+        "tools section must retain shell signature"
+    );
+    assert!(
+        section.contains("`task_show(id)`"),
+        "tools section must retain task_show signature"
+    );
+    assert!(
+        section.contains("`memory_search(query,"),
+        "tools section must retain memory_search signature"
+    );
+}
+
+/// AC2: Same check for the planner tools section — descriptions absent.
+#[test]
+fn planner_tools_section_omits_descriptions() {
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Planner);
+    let section = format_tools_section(&schemas);
+
+    assert!(
+        !section.contains("Reconcile a proposal's acceptance-criteria"),
+        "planner tools section must omit proposal_ac_set description"
+    );
+    assert!(
+        section.contains("`proposal_ac_set("),
+        "planner tools section must retain proposal_ac_set signature"
+    );
+}
+
+/// AC3: Rendered planner prompt shrinks by at least 8KB vs the old format
+/// baseline (which included per-tool descriptions).
+#[test]
+fn planner_prompt_shrinks_by_at_least_8kb() {
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Planner);
+
+    // Build a baseline tools section using the old format (with descriptions).
+    let baseline_tools = schemas
+        .iter()
+        .map(|s| format_tool_line_with_description(s))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let current_tools = format_tools_section(&schemas);
+    let tools_savings = baseline_tools.len().saturating_sub(current_tools.len());
+
+    // The shrinkage in the tools section propagates directly to the rendered
+    // prompt. Assert the tools section alone shrinks by >= 8KB.
+    assert!(
+        tools_savings >= 8 * 1024,
+        "planner tools section must shrink by >= 8KB; got {tools_savings} bytes savings \
+         (baseline {}, current {})",
+        baseline_tools.len(),
+        current_tools.len()
+    );
+}
+
+/// AC3: Rendered worker prompt shrinks by at least 4KB vs the old format
+/// baseline (which included per-tool descriptions).
+#[test]
+fn worker_prompt_shrinks_by_at_least_4kb() {
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Worker);
+
+    // Build a baseline tools section using the old format.
+    let baseline_tools = schemas
+        .iter()
+        .map(|s| format_tool_line_with_description(s))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let current_tools = format_tools_section(&schemas);
+    let tools_savings = baseline_tools.len().saturating_sub(current_tools.len());
+
+    assert!(
+        tools_savings >= 4 * 1024,
+        "worker tools section must shrink by >= 4KB; got {tools_savings} bytes savings \
+         (baseline {}, current {})",
+        baseline_tools.len(),
+        current_tools.len()
+    );
+}
+
+/// AC4: Verify that the tool schemas (passed to the provider at stream time)
+/// still carry `name`, `description`, and `inputSchema`.  The removal of
+/// descriptions from the prompt-side tools section must NOT affect the
+/// provider-side schemas.
+#[test]
+fn provider_tool_schemas_still_carry_descriptions() {
+    ensure_registry();
+
+    for agent_type in [
+        AgentType::Worker,
+        AgentType::Planner,
+        AgentType::Reviewer,
+        AgentType::Lead,
+    ] {
+        let schemas = crate::roles::tool_schemas_for(agent_type);
+        assert!(
+            !schemas.is_empty(),
+            "{:?} must have tool schemas",
+            agent_type
+        );
+        for schema in &schemas {
+            assert!(
+                schema.get("name").and_then(|v| v.as_str()).is_some(),
+                "{:?} tool schema must have 'name'",
+                agent_type
+            );
+            assert!(
+                schema.get("description").and_then(|v| v.as_str()).is_some(),
+                "{:?} tool schema must have 'description'",
+                agent_type
+            );
+            assert!(
+                schema.get("inputSchema").is_some(),
+                "{:?} tool schema must have 'inputSchema'",
+                agent_type
+            );
+        }
+    }
+}
