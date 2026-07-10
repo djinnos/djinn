@@ -8,17 +8,36 @@ use djinn_core::models::task_attempt::TaskAttemptPromptSummary;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
-    COMBINED_BRIEF_TOTAL_CHARS, build_reviewer_diff_context, build_role_code_graph_context,
-    derive_task_scope_paths, extract_worker_context, format_attempt_history,
-    format_knowledge_notes, recent_feedback,
+    COMBINED_BRIEF_TOTAL_CHARS, NotePackDisposition, build_reviewer_diff_context,
+    build_role_code_graph_context, derive_task_scope_paths, extract_worker_context,
+    format_attempt_history, pack_knowledge_notes, recent_feedback,
 };
 use crate::actors::slot::lifecycle::attempt_context;
 use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
 use crate::roles::AgentRole;
 use crate::skills::ResolvedSkill;
+use djinn_db::repositories::note::ScopeOverlapTraceCandidate;
+use djinn_db::repositories::retrieval_trace::{
+    CandidateOutcome, CreateRetrievalTraceParams, DEFAULT_CANDIDATE_CAP, RetrievalTraceEntryPoint,
+    RetrievalTraceRepository, SkippedReason, TraceCandidate,
+};
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 use tracing::Instrument;
+
+/// Char budget for the inline knowledge-notes block (matches the existing
+/// `format_knowledge_notes(&notes, 2000)` call site).
+const KNOWLEDGE_NOTES_BUDGET_CHARS: usize = 2000;
+
+/// Note-type filter used for both the production knowledge query and the
+/// per-event trace-candidate universe (per task guidance).
+const KNOWLEDGE_NOTE_TYPES: &[&str] = &["pattern", "pitfall", "case"];
+
+/// Production minimum confidence threshold for the knowledge query (`0.3`).
+const KNOWLEDGE_MIN_CONFIDENCE: f64 = 0.3;
+
+/// Production top-K cap for knowledge notes (per task guidance).
+const KNOWLEDGE_PRODUCTION_LIMIT: usize = 10;
 
 /// Fully-assembled prompt context for a single role session.
 #[allow(dead_code)]
@@ -376,7 +395,217 @@ async fn load_epic_context(
     Some(ctx_lines.join("\n"))
 }
 
+/// Per-candidate trace row built by [`classify_trace_candidate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TraceCandidateOutcome {
+    outcome: CandidateOutcome,
+    skipped_reason: Option<SkippedReason>,
+}
+
+/// Deterministic, pure classification of a single
+/// [`ScopeOverlapTraceCandidate`] row against the production top-K + threshold
+/// and the formatter's `BudgetPruned` set.
+///
+/// Rules (per task guidance):
+/// 1. `confidence < min_confidence` ⇒ `Skipped(MinConfidence)`.
+/// 2. `rank > production_limit` ⇒ `Skipped(NotTopK)`.
+/// 3. Candidate is in the production top-K (above rule false):
+///    - Permalink present in `budget_pruned_permalinks` ⇒ `Skipped(BudgetPruned)`.
+///    - Otherwise ⇒ `Injected` (no `skipped_reason`).
+/// 4. Trace-candidate universe contains notes not in production (e.g. below
+///    threshold or out of top-K). Those fall under rules 1/2 and are never
+///    classified as `Injected`.
+fn classify_trace_candidate(
+    candidate: &ScopeOverlapTraceCandidate,
+    min_confidence: f64,
+    production_limit: usize,
+    budget_pruned_permalinks: &[String],
+) -> TraceCandidateOutcome {
+    // Rule 1: below the production confidence threshold.
+    if candidate.confidence < min_confidence {
+        return TraceCandidateOutcome {
+            outcome: CandidateOutcome::Skipped,
+            skipped_reason: Some(SkippedReason::MinConfidence),
+        };
+    }
+    // Rule 2: above threshold but outside the production top-K. Note that the
+    // trace-candidate query uses `confidence DESC, updated_at DESC` ordering
+    // and `rank` is 1-based: `rank > production_limit` ⇒ off the top-K list.
+    if (candidate.rank as usize) > production_limit {
+        return TraceCandidateOutcome {
+            outcome: CandidateOutcome::Skipped,
+            skipped_reason: Some(SkippedReason::NotTopK),
+        };
+    }
+    // Rule 3: candidate is in production top-K. Distinguish between injected
+    // notes and formatter-pruned notes.
+    if budget_pruned_permalinks
+        .iter()
+        .any(|p| p == &candidate.permalink)
+    {
+        return TraceCandidateOutcome {
+            outcome: CandidateOutcome::Skipped,
+            skipped_reason: Some(SkippedReason::BudgetPruned),
+        };
+    }
+    // Rule 3 (Injected): no skipped reason allowed for injected candidates.
+    TraceCandidateOutcome {
+        outcome: CandidateOutcome::Injected,
+        skipped_reason: None,
+    }
+}
+
+/// Convert a [`ScopeOverlapTraceCandidate`] row into the persistence-layer
+/// [`TraceCandidate`] DTO using the supplied classification outcome.
+///
+/// This is the deterministic 1:1 mapping between the trace-universe row
+/// produced by `query_by_scope_overlap_trace_candidates` and the JSONB
+/// `TraceCandidate` shape consumed by `RetrievalTraceRepository::insert`.
+/// `outcome` and `skipped_reason` are derived separately by
+/// [`classify_trace_candidate`].
+fn scope_overlap_candidate_to_trace_candidate(
+    candidate: &ScopeOverlapTraceCandidate,
+    outcome: TraceCandidateOutcome,
+) -> TraceCandidate {
+    let rank_i32 = i32::try_from(candidate.rank).unwrap_or(i32::MAX);
+    // `scope_paths` is stored as a JSONB-encoded text column; round-trip it
+    // through `serde_json` so the persisted shape matches the rest of the
+    // codebase.  Fall back to a JSON string when parsing fails so we never
+    // silently drop the value.
+    let scope_value = serde_json::from_str::<serde_json::Value>(&candidate.scope_paths)
+        .unwrap_or_else(|_| serde_json::Value::String(candidate.scope_paths.clone()));
+    let scope_object = serde_json::json!({
+        "scope_paths": scope_value,
+        "note_type": candidate.note_type,
+        "folder": candidate.folder,
+    });
+    TraceCandidate {
+        note_id: candidate.id.clone(),
+        permalink: Some(candidate.permalink.clone()),
+        title: Some(candidate.title.clone()),
+        outcome: outcome.outcome,
+        rank: Some(rank_i32),
+        confidence: Some(candidate.confidence),
+        skipped_reason: outcome.skipped_reason,
+        source: Some("scope_overlap".to_string()),
+        scope: Some(scope_object),
+    }
+}
+
+/// Build a JSONB `serde_json::Value` candidate array for the persistence call.
+///
+/// Serialization is the one place where bad inputs (e.g. invalid `scope_paths`
+/// JSON) become a trace failure; we log a `tracing::warn!` on serialization
+/// errors and fall back to an empty array so the upstream call site can still
+/// succeed fail-open.
+fn trace_candidates_to_json_value(candidates: &[TraceCandidate]) -> serde_json::Value {
+    match serde_json::to_value(candidates) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "load_knowledge_context: failed to serialize trace candidates; persisting empty array"
+            );
+            serde_json::Value::Array(Vec::new())
+        }
+    }
+}
+
+/// Persist a [`RetrievalTraceEntryPoint::LoadKnowledgeContext`] row.
+///
+/// All errors from the persistence path (production search, trace-universe
+/// search, candidate serialization, repository insert) are downgraded to
+/// `tracing::warn!`/`tracing::debug!` so the prompt assembly never aborts.
+/// The function returns `()` and never panics.
+#[allow(clippy::too_many_arguments)]
+async fn persist_knowledge_context_trace(
+    app_state: &AgentContext,
+    task: &Task,
+    task_paths: &[String],
+    production_limit: usize,
+    min_confidence: f64,
+    note_types: &[&str],
+    candidates: Vec<TraceCandidate>,
+    candidate_cap_exceeded: bool,
+    production_search_ms: u128,
+    trace_search_ms: u128,
+    format_ms: u128,
+    estimated_injected_tokens: i32,
+    trace_query_error: Option<String>,
+) {
+    let persist_start = tokio::time::Instant::now();
+    let trace_repo = RetrievalTraceRepository::new(app_state.db.clone());
+    let candidates_json = trace_candidates_to_json_value(&candidates);
+    // `durations_ms` is consumed once when constructing `CreateRetrievalTraceParams`
+    // (a borrowed JSON document). Persistence duration is reported as
+    // `persistence_ms` so callers can diagnose insert latency.
+    let persistence_ms_at_call = persist_start.elapsed().as_millis();
+    let durations_ms = serde_json::json!({
+        "production_search_ms": production_search_ms,
+        "trace_search_ms": trace_search_ms,
+        "format_ms": format_ms,
+        "persistence_ms": persistence_ms_at_call,
+    });
+    // Build the trigger context — opaque JSON document carrying the task ids
+    // and scope parameters used to classify these candidates.
+    let note_types_json: Vec<serde_json::Value> = note_types
+        .iter()
+        .map(|t| serde_json::Value::String((*t).to_string()))
+        .collect();
+    let mut trigger = serde_json::json!({
+        "task_id": task.id,
+        "short_id": task.short_id,
+        "scope_paths": task_paths,
+        "min_confidence": min_confidence,
+        "production_limit": production_limit,
+        "note_types": note_types_json,
+    });
+    if let Some(err) = trace_query_error {
+        trigger["trace_query_error"] = serde_json::Value::String(err);
+    }
+    let params = CreateRetrievalTraceParams {
+        project_id: &task.project_id,
+        session_id: None,
+        task_run_id: None,
+        task_id: Some(&task.id),
+        entry_point: RetrievalTraceEntryPoint::LoadKnowledgeContext,
+        trigger: Some(&trigger),
+        candidates: &candidates_json,
+        candidate_cap: DEFAULT_CANDIDATE_CAP,
+        candidate_cap_exceeded,
+        sampling_metadata: None,
+        durations_ms: &durations_ms,
+        estimated_injected_tokens,
+    };
+    match trace_repo.insert(params).await {
+        Ok(_) => {
+            tracing::debug!(
+                task_id = %task.short_id,
+                candidate_count = candidates.len(),
+                candidate_cap_exceeded,
+                "load_knowledge_context: persisted retrieval trace"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "load_knowledge_context: failed to persist retrieval trace (fail-open)"
+            );
+        }
+    }
+}
+
 /// Load knowledge context from scope-matched notes. Returns None on error/empty.
+///
+/// This wraps the production `query_by_scope_overlap` with a parallel
+/// `query_by_scope_overlap_trace_candidates` call and persists a
+/// `RetrievalTraceEntryPoint::LoadKnowledgeContext` row classifying every
+/// candidate deterministically. The traced classification is **fail-open**:
+/// any trace-path error (search failure, serialization failure, persistence
+/// failure) only emits `tracing::warn!` and never changes the returned
+/// knowledge-context string. The rendered prompt remains byte-identical to
+/// the pre-instrumentation output.
 async fn load_knowledge_context(
     task: &Task,
     epic_context: Option<&str>,
@@ -384,27 +613,139 @@ async fn load_knowledge_context(
 ) -> Option<String> {
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_paths = derive_task_scope_paths(task, epic_context);
-    match note_repo
-        .query_by_scope_overlap(
-            &task.project_id,
-            &task_paths,
-            &["pattern", "pitfall", "case"],
-            0.3,
-            10,
-        )
-        .await
-    {
-        Ok(notes) if !notes.is_empty() => Some(format_knowledge_notes(&notes, 2000)),
-        Ok(_) => None,
+    // Run both queries in parallel so the trace fetch does not extend the
+    // wall-clock latency of the load_knowledge_context phase.
+    let prod_query_start = tokio::time::Instant::now();
+    let trace_query_start = tokio::time::Instant::now();
+    let prod_fut = note_repo.query_by_scope_overlap(
+        &task.project_id,
+        &task_paths,
+        KNOWLEDGE_NOTE_TYPES,
+        KNOWLEDGE_MIN_CONFIDENCE,
+        KNOWLEDGE_PRODUCTION_LIMIT,
+    );
+    // The trace-candidate query intentionally omits the production min
+    // confidence and limit (per its docs in `repositories/note/search.rs`),
+    // allowing downstream classifiers to label `min_confidence` and `not_top_k`
+    // drops.  The candidate cap [`DEFAULT_CANDIDATE_CAP`] is the only bound
+    // applied.
+    let trace_fut = note_repo.query_by_scope_overlap_trace_candidates(
+        &task.project_id,
+        &task_paths,
+        KNOWLEDGE_NOTE_TYPES,
+        DEFAULT_CANDIDATE_CAP as usize,
+    );
+    let (prod_result, trace_result) = tokio::join!(prod_fut, trace_fut);
+    let prod_search_ms = prod_query_start.elapsed().as_millis();
+    let trace_search_ms = trace_query_start.elapsed().as_millis();
+
+    // Capture the trace-candidate error before moving `trace_result`.
+    let trace_query_error_msg = trace_result.as_ref().err().map(|e| e.to_string());
+
+    // Production search errors fall back to None — same as before.
+    let notes = match prod_result {
+        Ok(notes) => notes,
         Err(e) => {
             tracing::debug!(
                 task_id = %task.short_id,
                 error = %e,
                 "Lifecycle: failed to query knowledge context"
             );
-            None
+            // We still try to persist a trace row recording the failure so the
+            // `memory_recall_trace` MCP tooling can surface it. Fail-open:
+            // any persistence error here is logged and swallowed.
+            persist_knowledge_context_trace(
+                app_state,
+                task,
+                &task_paths,
+                KNOWLEDGE_PRODUCTION_LIMIT,
+                KNOWLEDGE_MIN_CONFIDENCE,
+                KNOWLEDGE_NOTE_TYPES,
+                Vec::new(),
+                false,
+                prod_search_ms,
+                trace_search_ms,
+                0,
+                0,
+                Some(format!("production_search_error: {e}")),
+            )
+            .await;
+            return None;
         }
-    }
+    };
+
+    // Pack the notes into the formatter outcome.  `pack_knowledge_notes`
+    // returns a `rendered` string byte-identical to `format_knowledge_notes`
+    // (see `djinn-slot/src/helpers/code_context.rs`), so this swap preserves
+    // the existing rendered output.
+    let format_start = tokio::time::Instant::now();
+    let packed = pack_knowledge_notes(&notes, KNOWLEDGE_NOTES_BUDGET_CHARS);
+    let format_ms = format_start.elapsed().as_millis();
+
+    let rendered: Option<String> = if notes.is_empty() {
+        None
+    } else {
+        // The packer may legitimately produce an empty rendered string when
+        // the budget exhausts on the first note (rare in practice with 2000
+        // chars, but possible if a note's summary is enormous). Preserve the
+        // pre-instrumentation contract: `Some(packed.rendered)` for any
+        // non-empty input, even when budget caused every line to drop.
+        Some(packed.rendered)
+    };
+
+    // Persist the trace row with deterministic candidate classification.
+    // Token estimate uses the existing char-based heuristic from the
+    // packer (`total_injected_chars / 4`); it's a rough approximation but
+    // matches what `format_knowledge_notes` consumers already see.
+    let candidate_rows: Vec<ScopeOverlapTraceCandidate> = match trace_result {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "load_knowledge_context: trace-candidate search failed; \
+                 persisting search_error trace without candidate rows (fail-open)"
+            );
+            Vec::new()
+        }
+    };
+    let budget_pruned_permalinks: Vec<String> = packed
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.disposition == NotePackDisposition::BudgetPruned)
+        .map(|outcome| outcome.permalink.clone())
+        .collect();
+    let capped = candidate_rows.len() >= DEFAULT_CANDIDATE_CAP as usize;
+    let candidates: Vec<TraceCandidate> = candidate_rows
+        .iter()
+        .map(|row| {
+            let outcome = classify_trace_candidate(
+                row,
+                KNOWLEDGE_MIN_CONFIDENCE,
+                KNOWLEDGE_PRODUCTION_LIMIT,
+                &budget_pruned_permalinks,
+            );
+            scope_overlap_candidate_to_trace_candidate(row, outcome)
+        })
+        .collect();
+    persist_knowledge_context_trace(
+        app_state,
+        task,
+        &task_paths,
+        KNOWLEDGE_PRODUCTION_LIMIT,
+        KNOWLEDGE_MIN_CONFIDENCE,
+        KNOWLEDGE_NOTE_TYPES,
+        candidates,
+        capped,
+        prod_search_ms,
+        trace_search_ms,
+        format_ms,
+        packed.total_injected_tokens.min(i32::MAX as usize) as i32,
+        trace_query_error_msg,
+    )
+    .await;
+
+    rendered
 }
 
 /// Build full prompt context for one role session. Non-fatal: DB queries fall back to None.

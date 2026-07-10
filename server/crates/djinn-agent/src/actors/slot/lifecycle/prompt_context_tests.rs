@@ -275,6 +275,280 @@ async fn load_knowledge_context_returns_none_when_no_notes() {
     );
 }
 
+// ── Retrieval trace instrumentation tests for `load_knowledge_context`
+// (epic 3paf / task 0lmq). These tests exercise the deterministic
+// classification helper (`classify_trace_candidate`) and the fail-open
+// persistence path. They do not assert exact duration values (those are
+// wall-clock dependent) — the contract is "function returns the same
+// prompt/no-prompt result it would have returned before instrumentation and
+// logs only warnings/debug as appropriate."
+
+mod load_knowledge_context_trace_tests {
+    use super::*;
+    use djinn_db::repositories::note::ScopeOverlapTraceCandidate;
+    use djinn_db::repositories::retrieval_trace::{
+        CandidateOutcome, RetrievalTraceEntryPoint, RetrievalTraceListFilter,
+        RetrievalTraceRepository, SkippedReason, TraceCandidate, validate_candidates,
+    };
+
+    fn make_candidate(
+        id: &str,
+        permalink: &str,
+        confidence: f64,
+        rank: i64,
+    ) -> ScopeOverlapTraceCandidate {
+        ScopeOverlapTraceCandidate {
+            id: id.to_string(),
+            permalink: permalink.to_string(),
+            title: format!("title for {id}"),
+            folder: "test/folder".to_string(),
+            note_type: "pattern".to_string(),
+            scope_paths: "[\"test/folder\"]".to_string(),
+            confidence,
+            rank,
+        }
+    }
+
+    #[test]
+    fn classify_below_min_confidence_returns_min_confidence() {
+        let candidate = make_candidate("note-1", "decisions/note-1", 0.20, 1);
+        let outcome = classify_trace_candidate(&candidate, 0.3, 10, &[]);
+        assert_eq!(outcome.outcome, CandidateOutcome::Skipped);
+        assert_eq!(outcome.skipped_reason, Some(SkippedReason::MinConfidence));
+    }
+
+    #[test]
+    fn classify_above_threshold_outside_top_k_returns_not_top_k() {
+        let candidate = make_candidate("note-2", "decisions/note-2", 0.55, 11);
+        let outcome = classify_trace_candidate(&candidate, 0.3, 10, &[]);
+        assert_eq!(outcome.outcome, CandidateOutcome::Skipped);
+        assert_eq!(outcome.skipped_reason, Some(SkippedReason::NotTopK));
+    }
+
+    #[test]
+    fn classify_in_top_k_and_not_budget_pruned_returns_injected() {
+        let candidate = make_candidate("note-3", "decisions/note-3", 0.85, 1);
+        let outcome = classify_trace_candidate(&candidate, 0.3, 10, &[]);
+        assert_eq!(outcome.outcome, CandidateOutcome::Injected);
+        assert_eq!(outcome.skipped_reason, None);
+    }
+
+    #[test]
+    fn classify_in_top_k_but_budget_pruned_returns_budget_pruned() {
+        let candidate = make_candidate("note-4", "decisions/note-4", 0.85, 1);
+        let pruned = vec!["decisions/note-4".to_string()];
+        let outcome = classify_trace_candidate(&candidate, 0.3, 10, &pruned);
+        assert_eq!(outcome.outcome, CandidateOutcome::Skipped);
+        assert_eq!(outcome.skipped_reason, Some(SkippedReason::BudgetPruned));
+    }
+
+    #[test]
+    fn classify_rule_precedence_uses_min_confidence_over_not_top_k() {
+        let candidate = make_candidate("note-5", "decisions/note-5", 0.10, 99);
+        let outcome = classify_trace_candidate(&candidate, 0.3, 10, &[]);
+        assert_eq!(outcome.outcome, CandidateOutcome::Skipped);
+        assert_eq!(outcome.skipped_reason, Some(SkippedReason::MinConfidence));
+    }
+
+    #[test]
+    fn scope_overlap_to_trace_candidate_round_trips_essential_fields() {
+        let candidate = make_candidate("note-6", "decisions/note-6", 0.75, 3);
+        let outcome = classify_trace_candidate(&candidate, 0.3, 10, &[]);
+        let trace_candidate = scope_overlap_candidate_to_trace_candidate(&candidate, outcome);
+        assert_eq!(trace_candidate.note_id, "note-6");
+        assert_eq!(
+            trace_candidate.permalink.as_deref(),
+            Some("decisions/note-6")
+        );
+        assert_eq!(trace_candidate.rank, Some(3));
+        assert_eq!(trace_candidate.confidence, Some(0.75));
+        assert_eq!(trace_candidate.outcome, CandidateOutcome::Injected);
+        assert_eq!(trace_candidate.skipped_reason, None);
+        assert_eq!(trace_candidate.source.as_deref(), Some("scope_overlap"));
+    }
+
+    async fn seed_active_notes(
+        db: &Database,
+        note_repo: &NoteRepository,
+        project_id: &str,
+        notes: &[(&str, f64)],
+    ) -> Vec<ScopeOverlapTraceCandidate> {
+        let mut rows = Vec::new();
+        for (idx, (title, confidence)) in notes.iter().enumerate() {
+            let note = note_repo
+                .create_with_scope(project_id, title, "content", "pattern", None, "[]", "[]")
+                .await
+                .expect("create note");
+            sqlx::query("UPDATE notes SET confidence = $1 WHERE id = $2")
+                .bind(*confidence)
+                .bind(&note.id)
+                .execute(db.pool())
+                .await
+                .expect("set confidence");
+            rows.push(ScopeOverlapTraceCandidate {
+                id: note.id.clone(),
+                permalink: note.permalink.clone(),
+                title: note.title.clone(),
+                folder: note.folder.clone(),
+                note_type: note.note_type.clone(),
+                scope_paths: note.scope_paths.clone(),
+                confidence: *confidence,
+                rank: (idx + 1) as i64,
+            });
+        }
+        rows
+    }
+
+    #[tokio::test]
+    async fn load_knowledge_context_persists_load_trace_row_for_global_notes() {
+        let db = Database::ephemeral().await.expect("create ephemeral db");
+        let events = EventBus::noop();
+        let task = create_project_epic_task(&db, &events, "Trace row epic", "Trace row task").await;
+        let project_id = task.project_id.clone();
+
+        let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let seeded = seed_active_notes(
+            &db,
+            &note_repo,
+            &project_id,
+            &[("Global A", 0.85), ("Global B", 0.75)],
+        )
+        .await;
+        assert_eq!(seeded.len(), 2);
+
+        let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+        let trace_repo = RetrievalTraceRepository::new(db.clone());
+        let pre_list = trace_repo
+            .list_by_project(
+                &project_id,
+                RetrievalTraceListFilter {
+                    entry_point: Some(RetrievalTraceEntryPoint::LoadKnowledgeContext),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("pre list");
+        assert_eq!(
+            pre_list.len(),
+            0,
+            "no trace rows before instrumentation call"
+        );
+
+        let rendered = load_knowledge_context(&task, None, &app_state)
+            .await
+            .expect("rendered should be Some when notes exist");
+        assert!(
+            !rendered.is_empty(),
+            "rendered knowledge context should be non-empty"
+        );
+        // Regression guard for the `format_knowledge_notes` →
+        // `pack_knowledge_notes` swap: the rendered text must still include
+        // the note titles so callers (and downstream tooling) can identify
+        // the injected notes by content.
+        assert!(rendered.contains("Global A"));
+        assert!(rendered.contains("Global B"));
+
+        let post_list = trace_repo
+            .list_by_project(
+                &project_id,
+                RetrievalTraceListFilter {
+                    entry_point: Some(RetrievalTraceEntryPoint::LoadKnowledgeContext),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("post list");
+        assert_eq!(
+            post_list.len(),
+            1,
+            "exactly one LoadKnowledgeContext trace row"
+        );
+        let row = &post_list[0];
+        assert_eq!(row.project_id, project_id);
+        assert_eq!(row.task_id.as_deref(), Some(task.id.as_str()));
+        assert_eq!(row.entry_point, "load_knowledge_context");
+
+        let trigger = row.trigger.as_ref().expect("trigger should be Some");
+        assert_eq!(trigger["task_id"].as_str(), Some(task.id.as_str()));
+        assert_eq!(trigger["short_id"].as_str(), Some(task.short_id.as_str()));
+        assert!(
+            trigger["min_confidence"].as_f64().is_some(),
+            "min_confidence recorded"
+        );
+        assert_eq!(
+            trigger["min_confidence"].as_f64().unwrap(),
+            KNOWLEDGE_MIN_CONFIDENCE
+        );
+        assert_eq!(
+            trigger["production_limit"].as_u64().unwrap(),
+            KNOWLEDGE_PRODUCTION_LIMIT as u64
+        );
+        assert!(trigger["scope_paths"].is_array());
+        assert!(trigger["note_types"].is_array());
+
+        let durations = &row.durations_ms;
+        for phase in ["production_search_ms", "trace_search_ms", "format_ms"] {
+            assert!(durations.get(phase).is_some(), "{phase} duration recorded");
+        }
+
+        let persisted: Vec<TraceCandidate> = row.candidates_typed();
+        validate_candidates(&persisted).expect("persisted candidates must validate");
+        assert_eq!(persisted.len(), 2, "two trace candidates persisted");
+
+        for candidate in &persisted {
+            assert_eq!(
+                candidate.outcome,
+                CandidateOutcome::Injected,
+                "global seed note {id} should be Injected",
+                id = candidate.note_id
+            );
+            assert_eq!(candidate.skipped_reason, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn load_knowledge_context_returns_none_on_no_notes_without_panicking() {
+        let db = Database::ephemeral().await.expect("create ephemeral db");
+        let events = EventBus::noop();
+        let task =
+            create_project_epic_task(&db, &events, "No notes trace epic", "No notes trace task")
+                .await;
+        let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+        assert!(
+            load_knowledge_context(&task, None, &app_state)
+                .await
+                .is_none()
+        );
+        // After the call, the production query returned an empty result but
+        // the function still emits a `LoadKnowledgeContext` trace row with
+        // an empty candidates array so `memory_recall_trace` tooling can
+        // diagnose why a given task surfaced no knowledge (no matches vs.
+        // missing instrumentation). The pre-instrumentation contract — the
+        // function returns the same `None` it would have returned before
+        // — is the important part; the trace row is supplementary.
+        let trace_repo = RetrievalTraceRepository::new(db);
+        let post_list = trace_repo
+            .list_by_project(
+                &task.project_id,
+                RetrievalTraceListFilter {
+                    entry_point: Some(RetrievalTraceEntryPoint::LoadKnowledgeContext),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("post list");
+        assert_eq!(post_list.len(), 1, "one trace row even for empty result");
+        let row = &post_list[0];
+        assert_eq!(row.entry_point, "load_knowledge_context");
+        let persisted: Vec<TraceCandidate> = row.candidates_typed();
+        assert!(
+            persisted.is_empty(),
+            "no candidates persisted for empty result"
+        );
+    }
+}
+
 #[tokio::test]
 async fn load_epic_context_includes_blocker_and_sibling_sections_in_order() {
     let db = Database::ephemeral().await.expect("create ephemeral db");
