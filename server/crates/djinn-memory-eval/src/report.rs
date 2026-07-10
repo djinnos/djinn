@@ -65,6 +65,10 @@ pub struct Phase1Baseline {
     pub age_bucket_recall: HashMap<AgeBucket, RecallAtK>,
     /// Per-query top-k ranks, keyed by suite name.
     pub per_query_ranks: HashMap<String, Vec<QueryRankBaseline>>,
+    /// Signal comparison records (graph/entity and task-affinity assertions).
+    /// Proves which queries/cases demonstrate rank-change coverage for each signal.
+    #[serde(default)]
+    pub signal_comparisons: Vec<crate::run::SignalRankComparison>,
     /// Threshold policy version.
     pub threshold_policy_version: String,
 }
@@ -315,6 +319,7 @@ pub fn build_baseline(
         aggregate_metrics: report.aggregate_metrics.clone(),
         age_bucket_recall: report.age_bucket_recall.clone(),
         per_query_ranks,
+        signal_comparisons: report.signal_comparisons.clone(),
         threshold_policy_version: report.threshold_policy_version.clone(),
     }
 }
@@ -474,6 +479,7 @@ mod tests {
             aggregate_metrics: AggregateMetrics::default(),
             age_bucket_recall: HashMap::new(),
             per_query_ranks: HashMap::new(),
+            signal_comparisons: vec![],
             threshold_policy_version: THRESHOLD_POLICY_VERSION.to_string(),
         };
         let json = serde_json::to_string_pretty(&baseline).unwrap();
@@ -518,6 +524,7 @@ mod tests {
             },
             age_bucket_recall: HashMap::new(),
             per_query_ranks: HashMap::new(),
+            signal_comparisons: vec![],
             threshold_policy_version: THRESHOLD_POLICY_VERSION.to_string(),
         };
 

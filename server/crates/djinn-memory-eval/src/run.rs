@@ -686,11 +686,9 @@ fn find_best_graph_rank(
 /// Assert that at least one graph/entity signal comparison changed a rank,
 /// and at least one task-affinity signal comparison changed a rank.
 ///
-/// **Phase 1 behaviour:** graph/entity comparisons are *recorded* but
-/// are a **warning**, not a hard failure, because the search pipeline's
-/// RRF fusion may absorb graph proximity into the combined score and the
-/// fixture corpus may not yet surface rank-level differences.
-/// Task-affinity comparisons remain a hard assertion.
+/// Both graph/entity and task-affinity are **hard assertions**: if comparisons
+/// are present but none changed rank, the run fails. This prevents silent
+/// collapse to lexical/vector/temporal-only behavior.
 fn assert_signal_effects(output: &RunOutput) -> Result<()> {
     // Check graph/entity signal
     let graph_changed = output
@@ -719,13 +717,8 @@ fn assert_signal_effects(output: &RunOutput) -> Result<()> {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        // Phase 1: graph proximity comparisons are recorded for the baseline
-        // but do not gate the initial snapshot.  Graph proximity still matters
-        // for build_context and will gate once fixtures are refined to surface
-        // rank-level differences in the search path.
-        warn!(
-            "graph/entity signal comparisons exist ({} comparisons) but none showed rank change — \
-             recorded for baseline but not gating Phase 1: {}",
+        bail!(
+            "graph/entity signal comparisons exist ({} comparisons) but none showed rank change: {}",
             graph_comparisons.len(),
             details
         );
