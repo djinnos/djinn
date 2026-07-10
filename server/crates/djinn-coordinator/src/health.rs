@@ -1499,6 +1499,8 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
 
     let task_run_repo = djinn_db::repositories::task_run::TaskRunRepository::new(db.clone());
 
+    let now = SystemClock::new().now();
+
     for job in jobs {
         let task_run_id = job.task_run_id.trim();
         if task_run_id.is_empty() {
@@ -1548,6 +1550,29 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
                 db_classification = classification.db_classification,
                 reason,
                 "CoordinatorActor: task-run Job backstop preserved live task-run Job"
+            );
+            continue;
+        }
+
+        // Boot-race grace: the worker inserts the task_runs row (and later the
+        // session row) from INSIDE the pod via the create_task_run RPC, i.e.
+        // only after pod scheduling + image pull + worker boot — which can take
+        // minutes. Every new Job therefore has a legitimate window where its DB
+        // owner rows are still "absent" (or the run row exists but no session
+        // yet). Reaping in that window kills sessions before they start, so we
+        // skip young Jobs in the boot-race classes. Terminal task_run statuses
+        // and interrupted/completed sessions are genuinely dead and reaped
+        // regardless of age (handled by the eligibility check below).
+        if is_boot_race_classification(classification.db_classification)
+            && job_within_reap_grace(job.created_at, now, TASKRUN_JOB_REAP_GRACE)
+        {
+            tracing::debug!(
+                job_name = %job.job_name,
+                task_run_id = %task_run_id,
+                db_classification = "young_job_grace",
+                original_classification = classification.db_classification,
+                reason,
+                "CoordinatorActor: task-run Job backstop skipped young Job within boot-race grace window"
             );
             continue;
         }
@@ -1651,6 +1676,44 @@ fn classify_taskrun_job_owner(
     }
 }
 
+/// Grace window before the backstop will reap a task-run Job whose DB owner
+/// rows are still absent. Sized generously (pod scheduling + image pull +
+/// worker boot can take minutes) because the worker only inserts the
+/// `task_runs` row from inside the pod after boot; reaping sooner races the
+/// worker and kills the session before it starts.
+const TASKRUN_JOB_REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The classifications that can legitimately appear during pod boot, before the
+/// worker has inserted its DB owner rows: no `task_runs` row at all
+/// (`"absent"`), or a running `task_runs` row whose session row hasn't been
+/// created yet (`"task_run_running_without_session"`). Only these classes are
+/// age-gated; every other non-`keep_job` class is a genuinely dead owner.
+fn is_boot_race_classification(db_classification: &str) -> bool {
+    matches!(
+        db_classification,
+        "absent" | "task_run_running_without_session"
+    )
+}
+
+/// True when a Job is younger than `grace` and therefore still inside the
+/// boot-race window. A missing `created_at` is treated as old (not within
+/// grace) so the backstop still reaps Jobs it cannot age — preserving the
+/// cleanup guarantee. A `created_at` in the future (clock skew) is treated as
+/// within grace, since such a Job cannot yet have aged out.
+fn job_within_reap_grace(
+    created_at: Option<std::time::SystemTime>,
+    now: std::time::SystemTime,
+    grace: std::time::Duration,
+) -> bool {
+    match created_at {
+        Some(created) => match now.duration_since(created) {
+            Ok(age) => age < grace,
+            Err(_) => true,
+        },
+        None => false,
+    }
+}
+
 fn taskrun_status_classification(status: &str) -> &'static str {
     match status {
         "completed" => "task_run_completed",
@@ -1658,6 +1721,115 @@ fn taskrun_status_classification(status: &str) -> &'static str {
         "interrupted" => "task_run_interrupted",
         "running" => "task_run_running_without_live_session",
         _ => "task_run_unknown_status",
+    }
+}
+
+#[cfg(test)]
+mod taskrun_backstop_grace_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    /// Mirror of the loop's skip decision: a Job is spared only when its DB
+    /// classification is a boot-race class AND it is still within the grace
+    /// window.
+    fn would_skip_reap(
+        db_classification: &str,
+        created_at: Option<SystemTime>,
+        now: SystemTime,
+        grace: Duration,
+    ) -> bool {
+        is_boot_race_classification(db_classification)
+            && job_within_reap_grace(created_at, now, grace)
+    }
+
+    fn base() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    }
+
+    #[test]
+    fn young_absent_job_is_kept() {
+        let now = base();
+        let created = now - Duration::from_secs(30);
+        assert!(
+            would_skip_reap("absent", Some(created), now, TASKRUN_JOB_REAP_GRACE),
+            "a 30s-old Job with no task_runs row must be spared during boot"
+        );
+    }
+
+    #[test]
+    fn young_running_without_session_job_is_kept() {
+        let now = base();
+        let created = now - Duration::from_secs(60);
+        assert!(
+            would_skip_reap(
+                "task_run_running_without_session",
+                Some(created),
+                now,
+                TASKRUN_JOB_REAP_GRACE
+            ),
+            "a running task_run whose session row is not yet inserted must be spared during boot"
+        );
+    }
+
+    #[test]
+    fn old_absent_job_is_reaped() {
+        let now = base();
+        let created = now - (TASKRUN_JOB_REAP_GRACE + Duration::from_secs(1));
+        assert!(
+            !would_skip_reap("absent", Some(created), now, TASKRUN_JOB_REAP_GRACE),
+            "an aged-out Job with no DB owner is genuinely orphaned and must be reaped"
+        );
+    }
+
+    #[test]
+    fn young_terminal_task_run_job_is_reaped() {
+        let now = base();
+        let created = now - Duration::from_secs(5);
+        // Terminal task_run statuses are dead regardless of age.
+        for class in [
+            "task_run_completed",
+            "task_run_failed",
+            "task_run_interrupted",
+            "session_interrupted",
+            "session_completed",
+        ] {
+            assert!(
+                !would_skip_reap(class, Some(created), now, TASKRUN_JOB_REAP_GRACE),
+                "terminal classification {class} must be reaped even for a young Job"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_timestamp_is_treated_as_old() {
+        let now = base();
+        assert!(
+            !job_within_reap_grace(None, now, TASKRUN_JOB_REAP_GRACE),
+            "a Job with no creation timestamp must be eligible for reaping"
+        );
+    }
+
+    #[test]
+    fn future_timestamp_is_treated_as_young() {
+        let now = base();
+        let created = now + Duration::from_secs(120);
+        assert!(
+            job_within_reap_grace(Some(created), now, TASKRUN_JOB_REAP_GRACE),
+            "clock skew (future creation time) must not make a Job eligible for reaping"
+        );
+    }
+
+    #[test]
+    fn boot_race_classification_membership() {
+        assert!(is_boot_race_classification("absent"));
+        assert!(is_boot_race_classification(
+            "task_run_running_without_session"
+        ));
+        assert!(!is_boot_race_classification("task_run_completed"));
+        assert!(!is_boot_race_classification(
+            "task_run_running_without_live_session"
+        ));
+        assert!(!is_boot_race_classification("live_running"));
     }
 }
 

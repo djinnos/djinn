@@ -102,9 +102,21 @@ pub fn taskrun_job_ref_from_job(job: &Job) -> Option<djinn_runtime::TaskrunJobRe
         return None;
     };
 
+    // Carry the Job's creation timestamp so the backstop reaper can age-gate
+    // young Jobs: the worker inserts the task_runs row only after pod boot, so
+    // a fresh Job legitimately has no DB owner rows yet. k8s_openapi wraps the
+    // timestamp as `Time(chrono::DateTime<Utc>)`; chrono provides the
+    // `SystemTime: From<DateTime<Utc>>` conversion.
+    let created_at = job
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|time| std::time::SystemTime::from(time.0));
+
     Some(djinn_runtime::TaskrunJobRef {
         job_name,
         task_run_id,
+        created_at,
     })
 }
 
@@ -790,6 +802,27 @@ mod tests {
             taskrun_job_ref_from_job(&inventory_job(Some(&job_name), Some("not-a-uuid")))
                 .expect("canonical name should recover from malformed label");
         assert_eq!(malformed_label.task_run_id, task_run_id.to_string());
+    }
+
+    #[test]
+    fn carries_creation_timestamp_into_inventory_ref() {
+        let task_run_id = Uuid::now_v7();
+        let job_name = format!("{TASKRUN_JOB_NAME_PREFIX}{task_run_id}");
+        let created = k8s_openapi::chrono::DateTime::from_timestamp(1_700_000_000, 0)
+            .expect("valid timestamp");
+
+        let mut job = inventory_job(Some(&job_name), None);
+        job.metadata.creation_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(created),
+        );
+
+        let got = taskrun_job_ref_from_job(&job).expect("canonical name should be extracted");
+        assert_eq!(got.created_at, Some(std::time::SystemTime::from(created)));
+
+        // No creation timestamp → None, which the backstop treats as old.
+        let bare = taskrun_job_ref_from_job(&inventory_job(Some(&job_name), None))
+            .expect("canonical name should be extracted");
+        assert_eq!(bare.created_at, None);
     }
 
     #[test]
