@@ -8,6 +8,31 @@
 //!
 //! Errors are returned as `Result` so downstream instrumentation can log and
 //! continue fail-open without changing injection output.
+//!
+//! ## Data-layer contract for sibling epics
+//!
+//! The persisted trace shape is consumed by two sibling epics:
+//!
+//! - **`mwtv`** (dispatch injection instrumentation) writes trace rows via
+//!   [`RetrievalTraceRepository::insert`] and populates each
+//!   [`TraceCandidate`] with classification metadata (`outcome`,
+//!   `skipped_reason`, `rank`, `confidence`, `source`, `scope`).
+//!
+//! - **`liso`** (`memory_recall_trace` MCP tooling) reads trace rows via
+//!   [`RetrievalTraceRepository::list_by_project`] /
+//!   [`RetrievalTraceRepository::get_by_id`] and exposes the persisted
+//!   identity and metadata fields to operators.
+//!
+//! ### Required persisted fields per trace row
+//!
+//! | Layer | Field(s) |
+//! |-------|----------|
+//! | Row-level | `id`, `schema_version`, `project_id`, `session_id`, `task_run_id`, `task_id`, `entry_point`, `trigger`, `candidates` (JSONB), `candidate_cap`, `candidate_cap_exceeded`, `sampling_metadata` (optional), `durations_ms`, `estimated_injected_tokens`, `created_at` |
+//! | Per-candidate ([`TraceCandidate`]) | `note_id`, `permalink`, `title`, `outcome`, `rank`, `confidence`, `skipped_reason`, `source`, `scope` |
+//!
+//! The candidate JSONB array is validated by [`validate_candidates`] before
+//! persistence. The skipped-reason vocabulary is fixed at exactly
+//! [`SKIPPED_REASON_VALUES`].
 
 use serde::{Deserialize, Serialize};
 
@@ -196,6 +221,19 @@ pub const SKIPPED_REASON_VALUES: &[&str] = &[
 // ── Candidate DTO ─────────────────────────────────────────────────────────────
 
 /// A single candidate recorded in a trace's `candidates` JSONB array.
+///
+/// This is the complete per-candidate data-layer contract shape. Every field
+/// listed below is persisted in the JSONB column and must survive round-trip
+/// serialization:
+///
+/// - **Identity:** `note_id`, `permalink`, `title` — consumed by `liso`
+///   (`memory_recall_trace` tooling) for list/detail display.
+/// - **Classification:** `outcome`, `skipped_reason` — populated by `mwtv`
+///   (dispatch injection instrumentation). The skipped-reason vocabulary is
+///   [`SKIPPED_REASON_VALUES`].
+/// - **Ranking/score:** `rank` (1-based position), `confidence` (0.0–1.0).
+/// - **Provenance:** `source` (e.g. `"scope_overlap"`), `scope` (JSON
+///   metadata for later classification).
 ///
 /// `outcome` distinguishes injected from skipped candidates. When absent from
 /// JSONB (backward compat via `#[serde(default)]`), it defaults to
