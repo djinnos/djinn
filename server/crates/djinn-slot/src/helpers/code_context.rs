@@ -1,133 +1,123 @@
 use super::*;
 
-// ── Trace-aware knowledge-note formatting ──────────────────────────────────
+/// Approximate tokens-per-character ratio used for simple token estimation
+/// when no shared estimator is available. 4 chars ≈ 1 token is the standard
+/// heuristic for English-like prompt text.
+const APPROX_CHARS_PER_TOKEN: f64 = 4.0;
 
-/// Per-note outcome reported by the trace-aware formatter.
+/// Outcome classification for a single note candidate during prompt packing.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotePackDisposition {
+    /// The note was rendered into the prompt text within the character budget.
+    Injected,
+    /// The note was dropped because adding its rendered line would exceed the
+    /// remaining character budget. Once a note is budget-pruned, all subsequent
+    /// notes (which have equal or lower confidence) are also pruned.
+    BudgetPruned,
+}
+
+/// Per-note packing outcome for trace instrumentation.
 ///
-/// Reuses the data-layer vocabulary from the retrieval-trace foundation
-/// (`djinn_db::repositories::retrieval_trace`) so downstream consumers
-/// can map directly to [`TraceCandidate`] fields without a second
-/// vocabulary layer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NotePackingOutcome {
-    /// Stable note identifier (from `Note.id`).
-    pub note_id: String,
-    /// Permalink slug (from `Note.permalink`).
+/// Captures the decision and metadata for each input candidate so downstream
+/// callers (e.g. retrieval trace persistence) can classify prompt-budget drops
+/// without re-parsing the rendered text.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct NotePackOutcome {
+    /// The note's stable permalink identifier (e.g. `"pitfalls/refinement-target-less"`).
     pub permalink: String,
-    /// Whether the note was injected or skipped.
-    pub outcome: djinn_db::repositories::retrieval_trace::CandidateOutcome,
-    /// For skipped notes, the specific reason. Always `None` for injected
-    /// notes.
-    pub skipped_reason: Option<djinn_db::repositories::retrieval_trace::SkippedReason>,
+    /// The note's human-readable title.
+    pub title: String,
+    /// How this note was dispositioned during packing.
+    pub disposition: NotePackDisposition,
+    /// Estimated rendered character count for this note's line (including the
+    /// permalink suffix). `None` for budget-pruned notes where the line was
+    /// never rendered.
+    pub estimated_rendered_chars: Option<usize>,
+    /// Simple token estimate for this note's rendered line, computed as
+    /// `ceil(estimated_rendered_chars / 4.0)`. `None` for budget-pruned notes.
+    /// This is a rough heuristic; swap in a shared estimator if one becomes
+    /// available.
+    pub estimated_rendered_tokens: Option<usize>,
 }
 
-/// Result of [`format_knowledge_notes_with_trace`]: the same rendered
-/// prompt string the non-trace formatter would return, plus one
-/// [`NotePackingOutcome`] per input note describing whether it was
-/// injected or budget-pruned.
-#[derive(Clone, Debug)]
-pub struct FormatKnowledgeNotesTrace {
-    /// The rendered knowledge-note block, byte-identical to what
-    /// [`format_knowledge_notes`] returns for the same inputs.
+/// Result of packing knowledge notes into a budget-capped prompt string.
+///
+/// The `rendered` text is byte-identical to what [`format_knowledge_notes`]
+/// would produce for the same inputs. The `outcomes` vector contains one
+/// entry per input note, in input order, classifying each as injected or
+/// budget-pruned with associated metadata for trace persistence.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PackedKnowledgeNotes {
+    /// The rendered prompt text, byte-identical to `format_knowledge_notes` output.
     pub rendered: String,
-    /// Per-input-note packing outcomes, in the same order as the input
-    /// slice.
-    pub outcomes: Vec<NotePackingOutcome>,
+    /// Per-note packing outcomes, one per input note in input order.
+    pub outcomes: Vec<NotePackOutcome>,
+    /// Total estimated characters consumed by all injected notes (including
+    /// inter-note newlines).
+    pub total_injected_chars: usize,
+    /// Simple token estimate for all injected content, computed as
+    /// `ceil(total_injected_chars / 4.0)`.
+    pub total_injected_tokens: usize,
 }
 
-/// Extract crate/module path prefixes from a task's description, design, and epic context.
-pub fn derive_task_scope_paths(
-    task: &djinn_core::models::Task,
-    epic_context: Option<&str>,
-) -> Vec<String> {
-    use regex::Regex;
-    use std::sync::OnceLock;
-    // Match paths like: crates/foo, src/bar/baz, server/crates/djinn-db
-    // Looking for patterns with at least 2 slash-separated segments
-    static TASK_SCOPE_PATH_RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
-    let re = match TASK_SCOPE_PATH_RE.get_or_init(|| {
-        Regex::new(r#"(?:^|[\s`"(])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_.-]+){1,6})(?:[\s`")\.,:]|$)"#)
-    }) {
-        Ok(re) => re,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "failed to compile task-scope path regex; skipping scope derivation"
-            );
-            return Vec::new();
-        }
-    };
-    let mut paths = std::collections::HashSet::new();
-    for text in [&task.description, &task.design] {
-        for cap in re.captures_iter(text) {
-            if let Some(m) = cap.get(1) {
-                let path = m.as_str();
-                // Filter to paths that look like code paths (not URLs, not short fragments)
-                if path.contains('/') && !path.starts_with("http") && !path.starts_with("//") {
-                    // Derive scope: split on /src/ or take up to 3 components
-                    if let Some(idx) = path.find("/src/") {
-                        paths.insert(path[..idx].to_string());
-                    } else {
-                        paths.insert(path.to_string());
-                    }
-                }
-            }
-        }
-    }
-    if let Some(epic) = epic_context {
-        for cap in re.captures_iter(epic) {
-            if let Some(m) = cap.get(1) {
-                let path = m.as_str();
-                if path.contains('/') && !path.starts_with("http") && !path.starts_with("//") {
-                    if let Some(idx) = path.find("/src/") {
-                        paths.insert(path[..idx].to_string());
-                    } else {
-                        paths.insert(path.to_string());
-                    }
-                }
-            }
-        }
-    }
-    paths.into_iter().collect()
+/// Compute a simple token estimate from a character count.
+///
+/// Uses the standard heuristic of ~4 characters per token, rounding up so
+/// callers get a conservative budget estimate.
+fn token_estimate(chars: usize) -> usize {
+    ((chars as f64) / APPROX_CHARS_PER_TOKEN).ceil() as usize
 }
 
-/// Format knowledge notes for injection into the system prompt.
+/// Pack knowledge notes into a budget-capped prompt string and return
+/// per-note packing outcomes for trace instrumentation.
 ///
-/// Each rendered line preserves the note's type, title, and summary content
-/// and appends the note's `permalink` (e.g. `pitfalls/refinement-target-less`)
-/// so callers can resolve the note via
-/// `memory_read(identifier=<permalink>)` with an exact identifier instead of
-/// relying on title matching.
+/// This is the core implementation that [`format_knowledge_notes`] delegates
+/// to.  It uses the exact same line-rendering and budget accounting as the
+/// original formatter, but additionally classifies every input note as
+/// injected or budget-pruned and returns metadata suitable for retrieval
+/// trace persistence.
 ///
-/// Uses L0 (abstract) for most notes, L1 (overview) for high-confidence ones.
-/// Budget-capped at `budget_chars`, dropping lowest-confidence notes first;
-/// the appended `permalink` is included in that budget accounting rather than
-/// being layered on after truncation.
-pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize) -> String {
-    format_knowledge_notes_with_trace(notes, budget_chars).rendered
-}
-
-/// Trace-aware variant of [`format_knowledge_notes`].
+/// Notes are processed in input order (which the caller controls; typically
+/// highest-confidence first).  The first note that would overflow the budget
+/// triggers pruning of that note and **all** remaining notes.
 ///
-/// Returns the same rendered prompt string (byte-identical for the same
-/// inputs) plus a [`NotePackingOutcome`] for every input note indicating
-/// whether it was injected into the rendered output or budget-pruned.
-///
-/// This is the implementation primitive consumed by the
-/// `load_knowledge_context` instrumentation task; callers that only need
-/// the rendered string continue using [`format_knowledge_notes`] which
-/// delegates here.
-pub fn format_knowledge_notes_with_trace(
+/// Once the budget is exhausted, subsequent notes are classified as
+/// `BudgetPruned` **without** computing their label, summary, or rendered
+/// line content.  This preserves the original formatter's break semantics:
+/// the old `format_knowledge_notes` loop broke on the first overflow and
+/// never inspected later notes, so any content slicing (e.g. fallback
+/// summary at a non-UTF-8 boundary) was unreachable.  Skipping content
+/// computation for exhausted-budget notes maintains that invariant and
+/// avoids panics on notes whose `content[..min(100)]` would land on a
+/// non-byte-boundary.
+pub fn pack_knowledge_notes(
     notes: &[djinn_memory::Note],
     budget_chars: usize,
-) -> FormatKnowledgeNotesTrace {
-    use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
-
+) -> PackedKnowledgeNotes {
     let mut lines = Vec::new();
     let mut outcomes = Vec::with_capacity(notes.len());
-    let mut used = 0;
+    let mut used: usize = 0;
     let mut budget_exhausted = false;
+
     for note in notes {
+        // Once the budget is exhausted, push a budget-pruned outcome
+        // immediately without computing label/summary/line content.
+        // This preserves the original formatter's break semantics: the old
+        // loop broke on the first overflow and never inspected later notes,
+        // so any content slicing (e.g. fallback summary at a non-UTF-8
+        // boundary) was unreachable.
+        if budget_exhausted {
+            outcomes.push(NotePackOutcome {
+                permalink: note.permalink.clone(),
+                title: note.title.clone(),
+                disposition: NotePackDisposition::BudgetPruned,
+                estimated_rendered_chars: None,
+                estimated_rendered_tokens: None,
+            });
+            continue;
+        }
+
         let label = match note.note_type.as_str() {
             "pitfall" => "Pitfall",
             "pattern" => "Pattern",
@@ -155,29 +145,54 @@ pub fn format_knowledge_notes_with_trace(
             "- **[{}] {}**: {} (permalink: {})",
             label, note.title, summary, note.permalink
         );
-        if budget_exhausted || used + line.len() > budget_chars {
+
+        if used + line.len() > budget_chars {
             budget_exhausted = true;
-            outcomes.push(NotePackingOutcome {
-                note_id: note.id.clone(),
+            outcomes.push(NotePackOutcome {
                 permalink: note.permalink.clone(),
-                outcome: CandidateOutcome::Skipped,
-                skipped_reason: Some(SkippedReason::BudgetPruned),
+                title: note.title.clone(),
+                disposition: NotePackDisposition::BudgetPruned,
+                estimated_rendered_chars: None,
+                estimated_rendered_tokens: None,
             });
         } else {
-            used += line.len() + 1; // +1 for newline
+            let line_chars = line.len();
+            used += line_chars + 1; // +1 for newline
             lines.push(line);
-            outcomes.push(NotePackingOutcome {
-                note_id: note.id.clone(),
+            outcomes.push(NotePackOutcome {
                 permalink: note.permalink.clone(),
-                outcome: CandidateOutcome::Injected,
-                skipped_reason: None,
+                title: note.title.clone(),
+                disposition: NotePackDisposition::Injected,
+                estimated_rendered_chars: Some(line_chars),
+                estimated_rendered_tokens: Some(token_estimate(line_chars)),
             });
         }
     }
-    FormatKnowledgeNotesTrace {
+
+    PackedKnowledgeNotes {
         rendered: lines.join("\n"),
         outcomes,
+        total_injected_chars: used,
+        total_injected_tokens: token_estimate(used),
     }
+}
+
+/// Format knowledge notes for injection into the system prompt.
+///
+/// Each rendered line preserves the note's type, title, and summary content
+/// and appends the note's `permalink` (e.g. `pitfalls/refinement-target-less`)
+/// so callers can resolve the note via
+/// `memory_read(identifier=<permalink>)` with an exact identifier instead of
+/// relying on title matching.
+///
+/// Uses L0 (abstract) for most notes, L1 (overview) for high-confidence ones.
+/// Budget-capped at `budget_chars`, dropping lowest-confidence notes first;
+/// the appended `permalink` is included in that budget accounting rather than
+/// being layered on after truncation.
+///
+/// Now implemented as a compatibility wrapper around [`pack_knowledge_notes`].
+pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize) -> String {
+    pack_knowledge_notes(notes, budget_chars).rendered
 }
 
 /// Returns true when the given role name is opted-in to auto-injected
@@ -237,6 +252,62 @@ fn format_related_names(syms: &[djinn_control_plane::bridge::RelatedSymbol], max
         .map(|s| s.name.clone())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Extract crate/module path prefixes from a task's description, design, and epic context.
+pub fn derive_task_scope_paths(
+    task: &djinn_core::models::Task,
+    epic_context: Option<&str>,
+) -> Vec<String> {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    // Match paths like: crates/foo, src/bar/baz, server/crates/djinn-db
+    // Looking for patterns with at least 2 slash-separated segments
+    static TASK_SCOPE_PATH_RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+    let re = match TASK_SCOPE_PATH_RE.get_or_init(|| {
+        Regex::new(r#"(?:^|[\s`"(])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_.-]+){1,6})(?:[\s`")\.,:]|$)"#)
+    }) {
+        Ok(re) => re,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to compile task-scope path regex; skipping scope derivation"
+            );
+            return Vec::new();
+        }
+    };
+    let mut paths = std::collections::HashSet::new();
+    for text in [&task.description, &task.design] {
+        for cap in re.captures_iter(text) {
+            if let Some(m) = cap.get(1) {
+                let path = m.as_str();
+                // Filter to paths that look like code paths (not URLs, not short fragments)
+                if path.contains('/') && !path.starts_with("http") && !path.starts_with("//") {
+                    // Derive scope: split on /src/ or take up to 3 components
+                    if let Some(idx) = path.find("/src/") {
+                        paths.insert(path[..idx].to_string());
+                    } else {
+                        paths.insert(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if let Some(epic) = epic_context {
+        for cap in re.captures_iter(epic) {
+            if let Some(m) = cap.get(1) {
+                let path = m.as_str();
+                if path.contains('/') && !path.starts_with("http") && !path.starts_with("//") {
+                    if let Some(idx) = path.find("/src/") {
+                        paths.insert(path[..idx].to_string());
+                    } else {
+                        paths.insert(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+    paths.into_iter().collect()
 }
 
 /// Build the auto-injected `code_graph context` block for `role_name`.

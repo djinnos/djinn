@@ -1007,12 +1007,14 @@ fn format_knowledge_notes_budget_rejects_line_whose_permalink_itself_overflows()
     );
 }
 
-// ── Trace-aware formatter tests ─────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// pack_knowledge_notes tests
+// ---------------------------------------------------------------------------
 
 #[test]
-fn format_knowledge_notes_with_trace_renders_identically_to_non_trace() {
-    use djinn_db::repositories::retrieval_trace::CandidateOutcome;
-
+fn pack_knowledge_notes_rendered_matches_format_knowledge_notes() {
+    // The rendered output of pack_knowledge_notes must be byte-identical to
+    // format_knowledge_notes for the same inputs, at every budget size.
     let notes = vec![
         fixture_note(
             "pitfall",
@@ -1034,24 +1036,87 @@ fn format_knowledge_notes_with_trace_renders_identically_to_non_trace() {
         ),
     ];
 
-    let non_trace = format_knowledge_notes(&notes, 2000);
-    let trace_result = format_knowledge_notes_with_trace(&notes, 2000);
-
+    // Generous budget: both fit.
     assert_eq!(
-        non_trace, trace_result.rendered,
-        "trace-aware formatter must produce byte-identical rendered output"
+        pack_knowledge_notes(&notes, 2000).rendered,
+        format_knowledge_notes(&notes, 2000),
     );
-    assert_eq!(trace_result.outcomes.len(), 2);
-    assert_eq!(trace_result.outcomes[0].outcome, CandidateOutcome::Injected);
-    assert_eq!(trace_result.outcomes[0].skipped_reason, None);
-    assert_eq!(trace_result.outcomes[1].outcome, CandidateOutcome::Injected);
-    assert_eq!(trace_result.outcomes[1].skipped_reason, None);
+
+    // Tight budget: only first fits.
+    let first_line = "- **[Pitfall] Refinement target-less**: Refinements on proposals without a target project die as opaque agent_failure. (permalink: pitfalls/refinement-target-less)";
+    let budget = first_line.len();
+    assert_eq!(
+        pack_knowledge_notes(&notes, budget).rendered,
+        format_knowledge_notes(&notes, budget),
+    );
+
+    // Zero budget: nothing fits.
+    assert_eq!(
+        pack_knowledge_notes(&notes, 0).rendered,
+        format_knowledge_notes(&notes, 0),
+    );
 }
 
 #[test]
-fn format_knowledge_notes_with_trace_reports_budget_pruned_for_later_notes() {
-    use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+fn pack_knowledge_notes_empty_input_returns_empty() {
+    let packed = pack_knowledge_notes(&[], 2000);
+    assert!(packed.rendered.is_empty(), "expected empty rendered text");
+    assert!(packed.outcomes.is_empty(), "expected empty outcomes");
+    assert_eq!(packed.total_injected_chars, 0);
+    assert_eq!(packed.total_injected_tokens, 0);
+}
 
+#[test]
+fn pack_knowledge_notes_all_injected_when_budget_generous() {
+    let notes = vec![
+        fixture_note(
+            "pitfall",
+            "Pit One",
+            "pitfalls/one",
+            Some("Abstract one."),
+            None,
+            "",
+            0.5,
+        ),
+        fixture_note(
+            "pattern",
+            "Pat Two",
+            "patterns/two",
+            Some("Abstract two."),
+            None,
+            "",
+            0.5,
+        ),
+        fixture_note(
+            "case",
+            "Case Three",
+            "cases/three",
+            Some("Abstract three."),
+            None,
+            "",
+            0.5,
+        ),
+    ];
+
+    let packed = pack_knowledge_notes(&notes, 5000);
+    assert_eq!(packed.outcomes.len(), 3);
+    for outcome in &packed.outcomes {
+        assert_eq!(outcome.disposition, NotePackDisposition::Injected);
+        assert!(
+            outcome.estimated_rendered_chars.is_some(),
+            "injected note must have char estimate"
+        );
+        assert!(
+            outcome.estimated_rendered_tokens.is_some(),
+            "injected note must have token estimate"
+        );
+    }
+    assert!(packed.total_injected_chars > 0);
+    assert!(packed.total_injected_tokens > 0);
+}
+
+#[test]
+fn pack_knowledge_notes_budget_prunes_first_overflow_and_all_subsequent() {
     let notes = vec![
         fixture_note("note", "short", "a/short", Some("a"), None, "", 0.5),
         fixture_note(
@@ -1063,123 +1128,66 @@ fn format_knowledge_notes_with_trace_reports_budget_pruned_for_later_notes() {
             "",
             0.5,
         ),
+        fixture_note("note", "third-note", "c/third", Some("c"), None, "", 0.5),
     ];
+
+    // Budget only fits the first line.
     let first_line = "- **[Note] short**: a (permalink: a/short)";
-    let second_line = "- **[Note] medium-summary-text**: b (permalink: b/medium-summary)";
-    let used_after_first = first_line.len() + 1;
-    let budget = used_after_first + second_line.len() - 1;
+    let budget = first_line.len();
 
-    let trace_result = format_knowledge_notes_with_trace(&notes, budget);
+    let packed = pack_knowledge_notes(&notes, budget);
+    assert_eq!(packed.outcomes.len(), 3);
 
+    // First note injected.
     assert_eq!(
-        trace_result.rendered, first_line,
-        "rendered output must match non-trace formatter"
+        packed.outcomes[0].disposition,
+        NotePackDisposition::Injected
     );
-    assert_eq!(trace_result.outcomes.len(), 2);
-    assert_eq!(trace_result.outcomes[0].outcome, CandidateOutcome::Injected);
-    assert_eq!(trace_result.outcomes[0].skipped_reason, None);
-    assert_eq!(trace_result.outcomes[0].permalink, "a/short");
-    assert_eq!(trace_result.outcomes[1].outcome, CandidateOutcome::Skipped);
+    assert_eq!(packed.outcomes[0].permalink, "a/short");
+    assert_eq!(packed.outcomes[0].title, "short");
+
+    // Second note budget-pruned (first overflow).
     assert_eq!(
-        trace_result.outcomes[1].skipped_reason,
-        Some(SkippedReason::BudgetPruned)
+        packed.outcomes[1].disposition,
+        NotePackDisposition::BudgetPruned
     );
-    assert_eq!(trace_result.outcomes[1].permalink, "b/medium-summary");
+    assert_eq!(packed.outcomes[1].permalink, "b/medium-summary");
+    assert_eq!(packed.outcomes[1].title, "medium-summary-text");
+    assert!(packed.outcomes[1].estimated_rendered_chars.is_none());
+    assert!(packed.outcomes[1].estimated_rendered_tokens.is_none());
+
+    // Third note also budget-pruned (cascade after first overflow).
+    assert_eq!(
+        packed.outcomes[2].disposition,
+        NotePackDisposition::BudgetPruned
+    );
+    assert_eq!(packed.outcomes[2].permalink, "c/third");
+
+    // Rendered text only has the first note.
+    assert_eq!(packed.rendered, first_line);
 }
 
 #[test]
-fn format_knowledge_notes_with_trace_empty_input() {
-    let trace_result = format_knowledge_notes_with_trace(&[], 2000);
-    assert!(trace_result.rendered.is_empty());
-    assert!(trace_result.outcomes.is_empty());
-}
-
-#[test]
-fn format_knowledge_notes_with_trace_all_budget_pruned_when_budget_too_small() {
-    use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
-
+fn pack_knowledge_notes_zero_budget_prunes_all() {
     let notes = vec![
-        fixture_note(
-            "pattern",
-            "Long",
-            "patterns/this-permalink-slug-is-intentionally-very-long-on-purpose",
-            Some("summary"),
-            None,
-            "",
-            0.5,
-        ),
-        fixture_note("note", "short", "a/short", Some("x"), None, "", 0.5),
+        fixture_note("note", "A", "a/a", Some("a"), None, "", 0.5),
+        fixture_note("note", "B", "b/b", Some("b"), None, "", 0.5),
     ];
 
-    let trace_result = format_knowledge_notes_with_trace(&notes, 100);
-
-    assert!(
-        trace_result.rendered.is_empty(),
-        "rendered output must be empty when nothing fits: {:?}",
-        trace_result.rendered
-    );
-    assert_eq!(trace_result.outcomes.len(), 2);
-    for (i, outcome) in trace_result.outcomes.iter().enumerate() {
-        assert_eq!(
-            outcome.outcome,
-            CandidateOutcome::Skipped,
-            "note {i} should be skipped"
-        );
-        assert_eq!(
-            outcome.skipped_reason,
-            Some(SkippedReason::BudgetPruned),
-            "note {i} should be budget-pruned"
-        );
+    let packed = pack_knowledge_notes(&notes, 0);
+    assert_eq!(packed.outcomes.len(), 2);
+    for outcome in &packed.outcomes {
+        assert_eq!(outcome.disposition, NotePackDisposition::BudgetPruned);
+        assert!(outcome.estimated_rendered_chars.is_none());
+        assert!(outcome.estimated_rendered_tokens.is_none());
     }
+    assert!(packed.rendered.is_empty());
+    assert_eq!(packed.total_injected_chars, 0);
+    assert_eq!(packed.total_injected_tokens, 0);
 }
 
 #[test]
-fn format_knowledge_notes_with_trace_preserves_ordering_and_break_behavior() {
-    // When a note exceeds the budget, the original formatter `break`s —
-    // meaning ALL subsequent notes are also skipped, even if they individually
-    // would fit.  The trace-aware variant must behave identically.
-    use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
-
-    let notes = vec![
-        fixture_note("note", "first", "a/first", Some("f"), None, "", 0.5),
-        // A note that is too big for the remaining budget.
-        fixture_note(
-            "note",
-            "second-with-long-title",
-            "b/second-with-long-title",
-            Some("s"),
-            None,
-            "",
-            0.5,
-        ),
-        // A short note that would fit if the break hadn't happened.
-        fixture_note("note", "tiny", "c/tiny", Some("t"), None, "", 0.5),
-    ];
-
-    let first_line = "- **[Note] first**: f (permalink: a/first)";
-    let second_line =
-        "- **[Note] second-with-long-title**: s (permalink: b/second-with-long-title)";
-    // Budget fits first line + second line but NOT third.
-    let budget = first_line.len() + 1 + second_line.len() + 1 + 1;
-
-    let trace_result = format_knowledge_notes_with_trace(&notes, budget);
-
-    // First two notes fit; third is pruned because the break fires on the
-    // second note's successor iteration.
-    assert_eq!(trace_result.outcomes[0].outcome, CandidateOutcome::Injected);
-    assert_eq!(trace_result.outcomes[1].outcome, CandidateOutcome::Injected);
-    // The third note is beyond the break and must be budget-pruned.
-    assert_eq!(trace_result.outcomes[2].outcome, CandidateOutcome::Skipped);
-    assert_eq!(
-        trace_result.outcomes[2].skipped_reason,
-        Some(SkippedReason::BudgetPruned)
-    );
-}
-
-#[test]
-fn format_knowledge_notes_delegates_to_trace_variant() {
-    // Verify the compatibility wrapper returns the same string as
-    // the trace-aware helper for a representative input.
+fn pack_knowledge_notes_outcome_metadata_matches_permalink_and_title() {
     let notes = vec![
         fixture_note(
             "pitfall",
@@ -1187,7 +1195,7 @@ fn format_knowledge_notes_delegates_to_trace_variant() {
             "pitfalls/refinement-target-less",
             Some("Refinements on proposals without a target project die as opaque agent_failure."),
             None,
-            "Body.",
+            "",
             0.5,
         ),
         fixture_note(
@@ -1196,16 +1204,144 @@ fn format_knowledge_notes_delegates_to_trace_variant() {
             "patterns/anchor",
             Some("Use anchors for retrieval."),
             None,
-            "Body.",
+            "",
             0.9,
         ),
     ];
 
-    let wrapper_output = format_knowledge_notes(&notes, 2000);
-    let trace_output = format_knowledge_notes_with_trace(&notes, 2000);
-
+    let packed = pack_knowledge_notes(&notes, 2000);
     assert_eq!(
-        wrapper_output, trace_output.rendered,
-        "format_knowledge_notes must delegate to format_knowledge_notes_with_trace"
+        packed.outcomes[0].permalink,
+        "pitfalls/refinement-target-less"
     );
+    assert_eq!(packed.outcomes[0].title, "Refinement target-less");
+    assert_eq!(packed.outcomes[1].permalink, "patterns/anchor");
+    assert_eq!(packed.outcomes[1].title, "Anchor Note");
+}
+
+#[test]
+fn pack_knowledge_notes_injected_char_estimate_matches_rendered_line_length() {
+    let notes = vec![fixture_note(
+        "case",
+        "Sample Case",
+        "cases/sample-case",
+        Some("Short case abstract."),
+        None,
+        "Body text.",
+        0.6,
+    )];
+
+    let packed = pack_knowledge_notes(&notes, 2000);
+    let expected_line =
+        "- **[Case] Sample Case**: Short case abstract. (permalink: cases/sample-case)";
+    assert_eq!(packed.rendered, expected_line);
+    assert_eq!(
+        packed.outcomes[0].estimated_rendered_chars,
+        Some(expected_line.len()),
+        "char estimate must match the actual rendered line length"
+    );
+}
+
+#[test]
+fn pack_knowledge_notes_token_estimate_is_ceil_of_chars_divided_by_four() {
+    let notes = vec![fixture_note(
+        "note",
+        "Tok",
+        "t/tok",
+        Some("x"),
+        None,
+        "",
+        0.5,
+    )];
+
+    let packed = pack_knowledge_notes(&notes, 2000);
+    let chars = packed.outcomes[0].estimated_rendered_chars.unwrap();
+    let expected_tokens = ((chars as f64) / 4.0).ceil() as usize;
+    assert_eq!(
+        packed.outcomes[0].estimated_rendered_tokens,
+        Some(expected_tokens),
+        "token estimate must be ceil(chars / 4.0)"
+    );
+    // Verify aggregate totals are consistent.
+    assert_eq!(packed.total_injected_chars, chars + 1); // +1 for newline
+    let expected_total_tokens = ((packed.total_injected_chars as f64) / 4.0).ceil() as usize;
+    assert_eq!(packed.total_injected_tokens, expected_total_tokens);
+}
+
+#[test]
+fn pack_knowledge_notes_budget_permalink_overflow_prunes() {
+    // Mirrors the existing format_knowledge_notes_budget_rejects_line_whose_permalink_itself_overflows
+    // test, ensuring pack_knowledge_notes behaves identically.
+    let notes = vec![fixture_note(
+        "pattern",
+        "Long",
+        "patterns/this-permalink-slug-is-intentionally-very-long-on-purpose",
+        Some("summary"),
+        None,
+        "",
+        0.5,
+    )];
+
+    let packed = pack_knowledge_notes(&notes, 100);
+    assert!(
+        packed.rendered.is_empty(),
+        "single-line overflow must drop the note, got: {:?}",
+        packed.rendered
+    );
+    assert_eq!(packed.outcomes.len(), 1);
+    assert_eq!(
+        packed.outcomes[0].disposition,
+        NotePackDisposition::BudgetPruned
+    );
+    assert!(packed.outcomes[0].estimated_rendered_chars.is_none());
+}
+
+/// Regression: once the budget is exhausted, subsequent notes must be
+/// classified as budget-pruned **without** computing their label, summary,
+/// or rendered line content.  The old buggy version would continue
+/// evaluating the fallback summary for later notes, panicking on notes
+/// whose `content[..min(100)]` lands on a non-UTF-8 byte boundary.
+#[test]
+fn pack_knowledge_notes_budget_exhausted_skips_content_for_later_notes() {
+    // Note 1: overflows budget → triggers budget_exhausted.
+    let notes = vec![
+        fixture_note(
+            "note",
+            "overflow",
+            "a/overflow",
+            Some("This abstract is intentionally long enough to overflow the tiny budget."),
+            None,
+            "",
+            0.5,
+        ),
+        // Note 2: no abstract/overview, content whose byte 100 is a
+        // non-UTF-8 boundary.  The fallback summary `content[..min(100)]`
+        // would panic if reached.
+        fixture_note(
+            "note",
+            "utf8-trap",
+            "b/trap",
+            None,
+            None,
+            &("a".repeat(99) + "é"), // byte index 100 = inside 'é' (2 bytes)
+            0.3,
+        ),
+    ];
+
+    let budget = 50; // tiny budget; nothing fits
+    let packed = pack_knowledge_notes(&notes, budget);
+
+    assert_eq!(packed.outcomes.len(), 2);
+    // Both notes must be budget-pruned.
+    assert_eq!(
+        packed.outcomes[0].disposition,
+        NotePackDisposition::BudgetPruned
+    );
+    assert_eq!(
+        packed.outcomes[1].disposition,
+        NotePackDisposition::BudgetPruned
+    );
+    // Rendered output is empty.
+    assert!(packed.rendered.is_empty());
+    // Crucially: the function must not panic on note 2's non-UTF-8 boundary.
 }
