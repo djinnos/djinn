@@ -4,93 +4,37 @@
 
 //! Deterministic bounded synopses for oversized tool-result payloads.
 //!
-//! Phase 1 of proposal `01ik` covers JSON, code, text/log, and binary
-//! classification. The function [`synopsize`] is the integration surface the
-//! follow-up render task calls from [`super::render_tool_result`].
-//!
+//! Phase 1 of proposal `01ik`: JSON, code, text/log, binary classification.
+//! [`synopsize`] is the integration surface for the follow-up render task.
 //! Classification order: JSON -> binary (`None`) -> code -> text/log -> `None`.
-//!
-//! Design goals (locked in by the proposal and acceptance criteria):
-//!
-//! * **No LLM calls, no IO, no durable state.** Pure, deterministic string
-//!   transform; safe to call from the hot `render_tool_result` chokepoint.
-//! * **Bounded behavior on pathological input.** Never panic. On huge or
-//!   deeply-nested JSON a streaming structural scan rejects the input
-//!   *before* any [`serde_json::Value`] is allocated, so pathological
-//!   large-but-valid blobs never cause unbounded time/memory. `serde_json`'s
-//!   own recursion limit is the backstop for any nesting the scan might miss.
-//! * **Stable bullet labels.** Downstream tests/proposals depend on labels
-//!   like `kind`, `root`, `arrays`, `object shape depth 2`, `scalar examples`,
-//!   `lines`, `imports`, `symbols`, `sections`, `notable markers`, and
-//!   `suggested grep terms` appearing verbatim.
-//! * **Budget enforcement.** When the would-be synopsis exceeds
-//!   `budget_chars` characters, drop lower-priority fields in a deterministic
-//!   order before truncating the last surviving bullet at a word boundary.
+//! Pure, deterministic, bounded — no LLM calls, no panics, stable labels.
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Hard ceiling on the input text length (bytes) we will attempt to parse as
-/// JSON. Inputs exceeding this are rejected *before* calling
-/// [`serde_json::from_str`], so the deserializer never allocates for them.
-/// This is the primary defence against pathological memory consumption — a
-/// multi-MB valid-JSON blob would otherwise force a many-larger
-/// `serde_json::Value` tree before the post-parse token walk can bail out.
-///
-/// 1 MiB is generous enough for any realistic tool output we would summarize
-/// (the normal-case tool-result cap is 30 KB; stashed outputs rarely exceed a
-/// few hundred KB) while capping worst-case parse memory to ≈ 2–3× this
-/// value.
+/// Max input bytes for JSON parse (rejects before deserializer allocates).
 const MAX_PARSE_BYTES: usize = 1_048_576; // 1 MiB
-
-/// Hard ceiling on the number of JSON tokens we will inspect before giving up
-/// and returning `None`. Anything well-formed that exceeds this is almost
-/// certainly hostile or pathological — we deliberately do not summarize it
-/// rather than spend cycles walking it.
-///
-/// Sized so a 1 MB JSON blob (the upper end of tool output we are willing to
-/// even look at) is comfortably under the limit, but a 10 MB adversarial blob
-/// trips it.
+/// Max JSON tokens inspected before returning `None`.
 const MAX_JSON_TOKENS: usize = 200_000;
-
-/// Maximum number of top-level object keys to enumerate in the synopsis.
-/// Excess keys are reported as `…(+N more)`.
+/// Max top-level keys enumerated; excess shown as `…(+N more)`.
 const MAX_TOP_KEYS: usize = 16;
-
-/// Maximum number of nested object keys (depth 1 under the root) to enumerate
-/// per parent when emitting `object shape depth 2`. Excess keys are elided.
+/// Max nested keys per parent for `object shape depth 2`.
 const MAX_NESTED_KEYS: usize = 8;
-
-/// Maximum number of scalar examples to surface. Scalars here means string,
-/// number, boolean, or null leaf values seen while walking the tree.
+/// Max scalar examples surfaced from the tree.
 const MAX_SCALAR_EXAMPLES: usize = 6;
-
-/// Maximum length of a single scalar example, in characters. Longer values are
-/// truncated with a trailing `…` so a single huge string field cannot blow the
-/// budget.
+/// Max chars per scalar example; longer values truncated with `…`.
 const MAX_SCALAR_EXAMPLE_CHARS: usize = 64;
-
-/// Maximum length of a single suggested-grep term. Same reason as scalars.
+/// Max chars per suggested grep term.
 const MAX_GREP_TERM_CHARS: usize = 32;
-
-/// Maximum number of `suggested grep terms` we emit.
+/// Max suggested grep terms emitted.
 const MAX_GREP_TERMS: usize = 6;
 
-/// Maximum recursion depth (measured in nested containers) the summarizer
-/// walks. Beyond this we emit a placeholder and stop descending. The proposal
-/// only requires shape to depth 2, so this is a small safety margin above that.
+/// Max recursion depth when walking nested containers.
 const MAX_WALK_DEPTH: usize = 2;
-
-/// Hard cap on the number of nodes visited while building the synopsis. Stops
-/// adversarial inputs from forcing us to walk the whole tree even after we
-/// have a parsed `Value` in hand.
+/// Hard cap on visited nodes during tree walk.
 const MAX_WALK_NODES: usize = 4_096;
-
-/// Maximum nesting depth allowed by the streaming structural scanner. This
-/// mirrors `serde_json`'s default recursion limit (128); deeper nesting is
-/// rejected *before* the deserializer runs, so pathological deeply-nested
-/// JSON never allocates a `Value` tree.
+/// Max nesting depth for streaming scanner (mirrors serde_json default).
 const MAX_JSON_DEPTH: usize = 128;
 
 // -- Code/text constants --
@@ -108,25 +52,8 @@ const NOTABLE_MARKERS: &[&str] = &["error:", "FAILED", "FAIL", "panic", "Traceba
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Bounded synopsis entry point.
-///
-/// Returns a deterministic, bullet-formatted synopsis of `text` if it is
-/// detected as JSON, code, or text/log. Returns `None` for binary payloads,
-/// empty input, or when the budget is too small to emit even the always-on
-/// `kind` field.
-///
-/// Classification order: JSON -> binary (`None`) -> code -> text/log -> `None`.
-///
-/// `tool_name` is accepted for the future integration with the call site; in
-/// this slice it does not influence the classification.
-///
-/// `budget_chars` is the maximum number of characters the returned synopsis
-/// may occupy. The function never panics and never returns a string longer
-/// than `budget_chars`; when the natural synopsis would exceed it, fields are
-/// omitted in a deterministic order (lowest priority first). If even the
-/// always-present header would overflow an absurdly small budget, the
-/// function returns `None` so the caller can fall back to the byte-for-byte
-/// truncated stub.
+/// Bounded synopsis entry point. Returns `None` for binary, empty, or
+/// too-small budgets. Classification: JSON -> binary -> code -> text -> `None`.
 pub fn synopsize(_tool_name: &str, text: &str, budget_chars: usize) -> Option<String> {
     if budget_chars == 0 {
         return None;
@@ -572,18 +499,8 @@ fn classify_root(value: &serde_json::Value) -> RootKind {
 // JSON bounded parser
 // ---------------------------------------------------------------------------
 
-/// Bounded parse: deserialize `text` into a [`serde_json::Value`], but bail
-/// to `None` if the input exceeds [`MAX_PARSE_BYTES`] or the resulting token
-/// count exceeds [`MAX_JSON_TOKENS`]. The input-size check runs *before*
-/// calling the deserializer so that multi-MB inputs never cause unbounded
-/// allocation inside `serde_json::from_str`. We never unwrap the
-/// deserializer; both syntax errors and recursion-limit errors collapse to
-/// `None` so the caller can fall back to the byte-for-byte truncated stub.
-///
-/// The streaming structural scan ([`count_tokens_streaming`]) is the critical
-/// bound: it runs in O(n) time and O(1) memory *before* the deserializer, so
-/// a pathological large-but-valid blob (e.g. `[1,1,…,1]` with 250k elements)
-/// is rejected without ever materializing a huge `Value` tree.
+/// Bounded parse: bail to `None` if input exceeds MAX_PARSE_BYTES or token
+/// count exceeds MAX_JSON_TOKENS. Streaming scan runs before deserializer.
 fn parse_bounded(text: &str) -> Option<serde_json::Value> {
     if text.len() > MAX_PARSE_BYTES {
         return None;
@@ -592,34 +509,17 @@ fn parse_bounded(text: &str) -> Option<serde_json::Value> {
     serde_json::from_str(text).ok()
 }
 
-/// Streaming structural scan: count JSON value tokens by iterating the raw
-/// bytes *without* deserializing. This runs in O(n) time and O(1) memory and
-/// is the primary defence against pathological inputs that would force
-/// [`serde_json::from_str`] to allocate a huge [`serde_json::Value`] tree
-/// before any post-hoc node-count check could bail out.
-///
-/// Returns `Some(count)` if the input is structurally well-formed enough to
-/// count (balanced brackets, properly closed strings) and the token count and
-/// depth are within bounds. Returns `None` if the input is structurally
-/// broken, exceeds [`MAX_JSON_DEPTH`], or exceeds [`MAX_JSON_TOKENS`].
-///
-/// The count is an **upper bound** on the number of `serde_json::Value`
-/// nodes: object keys are counted as string tokens even though they are not
-/// separate nodes in the `Value` tree. Overcounting is safe — if the upper
-/// bound is within budget, the actual parse is guaranteed to be within budget
-/// too.
+/// Streaming structural scan: count JSON tokens without deserializing.
+/// O(n) time, O(1) memory. Returns None if malformed or over limits.
 fn count_tokens_streaming(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut tokens: usize = 0;
     let mut depth: usize = 0;
     let mut in_string = false;
     let mut escaped = false;
-    // After we count a scalar token (number/bool/null), we skip its remaining
-    // bytes until a structural delimiter, to avoid double-counting.
     let mut in_scalar_body = false;
 
     for &b in bytes {
-        // --- Inside a string literal ---
         if in_string {
             if escaped {
                 escaped = false;
@@ -632,16 +532,13 @@ fn count_tokens_streaming(text: &str) -> Option<usize> {
             }
             continue;
         }
-        // --- Inside a scalar body (already counted) ---
         if in_scalar_body {
             if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-') {
                 continue;
             }
             in_scalar_body = false;
-            // Fall through to process the terminating byte.
         }
 
-        // --- Structural scanning ---
         match b {
             b' ' | b'\t' | b'\n' | b'\r' => {}
             b'{' | b'[' => {
@@ -653,7 +550,7 @@ fn count_tokens_streaming(text: &str) -> Option<usize> {
             }
             b'}' | b']' => {
                 if depth == 0 {
-                    return None; // unbalanced closing bracket
+                    return None;
                 }
                 depth -= 1;
             }
@@ -665,7 +562,6 @@ fn count_tokens_streaming(text: &str) -> Option<usize> {
                 }
                 in_string = true;
             }
-            // Scalar value start: true, false, null, or a number.
             b't' | b'f' | b'n' | b'-' | b'0'..=b'9' => {
                 tokens += 1;
                 if tokens > MAX_JSON_TOKENS {
@@ -687,14 +583,8 @@ fn count_tokens_streaming(text: &str) -> Option<usize> {
 // Builder
 // ---------------------------------------------------------------------------
 
-/// Budgeted builder for the bullet-formatted synopsis.
-///
-/// Accumulates always-on fields first, then optional fields in priority
-/// order. Each push checks the remaining budget and short-circuits if the
-/// field would blow it, optionally flipping a `saw_overflow` flag so the
-/// finalizer can append a `…(truncated)` note. The builder is the single
-/// owner of the output string — fields are committed in fixed order so the
-/// bullet list is deterministic across runs and platforms.
+/// Budgeted builder for bullet-formatted synopsis. Fields committed in
+/// fixed order for deterministic output; overflow tracked for `…(truncated)`.
 struct Builder {
     budget: usize,
     out: String,
@@ -724,9 +614,7 @@ impl Builder {
         }
     }
 
-    /// Push a complete bullet line. Returns `false` if the line would exceed
-    /// the budget (in which case the field is dropped entirely — we do not
-    /// emit half-bullets, that would make downstream assertions flaky).
+    /// Push a complete bullet line; returns false if it would exceed budget.
     fn push_bullet(&mut self, label: &str, body: &str) -> bool {
         let line = format!("- {label}: {body}\n");
         if line.len() <= self.remaining() {
@@ -743,10 +631,8 @@ impl Builder {
             serde_json::Value::Array(_) => "array",
             _ => "scalar",
         };
-        // `kind` is always-on. If we cannot fit it, the budget is too small
-        // for any useful synopsis — the caller will degrade to a no-op.
+        // `kind` is always-on; if it doesn't fit, budget is too small.
         if !self.push_bullet("kind", kind) {
-            // Wipe the partial output and let the finalizer return None.
             self.out.clear();
             self.budget = 0;
         }
@@ -877,9 +763,7 @@ impl Builder {
 // JSON utilities
 // ---------------------------------------------------------------------------
 
-/// Stable, deterministic key ordering. `serde_json::Map` preserves insertion
-/// order by default, but tests and downstream consumers should not depend on
-/// caller input order — sorting makes the synopsis byte-for-byte stable.
+/// Stable sorted key list for deterministic synopsis output.
 fn sorted_keys(map: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
     let mut keys: Vec<String> = map.keys().cloned().collect();
     keys.sort();
@@ -890,8 +774,7 @@ fn preview_keys(keys: &[String], max: usize) -> Vec<String> {
     keys.iter().take(max).cloned().collect()
 }
 
-/// Truncate a string to at most `max_chars` Unicode characters, appending `…`
-/// if we had to cut. Never panics on multi-byte input.
+/// Truncate string to `max_chars` Unicode chars, appending `…` if cut.
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for (count, c) in s.chars().enumerate() {
@@ -904,8 +787,7 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     out
 }
 
-/// Walk the value collecting bounded scalar samples. We treat strings,
-/// numbers, booleans, and null as scalars and cap how many we surface.
+/// Collect bounded scalar samples from the tree.
 fn collect_scalar_examples(
     value: &serde_json::Value,
     depth: usize,
@@ -952,10 +834,7 @@ fn collect_scalar_examples(
     }
 }
 
-/// Collect distinctive short strings to suggest as grep terms. We look at
-/// string leaves, lowercase + trim, and keep the first [`MAX_GREP_TERMS`]
-/// distinct tokens that are between 3 and [`MAX_GREP_TERM_CHARS`] chars and
-/// contain at least one letter or digit.
+/// Collect distinctive short strings from JSON for grep suggestions.
 fn collect_grep_terms(
     value: &serde_json::Value,
     depth: usize,
