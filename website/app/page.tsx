@@ -176,7 +176,7 @@ export default function Home() {
             </div>
             <div className="aspect-video">
               <iframe
-                src="https://www.youtube-nocookie.com/embed/f-S3ju-GjCs"
+                src="https://www.youtube-nocookie.com/embed/cewtCRdkUuk"
                 title="Djinn — first look demo"
                 className="w-full h-full"
                 allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
