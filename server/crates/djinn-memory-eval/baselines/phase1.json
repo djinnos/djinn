@@ -5,7 +5,7 @@
       "memory_ref_queries": "ec2505a78fd0d0e3ba4567db0163b412e5ad83bd6c6a2ca19cacf5ec524d2f39",
       "bad_cases": "438ae6501e08313fb63521129da89c154ad9ea533e75c2ec83a4c006a32db96d"
     },
-    "refresh_commit": "local-test-refresh",
+    "refresh_commit": "abbba5bf12aab66d6febc1dd81d0260f8a2766be",
     "created_at": "2025-07-10T02:40:00Z"
   },
   "suite_metrics": {

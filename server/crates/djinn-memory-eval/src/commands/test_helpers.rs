@@ -104,15 +104,23 @@ pub fn make_baseline_with_counts(all_queries: usize, bad_cases: usize) -> Phase1
     suite_metrics.insert(
         "all_queries".to_string(),
         metrics::SuiteMetrics {
-            recall_at_1: 0.5, recall_at_5: 0.7, recall_at_10: 0.9,
-            mrr: 0.6, zero_result_rate: 0.1, query_count: all_queries,
+            recall_at_1: 0.5,
+            recall_at_5: 0.7,
+            recall_at_10: 0.9,
+            mrr: 0.6,
+            zero_result_rate: 0.1,
+            query_count: all_queries,
         },
     );
     suite_metrics.insert(
         "bad_cases".to_string(),
         metrics::SuiteMetrics {
-            recall_at_1: 0.3, recall_at_5: 0.5, recall_at_10: 0.7,
-            mrr: 0.4, zero_result_rate: 0.2, query_count: bad_cases,
+            recall_at_1: 0.3,
+            recall_at_5: 0.5,
+            recall_at_10: 0.7,
+            mrr: 0.4,
+            zero_result_rate: 0.2,
+            query_count: bad_cases,
         },
     );
     let mut per_query_ranks = HashMap::new();
@@ -120,9 +128,11 @@ pub fn make_baseline_with_counts(all_queries: usize, bad_cases: usize) -> Phase1
         "all_queries".to_string(),
         (0..all_queries)
             .map(|i| report::QueryRankBaseline {
-                query_id: format!("q-{:03}", i), query_text: format!("q {}", i),
+                query_id: format!("q-{:03}", i),
+                query_text: format!("q {}", i),
                 result_permalinks: vec!["notes/a".to_string()],
-                relevant_ranks: vec![Some(1)], best_rank: Some(1),
+                relevant_ranks: vec![Some(1)],
+                best_rank: Some(1),
             })
             .collect(),
     );
@@ -130,33 +140,45 @@ pub fn make_baseline_with_counts(all_queries: usize, bad_cases: usize) -> Phase1
         "bad_cases".to_string(),
         (0..bad_cases)
             .map(|i| report::QueryRankBaseline {
-                query_id: format!("bc-{:03}", i), query_text: format!("bc {}", i),
+                query_id: format!("bc-{:03}", i),
+                query_text: format!("bc {}", i),
                 result_permalinks: vec!["notes/a".to_string()],
-                relevant_ranks: vec![Some(1)], best_rank: Some(1),
+                relevant_ranks: vec![Some(1)],
+                best_rank: Some(1),
             })
             .collect(),
     );
     Phase1Baseline {
         metadata: BaselineMetadata {
             fixture_hashes: None,
-            refresh_commit: "test-commit-sha".to_string(),
+            refresh_commit: "aabbccdd00112233445566778899aabbccddeeff".to_string(),
             created_at: "2026-07-10T00:00:00Z".to_string(),
         },
         suite_metrics,
         aggregate_metrics: metrics::AggregateMetrics {
-            recall_at_1: 0.5, recall_at_5: 0.7, recall_at_10: 0.9,
-            mrr: 0.6, zero_result_rate: 0.1, query_count: total,
+            recall_at_1: 0.5,
+            recall_at_5: 0.7,
+            recall_at_10: 0.9,
+            mrr: 0.6,
+            zero_result_rate: 0.1,
+            query_count: total,
         },
         age_bucket_recall: HashMap::new(),
         per_query_ranks,
         signal_comparisons: vec![
             run::SignalRankComparison {
-                query_id: "q-000".to_string(), signal: "graph".to_string(),
-                rank_with_signal: Some(1), rank_without_signal: Some(5), rank_changed: true,
+                query_id: "q-000".to_string(),
+                signal: "graph".to_string(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(5),
+                rank_changed: true,
             },
             run::SignalRankComparison {
-                query_id: "q-001".to_string(), signal: "task_affinity".to_string(),
-                rank_with_signal: Some(1), rank_without_signal: Some(5), rank_changed: true,
+                query_id: "q-001".to_string(),
+                signal: "task_affinity".to_string(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(5),
+                rank_changed: true,
             },
         ],
         threshold_policy_version: metrics::THRESHOLD_POLICY_VERSION.to_string(),

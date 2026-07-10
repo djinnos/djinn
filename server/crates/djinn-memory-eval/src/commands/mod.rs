@@ -81,16 +81,30 @@ pub async fn cmd_run(crate_root: &std::path::Path) -> Result<()> {
         suite_metrics.iter().map(|(k, v)| (k.as_str(), v)).collect();
     let aggregate_metrics = metrics::compute_aggregate_metrics(&agg_suites);
 
-    let age_bucket_recall =
-        metrics::compute_age_bucket_recall(&output.query_records, &note_ages);
+    let age_bucket_recall = metrics::compute_age_bucket_recall(&output.query_records, &note_ages);
     let directional = metrics::directional_metrics(&output.query_records);
 
     info!("--- Metrics ---");
-    info!(recall_at_1 = format!("{:.4}", aggregate_metrics.recall_at_1), "aggregate recall@1");
-    info!(recall_at_5 = format!("{:.4}", aggregate_metrics.recall_at_5), "aggregate recall@5");
-    info!(recall_at_10 = format!("{:.4}", aggregate_metrics.recall_at_10), "aggregate recall@10");
-    info!(mrr = format!("{:.4}", aggregate_metrics.mrr), "aggregate MRR");
-    info!(zr = format!("{:.4}", aggregate_metrics.zero_result_rate), "aggregate zero-result rate");
+    info!(
+        recall_at_1 = format!("{:.4}", aggregate_metrics.recall_at_1),
+        "aggregate recall@1"
+    );
+    info!(
+        recall_at_5 = format!("{:.4}", aggregate_metrics.recall_at_5),
+        "aggregate recall@5"
+    );
+    info!(
+        recall_at_10 = format!("{:.4}", aggregate_metrics.recall_at_10),
+        "aggregate recall@10"
+    );
+    info!(
+        mrr = format!("{:.4}", aggregate_metrics.mrr),
+        "aggregate MRR"
+    );
+    info!(
+        zr = format!("{:.4}", aggregate_metrics.zero_result_rate),
+        "aggregate zero-result rate"
+    );
     info!(
         label = %directional.label,
         precision = format!("{:.4}", directional.avg_precision_at_10),
@@ -222,9 +236,12 @@ pub async fn cmd_refresh_baseline(crate_root: &std::path::Path) -> Result<()> {
         .nth(3)
         .unwrap_or(crate_root)
         .to_path_buf();
-    let refresh_commit = djinn_git::head_commit_sha(&repo_root)
-        .await
-        .unwrap_or_else(|_| "unknown".to_string());
+    let refresh_commit = djinn_git::head_commit_sha(&repo_root).await.map_err(|e| {
+        anyhow::anyhow!(
+            "failed to resolve refresh commit from repository HEAD: {}",
+            e
+        )
+    })?;
 
     info!("=== Refresh Baseline ===");
     info!(commit = %refresh_commit, "refresh commit");
@@ -274,12 +291,20 @@ fn build_query_result_record(
 /// Parse an ISO-8601 timestamp to epoch seconds.
 fn parse_iso8601_epoch(s: &str) -> Result<u64> {
     let s = s.trim_end_matches('Z');
-    let s = if let Some(dot_pos) = s.find('.') { &s[..dot_pos] } else { s };
+    let s = if let Some(dot_pos) = s.find('.') {
+        &s[..dot_pos]
+    } else {
+        s
+    };
     let parts: Vec<&str> = s.split('T').collect();
-    if parts.len() != 2 { anyhow::bail!("invalid ISO-8601 format: {}", s); }
+    if parts.len() != 2 {
+        anyhow::bail!("invalid ISO-8601 format: {}", s);
+    }
     let date_parts: Vec<&str> = parts[0].split('-').collect();
     let time_parts: Vec<&str> = parts[1].split(':').collect();
-    if date_parts.len() != 3 || time_parts.len() != 3 { anyhow::bail!("invalid ISO-8601 format: {}", s); }
+    if date_parts.len() != 3 || time_parts.len() != 3 {
+        anyhow::bail!("invalid ISO-8601 format: {}", s);
+    }
     let year: i64 = date_parts[0].parse().context("parsing year")?;
     let month: u64 = date_parts[1].parse().context("parsing month")?;
     let day: u64 = date_parts[2].parse().context("parsing day")?;
@@ -306,6 +331,46 @@ pub fn not_yet_implemented(subcommand: &str, task_ref: &str) -> anyhow::Result<(
     )
 }
 
+/// Validate that a `refresh_commit` value looks like a real commit SHA
+/// and is not a known placeholder.
+///
+/// Called by `cmd_validate_fixtures` to reject test scaffolding metadata
+/// in committed baselines.  Valid commit SHAs are lowercase hex and at
+/// least 7 characters (abbreviated SHA) -- common git conventions.
+pub fn validate_refresh_commit(refresh_commit: &str) -> anyhow::Result<()> {
+    if refresh_commit.is_empty() {
+        anyhow::bail!("baseline metadata.refresh_commit is empty");
+    }
+
+    const PLACEHOLDER_PATTERNS: &[&str] = &["local-test-refresh", "unknown", "placeholder", "none"];
+
+    let lower = refresh_commit.to_lowercase();
+    for &pattern in PLACEHOLDER_PATTERNS {
+        if lower == pattern {
+            anyhow::bail!(
+                "baseline metadata.refresh_commit is a known placeholder \
+                 (\"{}\").  Refresh the baseline with `cargo run -p \
+                 djinn-memory-eval -- refresh-baseline` so it carries \
+                 real repository HEAD commit provenance.",
+                refresh_commit,
+            );
+        }
+    }
+
+    // A real commit SHA is hex and at least 7 characters (abbreviated SHA).
+    if lower.len() < 7 || !lower.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!(
+            "baseline metadata.refresh_commit \"{}\" does not look like a \
+             valid git commit SHA (expected 7+ hex characters). \
+             Refresh the baseline with `cargo run -p djinn-memory-eval -- \
+             refresh-baseline`.",
+            refresh_commit,
+        );
+    }
+
+    Ok(())
+}
+
 /// Validate committed fixtures and baseline without running the pipeline.
 /// No LLM calls or external network are required.
 ///
@@ -327,44 +392,89 @@ pub fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
     loader::validate_fixtures(&fixtures).context("fixture validation failed")?;
     info!("fixture validation passed");
 
-    let task_affinity_queries = fixtures.memory_ref_queries.iter().filter(|q| q.task_id.is_some()).count();
+    let task_affinity_queries = fixtures
+        .memory_ref_queries
+        .iter()
+        .filter(|q| q.task_id.is_some())
+        .count();
     let total_queries = fixtures.memory_ref_queries.len() + fixtures.bad_cases.len();
     info!(
-        total_labeled = total_queries, memory_ref = fixtures.memory_ref_queries.len(),
-        task_affinity = task_affinity_queries, bad_cases = fixtures.bad_cases.len(),
+        total_labeled = total_queries,
+        memory_ref = fixtures.memory_ref_queries.len(),
+        task_affinity = task_affinity_queries,
+        bad_cases = fixtures.bad_cases.len(),
         "query counts"
     );
 
     if total_queries < 25 {
-        anyhow::bail!("expected at least 25 total labeled queries, got {}", total_queries);
+        anyhow::bail!(
+            "expected at least 25 total labeled queries, got {}",
+            total_queries
+        );
     }
     if fixtures.memory_ref_queries.len() < 15 {
-        anyhow::bail!("expected at least 15 mined memory_refs queries, got {}", fixtures.memory_ref_queries.len());
+        anyhow::bail!(
+            "expected at least 15 mined memory_refs queries, got {}",
+            fixtures.memory_ref_queries.len()
+        );
     }
     if fixtures.bad_cases.len() < 10 {
-        anyhow::bail!("expected at least 10 bad-case rows, got {}", fixtures.bad_cases.len());
+        anyhow::bail!(
+            "expected at least 10 bad-case rows, got {}",
+            fixtures.bad_cases.len()
+        );
     }
 
-    let has_over_decay = fixtures.bad_cases.iter().any(|c| c.case_type == fixtures::BadCaseType::OverDecayThreshold);
-    let has_graph_entity = fixtures.bad_cases.iter().any(|c| c.case_type == fixtures::BadCaseType::GraphEntityInfluenced);
-    let has_task_affinity = fixtures.bad_cases.iter().any(|c| c.case_type == fixtures::BadCaseType::TaskAffinityInfluenced);
+    let has_over_decay = fixtures
+        .bad_cases
+        .iter()
+        .any(|c| c.case_type == fixtures::BadCaseType::OverDecayThreshold);
+    let has_graph_entity = fixtures
+        .bad_cases
+        .iter()
+        .any(|c| c.case_type == fixtures::BadCaseType::GraphEntityInfluenced);
+    let has_task_affinity = fixtures
+        .bad_cases
+        .iter()
+        .any(|c| c.case_type == fixtures::BadCaseType::TaskAffinityInfluenced);
 
-    if !has_over_decay { anyhow::bail!("missing over-decay-threshold bad case"); }
-    if !has_graph_entity { anyhow::bail!("missing graph/entity-influenced bad case"); }
-    if !has_task_affinity { anyhow::bail!("missing task-affinity-influenced bad case"); }
+    if !has_over_decay {
+        anyhow::bail!("missing over-decay-threshold bad case");
+    }
+    if !has_graph_entity {
+        anyhow::bail!("missing graph/entity-influenced bad case");
+    }
+    if !has_task_affinity {
+        anyhow::bail!("missing task-affinity-influenced bad case");
+    }
 
-    info!(over_decay = has_over_decay, graph_entity = has_graph_entity, task_affinity = has_task_affinity, "required coverage types present");
+    info!(
+        over_decay = has_over_decay,
+        graph_entity = has_graph_entity,
+        task_affinity = has_task_affinity,
+        "required coverage types present"
+    );
 
-    let baseline_path = crate_root.join(FixturePaths::BASELINES_DIR).join("phase1.json");
+    let baseline_path = crate_root
+        .join(FixturePaths::BASELINES_DIR)
+        .join("phase1.json");
     if !baseline_path.exists() {
-        anyhow::bail!("baseline not found at {}. Run `djinn-memory-eval run` then `refresh-baseline`.", baseline_path.display());
+        anyhow::bail!(
+            "baseline not found at {}. Run `djinn-memory-eval run` then `refresh-baseline`.",
+            baseline_path.display()
+        );
     }
 
     let baseline = report::load_baseline(crate_root).context("loading baseline")?;
 
-    if baseline.metadata.refresh_commit.is_empty() { anyhow::bail!("baseline refresh_commit is empty"); }
-    if baseline.threshold_policy_version.is_empty() { anyhow::bail!("baseline threshold_policy_version is empty"); }
-    if baseline.suite_metrics.is_empty() { anyhow::bail!("baseline suite_metrics is empty"); }
+    validate_refresh_commit(&baseline.metadata.refresh_commit)
+        .context("baseline refresh_commit validation failed")?;
+    if baseline.threshold_policy_version.is_empty() {
+        anyhow::bail!("baseline threshold_policy_version is empty");
+    }
+    if baseline.suite_metrics.is_empty() {
+        anyhow::bail!("baseline suite_metrics is empty");
+    }
     if baseline.signal_comparisons.is_empty() {
         anyhow::bail!(
             "baseline signal_comparisons is empty; graph/entity and task-affinity \
@@ -381,8 +491,16 @@ pub fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
 
     // Phase 1 requires at least one graph/entity and at least one task-affinity
     // comparison with rank_changed=true in the baseline.
-    let graph_changed = baseline.signal_comparisons.iter().filter(|c| c.signal == "graph" && c.rank_changed).count();
-    let ta_changed = baseline.signal_comparisons.iter().filter(|c| c.signal == "task_affinity" && c.rank_changed).count();
+    let graph_changed = baseline
+        .signal_comparisons
+        .iter()
+        .filter(|c| c.signal == "graph" && c.rank_changed)
+        .count();
+    let ta_changed = baseline
+        .signal_comparisons
+        .iter()
+        .filter(|c| c.signal == "task_affinity" && c.rank_changed)
+        .count();
 
     if graph_changed == 0 {
         anyhow::bail!(
@@ -390,7 +508,11 @@ pub fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
              with rank_changed=true ({} total graph comparisons found). \
              Phase 1 requires at least one graph/entity rank-change proof case. \
              Re-run `run` then `refresh-baseline`.",
-            baseline.signal_comparisons.iter().filter(|c| c.signal == "graph").count()
+            baseline
+                .signal_comparisons
+                .iter()
+                .filter(|c| c.signal == "graph")
+                .count()
         );
     }
     if ta_changed == 0 {
@@ -399,10 +521,18 @@ pub fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
              with rank_changed=true ({} total task-affinity comparisons found). \
              Phase 1 requires at least one task-affinity rank-change proof case. \
              Re-run `run` then `refresh-baseline`.",
-            baseline.signal_comparisons.iter().filter(|c| c.signal == "task_affinity").count()
+            baseline
+                .signal_comparisons
+                .iter()
+                .filter(|c| c.signal == "task_affinity")
+                .count()
         );
     }
-    info!(graph_rank_changes = graph_changed, task_affinity_rank_changes = ta_changed, "signal comparison rank-change summary");
+    info!(
+        graph_rank_changes = graph_changed,
+        task_affinity_rank_changes = ta_changed,
+        "signal comparison rank-change summary"
+    );
 
     let expected_total = fixtures.memory_ref_queries.len() + fixtures.bad_cases.len();
     let baseline_total = baseline.aggregate_metrics.query_count;
@@ -410,36 +540,67 @@ pub fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
         anyhow::bail!(
             "baseline aggregate query_count {} != total fixture queries {} \
              (memory_ref {} + bad_cases {}). Re-run `run` then `refresh-baseline` to fix.",
-            baseline_total, expected_total,
-            fixtures.memory_ref_queries.len(), fixtures.bad_cases.len()
+            baseline_total,
+            expected_total,
+            fixtures.memory_ref_queries.len(),
+            fixtures.bad_cases.len()
         );
     }
-    info!(baseline_query_count = baseline_total, "baseline aggregate count matches total fixture queries");
+    info!(
+        baseline_query_count = baseline_total,
+        "baseline aggregate count matches total fixture queries"
+    );
 
-    let baseline_all_queries = baseline.per_query_ranks.get("all_queries").map(|v| v.len()).unwrap_or(0);
-    let baseline_bad_cases = baseline.per_query_ranks.get("bad_cases").map(|v| v.len()).unwrap_or(0);
+    let baseline_all_queries = baseline
+        .per_query_ranks
+        .get("all_queries")
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let baseline_bad_cases = baseline
+        .per_query_ranks
+        .get("bad_cases")
+        .map(|v| v.len())
+        .unwrap_or(0);
     if baseline_all_queries != fixtures.memory_ref_queries.len() {
-        anyhow::bail!("baseline per_query_ranks.all_queries count {} != memory_ref_queries {}", baseline_all_queries, fixtures.memory_ref_queries.len());
+        anyhow::bail!(
+            "baseline per_query_ranks.all_queries count {} != memory_ref_queries {}",
+            baseline_all_queries,
+            fixtures.memory_ref_queries.len()
+        );
     }
     if baseline_bad_cases != fixtures.bad_cases.len() {
-        anyhow::bail!("baseline per_query_ranks.bad_cases count {} != bad_cases {}", baseline_bad_cases, fixtures.bad_cases.len());
+        anyhow::bail!(
+            "baseline per_query_ranks.bad_cases count {} != bad_cases {}",
+            baseline_bad_cases,
+            fixtures.bad_cases.len()
+        );
     }
-    info!(all_queries = baseline_all_queries, bad_cases = baseline_bad_cases, "baseline per_query_ranks covers all fixture queries");
+    info!(
+        all_queries = baseline_all_queries,
+        bad_cases = baseline_bad_cases,
+        "baseline per_query_ranks covers all fixture queries"
+    );
 
     if !fixtures.bad_cases.is_empty() && !baseline.suite_metrics.contains_key("bad_cases") {
         anyhow::bail!(
             "baseline suite_metrics is missing 'bad_cases' key but fixtures have {} bad-case rows. \
-             Re-run `run` then `refresh-baseline` to fix.", fixtures.bad_cases.len()
+             Re-run `run` then `refresh-baseline` to fix.",
+            fixtures.bad_cases.len()
         );
     }
-    info!(has_bad_cases_suite = baseline.suite_metrics.contains_key("bad_cases"), "baseline suite_metrics bad_cases key check passed");
+    info!(
+        has_bad_cases_suite = baseline.suite_metrics.contains_key("bad_cases"),
+        "baseline suite_metrics bad_cases key check passed"
+    );
 
     validate_baseline_not_all_miss(&baseline.aggregate_metrics, &baseline.suite_metrics)?;
 
     if let Some(ref manifest) = fixtures.manifest {
         if let Some(ref baseline_hashes) = baseline.metadata.fixture_hashes {
             if manifest.file_hashes != *baseline_hashes {
-                anyhow::bail!("fixture hashes in baseline do not match manifest. Re-run `refresh-baseline` after updating fixtures.");
+                anyhow::bail!(
+                    "fixture hashes in baseline do not match manifest. Re-run `refresh-baseline` after updating fixtures."
+                );
             }
             info!("fixture hashes match baseline");
         } else {
@@ -458,8 +619,11 @@ pub fn validate_baseline_not_all_miss(
     aggregate: &metrics::AggregateMetrics,
     suite_metrics: &HashMap<String, metrics::SuiteMetrics>,
 ) -> Result<()> {
-    if std::env::var("DJINN_MEMORY_EVAL_TEST_OVERRIDE").as_deref() == Ok("allow_all_miss_baseline") {
-        tracing::warn!("DJINN_MEMORY_EVAL_TEST_OVERRIDE=allow_all_miss_baseline is set — skipping all-miss baseline check");
+    if std::env::var("DJINN_MEMORY_EVAL_TEST_OVERRIDE").as_deref() == Ok("allow_all_miss_baseline")
+    {
+        tracing::warn!(
+            "DJINN_MEMORY_EVAL_TEST_OVERRIDE=allow_all_miss_baseline is set — skipping all-miss baseline check"
+        );
         return Ok(());
     }
 
@@ -479,7 +643,9 @@ pub fn validate_baseline_not_all_miss(
     }
 
     for (suite_name, sm) in suite_metrics {
-        if sm.query_count == 0 { continue; }
+        if sm.query_count == 0 {
+            continue;
+        }
         let suite_all_recall_zero = sm.recall_at_1.abs() < 1e-10
             && sm.recall_at_5.abs() < 1e-10
             && sm.recall_at_10.abs() < 1e-10;
@@ -490,7 +656,8 @@ pub fn validate_baseline_not_all_miss(
                  recall@1/5/10 all zero, zero-result-rate 1.0). \
                  Re-run against a working pipeline with meaningful fixtures. \
                  (Test override: DJINN_MEMORY_EVAL_TEST_OVERRIDE=allow_all_miss_baseline)",
-                suite_name, sm.query_count,
+                suite_name,
+                sm.query_count,
             );
         }
     }
@@ -510,13 +677,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: make_n_queries(10),
-            bad_cases: make_n_bad_cases(3), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(10),
+            bad_cases: make_n_bad_cases(3),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         write_baseline_to_disk(root, &make_baseline_with_counts(10, 3));
         let err = cmd_validate_fixtures(root).unwrap_err().to_string();
-        assert!(err.contains("expected at least 25 total labeled queries"), "{}", err);
+        assert!(
+            err.contains("expected at least 25 total labeled queries"),
+            "{}",
+            err
+        );
     }
 
     #[test]
@@ -524,13 +697,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: make_n_queries(12),
-            bad_cases: make_n_bad_cases(13), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(12),
+            bad_cases: make_n_bad_cases(13),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         write_baseline_to_disk(root, &make_baseline_with_counts(12, 13));
         let err = cmd_validate_fixtures(root).unwrap_err().to_string();
-        assert!(err.contains("expected at least 15 mined memory_refs queries"), "{}", err);
+        assert!(
+            err.contains("expected at least 15 mined memory_refs queries"),
+            "{}",
+            err
+        );
     }
 
     #[test]
@@ -538,13 +717,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: make_n_queries(20),
-            bad_cases: make_n_bad_cases(5), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(5),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         write_baseline_to_disk(root, &make_baseline_with_counts(20, 5));
         let err = cmd_validate_fixtures(root).unwrap_err().to_string();
-        assert!(err.contains("expected at least 10 bad-case rows"), "{}", err);
+        assert!(
+            err.contains("expected at least 10 bad-case rows"),
+            "{}",
+            err
+        );
     }
 
     // ── AC: Dropped bad-case aggregation ─────────────────────────────────
@@ -554,8 +739,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: make_n_queries(20),
-            bad_cases: make_n_bad_cases(10), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         let mut baseline = make_baseline_with_counts(20, 10);
@@ -572,14 +759,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: make_n_queries(20),
-            bad_cases: make_n_bad_cases(10), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         let mut baseline = make_baseline_with_counts(20, 10);
         baseline.aggregate_metrics = metrics::AggregateMetrics {
-            recall_at_1: 0.0, recall_at_5: 0.0, recall_at_10: 0.0,
-            mrr: 0.0, zero_result_rate: 1.0, query_count: 30,
+            recall_at_1: 0.0,
+            recall_at_5: 0.0,
+            recall_at_10: 0.0,
+            mrr: 0.0,
+            zero_result_rate: 1.0,
+            query_count: 30,
         };
         write_baseline_to_disk(root, &baseline);
         let err = cmd_validate_fixtures(root).unwrap_err().to_string();
@@ -591,15 +784,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: make_n_queries(20),
-            bad_cases: make_n_bad_cases(10), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         let mut baseline = make_baseline_with_counts(20, 10);
-        baseline.suite_metrics.insert("bad_cases".to_string(), metrics::SuiteMetrics {
-            recall_at_1: 0.0, recall_at_5: 0.0, recall_at_10: 0.0,
-            mrr: 0.0, zero_result_rate: 1.0, query_count: 10,
-        });
+        baseline.suite_metrics.insert(
+            "bad_cases".to_string(),
+            metrics::SuiteMetrics {
+                recall_at_1: 0.0,
+                recall_at_5: 0.0,
+                recall_at_10: 0.0,
+                mrr: 0.0,
+                zero_result_rate: 1.0,
+                query_count: 10,
+            },
+        );
         write_baseline_to_disk(root, &baseline);
         let err = cmd_validate_fixtures(root).unwrap_err().to_string();
         assert!(err.contains("all-miss"), "{}", err);
@@ -608,15 +810,23 @@ mod tests {
     #[test]
     fn validate_baseline_not_all_miss_allows_test_override() {
         let aggregate = metrics::AggregateMetrics {
-            recall_at_1: 0.0, recall_at_5: 0.0, recall_at_10: 0.0,
-            mrr: 0.0, zero_result_rate: 1.0, query_count: 30,
+            recall_at_1: 0.0,
+            recall_at_5: 0.0,
+            recall_at_10: 0.0,
+            mrr: 0.0,
+            zero_result_rate: 1.0,
+            query_count: 30,
         };
         let suite_metrics = HashMap::new();
         assert!(validate_baseline_not_all_miss(&aggregate, &suite_metrics).is_err());
         // SAFETY: this test runs single-threaded and only touches the specific env var.
-        unsafe { std::env::set_var("DJINN_MEMORY_EVAL_TEST_OVERRIDE", "allow_all_miss_baseline"); }
+        unsafe {
+            std::env::set_var("DJINN_MEMORY_EVAL_TEST_OVERRIDE", "allow_all_miss_baseline");
+        }
         assert!(validate_baseline_not_all_miss(&aggregate, &suite_metrics).is_ok());
-        unsafe { std::env::remove_var("DJINN_MEMORY_EVAL_TEST_OVERRIDE"); }
+        unsafe {
+            std::env::remove_var("DJINN_MEMORY_EVAL_TEST_OVERRIDE");
+        }
     }
 
     // ── AC: Missing hard signal coverage ─────────────────────────────────
@@ -629,13 +839,19 @@ mod tests {
         corpus[0].expected_signals.graph = true;
         corpus[0].graph_edges = vec![];
         let fixtures = Phase1Fixtures {
-            corpus_notes: corpus, memory_ref_queries: make_n_queries(1),
-            bad_cases: make_n_bad_cases(1), manifest: None,
+            corpus_notes: corpus,
+            memory_ref_queries: make_n_queries(1),
+            bad_cases: make_n_bad_cases(1),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         write_baseline_to_disk(root, &make_baseline_with_counts(1, 1));
         let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
-        assert!(err.contains("graph signal claimed but no graph_edges"), "{}", err);
+        assert!(
+            err.contains("graph signal claimed but no graph_edges"),
+            "{}",
+            err
+        );
     }
 
     #[test]
@@ -646,13 +862,19 @@ mod tests {
         corpus[1].expected_signals.entity = true;
         corpus[1].labels = vec![];
         let fixtures = Phase1Fixtures {
-            corpus_notes: corpus, memory_ref_queries: make_n_queries(1),
-            bad_cases: make_n_bad_cases(1), manifest: None,
+            corpus_notes: corpus,
+            memory_ref_queries: make_n_queries(1),
+            bad_cases: make_n_bad_cases(1),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         write_baseline_to_disk(root, &make_baseline_with_counts(1, 1));
         let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
-        assert!(err.contains("entity signal claimed but no labels"), "{}", err);
+        assert!(
+            err.contains("entity signal claimed but no labels"),
+            "{}",
+            err
+        );
     }
 
     #[test]
@@ -663,13 +885,19 @@ mod tests {
         queries[0].expected_signals.task_affinity = true;
         queries[0].task_id = None;
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: queries,
-            bad_cases: make_n_bad_cases(1), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: queries,
+            bad_cases: make_n_bad_cases(1),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         write_baseline_to_disk(root, &make_baseline_with_counts(1, 1));
         let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
-        assert!(err.contains("task_affinity signal claimed but no task_id"), "{}", err);
+        assert!(
+            err.contains("task_affinity signal claimed but no task_id"),
+            "{}",
+            err
+        );
     }
 
     #[test]
@@ -677,12 +905,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: make_n_queries(20),
-            bad_cases: make_n_bad_cases(10), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         write_baseline_to_disk(root, &make_baseline_with_counts(20, 10));
-        assert!(cmd_validate_fixtures(root).is_ok(), "should pass with valid set");
+        assert!(
+            cmd_validate_fixtures(root).is_ok(),
+            "should pass with valid set"
+        );
     }
 
     // ── AC: Missing / no-change signal comparison families ──────────────
@@ -692,13 +925,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: make_n_queries(20),
-            bad_cases: make_n_bad_cases(10), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         let baseline = make_baseline_with_signal_comparisons(vec![run::SignalRankComparison {
-            query_id: "q-000".into(), signal: "task_affinity".into(),
-            rank_with_signal: Some(1), rank_without_signal: Some(5), rank_changed: true,
+            query_id: "q-000".into(),
+            signal: "task_affinity".into(),
+            rank_with_signal: Some(1),
+            rank_without_signal: Some(5),
+            rank_changed: true,
         }]);
         write_baseline_to_disk(root, &baseline);
         let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
@@ -710,13 +948,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: make_n_queries(20),
-            bad_cases: make_n_bad_cases(10), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         let baseline = make_baseline_with_signal_comparisons(vec![run::SignalRankComparison {
-            query_id: "q-000".into(), signal: "graph".into(),
-            rank_with_signal: Some(1), rank_without_signal: Some(5), rank_changed: true,
+            query_id: "q-000".into(),
+            signal: "graph".into(),
+            rank_with_signal: Some(1),
+            rank_without_signal: Some(5),
+            rank_changed: true,
         }]);
         write_baseline_to_disk(root, &baseline);
         let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
@@ -728,18 +971,26 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: make_n_queries(20),
-            bad_cases: make_n_bad_cases(10), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         let baseline = make_baseline_with_signal_comparisons(vec![
             run::SignalRankComparison {
-                query_id: "q-000".into(), signal: "graph".into(),
-                rank_with_signal: Some(1), rank_without_signal: Some(1), rank_changed: false,
+                query_id: "q-000".into(),
+                signal: "graph".into(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(1),
+                rank_changed: false,
             },
             run::SignalRankComparison {
-                query_id: "q-001".into(), signal: "task_affinity".into(),
-                rank_with_signal: Some(1), rank_without_signal: Some(5), rank_changed: true,
+                query_id: "q-001".into(),
+                signal: "task_affinity".into(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(5),
+                rank_changed: true,
             },
         ]);
         write_baseline_to_disk(root, &baseline);
@@ -752,22 +1003,128 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fixtures = Phase1Fixtures {
-            corpus_notes: minimal_corpus_notes(), memory_ref_queries: make_n_queries(20),
-            bad_cases: make_n_bad_cases(10), manifest: None,
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
         };
         write_fixtures_to_disk(root, &fixtures);
         let baseline = make_baseline_with_signal_comparisons(vec![
             run::SignalRankComparison {
-                query_id: "q-000".into(), signal: "graph".into(),
-                rank_with_signal: Some(1), rank_without_signal: Some(5), rank_changed: true,
+                query_id: "q-000".into(),
+                signal: "graph".into(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(5),
+                rank_changed: true,
             },
             run::SignalRankComparison {
-                query_id: "q-001".into(), signal: "task_affinity".into(),
-                rank_with_signal: Some(1), rank_without_signal: Some(1), rank_changed: false,
+                query_id: "q-001".into(),
+                signal: "task_affinity".into(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(1),
+                rank_changed: false,
             },
         ]);
         write_baseline_to_disk(root, &baseline);
         let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
         assert!(err.contains("no task-affinity comparisons"), "{}", err);
+    }
+
+    // -- AC: Placeholder refresh metadata rejection -----------------------
+
+    #[test]
+    fn validate_fixtures_rejects_empty_refresh_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fixtures = Phase1Fixtures {
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
+        };
+        write_fixtures_to_disk(root, &fixtures);
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.metadata.refresh_commit = String::new();
+        write_baseline_to_disk(root, &baseline);
+        let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
+        assert!(err.contains("refresh_commit"), "{}", err);
+        assert!(err.contains("empty"), "{}", err);
+    }
+
+    #[test]
+    fn validate_fixtures_rejects_placeholder_refresh_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fixtures = Phase1Fixtures {
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
+        };
+        write_fixtures_to_disk(root, &fixtures);
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.metadata.refresh_commit = "local-test-refresh".to_string();
+        write_baseline_to_disk(root, &baseline);
+        let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
+        assert!(err.contains("known placeholder"), "{}", err);
+        assert!(err.contains("local-test-refresh"), "{}", err);
+    }
+
+    #[test]
+    fn validate_fixtures_rejects_unknown_refresh_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fixtures = Phase1Fixtures {
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
+        };
+        write_fixtures_to_disk(root, &fixtures);
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.metadata.refresh_commit = "unknown".to_string();
+        write_baseline_to_disk(root, &baseline);
+        let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
+        assert!(err.contains("known placeholder"), "{}", err);
+    }
+
+    #[test]
+    fn validate_fixtures_accepts_valid_commit_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fixtures = Phase1Fixtures {
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
+        };
+        write_fixtures_to_disk(root, &fixtures);
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.metadata.refresh_commit = "abcdef0123456789abcdef0123456789abcdef01".to_string();
+        write_baseline_to_disk(root, &baseline);
+        assert!(
+            cmd_validate_fixtures(root).is_ok(),
+            "should pass with a valid hex commit SHA"
+        );
+    }
+
+    #[test]
+    fn validate_fixtures_accepts_abbreviated_commit_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fixtures = Phase1Fixtures {
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
+        };
+        write_fixtures_to_disk(root, &fixtures);
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.metadata.refresh_commit = "abcdef0".to_string();
+        write_baseline_to_disk(root, &baseline);
+        assert!(
+            cmd_validate_fixtures(root).is_ok(),
+            "should pass with a 7-char abbreviated commit SHA"
+        );
     }
 }
