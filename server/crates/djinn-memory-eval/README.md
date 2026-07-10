@@ -81,6 +81,28 @@ surface over-decay regressions:
 | `30-90d` | Mature |
 | `>90d` | Over decay threshold |
 
+**Stable bucket keys** (used in JSON reports and baselines):
+
+| Bucket key | Display | Description |
+|------------|---------|-------------|
+| `under7d` | `<7d` | Notes accessed within 7 days |
+| `days7to30` | `7-30d` | Notes accessed 7–30 days ago |
+| `days30to90` | `30-90d` | Notes accessed 30–90 days ago |
+| `over_decay_threshold` | `>90d` | Notes older than the 90-day decay threshold |
+
+#### Over-decay age-bucket invariant
+
+The committed baseline (`baselines/phase1.json`) **MUST** include the
+`over_decay_threshold` age-bucket recall entry when the committed fixtures
+include an over-decay-threshold bad case. The `validate-fixtures` command
+hard-fails if this invariant is violated.
+
+Age-bucket recall curves include **both** memory-ref query records and
+bad-case records so that over-decay fixture cases (e.g. `bc-over-decay-001`
+referencing `cases/over-decay-slot-setup`) contribute to the over-decay
+recall metrics. This ensures that the >90d bucket is populated whenever
+the fixtures contain notes older than the decay threshold.
+
 ## Compare policy
 
 The `compare` command evaluates current metrics against the committed baseline

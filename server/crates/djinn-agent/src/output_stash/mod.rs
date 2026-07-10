@@ -1010,3 +1010,5 @@ pub fn handle_stash_tool(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_synopsis;
