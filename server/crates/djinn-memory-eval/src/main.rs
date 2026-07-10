@@ -554,7 +554,9 @@ fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
         "baseline validated"
     );
 
-    // 5a2. Log signal comparison summary
+    // 5a2. Validate signal comparison rank-change proof families.
+    // Phase 1 requires at least one graph/entity and at least one
+    // task-affinity comparison with rank_changed=true in the baseline.
     let graph_changed = baseline
         .signal_comparisons
         .iter()
@@ -565,6 +567,32 @@ fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
         .iter()
         .filter(|c| c.signal == "task_affinity" && c.rank_changed)
         .count();
+    if graph_changed == 0 {
+        anyhow::bail!(
+            "baseline signal_comparisons has no graph/entity comparisons \
+             with rank_changed=true ({} total graph comparisons found). \
+             Phase 1 requires at least one graph/entity rank-change proof case. \
+             Re-run `run` then `refresh-baseline`.",
+            baseline
+                .signal_comparisons
+                .iter()
+                .filter(|c| c.signal == "graph")
+                .count()
+        );
+    }
+    if ta_changed == 0 {
+        anyhow::bail!(
+            "baseline signal_comparisons has no task-affinity comparisons \
+             with rank_changed=true ({} total task-affinity comparisons found). \
+             Phase 1 requires at least one task-affinity rank-change proof case. \
+             Re-run `run` then `refresh-baseline`.",
+            baseline
+                .signal_comparisons
+                .iter()
+                .filter(|c| c.signal == "task_affinity")
+                .count()
+        );
+    }
     info!(
         graph_rank_changes = graph_changed,
         task_affinity_rank_changes = ta_changed,
@@ -899,16 +927,26 @@ mod tests {
             },
             age_bucket_recall: HashMap::new(),
             per_query_ranks,
-            // Non-empty so baselines pass the signal_comparisons.is_empty() gate
-            // in cmd_validate_fixtures. Tests checking for "all-miss" or "missing
-            // bad_cases key" must reach those checks rather than bail here.
-            signal_comparisons: vec![run::SignalRankComparison {
-                query_id: "q-000".to_string(),
-                signal: "graph".to_string(),
-                rank_with_signal: Some(1),
-                rank_without_signal: Some(5),
-                rank_changed: true,
-            }],
+            // Both graph and task-affinity rank-change proof cases required
+            // for Phase 1 invariant validation. Tests checking for "all-miss"
+            // or "missing bad_cases key" must reach those checks rather than
+            // bail here.
+            signal_comparisons: vec![
+                run::SignalRankComparison {
+                    query_id: "q-000".to_string(),
+                    signal: "graph".to_string(),
+                    rank_with_signal: Some(1),
+                    rank_without_signal: Some(5),
+                    rank_changed: true,
+                },
+                run::SignalRankComparison {
+                    query_id: "q-001".to_string(),
+                    signal: "task_affinity".to_string(),
+                    rank_with_signal: Some(1),
+                    rank_without_signal: Some(5),
+                    rank_changed: true,
+                },
+            ],
             threshold_policy_version: metrics::THRESHOLD_POLICY_VERSION.to_string(),
         }
     }
@@ -1294,6 +1332,191 @@ mod tests {
             result.is_ok(),
             "should pass with valid fixtures and baseline: {:?}",
             result.err()
+        );
+    }
+
+    /// Helper: build a baseline with explicit signal_comparisons.
+    fn make_baseline_with_signal_comparisons(
+        signal_comparisons: Vec<run::SignalRankComparison>,
+    ) -> Phase1Baseline {
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.signal_comparisons = signal_comparisons;
+        baseline
+    }
+
+    // ── AC: Missing / no-change signal comparison families ──────────────
+
+    #[test]
+    fn validate_fixtures_rejects_baseline_missing_graph_signal_comparisons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(20);
+        let bad_cases = make_n_bad_cases(10);
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        // Baseline has only task-affinity; graph is entirely absent.
+        let baseline = make_baseline_with_signal_comparisons(vec![run::SignalRankComparison {
+            query_id: "q-000".to_string(),
+            signal: "task_affinity".to_string(),
+            rank_with_signal: Some(1),
+            rank_without_signal: Some(5),
+            rank_changed: true,
+        }]);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(
+            result.is_err(),
+            "should hard-fail when baseline has no graph comparisons"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("no graph/entity comparisons"),
+            "error should mention missing graph comparisons: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_fixtures_rejects_baseline_missing_task_affinity_signal_comparisons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(20);
+        let bad_cases = make_n_bad_cases(10);
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        // Baseline has only graph; task-affinity is entirely absent.
+        let baseline = make_baseline_with_signal_comparisons(vec![run::SignalRankComparison {
+            query_id: "q-000".to_string(),
+            signal: "graph".to_string(),
+            rank_with_signal: Some(1),
+            rank_without_signal: Some(5),
+            rank_changed: true,
+        }]);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(
+            result.is_err(),
+            "should hard-fail when baseline has no task-affinity comparisons"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("no task-affinity comparisons"),
+            "error should mention missing task-affinity comparisons: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_fixtures_rejects_baseline_graph_comparisons_no_rank_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(20);
+        let bad_cases = make_n_bad_cases(10);
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        // Graph comparison exists but rank_changed=false; task-affinity is good.
+        let baseline = make_baseline_with_signal_comparisons(vec![
+            run::SignalRankComparison {
+                query_id: "q-000".to_string(),
+                signal: "graph".to_string(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(1),
+                rank_changed: false,
+            },
+            run::SignalRankComparison {
+                query_id: "q-001".to_string(),
+                signal: "task_affinity".to_string(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(5),
+                rank_changed: true,
+            },
+        ]);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(
+            result.is_err(),
+            "should hard-fail when graph comparisons have no rank_change"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("no graph/entity comparisons"),
+            "error should mention no graph rank_change: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_fixtures_rejects_baseline_task_affinity_comparisons_no_rank_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path();
+
+        let corpus = minimal_corpus_notes();
+        let queries = make_n_queries(20);
+        let bad_cases = make_n_bad_cases(10);
+        let fixtures = Phase1Fixtures {
+            corpus_notes: corpus,
+            memory_ref_queries: queries,
+            bad_cases,
+            manifest: None,
+        };
+        write_fixtures_to_disk(crate_root, &fixtures);
+
+        // Task-affinity comparison exists but rank_changed=false; graph is good.
+        let baseline = make_baseline_with_signal_comparisons(vec![
+            run::SignalRankComparison {
+                query_id: "q-000".to_string(),
+                signal: "graph".to_string(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(5),
+                rank_changed: true,
+            },
+            run::SignalRankComparison {
+                query_id: "q-001".to_string(),
+                signal: "task_affinity".to_string(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(1),
+                rank_changed: false,
+            },
+        ]);
+        write_baseline_to_disk(crate_root, &baseline);
+
+        let result = cmd_validate_fixtures(crate_root);
+        assert!(
+            result.is_err(),
+            "should hard-fail when task-affinity comparisons have no rank_change"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("no task-affinity comparisons"),
+            "error should mention no task-affinity rank_change: {}",
+            err
         );
     }
 }
