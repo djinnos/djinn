@@ -950,6 +950,7 @@ mod tests {
     /// Run the committed fixtures through the pipeline and write the baseline
     /// with signal_comparisons. This test overwrites `baselines/phase1.json`
     /// so reviewers can see graph/entity and task-affinity proof cases.
+    #[allow(clippy::print_stderr)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn refresh_baseline_with_committed_fixtures() {
         let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
