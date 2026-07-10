@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
-assertion_line: 349
 expression: tool_schemas_lead()
 ---
 [
@@ -27,7 +26,7 @@ expression: tool_schemas_lead()
   },
   {
     "name": "task_list",
-    "description": "List tasks with optional filters and pagination.",
+    "description": "List tasks with optional filters for status, priority, label, and text search. Supports pagination.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -105,7 +104,7 @@ expression: tool_schemas_lead()
   },
   {
     "name": "memory_read",
-    "description": "Read a note by permalink or title.",
+    "description": "Read a memory note by permalink or title from the database-backed memory store. Returns full content and metadata.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -260,7 +259,7 @@ expression: tool_schemas_lead()
   },
   {
     "name": "code_search",
-    "description": "Search code across registered repos with `git grep` (basic regex). Pass `project` (UUID or owner/repo slug) to search one repo, or omit it (or pass \"*\") to search ALL registered projects at once — e.g. find every caller of a gRPC service org-wide. Served from each repo's default branch (no checkout). For your own task repo's working tree (your uncommitted changes), use shell grep instead.",
+    "description": "Search code across registered repos with `git grep` (basic regex). Pass `project` to search one repo, or omit it to search ALL projects at once. Served from each repo's default branch (no checkout); use shell grep for local changes.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -658,7 +657,7 @@ expression: tool_schemas_lead()
   },
   {
     "name": "epic_show",
-    "description": "Show details for an epic by UUID or short ID.",
+    "description": "Show full details of an epic by UUID or short ID, including its task breakdown and blocker status.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -735,7 +734,7 @@ expression: tool_schemas_lead()
   },
   {
     "name": "epic_tasks",
-    "description": "List tasks for an epic with pagination.",
+    "description": "List tasks belonging to an epic, showing status and assignee. Supports pagination.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -762,7 +761,7 @@ expression: tool_schemas_lead()
   },
   {
     "name": "epic_close",
-    "description": "Close an epic. Use when all work is complete and no further waves are needed.",
+    "description": "Close an epic when all work is complete and no further task waves are needed. Marks the epic as done.",
     "inputSchema": {
       "type": "object",
       "required": [

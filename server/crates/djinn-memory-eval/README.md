@@ -367,7 +367,13 @@ A baseline that passes `validate-fixtures` must:
   real `NoteRepository::search` and `build_context` paths — not by
   hand-computing synthetic ranks. The committed `metadata.refresh_commit`
   must equal the git HEAD SHA at the time of refresh so reviewers can
-  reproduce the pipeline path that produced the file.
+  reproduce the pipeline path that produced the file.  The
+  `validate-fixtures` command **rejects** known placeholder values
+  (`local-test-refresh`, `unknown`, `placeholder`, `none`, empty) and
+  non-hex or too-short commit identifiers.  Committed baselines must
+  contain real refresh commit provenance; test-only baseline helpers
+  must use explicitly fake hex strings (e.g. `aabbccdd0011…`) rather
+  than sharing the production placeholder constants.
 
 The committed `baselines/phase1.json` was refreshed from a live run on
 2026-07-10 against the dedicated Postgres test cluster. Its
@@ -403,6 +409,10 @@ prevent the specific regressions found during planning:
 6. **Cross-reference integrity**: every memory_ref permalink, graph
    edge endpoint, and bad-case reference must exist in the corpus.
    Manifest counts must match actual fixture lengths.
+7. **Real refresh commit provenance**: `metadata.refresh_commit` must
+   be a valid hex commit SHA (7+ characters), not a placeholder such
+   as `local-test-refresh`, `unknown`, or empty.  The
+   `validate-fixtures` command rejects these at load time.
 
 Fixture updates must preserve meaningful retrieval and hard
 graph/entity + task-affinity rank-change coverage before refreshing
