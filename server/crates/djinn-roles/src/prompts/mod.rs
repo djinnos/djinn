@@ -351,16 +351,19 @@ pub fn render_prompt_for_role(
 /// Generate a markdown tools reference from serialized tool schemas.
 ///
 /// Each schema is expected to have `name`, `description`, and `inputSchema`
-/// (with `properties` and optionally `required`). Output is a bullet list:
+/// (with `properties` and optionally `required`). Output is a bullet list of
+/// tool name plus required/optional parameter signature only — per-tool
+/// description bodies are intentionally omitted because detailed tool docs
+/// are supplied through provider tool definitions, not repeated in the system
+/// prompt.
 ///
 /// ```text
-/// - `tool_name(required_param, optional_param?)` — Description text.
+/// - `tool_name(required_param, optional_param?)`
 /// ```
 pub fn format_tools_section(schemas: &[serde_json::Value]) -> String {
     let mut lines = Vec::with_capacity(schemas.len());
     for schema in schemas {
         let name = schema["name"].as_str().unwrap_or("unknown");
-        let desc = schema["description"].as_str().unwrap_or("");
         let input = &schema["inputSchema"];
         let required: Vec<&str> = input["required"]
             .as_array()
@@ -387,9 +390,44 @@ pub fn format_tools_section(schemas: &[serde_json::Value]) -> String {
         params.extend(opt_params);
         let sig = params.join(", ");
 
-        lines.push(format!("- `{name}({sig})` — {desc}"));
+        lines.push(format!("- `{name}({sig})`"));
     }
     lines.join("\n")
+}
+
+/// Render a tool line with the old format that includes the per-tool description.
+///
+/// Used by tests to compute a pre-change baseline size for prompt-shrinkage
+/// assertions. Single-line convenience wrapper for one schema entry.
+/// Not used in production rendering.
+pub fn format_tool_line_with_description(schema: &serde_json::Value) -> String {
+    let name = schema["name"].as_str().unwrap_or("unknown");
+    let desc = schema["description"].as_str().unwrap_or("");
+    let input = &schema["inputSchema"];
+    let required: Vec<&str> = input["required"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut req_params = Vec::new();
+    let mut opt_params = Vec::new();
+    if let Some(props) = input["properties"].as_object() {
+        let mut keys: Vec<&String> = props.keys().collect();
+        keys.sort();
+        for key in keys {
+            if required.contains(&key.as_str()) {
+                req_params.push(key.as_str());
+            } else {
+                opt_params.push(format!("{key}?"));
+            }
+        }
+    }
+
+    let mut params: Vec<String> = req_params.iter().map(|s| s.to_string()).collect();
+    params.extend(opt_params);
+    let sig = params.join(", ");
+
+    format!("- `{name}({sig})` — {desc}")
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
