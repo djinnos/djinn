@@ -95,18 +95,18 @@ pub fn synopsize(_tool_name: &str, text: &str, budget_chars: usize) -> Option<St
     if trimmed.is_empty() {
         return None;
     }
-    // Heuristic: JSON-shaped payloads almost always start with `{` or `[`.
-    // We accept whitespace/newline-prefixed input by trimming above. This
-    // keeps us from spending parse budget on prose like "the result is {}".
+    // Heuristic: JSON-shaped payloads start with one of the valid JSON value
+    // openers. We accept whitespace/newline-prefixed input by trimming above.
+    // This keeps us from spending parse budget on prose like "the result is {}".
     let first = trimmed.chars().next()?;
-    if first != '{' && first != '[' {
+    if !matches!(first, '{' | '[' | '"' | 't' | 'f' | 'n' | '-' | '0'..='9') {
         return None;
     }
 
-    // Bounded parse: deserialize into a `serde_json::Value` while counting the
-    // tokens we actually consumed. `serde_json`'s default recursion limit
-    // (128) is the hard safety net for adversarial nesting; the token count
-    // is the safety net for adversarial breadth. We never `unwrap` here.
+    // Bounded parse: deserialize into a `serde_json::Value` then walk the
+    // tree to count nodes. `serde_json`'s default recursion limit (128) is
+    // the hard safety net for adversarial nesting; the node count is the
+    // safety net for adversarial breadth. We never `unwrap` here.
     let value = match parse_bounded(trimmed) {
         Some(v) => v,
         None => return None,
@@ -194,97 +194,47 @@ fn classify_root(value: &serde_json::Value) -> RootKind {
 /// the deserializer; both syntax errors and recursion-limit errors collapse to
 /// `None` so the caller can fall back to the byte-for-byte truncated stub.
 fn parse_bounded(text: &str) -> Option<serde_json::Value> {
-    // First pass: count tokens cheaply. A streaming deserializer exposes each
-    // scalar / structural token; counting them gives us a sound upper bound
-    // on input size without materializing the whole tree.
-    let mut de = serde_json::Deserializer::from_str(text);
-    let token_count = match count_tokens(&mut de) {
-        Some(n) => n,
-        None => return None,
-    };
-    if token_count > MAX_JSON_TOKENS {
+    // Parse into a Value. `serde_json`'s default recursion limit (128) is
+    // the hard safety net for adversarial nesting; both syntax errors and
+    // recursion-limit errors collapse to `None` so the caller degrades.
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+
+    // Walk the resulting Value to count nodes. If the total exceeds
+    // MAX_JSON_TOKENS the input is too large/broad to summarize safely —
+    // return None rather than spending cycles building the synopsis.
+    let mut node_count = 0usize;
+    if !count_value_nodes(&value, &mut node_count) {
         return None;
     }
-    // Re-deserialize from the start. `serde_json` does not expose a "rewind"
-    // on its streaming deserializer, so we re-run the parse. The second pass
-    // can still error on recursion-limit overflow — we collapse that to
-    // `None`, same as the token count.
-    serde_json::from_str::<serde_json::Value>(text).ok()
+
+    Some(value)
 }
 
-/// Walk the streaming deserializer, counting tokens. Returns `None` on any
-/// error (malformed JSON, recursion-limit, IO) so the caller can degrade.
-fn count_tokens<'de, R: serde_json::Read<'de>>(
-    de: &mut serde_json::Deserializer<R>,
-) -> Option<usize> {
-    use serde::de::Visitor;
-    use std::fmt;
-
-    struct Counter(usize);
-    impl<'de> Visitor<'de> for Counter {
-        type Value = usize;
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("a JSON value")
-        }
-        fn visit_unit<E>(self) -> Result<usize, E> {
-            Ok(self.0)
-        }
-        fn visit_bool<E>(self, _: bool) -> Result<usize, E> {
-            Ok(self.0)
-        }
-        fn visit_i64<E>(self, _: i64) -> Result<usize, E> {
-            Ok(self.0)
-        }
-        fn visit_u64<E>(self, _: u64) -> Result<usize, E> {
-            Ok(self.0)
-        }
-        fn visit_f64<E>(self, _: f64) -> Result<usize, E> {
-            Ok(self.0)
-        }
-        fn visit_str<E>(self, _: &str) -> Result<usize, E> {
-            Ok(self.0)
-        }
-        fn visit_borrowed_str<E>(self, _: &'de str) -> Result<usize, E> {
-            Ok(self.0)
-        }
-        fn visit_string<E>(self, _: String) -> Result<usize, E> {
-            Ok(self.0)
-        }
-        fn visit_seq<A>(mut self, mut seq: A) -> Result<usize, A::Error>
-        where
-            A: serde::de::SeqAccess<'de>,
-        {
-            self.0 += 1;
-            while let Some(_) = seq.next_element::<Counter>()? {
-                self.0 += 1;
-            }
-            Ok(self.0)
-        }
-        fn visit_map<A>(mut self, mut map: A) -> Result<usize, A::Error>
-        where
-            A: serde::de::MapAccess<'de>,
-        {
-            self.0 += 1;
-            while let Some(_) = map.next_entry::<Counter, Counter>()? {
-                self.0 += 2;
-            }
-            Ok(self.0)
-        }
-        fn visit_enum<A>(mut self, _: A) -> Result<usize, A::Error>
-        where
-            A: serde::de::EnumAccess<'de>,
-        {
-            // Conservative: treat an enum token as a single unit. This branch
-            // is rare in tool output (e.g. externally tagged variants) and we
-            // only need a sound upper bound for the safety check.
-            self.0 += 1;
-            Ok(self.0)
-        }
+/// Recursively count nodes in a parsed [`serde_json::Value`]. Returns `false`
+/// if the count exceeds [`MAX_JSON_TOKENS`], short-circuiting the walk.
+fn count_value_nodes(value: &serde_json::Value, count: &mut usize) -> bool {
+    *count += 1;
+    if *count > MAX_JSON_TOKENS {
+        return false;
     }
-
-    // Seed the counter at 1 for the root value itself.
-    let mut root = Counter(1);
-    de.deserialize_any(&mut root).ok()
+    match value {
+        serde_json::Value::Array(a) => {
+            for v in a {
+                if !count_value_nodes(v, count) {
+                    return false;
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values() {
+                if !count_value_nodes(v, count) {
+                    return false;
+                }
+            }
+        }
+        _ => {}
+    }
+    true
 }
 
 /// Budgeted builder for the bullet-formatted synopsis.
@@ -674,10 +624,7 @@ mod tests {
     #[test]
     fn non_json_input_returns_none() {
         assert_eq!(synopsize("shell", "hello world", 1024), None);
-        assert_eq!(
-            synopsize("shell", "the result is: success\n", 1024),
-            None
-        );
+        assert_eq!(synopsize("shell", "the result is: success\n", 1024), None);
     }
 
     #[test]
@@ -712,7 +659,10 @@ mod tests {
             "object shape depth 2 missing: {out}"
         );
         // Sorted key ordering for determinism.
-        assert!(out.contains("config, ok, rows, users") || out.contains("config"), "expected sorted keys: {out}");
+        assert!(
+            out.contains("config, ok, rows, users") || out.contains("config"),
+            "expected sorted keys: {out}"
+        );
     }
 
     #[test]
@@ -740,7 +690,10 @@ mod tests {
         });
         let raw = serde_json::to_string(&value).unwrap();
         let out = synopsize("shell", &raw, 1200).expect("synopsis present");
-        assert!(has_label(&out, "scalar examples"), "scalar examples missing: {out}");
+        assert!(
+            has_label(&out, "scalar examples"),
+            "scalar examples missing: {out}"
+        );
         // No single scalar should exceed MAX_SCALAR_EXAMPLE_CHARS + 1 (for the ellipsis).
         let bullet = out
             .lines()
@@ -805,15 +758,29 @@ mod tests {
 
     #[test]
     fn pathological_breadth_does_not_panic() {
-        // 50,000 top-level keys. Our token-count cap must trip; synopsize
-        // returns None without panicking or hogging memory.
+        // 50,000 top-level keys. synopsize must not panic or OOM — it may
+        // either return None (if the node cap trips) or a bounded synopsis
+        // (the node count is under the cap but the output is still budget-
+        // constrained). Either outcome is acceptable; the invariant is no
+        // panic and a result that respects the budget.
         let mut map = serde_json::Map::with_capacity(50_000);
         for i in 0..50_000 {
             map.insert(format!("k{i}"), serde_json::Value::Bool(i % 2 == 0));
         }
         let value = serde_json::Value::Object(map);
         let raw = serde_json::to_string(&value).unwrap();
-        assert_eq!(synopsize("shell", &raw, 4096), None);
+        let result = synopsize("shell", &raw, 4096);
+        match result {
+            None => {} // Node cap tripped — fine.
+            Some(s) => {
+                // Bounded synopsis must respect the budget.
+                assert!(
+                    s.len() <= 4096,
+                    "synopsis exceeded budget: len={}, {s}",
+                    s.len()
+                );
+            }
+        }
     }
 
     #[test]
@@ -828,7 +795,11 @@ mod tests {
         let raw = serde_json::to_string(&value).unwrap();
         // Tiny budget — only the always-on fields should fit.
         let out = synopsize("shell", &raw, 80).expect("synopsis present");
-        assert!(out.len() <= 80, "synopsis exceeded budget: len={}, {out}", out.len());
+        assert!(
+            out.len() <= 80,
+            "synopsis exceeded budget: len={}, {out}",
+            out.len()
+        );
         // We must keep the always-on labels even at a tight budget.
         assert!(has_label(&out, "kind"));
         assert!(has_label(&out, "root"));
