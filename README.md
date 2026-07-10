@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://youtu.be/f-S3ju-GjCs"><strong>Demo video</strong></a> ·
+  <a href="https://youtu.be/cewtCRdkUuk"><strong>Demo video</strong></a> ·
   <a href="#how-it-works"><strong>How it works</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
   <a href="#deploy"><strong>Deploy</strong></a> ·
