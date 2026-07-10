@@ -206,6 +206,12 @@ pub const SKIPPED_REASON_VALUES: &[&str] = &[
 pub struct TraceCandidate {
     /// Stable note id of the candidate.
     pub note_id: String,
+    /// Optional stable permalink of the candidate note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permalink: Option<String>,
+    /// Optional human-readable title of the candidate note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Whether the candidate was injected or skipped.
     ///
     /// Defaults to `Skipped` when absent from JSONB (backward compat).
