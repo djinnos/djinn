@@ -921,4 +921,5 @@ fn collect_grep_terms(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[path = "synopsis_tests.rs"]
 mod synopsis_tests;
