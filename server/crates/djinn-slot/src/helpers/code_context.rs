@@ -57,8 +57,17 @@ pub fn derive_task_scope_paths(
 }
 
 /// Format knowledge notes for injection into the system prompt.
+///
+/// Each rendered line preserves the note's type, title, and summary content
+/// and appends the note's `permalink` (e.g. `pitfalls/refinement-target-less`)
+/// so callers can resolve the note via
+/// `memory_read(identifier=<permalink>)` with an exact identifier instead of
+/// relying on title matching.
+///
 /// Uses L0 (abstract) for most notes, L1 (overview) for high-confidence ones.
-/// Budget-capped at `budget_chars`, dropping lowest-confidence notes first.
+/// Budget-capped at `budget_chars`, dropping lowest-confidence notes first;
+/// the appended `permalink` is included in that budget accounting rather than
+/// being layered on after truncation.
 pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize) -> String {
     let mut lines = Vec::new();
     let mut used = 0;
@@ -81,7 +90,15 @@ pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize)
                 .as_deref()
                 .unwrap_or_else(|| &note.content[..note.content.len().min(100)])
         };
-        let line = format!("- **[{}] {}**: {}", label, note.title, summary);
+        // Append the permalink on the same rendered line so callers can
+        // resolve the note via `memory_read(identifier=<permalink>)`.
+        // The permalink suffix length is counted against `budget_chars` below,
+        // so the truncation logic is identical to a non-permalink line of
+        // the same total length.
+        let line = format!(
+            "- **[{}] {}**: {} (permalink: {})",
+            label, note.title, summary, note.permalink
+        );
         if used + line.len() > budget_chars {
             break;
         }
