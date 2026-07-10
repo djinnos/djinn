@@ -91,11 +91,23 @@ pub use housekeeping::{
     LlmAnchorProposer, ProposedBackfillAnchor, propose_anchor_deterministic,
 };
 
-/// Compact scope-overlap candidate row used for retrieval tracing.
+/// Compact scope-overlap candidate row returned by
+/// [`NoteRepository::query_by_scope_overlap_trace_candidates`].
 ///
 /// This intentionally carries ranking and scope/source metadata but omits note
 /// content so downstream trace classification can record why eligible notes
 /// were injected or skipped without changing production injection output.
+///
+/// Unlike the production [`NoteRepository::query_by_scope_overlap`] query,
+/// the trace-candidate query omits the confidence threshold and production
+/// injection limit. This means the result set includes below-threshold active
+/// notes (classifiable as `min_confidence`) and over-production-limit active
+/// notes (classifiable as `not_top_k`) for downstream `mwtv` instrumentation.
+///
+/// Each row maps 1:1 to a [`TraceCandidate`](crate::repositories::retrieval_trace::TraceCandidate)
+/// for JSONB persistence in `retrieval_traces`. The identity fields (`id`,
+/// `permalink`, `title`) and provenance fields (`folder`, `note_type`,
+/// `scope_paths`) are consumed by `liso` (`memory_recall_trace` tooling).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub struct ScopeOverlapTraceCandidate {
     pub id: String,

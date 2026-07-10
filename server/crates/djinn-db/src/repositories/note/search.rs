@@ -734,9 +734,17 @@ impl NoteRepository {
     /// (project, active status, note type, global-note handling, and
     /// bidirectional scope overlap), but intentionally omits the production
     /// confidence threshold and production injection limit. The only cap applied
-    /// here is `trace_candidate_cap`, allowing downstream trace classifiers to
-    /// label `min_confidence` and `not_top_k` drop reasons from the full ordered
-    /// candidate set.
+    /// here is `trace_candidate_cap`, allowing downstream trace classifiers
+    /// (`mwtv`) to label `min_confidence` and `not_top_k` drop reasons from the
+    /// full ordered candidate set.
+    ///
+    /// Returns [`ScopeOverlapTraceCandidate`] rows that map 1:1 to
+    /// [`TraceCandidate`](crate::repositories::retrieval_trace::TraceCandidate)
+    /// for JSONB persistence. The identity fields (`id`, `permalink`, `title`),
+    /// ranking metadata (`rank`, `confidence`), and provenance (`folder`,
+    /// `note_type`, `scope_paths`) form the complete data-layer contract
+    /// consumed by `mwtv` (classification) and `liso` (`memory_recall_trace`
+    /// tooling).
     pub async fn query_by_scope_overlap_trace_candidates(
         &self,
         project_id: &str,
