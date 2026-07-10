@@ -245,9 +245,12 @@ pub async fn cmd_refresh_baseline(crate_root: &std::path::Path) -> Result<()> {
         .nth(3)
         .unwrap_or(crate_root)
         .to_path_buf();
-    let refresh_commit = djinn_git::head_commit_sha(&repo_root)
-        .await
-        .unwrap_or_else(|_| "unknown".to_string());
+    let refresh_commit = djinn_git::head_commit_sha(&repo_root).await.map_err(|e| {
+        anyhow::anyhow!(
+            "failed to resolve refresh commit from repository HEAD: {}",
+            e
+        )
+    })?;
 
     info!("=== Refresh Baseline ===");
     info!(commit = %refresh_commit, "refresh commit");
@@ -335,6 +338,46 @@ pub fn not_yet_implemented(subcommand: &str, task_ref: &str) -> anyhow::Result<(
          Tracked by task {task_ref} in epic nih4 (Phase 1). \
          See the djinn-memory-eval README for the implementation roadmap."
     )
+}
+
+/// Validate that a `refresh_commit` value looks like a real commit SHA
+/// and is not a known placeholder.
+///
+/// Called by `cmd_validate_fixtures` to reject test scaffolding metadata
+/// in committed baselines.  Valid commit SHAs are lowercase hex and at
+/// least 7 characters (abbreviated SHA) -- common git conventions.
+pub fn validate_refresh_commit(refresh_commit: &str) -> anyhow::Result<()> {
+    if refresh_commit.is_empty() {
+        anyhow::bail!("baseline metadata.refresh_commit is empty");
+    }
+
+    const PLACEHOLDER_PATTERNS: &[&str] = &["local-test-refresh", "unknown", "placeholder", "none"];
+
+    let lower = refresh_commit.to_lowercase();
+    for &pattern in PLACEHOLDER_PATTERNS {
+        if lower == pattern {
+            anyhow::bail!(
+                "baseline metadata.refresh_commit is a known placeholder \
+                 (\"{}\").  Refresh the baseline with `cargo run -p \
+                 djinn-memory-eval -- refresh-baseline` so it carries \
+                 real repository HEAD commit provenance.",
+                refresh_commit,
+            );
+        }
+    }
+
+    // A real commit SHA is hex and at least 7 characters (abbreviated SHA).
+    if lower.len() < 7 || !lower.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!(
+            "baseline metadata.refresh_commit \"{}\" does not look like a \
+             valid git commit SHA (expected 7+ hex characters). \
+             Refresh the baseline with `cargo run -p djinn-memory-eval -- \
+             refresh-baseline`.",
+            refresh_commit,
+        );
+    }
+
+    Ok(())
 }
 
 /// Validate committed fixtures and baseline without running the pipeline.
@@ -433,9 +476,8 @@ pub fn cmd_validate_fixtures(crate_root: &std::path::Path) -> Result<()> {
 
     let baseline = report::load_baseline(crate_root).context("loading baseline")?;
 
-    if baseline.metadata.refresh_commit.is_empty() {
-        anyhow::bail!("baseline refresh_commit is empty");
-    }
+    validate_refresh_commit(&baseline.metadata.refresh_commit)
+        .context("baseline refresh_commit validation failed")?;
     if baseline.threshold_policy_version.is_empty() {
         anyhow::bail!("baseline threshold_policy_version is empty");
     }
@@ -1013,6 +1055,104 @@ mod tests {
         write_baseline_to_disk(root, &baseline);
         let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
         assert!(err.contains("no task-affinity comparisons"), "{}", err);
+    }
+
+    // -- AC: Placeholder refresh metadata rejection -----------------------
+
+    #[test]
+    fn validate_fixtures_rejects_empty_refresh_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fixtures = Phase1Fixtures {
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
+        };
+        write_fixtures_to_disk(root, &fixtures);
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.metadata.refresh_commit = String::new();
+        write_baseline_to_disk(root, &baseline);
+        let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
+        assert!(err.contains("refresh_commit"), "{}", err);
+        assert!(err.contains("empty"), "{}", err);
+    }
+
+    #[test]
+    fn validate_fixtures_rejects_placeholder_refresh_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fixtures = Phase1Fixtures {
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
+        };
+        write_fixtures_to_disk(root, &fixtures);
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.metadata.refresh_commit = "local-test-refresh".to_string();
+        write_baseline_to_disk(root, &baseline);
+        let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
+        assert!(err.contains("known placeholder"), "{}", err);
+        assert!(err.contains("local-test-refresh"), "{}", err);
+    }
+
+    #[test]
+    fn validate_fixtures_rejects_unknown_refresh_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fixtures = Phase1Fixtures {
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
+        };
+        write_fixtures_to_disk(root, &fixtures);
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.metadata.refresh_commit = "unknown".to_string();
+        write_baseline_to_disk(root, &baseline);
+        let err = format!("{:?}", cmd_validate_fixtures(root).unwrap_err());
+        assert!(err.contains("known placeholder"), "{}", err);
+    }
+
+    #[test]
+    fn validate_fixtures_accepts_valid_commit_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fixtures = Phase1Fixtures {
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
+        };
+        write_fixtures_to_disk(root, &fixtures);
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.metadata.refresh_commit = "abcdef0123456789abcdef0123456789abcdef01".to_string();
+        write_baseline_to_disk(root, &baseline);
+        assert!(
+            cmd_validate_fixtures(root).is_ok(),
+            "should pass with a valid hex commit SHA"
+        );
+    }
+
+    #[test]
+    fn validate_fixtures_accepts_abbreviated_commit_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fixtures = Phase1Fixtures {
+            corpus_notes: minimal_corpus_notes(),
+            memory_ref_queries: make_n_queries(20),
+            bad_cases: make_n_bad_cases(10),
+            manifest: None,
+        };
+        write_fixtures_to_disk(root, &fixtures);
+        let mut baseline = make_baseline_with_counts(20, 10);
+        baseline.metadata.refresh_commit = "abcdef0".to_string();
+        write_baseline_to_disk(root, &baseline);
+        assert!(
+            cmd_validate_fixtures(root).is_ok(),
+            "should pass with a 7-char abbreviated commit SHA"
+        );
     }
 
     // ── AC: Over-decay age-bucket missing from baseline ─────────────────
