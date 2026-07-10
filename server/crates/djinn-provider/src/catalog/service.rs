@@ -83,10 +83,30 @@ struct RawLimit {
 
 // ── Catalog internals ─────────────────────────────────────────────────────────
 
+/// Retained custom-provider entry: the raw `Provider` plus its seed models with
+/// the `provider/` prefix already stripped from each model ID.  Kept in
+/// `CatalogData.custom_providers` so periodic upstream refreshes do not drop
+/// user-registered providers while the rest of the catalog is being replaced.
+#[derive(Clone, Debug)]
+struct CustomCatalogProvider {
+    /// Stored verbatim so a downstream periodic refresh compose/swap path can
+    /// re-overlay it onto the active catalog after a models.dev reload.
+    #[allow(dead_code)] // read by the upcoming refresh compose/swap task
+    provider: Provider,
+    /// Normalized seed models (provider-prefix stripped).  Same future use as
+    /// `provider`; today only the unit tests inspect it.
+    #[allow(dead_code)] // read by the upcoming refresh compose/swap task
+    seed_models: Vec<Model>,
+}
+
 #[derive(Default)]
 struct CatalogData {
     providers: Vec<Provider>,
     models_idx: HashMap<String, Vec<Model>>,
+    /// Retained custom-provider set, kept separate from upstream/builtin catalog
+    /// data so a live `models.dev` refresh can recompose the active catalog
+    /// without dropping user-registered entries.
+    custom_providers: HashMap<String, CustomCatalogProvider>,
     fetched_at: Option<Instant>,
 }
 
@@ -345,35 +365,22 @@ impl CatalogService {
     /// Persisting to DB is the caller's responsibility.
     pub fn remove_custom_provider(&self, provider_id: &str) {
         let mut data = self.inner.write();
-        data.providers.retain(|p| p.id != provider_id);
-        data.models_idx.remove(provider_id);
+        data.custom_providers.remove(provider_id);
+        remove_provider_from_active(&mut data, provider_id);
     }
 
     /// Add or replace a custom provider and its seed models in the in-memory catalog.
     /// Persisting to DB is the caller's responsibility.
     pub fn add_custom_provider(&self, provider: Provider, seed_models: Vec<Model>) {
+        let normalized = normalize_seed_models(&provider, seed_models);
+        let retained = CustomCatalogProvider {
+            provider: provider.clone(),
+            seed_models: normalized.clone(),
+        };
+
         let mut data = self.inner.write();
-        data.providers.retain(|p| p.id != provider.id);
-        data.models_idx.remove(&provider.id);
-
-        data.providers.push(provider.clone());
-        data.providers.sort_by(|a, b| a.id.cmp(&b.id));
-
-        if !seed_models.is_empty() {
-            // Strip provider prefix from model IDs (some sources store the full
-            // "provider/model" form; internal IDs should be the bare model name).
-            let prefix = format!("{}/", provider.id);
-            let normalized: Vec<Model> = seed_models
-                .into_iter()
-                .map(|mut m| {
-                    if let Some(bare) = m.id.strip_prefix(&prefix) {
-                        m.id = bare.to_string();
-                    }
-                    m
-                })
-                .collect();
-            data.models_idx.insert(provider.id, normalized);
-        }
+        data.custom_providers.insert(provider.id.clone(), retained);
+        apply_custom_provider_to_active(&mut data, &provider, &normalized);
     }
 }
 
@@ -381,6 +388,61 @@ impl Default for CatalogService {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── Custom-provider helpers ───────────────────────────────────────────────────
+
+/// Strip the `"<provider_id>/"` prefix from each seed-model id so internal
+/// IDs are always the bare model name.  Shared between `add_custom_provider`
+/// (which seeds the retained set) and the periodic refresh compose/swap path
+/// (which will re-apply the retained set after a models.dev reload).
+///
+/// Behavior matches the upstream `normalize()` path: a model whose id already
+/// starts with `"<provider_id>/"` is rewritten to the bare form; any other id
+/// (including dotted ids like `mimo-v2.5-pro`) is left untouched.  Empty input
+/// produces an empty output without allocating a throwaway prefix string.
+fn normalize_seed_models(provider: &Provider, seed_models: Vec<Model>) -> Vec<Model> {
+    if seed_models.is_empty() {
+        return Vec::new();
+    }
+    let prefix = format!("{}/", provider.id);
+    seed_models
+        .into_iter()
+        .map(|mut m| {
+            if let Some(bare) = m.id.strip_prefix(&prefix) {
+                m.id = bare.to_string();
+            }
+            m
+        })
+        .collect()
+}
+
+/// Overlay a retained custom-provider entry into the active `providers` /
+/// `models_idx` state.  Always replaces any prior entry under the same id so
+/// add/replace semantics stay consistent with the previous in-place behavior.
+/// The providers list is kept sorted by id to match `normalize()`.
+fn apply_custom_provider_to_active(
+    data: &mut CatalogData,
+    provider: &Provider,
+    seed_models: &[Model],
+) {
+    data.providers.retain(|p| p.id != provider.id);
+    data.providers.push(provider.clone());
+    data.providers.sort_by(|a, b| a.id.cmp(&b.id));
+
+    data.models_idx.remove(&provider.id);
+    if !seed_models.is_empty() {
+        data.models_idx
+            .insert(provider.id.clone(), seed_models.to_vec());
+    }
+}
+
+/// Remove a provider (and its model list) from the active catalog.  Used by
+/// `remove_custom_provider` and by the periodic refresh compose/swap path to
+/// strip an entry that no longer belongs in the retained set.
+fn remove_provider_from_active(data: &mut CatalogData, provider_id: &str) {
+    data.providers.retain(|p| p.id != provider_id);
+    data.models_idx.remove(provider_id);
 }
 
 // ── Normalization ─────────────────────────────────────────────────────────────
@@ -958,5 +1020,233 @@ mod tests {
         catalog.inject_builtin_providers(entries);
 
         assert_eq!(catalog.list_providers().len(), initial_count);
+    }
+
+    // ── Custom-provider retention tests ───────────────────────────────────────
+
+    fn mk_custom_provider(id: &str) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: format!("Custom {id}"),
+            npm: String::new(),
+            env_vars: vec![format!("{id}_API_KEY")],
+            base_url: format!("https://api.{id}.invalid/v1"),
+            docs_url: String::new(),
+            is_openai_compatible: true,
+        }
+    }
+
+    fn mk_seed_model(id: &str, provider_id: &str) -> Model {
+        Model {
+            id: id.to_string(),
+            provider_id: provider_id.to_string(),
+            name: id.to_string(),
+            tool_call: true,
+            reasoning: false,
+            attachment: false,
+            context_window: 0,
+            output_limit: 0,
+            pricing: Pricing::default(),
+        }
+    }
+
+    /// `add_custom_provider` must persist the entry in the retained custom-provider
+    /// set *and* surface it through the active catalog's read methods.
+    #[test]
+    fn add_custom_provider_retains_entry_and_reflects_in_active() {
+        let catalog = CatalogService::new();
+        let provider = mk_custom_provider("retentive");
+        let seeds = vec![
+            mk_seed_model("alpha", "retentive"),
+            mk_seed_model("beta", "retentive"),
+        ];
+
+        catalog.add_custom_provider(provider.clone(), seeds.clone());
+
+        let providers = catalog.list_providers();
+        assert!(
+            providers.iter().any(|p| p.id == "retentive"),
+            "add_custom_provider should expose the provider in list_providers"
+        );
+        let models = catalog.list_models("retentive");
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert!(
+            ids.contains(&"alpha") && ids.contains(&"beta"),
+            "add_custom_provider should expose seed models in list_models; got {ids:?}"
+        );
+
+        let found = catalog
+            .find_model("retentive/alpha")
+            .expect("retentive/alpha should be findable");
+        assert_eq!(found.provider_id, "retentive");
+        assert_eq!(found.id, "alpha");
+
+        let data = catalog.inner.read();
+        let retained = data
+            .custom_providers
+            .get("retentive")
+            .expect("retentive entry should be retained in CatalogData.custom_providers");
+        assert_eq!(retained.provider.id, "retentive");
+        let retained_ids: Vec<&str> = retained.seed_models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(retained_ids, vec!["alpha", "beta"]);
+    }
+
+    /// Calling `add_custom_provider` a second time with the same id must
+    /// replace (not duplicate) both the retained entry and the active catalog.
+    #[test]
+    fn add_custom_provider_replaces_existing_entry() {
+        let catalog = CatalogService::new();
+        let provider = mk_custom_provider("replacy");
+
+        catalog.add_custom_provider(provider.clone(), vec![mk_seed_model("v1", "replacy")]);
+        catalog.add_custom_provider(
+            provider.clone(),
+            vec![
+                mk_seed_model("v2-alpha", "replacy"),
+                mk_seed_model("v2-beta", "replacy"),
+            ],
+        );
+
+        let matching = catalog
+            .list_providers()
+            .into_iter()
+            .filter(|p| p.id == "replacy")
+            .count();
+        assert_eq!(matching, 1, "replace must not duplicate the provider");
+
+        let ids: Vec<String> = catalog
+            .list_models("replacy")
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, vec!["v2-alpha", "v2-beta"]);
+
+        let data = catalog.inner.read();
+        let retained = data
+            .custom_providers
+            .get("replacy")
+            .expect("replacy should still be retained after replace");
+        let retained_ids: Vec<String> = retained.seed_models.iter().map(|m| m.id.clone()).collect();
+        assert_eq!(retained_ids, vec!["v2-alpha", "v2-beta"]);
+    }
+
+    /// `remove_custom_provider` must drop the entry from both the retained set
+    /// and the active catalog so a future refresh compose/swap cannot
+    /// resurrect it.
+    #[test]
+    fn remove_custom_provider_clears_retained_and_active() {
+        let catalog = CatalogService::new();
+        catalog.add_custom_provider(
+            mk_custom_provider("deleteme"),
+            vec![mk_seed_model("m", "deleteme")],
+        );
+
+        catalog.remove_custom_provider("deleteme");
+
+        assert!(
+            catalog.list_providers().iter().all(|p| p.id != "deleteme"),
+            "remove_custom_provider must drop the provider from list_providers"
+        );
+        assert!(
+            catalog.list_models("deleteme").is_empty(),
+            "remove_custom_provider must drop the model list"
+        );
+        assert!(
+            catalog.find_model("deleteme/m").is_none(),
+            "find_model must no longer resolve deleteme/m"
+        );
+
+        let data = catalog.inner.read();
+        assert!(
+            !data.custom_providers.contains_key("deleteme"),
+            "remove_custom_provider must clear the retained entry"
+        );
+    }
+
+    /// Seed-model normalization must strip the `"<provider_id>/"` prefix from
+    /// full-form ids, leave unrelated ids untouched (including dotted ids),
+    /// and tolerate empty input.
+    #[test]
+    fn normalize_seed_models_strips_provider_prefix_only() {
+        let provider = mk_custom_provider("norm");
+
+        let empty: Vec<Model> = normalize_seed_models(&provider, Vec::new());
+        assert!(empty.is_empty());
+
+        let input = vec![
+            mk_seed_model("norm/bare-from-full", "norm"),
+            mk_seed_model("already-bare", "norm"),
+            mk_seed_model("mimo-v2.5-pro", "norm"),
+            mk_seed_model("norm/dotted.v2", "norm"),
+        ];
+        let normalized = normalize_seed_models(&provider, input);
+        let ids: Vec<String> = normalized.iter().map(|m| m.id.clone()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "bare-from-full".to_string(),
+                "already-bare".to_string(),
+                "mimo-v2.5-pro".to_string(),
+                "dotted.v2".to_string(),
+            ],
+            "only the provider/ prefix is stripped; bare and unrelated ids are preserved"
+        );
+    }
+
+    /// End-to-end: seed models submitted through `add_custom_provider` with
+    /// the full `"<provider_id>/<model>"` form must surface through the
+    /// active catalog with the prefix stripped, so `find_model` and the
+    /// pricing snapshot use the canonical bare id.
+    #[test]
+    fn add_custom_provider_normalizes_seed_model_ids_end_to_end() {
+        let catalog = CatalogService::new();
+        let provider = mk_custom_provider("normalize-me");
+        let priced = |id: &str, in_rate: f64| Model {
+            id: id.to_string(),
+            provider_id: "normalize-me".to_string(),
+            name: id.to_string(),
+            tool_call: false,
+            reasoning: false,
+            attachment: false,
+            context_window: 0,
+            output_limit: 0,
+            pricing: Pricing {
+                input_per_million: in_rate,
+                output_per_million: in_rate * 2.0,
+                ..Pricing::default()
+            },
+        };
+
+        catalog.add_custom_provider(
+            provider,
+            vec![
+                priced("normalize-me/full-form", 1.0),
+                priced("bare-form", 2.0),
+            ],
+        );
+
+        let ids: Vec<String> = catalog
+            .list_models("normalize-me")
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert!(
+            ids.contains(&"full-form".to_string()),
+            "prefix must be stripped; got {ids:?}"
+        );
+        assert!(ids.contains(&"bare-form".to_string()));
+
+        let found = catalog
+            .find_model("normalize-me/full-form")
+            .expect("full-form model must resolve via the canonical bare id");
+        assert_eq!(found.id, "full-form");
+        assert_eq!(found.provider_id, "normalize-me");
+
+        let pricing = catalog.pricing_for_all_models();
+        assert!(
+            pricing.contains_key("normalize-me/full-form"),
+            "pricing_for_all_models must key on the stripped id; got {pricing:?}"
+        );
+        assert_eq!(pricing["normalize-me/full-form"].input_per_million, 1.0);
     }
 }

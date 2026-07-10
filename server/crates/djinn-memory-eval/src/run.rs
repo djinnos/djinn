@@ -1043,7 +1043,7 @@ mod tests {
         };
 
         // Build and write baseline
-        let refresh_commit = "local-test-refresh".to_string();
+        let refresh_commit = "aabbccdd00112233445566778899aabbccddeeff".to_string();
         let baseline = crate::report::build_baseline(
             &report,
             report.fixture_hashes.clone(),
