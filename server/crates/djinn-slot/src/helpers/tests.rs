@@ -11,6 +11,7 @@ use djinn_control_plane::bridge::{
 use djinn_core::events::EventBus;
 use djinn_core::models::Project;
 use djinn_db::{Database, ProjectRepository};
+use djinn_memory::Note;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -844,4 +845,164 @@ async fn build_reviewer_diff_context_returns_none_when_no_touched_symbols() {
     unsafe {
         std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
     }
+}
+// New tests appended below the existing test suite in helpers/tests.rs.
+
+fn fixture_note(
+    note_type: &str,
+    title: &str,
+    permalink: &str,
+    abstract_text: Option<&str>,
+    overview_text: Option<&str>,
+    content: &str,
+    confidence: f64,
+) -> Note {
+    Note {
+        id: format!("note:{title}"),
+        project_id: "project_test".to_string(),
+        permalink: permalink.to_string(),
+        title: title.to_string(),
+        file_path: String::new(),
+        storage: "db".to_string(),
+        note_type: note_type.to_string(),
+        folder: permalink.split('/').next().unwrap_or("").to_string(),
+        status: "active".to_string(),
+        tags: "[]".to_string(),
+        content: content.to_string(),
+        retrieval_anchor: None,
+        created_at: "2026-01-01T00:00:00.000Z".to_string(),
+        updated_at: "2026-01-01T00:00:00.000Z".to_string(),
+        last_accessed: "2026-01-01T00:00:00.000Z".to_string(),
+        access_count: 0,
+        confidence,
+        abstract_: abstract_text.map(|s| s.to_string()),
+        overview: overview_text.map(|s| s.to_string()),
+        scope_paths: "[]".to_string(),
+    }
+}
+#[test]
+fn format_knowledge_notes_appends_permalink_on_each_line() {
+    // Two notes - different types, distinct permalinks - must each surface
+    // their permalink on the rendered line and still preserve the existing
+    // type / title / summary shape so the prompt's meaning is unchanged.
+    let notes = vec![
+        fixture_note(
+            "pitfall",
+            "Refinement target-less",
+            "pitfalls/refinement-target-less",
+            Some("Refinements on proposals without a target project die as opaque agent_failure."),
+            None,
+            "Long body content that should NOT appear because abstract wins.",
+            0.5,
+        ),
+        fixture_note(
+            "pattern",
+            "Anchor Note",
+            "patterns/anchor",
+            Some("Use anchors for retrieval."),
+            None,
+            "Body remains separate from the retrieval anchor.",
+            0.9,
+        ),
+    ];
+
+    let rendered = format_knowledge_notes(&notes, 2000);
+
+    assert!(
+        rendered.contains(
+            "**[Pitfall] Refinement target-less**: Refinements on proposals without a target project die as opaque agent_failure. (permalink: pitfalls/refinement-target-less)",
+        ),
+        "expected pitfall line with permalink, got: {rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "**[Pattern] Anchor Note**: Use anchors for retrieval. (permalink: patterns/anchor)",
+        ),
+        "expected pattern line with permalink, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Long body content that should NOT appear"),
+        "body content leaked past abstract selection: {rendered}"
+    );
+}
+
+#[test]
+fn format_knowledge_notes_permalink_visible_when_line_fits_within_budget() {
+    let notes = vec![fixture_note(
+        "case",
+        "Sample Case",
+        "cases/sample-case",
+        Some("Short case abstract."),
+        None,
+        "Body text.",
+        0.6,
+    )];
+
+    let rendered = format_knowledge_notes(&notes, 2000);
+    assert_eq!(
+        rendered,
+        "- **[Case] Sample Case**: Short case abstract. (permalink: cases/sample-case)"
+    );
+}
+
+#[test]
+fn format_knowledge_notes_empty_input_returns_empty_string() {
+    let rendered = format_knowledge_notes(&[], 2000);
+    assert!(
+        rendered.is_empty(),
+        "expected empty output, got: {rendered:?}"
+    );
+}
+
+#[test]
+fn format_knowledge_notes_budget_counts_permalink_in_truncation() {
+    let notes = vec![
+        fixture_note("note", "short", "a/short", Some("a"), None, "", 0.5),
+        fixture_note(
+            "note",
+            "medium-summary-text",
+            "b/medium-summary",
+            Some("b"),
+            None,
+            "",
+            0.5,
+        ),
+    ];
+    let first_line = "- **[Note] short**: a (permalink: a/short)";
+    let second_line = "- **[Note] medium-summary-text**: b (permalink: b/medium-summary)";
+    let used_after_first = first_line.len() + 1;
+    let budget = used_after_first + second_line.len() - 1;
+
+    let rendered = format_knowledge_notes(&notes, budget);
+    assert_eq!(
+        rendered, first_line,
+        "expected only the first line (with permalink) within budget, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("(permalink: b/medium-summary)"),
+        "second note's permalink leaked past budget: {rendered}"
+    );
+}
+
+#[test]
+fn format_knowledge_notes_budget_rejects_line_whose_permalink_itself_overflows() {
+    let notes = vec![fixture_note(
+        "pattern",
+        "Long",
+        "patterns/this-permalink-slug-is-intentionally-very-long-on-purpose",
+        Some("summary"),
+        None,
+        "",
+        0.5,
+    )];
+
+    let rendered = format_knowledge_notes(&notes, 100);
+    assert!(
+        rendered.is_empty(),
+        "single-line overflow must drop the note rather than partial-emit, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("patterns/this-permalink-slug"),
+        "overflow line must not leak, got: {rendered}"
+    );
 }
