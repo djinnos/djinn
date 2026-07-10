@@ -1262,3 +1262,179 @@ async fn write_accepts_worker_role_plumbing() {
         "write must report the written path"
     );
 }
+
+// ─── call_read: `.djinn/memory/` NotFound teaching hint ───────────────────
+
+/// A NotFound read whose path contains `.djinn/memory/` must return the
+/// teaching error that names `memory_read` and `memory_search` with
+/// concrete example invocations, rather than the generic
+/// file-not-found / similar-filename error.
+#[tokio::test]
+async fn read_memory_path_not_found_returns_teaching_hint() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-read-mem-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": ".djinn/memory/pitfalls/some-slug.md" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let err = call_read(&state, &args, worktree.path())
+        .await
+        .expect_err("memory path read must fail with NotFound");
+    assert!(
+        err.contains("memory_read"),
+        "hint must name memory_read, got: {err}"
+    );
+    assert!(
+        err.contains("memory_search"),
+        "hint must name memory_search, got: {err}"
+    );
+    assert!(
+        err.contains("memory_read(identifier="),
+        "hint must include a concrete memory_read example, got: {err}"
+    );
+    assert!(
+        err.contains("memory_search(query="),
+        "hint must include a concrete memory_search example, got: {err}"
+    );
+    // Must NOT include the generic similar-filename suffix.
+    assert!(
+        !err.contains("similar filenames"),
+        "memory path must not show similar-filename suggestions, got: {err}"
+    );
+}
+
+/// A NotFound read of a `.djinn/memory/` path expressed with an absolute
+/// prefix must also trigger the hint (matching the resolved absolute form).
+#[tokio::test]
+async fn read_memory_path_not_found_absolute_form_triggers_hint() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-read-mem-abs-");
+    let abs_memory = worktree
+        .path()
+        .join(".djinn/memory/decisions/adr-xyz.md")
+        .display()
+        .to_string();
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": abs_memory })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let err = call_read(&state, &args, worktree.path())
+        .await
+        .expect_err("absolute memory path read must fail with NotFound");
+    assert!(err.contains("memory_read"), "got: {err}");
+    assert!(err.contains("memory_search"), "got: {err}");
+}
+
+/// A NotFound read of a NON-memory path that has sibling files must keep
+/// the existing generic file-not-found + similar-filename behavior
+/// unchanged.
+#[tokio::test]
+async fn read_non_memory_not_found_keeps_similar_filename_suggestion() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-read-sim-");
+    // Seed a sibling file so the similar-filename suggestion is non-empty.
+    tokio::fs::write(worktree.path().join("sibling.txt"), "hi")
+        .await
+        .expect("seed sibling");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": "missing.txt" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let err = call_read(&state, &args, worktree.path())
+        .await
+        .expect_err("non-memory missing path must fail with NotFound");
+    assert!(err.contains("file not found"), "got: {err}");
+    assert!(err.contains("similar filenames"), "got: {err}");
+    // Must NOT trigger the memory hint for a non-memory path.
+    assert!(
+        !err.contains("memory_read"),
+        "non-memory path must not trigger memory hint, got: {err}"
+    );
+}
+
+/// A NotFound read of a NON-memory path with no siblings must keep the
+/// plain "file not found" message (no similar-filename suffix) and must
+/// not trigger the memory hint.
+#[tokio::test]
+async fn read_non_memory_not_found_empty_parent_keeps_plain_message() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-read-empty-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": "gone.rs" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let err = call_read(&state, &args, worktree.path())
+        .await
+        .expect_err("non-memory missing path must fail with NotFound");
+    assert!(err.contains("file not found"), "got: {err}");
+    assert!(
+        !err.contains("similar filenames"),
+        "empty parent must not add similar-filename suffix, got: {err}"
+    );
+    assert!(
+        !err.contains("memory_read"),
+        "non-memory path must not trigger memory hint, got: {err}"
+    );
+}
+
+/// A genuinely readable file must NOT trigger the memory NotFound hint —
+/// the hint only fires in the NotFound branch, so a readable file returns
+/// its content normally. This preserves ADR-057/FUSE readable-path
+/// behavior by construction: even a readable file placed under
+/// `.djinn/memory/` must return content, not the hint.
+#[tokio::test]
+async fn read_readable_file_does_not_trigger_memory_hint() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-read-ok-");
+    // Place a readable file at a `.djinn/memory/` path to prove the hint
+    // only fires on NotFound, not on any memory-looking path. If the file
+    // exists and is readable, content is returned normally.
+    let mem_dir = worktree.path().join(".djinn/memory/pitfalls");
+    tokio::fs::create_dir_all(&mem_dir).await.expect("mkdir");
+    let readable = mem_dir.join("readable.md");
+    tokio::fs::write(&readable, "# real content\nline two\n")
+        .await
+        .expect("seed readable file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let rel = readable
+        .strip_prefix(worktree.path())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let args = Some(
+        serde_json::json!({ "file_path": rel })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let result = call_read(&state, &args, worktree.path())
+        .await
+        .expect("readable file must return content, not an error");
+    let content = result
+        .get("content")
+        .and_then(|v| v.as_str())
+        .expect("content field");
+    assert!(
+        content.contains("real content"),
+        "readable file content must be returned, got: {content}"
+    );
+}
