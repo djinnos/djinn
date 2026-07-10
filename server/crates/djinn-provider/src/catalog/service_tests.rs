@@ -926,3 +926,241 @@ fn refresh_and_explicit_inject_share_builtin_helper() {
         "refresh composition and explicit inject must apply the same builtin set"
     );
 }
+
+// ── set_custom_providers (reconciliation) tests ───────────────────────────
+
+/// Reconciling with a custom provider and then reconciling without it must
+/// remove it from both the retained set and the active catalog.  This is the
+/// primary regression guard for the reconciliation API.
+#[test]
+fn set_custom_providers_removes_absent_entries() {
+    let catalog = CatalogService::new();
+
+    // First reconciliation: two custom providers.
+    catalog.set_custom_providers(vec![
+        (
+            mk_custom_provider("alpha"),
+            vec![mk_seed_model("a1", "alpha")],
+        ),
+        (
+            mk_custom_provider("beta"),
+            vec![mk_seed_model("b1", "beta")],
+        ),
+    ]);
+
+    assert!(
+        catalog.list_providers().iter().any(|p| p.id == "alpha"),
+        "alpha must be present after first reconciliation"
+    );
+    assert!(
+        catalog.list_providers().iter().any(|p| p.id == "beta"),
+        "beta must be present after first reconciliation"
+    );
+    assert_eq!(
+        catalog.list_models("alpha").len(),
+        1,
+        "alpha seed model must be present"
+    );
+
+    // Second reconciliation: only beta — alpha must be removed.
+    catalog.set_custom_providers(vec![(
+        mk_custom_provider("beta"),
+        vec![mk_seed_model("b1", "beta")],
+    )]);
+
+    assert!(
+        catalog.list_providers().iter().all(|p| p.id != "alpha"),
+        "alpha must be removed from the active catalog after reconciliation without it"
+    );
+    assert!(
+        catalog.list_models("alpha").is_empty(),
+        "alpha model list must be empty after removal"
+    );
+    assert!(
+        catalog.find_model("alpha/a1").is_none(),
+        "alpha/a1 must not be findable after removal"
+    );
+
+    // Retained set must also reflect the removal.
+    {
+        let data = catalog.inner.read();
+        assert!(
+            !data.custom_providers.contains_key("alpha"),
+            "alpha must be absent from the retained set after reconciliation"
+        );
+        assert!(
+            data.custom_providers.contains_key("beta"),
+            "beta must still be in the retained set"
+        );
+    }
+
+    // beta is still present and correct.
+    assert!(
+        catalog.list_providers().iter().any(|p| p.id == "beta"),
+        "beta must survive reconciliation that omits alpha"
+    );
+    assert_eq!(
+        catalog.list_models("beta").len(),
+        1,
+        "beta seed model must still be present"
+    );
+}
+
+/// Reconciling with an empty vec must clear all custom providers from the
+/// retained set and active catalog.
+#[test]
+fn set_custom_providers_with_empty_vec_clears_all() {
+    let catalog = CatalogService::new();
+    let initial_count = catalog.list_providers().len();
+
+    // Add two custom providers via the individual API.
+    catalog.add_custom_provider(
+        mk_custom_provider("gone-1"),
+        vec![mk_seed_model("m1", "gone-1")],
+    );
+    catalog.add_custom_provider(
+        mk_custom_provider("gone-2"),
+        vec![mk_seed_model("m2", "gone-2")],
+    );
+    assert!(catalog.list_providers().iter().any(|p| p.id == "gone-1"));
+    assert!(catalog.list_providers().iter().any(|p| p.id == "gone-2"));
+
+    // Reconcile with empty — must remove both.
+    catalog.set_custom_providers(vec![]);
+
+    assert!(
+        catalog
+            .list_providers()
+            .iter()
+            .all(|p| p.id != "gone-1" && p.id != "gone-2"),
+        "both custom providers must be removed by empty reconciliation"
+    );
+    // The active catalog should be back to the pre-add state.
+    assert_eq!(
+        catalog.list_providers().len(),
+        initial_count,
+        "provider count must return to initial after clearing all custom providers"
+    );
+    {
+        let data = catalog.inner.read();
+        assert!(
+            data.custom_providers.is_empty(),
+            "retained set must be empty after clearing"
+        );
+    }
+}
+
+/// Reconciliation with overlapping entries must replace (not duplicate) entries
+/// that share the same provider id, and seed-model normalization must apply.
+#[test]
+fn set_custom_providers_replaces_overlapping_entries() {
+    let catalog = CatalogService::new();
+
+    // First reconciliation with v1 seeds.
+    catalog.set_custom_providers(vec![(
+        mk_custom_provider("overlap"),
+        vec![mk_seed_model("overlap/v1-seed", "overlap")],
+    )]);
+
+    let models_v1: Vec<String> = catalog
+        .list_models("overlap")
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(
+        models_v1,
+        vec!["v1-seed"],
+        "v1 seed prefix must be stripped"
+    );
+
+    // Second reconciliation with v2 seeds (same provider id).
+    catalog.set_custom_providers(vec![(
+        mk_custom_provider("overlap"),
+        vec![
+            mk_seed_model("overlap/v2-alpha", "overlap"),
+            mk_seed_model("overlap/v2-beta", "overlap"),
+        ],
+    )]);
+
+    // Must not duplicate the provider.
+    let count = catalog
+        .list_providers()
+        .into_iter()
+        .filter(|p| p.id == "overlap")
+        .count();
+    assert_eq!(
+        count, 1,
+        "reconciliation must not duplicate overlapping entries"
+    );
+
+    // Models must be the v2 set with prefix stripped.
+    let models_v2: Vec<String> = catalog
+        .list_models("overlap")
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(
+        models_v2,
+        vec!["v2-alpha".to_string(), "v2-beta".to_string()],
+        "v2 seeds must replace v1 seeds with prefix stripped"
+    );
+
+    // Retained set must reflect v2.
+    {
+        let data = catalog.inner.read();
+        let retained = data
+            .custom_providers
+            .get("overlap")
+            .expect("overlap must be in retained set");
+        let retained_ids: Vec<String> = retained.seed_models.iter().map(|m| m.id.clone()).collect();
+        assert_eq!(
+            retained_ids,
+            vec!["v2-alpha".to_string(), "v2-beta".to_string()]
+        );
+    }
+}
+
+/// Reconciliation followed by a successful refresh must not resurrect a
+/// custom provider that was absent from the reconciliation input.
+#[test]
+fn set_custom_providers_then_refresh_does_not_resurrect() {
+    let catalog = CatalogService::new();
+
+    // Seed with two custom providers.
+    catalog.set_custom_providers(vec![
+        (
+            mk_custom_provider("keep"),
+            vec![mk_seed_model("k1", "keep")],
+        ),
+        (
+            mk_custom_provider("drop"),
+            vec![mk_seed_model("d1", "drop")],
+        ),
+    ]);
+    assert!(catalog.list_providers().iter().any(|p| p.id == "drop"));
+
+    // Reconcile with only "keep" — "drop" should be gone.
+    catalog.set_custom_providers(vec![(
+        mk_custom_provider("keep"),
+        vec![mk_seed_model("k1", "keep")],
+    )]);
+    assert!(catalog.list_providers().iter().all(|p| p.id != "drop"));
+
+    // Simulate a successful refresh (compose_catalog) — must not resurrect "drop".
+    {
+        let mut data = catalog.inner.write();
+        let upstream = vec![mk_custom_provider("openai")];
+        let mut idx = HashMap::new();
+        idx.insert("openai".to_string(), vec![mk_seed_model("gpt-x", "openai")]);
+        compose_catalog(&mut data, upstream, idx);
+    }
+
+    assert!(
+        catalog.list_providers().iter().all(|p| p.id != "drop"),
+        "a custom provider absent from reconciliation must not be resurrected by refresh"
+    );
+    assert!(
+        catalog.list_providers().iter().any(|p| p.id == "keep"),
+        "keep must survive the refresh"
+    );
+}
