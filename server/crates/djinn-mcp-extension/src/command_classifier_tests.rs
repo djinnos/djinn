@@ -958,17 +958,19 @@ fn destructive_class_as_str_round_trip() {
 #[test]
 fn read_only_validator_still_rejects_rm() {
     // The fail-closed validator still rejects rm as UnknownTool.
-    let violations = super::validate_read_only_command("rm src/file.txt").unwrap_err();
-    assert!(violations.contains(&super::CommandViolation::UnknownTool));
+    let violations =
+        crate::command_validator::validate_read_only_command("rm src/file.txt").unwrap_err();
+    assert!(violations.contains(&crate::command_validator::CommandViolation::UnknownTool));
 }
 
 #[test]
 fn read_only_validator_still_allows_cat() {
-    assert!(super::validate_read_only_command("cat src/main.rs").is_ok());
+    assert!(crate::command_validator::validate_read_only_command("cat src/main.rs").is_ok());
 }
 
 #[test]
 fn read_only_validator_still_rejects_git_commit() {
-    let violations = super::validate_read_only_command("git commit -m 'msg'").unwrap_err();
-    assert!(violations.contains(&super::CommandViolation::VcsMutation));
+    let violations =
+        crate::command_validator::validate_read_only_command("git commit -m 'msg'").unwrap_err();
+    assert!(violations.contains(&crate::command_validator::CommandViolation::VcsMutation));
 }
