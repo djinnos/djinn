@@ -5,11 +5,10 @@ use serde_json::json;
 
 use crate::database::Database;
 use crate::repositories::retrieval_trace::{
-    CandidateOutcome, CANDIDATE_OUTCOME_VALUES, CreateRetrievalTraceParams,
-    DEFAULT_CANDIDATE_CAP, ENTRY_POINT_VALUES, RetrievalTraceEntryPoint,
-    RetrievalTraceListFilter, RetrievalTraceRepository, RetrievalTraceRow,
-    RETRIEVAL_TRACE_SCHEMA_VERSION, SKIPPED_REASON_VALUES, SkippedReason,
-    TraceCandidate, validate_candidates,
+    CANDIDATE_OUTCOME_VALUES, CandidateOutcome, CreateRetrievalTraceParams, DEFAULT_CANDIDATE_CAP,
+    ENTRY_POINT_VALUES, RETRIEVAL_TRACE_SCHEMA_VERSION, RetrievalTraceEntryPoint,
+    RetrievalTraceListFilter, RetrievalTraceRepository, RetrievalTraceRow, SKIPPED_REASON_VALUES,
+    SkippedReason, TraceCandidate, validate_candidates,
 };
 
 fn test_db() -> Database {

@@ -185,6 +185,39 @@ pub struct AuditOutcomeReportRow {
     pub project_id: String,
 }
 
+/// An unmaterialized selection joined with its source merged-change and frame data.
+///
+/// Used by the scheduler to build provenance-rich audit task descriptions
+/// without additional round-trips.
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UnmaterializedSelection {
+    // Selection fields
+    pub selection_id: String,
+    pub frame_id: String,
+    pub merged_change_id: String,
+    pub stratum: String,
+    pub selected_position: i32,
+    pub algorithm: String,
+    pub seed_commitment: String,
+    pub seed_reveal: Option<String>,
+    pub replay_data: serde_json::Value,
+    pub selection_created_at: String,
+    // Merged-change provenance
+    pub project_id: String,
+    pub task_id: Option<String>,
+    pub pr_number: Option<i64>,
+    pub head_sha: Option<String>,
+    pub merge_commit_sha: String,
+    pub gate_outcome: String,
+    pub gate_provenance: Option<serde_json::Value>,
+    pub release_provenance: Option<serde_json::Value>,
+    // Frame provenance
+    pub window_start: String,
+    pub window_end: String,
+    pub frame_revision: i32,
+    pub frame_policy_id: String,
+}
+
 // ── Input types ───────────────────────────────────────────────────────────────
 
 /// Parameters for upserting a merged-change fact.
@@ -549,7 +582,35 @@ impl AuditSamplerRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    // ── Audit outcomes ───────────────────────────────────────────────────
+    /// List selections from non-superseded frames that have not yet been
+    /// materialized (i.e., `audit_task_id IS NULL`), ordered by
+    /// `created_at ASC` for FIFO materialization.
+    ///
+    /// Each returned selection is joined with the source merged-change row
+    /// and the frame row so the caller has provenance data for task
+    /// description construction.
+    pub async fn list_unmaterialized_selections(&self) -> Result<Vec<UnmaterializedSelection>> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as::<_, UnmaterializedSelection>(UNMATERIALIZED_SELECTIONS)
+                .fetch_all(self.db.pool())
+                .await?,
+        )
+    }
+
+    /// Count the number of selections that have been materialized into audit
+    /// tasks whose associated task row is still open (not closed).
+    ///
+    /// The join with `tasks` is a LEFT JOIN because the audit task may have
+    /// been deleted (no FK from `audit_selections.audit_task_id`). In that
+    /// case the selection is NOT counted as open.
+    pub async fn count_open_audit_tasks(&self) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        let count: i64 = sqlx::query_scalar(COUNT_OPEN_AUDIT_TASKS)
+            .fetch_one(self.db.pool())
+            .await?;
+        Ok(count)
+    }
 
     /// Record an audit outcome for a selection. Each selection can have at
     /// most one outcome (unique constraint on selection_id).
@@ -715,6 +776,46 @@ const SET_SELECTION_AUDIT_TASK: &str = r#"
     UPDATE audit_selections
     SET audit_task_id = $1
     WHERE id = $2
+"#;
+
+const UNMATERIALIZED_SELECTIONS: &str = r#"
+    SELECT
+        asel.id AS selection_id,
+        asel.frame_id,
+        asel.merged_change_id,
+        asel.stratum,
+        asel.selected_position,
+        asel.algorithm,
+        asel.seed_commitment,
+        asel.seed_reveal,
+        asel.replay_data,
+        asel.created_at AS selection_created_at,
+        amc.project_id,
+        amc.task_id,
+        amc.pr_number,
+        amc.head_sha,
+        amc.merge_commit_sha,
+        amc.gate_outcome,
+        amc.gate_provenance,
+        amc.release_provenance,
+        sf.window_start,
+        sf.window_end,
+        sf.revision AS frame_revision,
+        sf.policy_id AS frame_policy_id
+    FROM audit_selections asel
+    JOIN audit_merged_changes amc ON amc.id = asel.merged_change_id
+    JOIN audit_sample_frames sf ON sf.id = asel.frame_id
+    WHERE asel.audit_task_id IS NULL
+      AND sf.superseded_by_id IS NULL
+    ORDER BY asel.created_at ASC
+"#;
+
+const COUNT_OPEN_AUDIT_TASKS: &str = r#"
+    SELECT COUNT(*)::bigint
+    FROM audit_selections asel
+    JOIN tasks t ON t.id = asel.audit_task_id
+    WHERE asel.audit_task_id IS NOT NULL
+      AND t.closed_at IS NULL
 "#;
 
 const OUTCOME_BY_ID: &str = r#"

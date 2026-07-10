@@ -55,6 +55,7 @@ tempfile = "3"
 insta = { version = "1", features = ["json"] }
 tracing-test = "0.2"
 djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 
 [lints.clippy]
 # Workspace lint baseline (manually replicated because this crate also carries

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::database::Database;
 use djinn_core::events::EventBus;
