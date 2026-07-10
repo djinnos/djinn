@@ -163,7 +163,21 @@ pub fn make_baseline_with_counts(all_queries: usize, bad_cases: usize) -> Phase1
             zero_result_rate: 0.1,
             query_count: total,
         },
-        age_bucket_recall: HashMap::new(),
+        age_bucket_recall: {
+            // Include over-decay bucket so that tests using
+            // make_n_bad_cases() (which always includes OverDecayThreshold
+            // type) pass the over-decay bucket validation.
+            let mut m = HashMap::new();
+            m.insert(
+                metrics::AgeBucket::OverDecayThreshold,
+                metrics::RecallAtK {
+                    recall_at_1: 1.0,
+                    recall_at_5: 1.0,
+                    recall_at_10: 1.0,
+                },
+            );
+            m
+        },
         per_query_ranks,
         signal_comparisons: vec![
             run::SignalRankComparison {

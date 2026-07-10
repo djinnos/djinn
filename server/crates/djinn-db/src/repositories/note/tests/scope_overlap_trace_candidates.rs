@@ -1,8 +1,9 @@
 use super::*;
 use crate::database::Database;
 use crate::repositories::retrieval_trace::{
-    CandidateOutcome, CreateRetrievalTraceParams, RetrievalTraceEntryPoint,
-    RetrievalTraceRepository, SkippedReason, TraceCandidate, validate_candidates,
+    CandidateOutcome, CreateRetrievalTraceParams, RETRIEVAL_TRACE_SCHEMA_VERSION,
+    RetrievalTraceEntryPoint, RetrievalTraceRepository, SkippedReason, TraceCandidate,
+    validate_candidates,
 };
 use djinn_core::events::EventBus;
 use serde_json::json;
@@ -126,6 +127,10 @@ async fn set_scope_trace_signals(
         .unwrap();
 }
 
+/// Proves the trace-candidate query diverges from the production query exactly
+/// where the data-layer contract requires: below-threshold notes (classifiable
+/// as `min_confidence` by `mwtv`) and over-production-limit notes (classifiable
+/// as `not_top_k`) appear in trace candidates but not in production results.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_by_scope_overlap_trace_candidates_keeps_unfiltered_ordered_candidates() {
     let (repo, _tmp, project_id) = make_repo_and_project().await;
@@ -372,6 +377,20 @@ async fn query_by_scope_overlap_trace_candidates_empty_task_paths_matches_global
 /// Data-layer contract fixture: convert a single `ScopeOverlapTraceCandidate`
 /// row into a `TraceCandidate` ready for `retrieval_traces` JSONB persistence.
 ///
+/// This maps every field in the data-layer contract consumed by sibling epics:
+///
+/// | `ScopeOverlapTraceCandidate` field | → `TraceCandidate` field | Consumer |
+/// |------------------------------------|--------------------------|----------|
+/// | `id`                               | `note_id`                | `liso`   |
+/// | `permalink`                        | `permalink`              | `liso`   |
+/// | `title`                            | `title`                  | `liso`   |
+/// | (rank vs `injected_top_n`)         | `outcome`                | `mwtv`   |
+/// | (rank vs `injected_top_n`)         | `skipped_reason`         | `mwtv`   |
+/// | `rank`                             | `rank`                   | both     |
+/// | `confidence`                       | `confidence`             | both     |
+/// | (constant `"scope_overlap"`)       | `source`                 | both     |
+/// | `scope_paths` + `note_type` + `folder` | `scope` (JSON object) | both   |
+///
 /// This is a deliberately deterministic, test-only conversion. It does **not**
 /// implement dispatch classification logic — the production classifier that
 /// decides which candidates are injected vs. skipped lives in the sibling epic
@@ -431,6 +450,11 @@ async fn scope_overlap_trace_candidates_round_trip_through_retrieval_traces_json
     // fields from `dy9z`. It must stay a data-layer contract fixture: it does
     // not implement dispatch classification, drop-reason logic, MCP tools, or
     // any change to the production `query_by_scope_overlap` path.
+    //
+    // Verifies the complete data-layer contract for both candidate-level fields
+    // (note_id, permalink, title, outcome, rank, confidence, skipped_reason,
+    // source, scope) and trace-row-level metadata (schema_version, created_at,
+    // candidate_cap, candidate_cap_exceeded) consumed by `mwtv` and `liso`.
     let (repo, _tmp, project_id) = make_repo_and_project().await;
     let task_paths = vec!["server/src/server/state/mod.rs".to_string()];
 
@@ -562,6 +586,20 @@ async fn scope_overlap_trace_candidates_round_trip_through_retrieval_traces_json
         .expect("get_by_id must not error")
         .expect("row just inserted must exist");
 
+    // Trace-level metadata: schema_version, created_at, candidate_cap, and
+    // candidate_cap_exceeded are part of the data-layer contract consumed by
+    // `liso` (`memory_recall_trace` tooling).
+    assert_eq!(
+        fetched.schema_version, RETRIEVAL_TRACE_SCHEMA_VERSION,
+        "persisted schema_version must match the current constant"
+    );
+    assert!(
+        !fetched.created_at.is_empty(),
+        "created_at must be non-empty ISO-8601"
+    );
+    assert_eq!(fetched.candidate_cap, 50);
+    assert!(!fetched.candidate_cap_exceeded);
+
     let persisted = fetched.candidates_typed();
     assert_eq!(persisted.len(), trace_candidates.len());
 
@@ -683,5 +721,119 @@ async fn scope_overlap_trace_candidates_round_trip_through_retrieval_traces_json
     assert_eq!(
         expected_injected.len() + expected_skipped.len(),
         expected_by_id.len(),
+    );
+}
+
+/// Regression: production `query_by_scope_overlap` remains unchanged while
+/// trace candidates include below-threshold and over-production-limit active
+/// notes for downstream `min_confidence` / `not_top_k` classification.
+///
+/// This is a focused assertion that the two queries diverge exactly where the
+/// data-layer contract requires: the production query applies confidence
+/// filtering and a result limit; the trace-candidate query omits both so the
+/// full ranked set is available to `mwtv` classification.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_query_unchanged_while_trace_candidates_include_below_threshold_and_over_limit()
+{
+    let (repo, _tmp, project_id) = make_repo_and_project().await;
+    let task_paths = vec!["server/src/server/state/mod.rs".to_string()];
+
+    // Seed notes at distinct confidence levels.
+    // Production query uses min_confidence=0.5, limit=2.
+    let fixtures: &[(&str, f64, &str)] = &[
+        ("High A", 0.90, "2026-03-01T00:00:00.000Z"),
+        ("High B", 0.80, "2026-03-02T00:00:00.000Z"),
+        ("Mid C", 0.60, "2026-03-03T00:00:00.000Z"),
+        ("Low D", 0.30, "2026-03-04T00:00:00.000Z"),
+        ("Low E", 0.10, "2026-03-05T00:00:00.000Z"),
+    ];
+
+    let mut note_ids: Vec<String> = Vec::new();
+    for &(title, confidence, updated_at) in fixtures {
+        let note = repo
+            .create_with_scope(
+                &project_id,
+                title,
+                "content",
+                "pattern",
+                None,
+                "[]",
+                r#"["server/src/server/state/mod.rs"]"#,
+            )
+            .await
+            .unwrap();
+        set_scope_trace_signals(&repo, &note.id, confidence, updated_at).await;
+        note_ids.push(note.id);
+    }
+
+    // Production query: confidence ≥ 0.5, limit 2 → only "High A" and "High B".
+    let production = repo
+        .query_by_scope_overlap(&project_id, &task_paths, &["pattern"], 0.5, 2)
+        .await
+        .unwrap();
+    let prod_ids: HashSet<String> = production.iter().map(|n| n.id.clone()).collect();
+    assert_eq!(production.len(), 2, "production query applies limit=2");
+    assert!(prod_ids.contains(&note_ids[0]), "High A in production");
+    assert!(prod_ids.contains(&note_ids[1]), "High B in production");
+    // Below-threshold notes excluded.
+    assert!(
+        !prod_ids.contains(&note_ids[3]),
+        "Low D excluded by production confidence"
+    );
+    assert!(
+        !prod_ids.contains(&note_ids[4]),
+        "Low E excluded by production confidence"
+    );
+    // Over-limit note excluded.
+    assert!(
+        !prod_ids.contains(&note_ids[2]),
+        "Mid C excluded by production limit"
+    );
+
+    // Trace candidate query: no confidence filter, cap=50 → all 5 returned.
+    let trace_candidates = repo
+        .query_by_scope_overlap_trace_candidates(&project_id, &task_paths, &["pattern"], 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        trace_candidates.len(),
+        5,
+        "trace includes all active in-scope notes"
+    );
+
+    // Verify classification contract: each candidate carries rank and confidence
+    // sufficient for downstream `min_confidence` / `not_top_k` classification.
+    for tc in &trace_candidates {
+        assert!(tc.rank >= 1, "rank must be 1-based");
+        assert!(tc.confidence >= 0.0, "confidence must be non-negative");
+        assert!(!tc.id.is_empty(), "note id must be present");
+        assert!(!tc.permalink.is_empty(), "permalink must be present");
+        assert!(!tc.title.is_empty(), "title must be present");
+    }
+
+    // Below-threshold notes appear with their raw confidence for `min_confidence`.
+    let low_d = trace_candidates
+        .iter()
+        .find(|c| c.id == note_ids[3])
+        .unwrap();
+    assert_eq!(low_d.confidence, 0.30);
+    assert_eq!(low_d.rank, 4);
+
+    let low_e = trace_candidates
+        .iter()
+        .find(|c| c.id == note_ids[4])
+        .unwrap();
+    assert_eq!(low_e.confidence, 0.10);
+    assert_eq!(low_e.rank, 5);
+
+    // Over-production-limit note appears with rank > production limit (2).
+    let mid_c = trace_candidates
+        .iter()
+        .find(|c| c.id == note_ids[2])
+        .unwrap();
+    assert_eq!(mid_c.confidence, 0.60);
+    assert_eq!(
+        mid_c.rank, 3,
+        "rank 3 exceeds production limit of 2 → not_top_k"
     );
 }
