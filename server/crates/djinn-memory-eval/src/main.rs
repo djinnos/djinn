@@ -899,6 +899,16 @@ mod tests {
             },
             age_bucket_recall: HashMap::new(),
             per_query_ranks,
+            // Non-empty so baselines pass the signal_comparisons.is_empty() gate
+            // in cmd_validate_fixtures. Tests checking for "all-miss" or "missing
+            // bad_cases key" must reach those checks rather than bail here.
+            signal_comparisons: vec![run::SignalRankComparison {
+                query_id: "q-000".to_string(),
+                signal: "graph".to_string(),
+                rank_with_signal: Some(1),
+                rank_without_signal: Some(5),
+                rank_changed: true,
+            }],
             threshold_policy_version: metrics::THRESHOLD_POLICY_VERSION.to_string(),
         }
     }
