@@ -1348,37 +1348,43 @@ impl AppState {
             tracing::warn!(error = %e, "failed to bootstrap provider env credentials");
         }
 
-        // Load custom providers from DB → merge into in-memory catalog.
+        // Reconcile custom providers from DB into the in-memory catalog in one
+        // deterministic call.  This replaces any previously retained custom
+        // providers so deleted DB rows do not survive across restarts.
         let repo = CustomProviderRepository::new(self.db().clone(), self.event_bus());
         match repo.list().await {
-            Ok(providers) => {
-                for cp in providers {
-                    let provider = Provider {
-                        id: cp.id.clone(),
-                        name: cp.name,
-                        npm: String::new(),
-                        env_vars: vec![cp.env_var],
-                        base_url: cp.base_url,
-                        docs_url: String::new(),
-                        is_openai_compatible: true,
-                    };
-                    let seed_models: Vec<Model> = cp
-                        .seed_models
-                        .iter()
-                        .map(|s| Model {
-                            id: s.id.clone(),
-                            provider_id: cp.id.clone(),
-                            name: s.name.clone(),
-                            tool_call: false,
-                            reasoning: false,
-                            attachment: false,
-                            context_window: 0,
-                            output_limit: 0,
-                            pricing: djinn_core::models::Pricing::default(),
-                        })
-                        .collect();
-                    self.catalog().add_custom_provider(provider, seed_models);
-                }
+            Ok(db_providers) => {
+                let entries: Vec<(Provider, Vec<Model>)> = db_providers
+                    .into_iter()
+                    .map(|cp| {
+                        let provider = Provider {
+                            id: cp.id.clone(),
+                            name: cp.name,
+                            npm: String::new(),
+                            env_vars: vec![cp.env_var],
+                            base_url: cp.base_url,
+                            docs_url: String::new(),
+                            is_openai_compatible: true,
+                        };
+                        let seed_models: Vec<Model> = cp
+                            .seed_models
+                            .iter()
+                            .map(|s| Model {
+                                id: s.id.clone(),
+                                provider_id: cp.id.clone(),
+                                name: s.name.clone(),
+                                tool_call: false,
+                                reasoning: false,
+                                attachment: false,
+                                context_window: 0,
+                                output_limit: 0,
+                                pricing: djinn_core::models::Pricing::default(),
+                            })
+                            .collect();
+                        (provider, seed_models)
+                    })
+                    .collect();
+                self.catalog().set_custom_providers(entries);
             }
             Err(e) => tracing::warn!(error = %e, "failed to load custom providers from DB"),
         }
@@ -1389,11 +1395,12 @@ impl AppState {
         self.catalog().inject_builtin_providers(BUILTIN_PROVIDERS);
 
         // Kick off background refresh from models.dev.
+        // Note: the refresh compose/swap path now injects builtins and re-applies
+        // retained custom providers itself, so no post-refresh re-injection is
+        // needed (n5jj).
         let catalog = self.catalog().clone();
         tokio::spawn(async move {
             catalog.refresh().await;
-            // Re-inject after refresh so built-in providers survive the replace.
-            catalog.inject_builtin_providers(BUILTIN_PROVIDERS);
         });
 
         self.restore_model_health_state().await;
