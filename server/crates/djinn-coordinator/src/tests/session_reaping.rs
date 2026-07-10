@@ -107,10 +107,12 @@ async fn taskrun_job_backstop_skips_empty_task_run_id_inventory_entry() {
         djinn_control_plane::bridge::TaskrunJobRef {
             job_name: "djinn-taskrun-empty".to_string(),
             task_run_id: "".to_string(),
+            created_at: None,
         },
         djinn_control_plane::bridge::TaskrunJobRef {
             job_name: "djinn-taskrun-whitespace".to_string(),
             task_run_id: "   ".to_string(),
+            created_at: None,
         },
     ]);
     let mut app_state =
@@ -742,6 +744,9 @@ fn taskrun_job_ref(task_run_id: &str) -> djinn_control_plane::bridge::TaskrunJob
     djinn_control_plane::bridge::TaskrunJobRef {
         job_name: format!("djinn-taskrun-{task_run_id}"),
         task_run_id: task_run_id.to_string(),
+        // `None` is treated as an old Job (past the boot-race grace window), so
+        // these existing reaping assertions keep exercising the delete path.
+        created_at: None,
     }
 }
 
