@@ -48,6 +48,7 @@ jobs:
       server: ${{ steps.filter.outputs.server }}
       sandbox: ${{ steps.filter.outputs.sandbox }}
       ui: ${{ steps.filter.outputs.ui }}
+      memory-ranking: ${{ steps.filter.outputs.memory-ranking }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -101,6 +102,17 @@ jobs:
               - 'ui/**'
               # Re-run the UI gate when its own workflow changes, so edits to
               # the build/test steps are exercised on the PR that makes them.
+              - '.github/workflows/quality-gate.yml'
+            # Deterministic Phase 1 memory-rank benchmark gate. Triggers only
+            # on ranking-path changes and eval-crate fixture/baseline edits —
+            # the benchmark re-runs against the committed corpus so it must
+            # fire whenever the production ranking code or its fixtures move.
+            memory-ranking:
+              - 'server/crates/djinn-db/src/repositories/note/search.rs'
+              - 'server/crates/djinn-db/src/repositories/note/rrf.rs'
+              - 'server/crates/djinn-db/src/repositories/note/scoring.rs'
+              - 'server/crates/djinn-db/src/repositories/note/context.rs'
+              - 'server/crates/djinn-memory-eval/**'
               - '.github/workflows/quality-gate.yml'
 
   # ╔══════════════════════════════════════════════════════════════════╗
@@ -710,6 +722,137 @@ jobs:
         run: make sqlx-verify
 
   # ╔══════════════════════════════════════════════════════════════════╗
+  # ║  Memory-eval Phase 1 PR gate (PR + merge queue)                  ║
+  # ║                                                                  ║
+  # ║  Deterministic, no-LLM rank benchmark that exercises the real    ║
+  # ║  NoteRepository::search / build_context paths against committed  ║
+  # ║  JSONL fixtures. Provisions the same Postgres :5433 + migration  ║
+  # ║  + test-template setup used by server-test, loads fixtures,      ║
+  # ║  runs the benchmark, compares against baselines/phase1.json,     ║
+  # ║  and fails the job on any threshold regression.                  ║
+  # ╚══════════════════════════════════════════════════════════════════╝
+
+  memory-eval:
+    name: Memory Eval Phase 1
+    needs: changes
+    if: needs.changes.outputs.memory-ranking == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      # The djinn-memory-eval binary uses Database::open_in_memory(), which
+      # resolves DJINN_TEST_DATABASE_URL (template-clone harness) and
+      # DATABASE_URL (compile-time sqlx macros). Both point at :5433 per
+      # .cargo/config.toml. SQLX_OFFLINE forces macro compilation off the
+      # committed .sqlx/ cache so we don't need a live connection at build
+      # time (the service Postgres is up for the run itself).
+      SQLX_OFFLINE: "true"
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: djinn
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup toolchain install
+        working-directory: server
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-quality
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Prebuilt binary — avoids a multi-minute Rust build of sqlx-cli.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+
+      - name: Apply djinn-db migrations
+        working-directory: server/crates/djinn-db
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
+        run: sqlx migrate run --source migrations_postgres
+
+      # The benchmark harness clones a per-run database from
+      # djinn_test_template (Database::open_in_memory). Build the migrated
+      # template exactly like server-test does so fixture loading works.
+      - name: Build Postgres test template
+        env:
+          PGPASSWORD: postgres
+        run: |
+          until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
+          cd crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+
+      # Tests default DJINN_VAULT_KEY_PATH to /var/tmp/djinn-test-vault
+      # (.cargo/config.toml); create the disk-backed key the crypto layer
+      # expects so vault-touching code paths don't fall back to prod.
+      - name: Create test vault key
+        run: |
+          mkdir -p /var/tmp/djinn-test-vault
+          openssl rand -out /var/tmp/djinn-test-vault/vault.key 32
+          chmod 600 /var/tmp/djinn-test-vault/vault.key
+
+      # Validate committed fixtures before spending DB time on the run.
+      - name: Validate fixtures
+        run: cargo run -p djinn-memory-eval -- validate-fixtures
+
+      # Run the deterministic benchmark (loads fixtures into an isolated
+      # per-run Postgres clone, exercises real search/build_context, computes
+      # metrics, writes target/memory-eval/phase1-report.json + .md).
+      # No LLM calls, no external network.
+      - name: Run Phase 1 benchmark
+        env:
+          DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
+        run: cargo run -p djinn-memory-eval -- run
+
+      # Compare current metrics against the committed baseline. Exits non-zero
+      # (failing the job) on any unapproved threshold regression. Re-writes the
+      # reports with per-query regression details (query id, text, permalink,
+      # old/new rank, metric delta) for the artifact/summary upload below.
+      - name: Compare against baseline
+        env:
+          DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
+        run: cargo run -p djinn-memory-eval -- compare
+
+      # Upload both artifacts so reviewers can inspect the full report and
+      # the Markdown summary even after the job cleans up its workspace.
+      - name: Upload Phase 1 report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-eval-phase1-report
+          path: |
+            server/target/memory-eval/phase1-report.json
+            server/target/memory-eval/phase1-summary.md
+          if-no-files-found: error
+          retention-days: 30
+
+      # Append the Markdown summary to the GitHub Actions job summary so it
+      # renders inline on the run page and PR checks tab without downloading
+      # the artifact.
+      - name: Write job summary
+        if: always()
+        run: |
+          SUMMARY="target/memory-eval/phase1-summary.md"
+          if [[ -f "$SUMMARY" ]]; then
+            cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ╔══════════════════════════════════════════════════════════════════╗
   # ║  UI (PR + merge queue)                                           ║
   # ╚══════════════════════════════════════════════════════════════════╝
 
@@ -786,6 +929,7 @@ jobs:
       - server-boundaries
       - server-test
       - server-sqlx-cache
+      - memory-eval
       - ui-frontend
     steps:
       - name: Check results
@@ -801,6 +945,7 @@ jobs:
             "${{ needs.server-boundaries.result }}"
             "${{ needs.server-test.result }}"
             "${{ needs.server-sqlx-cache.result }}"
+            "${{ needs.memory-eval.result }}"
             "${{ needs.ui-frontend.result }}"
           )
           for r in "${results[@]}"; do
