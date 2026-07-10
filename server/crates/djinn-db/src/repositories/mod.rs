@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod audit_sampler;
 pub mod code_chunk;
 pub mod commit_file_changes;
 pub mod dispatch_pause;
