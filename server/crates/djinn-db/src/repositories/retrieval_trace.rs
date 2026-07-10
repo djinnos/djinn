@@ -552,4 +552,3 @@ const RETRIEVAL_TRACE_SELECT_BY_ID: &str = r#"
     FROM retrieval_traces
     WHERE id = $1
 "#;
-
