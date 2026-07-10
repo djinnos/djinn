@@ -726,6 +726,49 @@ mod tests {
         assert_eq!(d.exclusion_reason.as_deref(), Some("break_glass"));
     }
 
+    /// **Tamper** → excluded with `tamper_detected` reason.
+    #[test]
+    fn derive_tamper_excluded() {
+        let head = "tamper1";
+        let tamper_payload = serde_json::json!({
+            "event_type": TRIPWIRE_EVENT_TAMPER_LABEL_REMOVED,
+            "task_id": "t1",
+            "project_id": "proj",
+            "pr_number": 42,
+            "head_sha": head,
+            "policy_revision": "org-policy:1",
+            "removed_by": "unknown",
+            "detection_source": "pr_poller",
+            "tampered_findings": [],
+            "reapplied": true,
+            "idempotency_key": format!("sha256:tamper:{head}"),
+        });
+        let entries = vec![
+            ActivityEntry {
+                id: "a1".into(),
+                task_id: Some("t1".into()),
+                actor_id: "system".into(),
+                actor_role: "system".into(),
+                event_type: TRIPWIRE_EVENT_GATE_HELD.to_owned(),
+                payload: serde_json::to_string(&sample_gate_held_payload("t1", head)).unwrap(),
+                created_at: "2026-07-01T00:00:00Z".into(),
+            },
+            ActivityEntry {
+                id: "a2".into(),
+                task_id: Some("t1".into()),
+                actor_id: "unknown".into(),
+                actor_role: "system".into(),
+                event_type: TRIPWIRE_EVENT_TAMPER_LABEL_REMOVED.to_owned(),
+                payload: serde_json::to_string(&tamper_payload).unwrap(),
+                created_at: "2026-07-01T00:01:00Z".into(),
+            },
+        ];
+        let d = derive_provenance(&entries, head);
+        assert_eq!(d.gate_outcome, "held_tamper");
+        assert!(d.excluded);
+        assert_eq!(d.exclusion_reason.as_deref(), Some("tamper_detected"));
+    }
+
     /// **No tripwire events** → `unflagged_merged` (implicit pass).
     #[test]
     fn derive_no_tripwire_events_unflagged() {
