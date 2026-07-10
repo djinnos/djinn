@@ -822,6 +822,32 @@ impl CoordinatorActor {
         )
         .await;
 
+        // Audit sampler scheduler (epic ihf1, task 0utu). Materializes
+        // selected audit records into ordinary review tasks at a configurable
+        // rate, enforcing max-open and SLO backlog controls. Failures are
+        // isolated and never panic or block the rest of the tick.
+        let audit_config = crate::audit_sampler::scheduler::AuditSchedulerConfig::default();
+        let audit_repo = self.audit_sampler_repo();
+        let task_repo = self.task_repo();
+        let epic_repo = djinn_db::EpicRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let audit_result = crate::audit_sampler::scheduler::run_audit_scheduler(
+            &audit_config,
+            &audit_repo,
+            &task_repo,
+            &epic_repo,
+        )
+        .await;
+        if audit_result.ran && !audit_result.materialized_items.is_empty() {
+            tracing::info!(
+                materialized = audit_result.materialized_items.len(),
+                total_unmaterialized = audit_result.total_unmaterialized,
+                "audit scheduler: tick complete"
+            );
+        }
+
         // Check memory pressure before dispatching.
         let memory_throttled = if let Some(mem) = crate::resource_monitor::MemoryStatus::read() {
             if mem.is_critical() {

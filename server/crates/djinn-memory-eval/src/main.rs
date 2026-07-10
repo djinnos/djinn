@@ -3,6 +3,7 @@ mod deterministic_embeddings;
 mod fixtures;
 mod loader;
 mod metrics;
+pub mod qa;
 mod report;
 mod run;
 

@@ -410,6 +410,52 @@ impl CatalogService {
         data.custom_providers.insert(provider.id.clone(), retained);
         apply_custom_provider_to_active(&mut data, &provider, &normalized);
     }
+
+    /// Replace the *entire* retained custom-provider set from a caller-supplied
+    /// collection (e.g. DB rows), normalizing seed-model IDs and updating the
+    /// active catalog deterministically under one write lock.
+    ///
+    /// Providers absent from the supplied collection are removed from both the
+    /// retained set and the active catalog; providers present are added or
+    /// replaced.  This is the deterministic startup/DB-reload reconciliation
+    /// surface that removes the fragile pattern of calling
+    /// [`add_custom_provider`](Self::add_custom_provider) in a loop.
+    pub fn set_custom_providers(&self, providers: Vec<(Provider, Vec<Model>)>) {
+        let new_entries: HashMap<String, CustomCatalogProvider> = providers
+            .into_iter()
+            .map(|(p, seeds)| {
+                let normalized = normalize_seed_models(&p, seeds);
+                let retained = CustomCatalogProvider {
+                    provider: p,
+                    seed_models: normalized,
+                };
+                (retained.provider.id.clone(), retained)
+            })
+            .collect();
+
+        let mut data = self.inner.write();
+
+        // Remove from the active catalog any custom providers that are absent
+        // from the new set so deleted DB rows do not persist.
+        let old_ids: Vec<String> = data.custom_providers.keys().cloned().collect();
+        for id in &old_ids {
+            if !new_entries.contains_key(id) {
+                remove_provider_from_active(&mut data, id);
+            }
+        }
+
+        // Replace the retained set.
+        data.custom_providers = new_entries;
+
+        // Overlay each new entry onto the active catalog.  Clone the values
+        // first so the immutable borrow of `data.custom_providers` ends before
+        // the mutable `apply_custom_provider_to_active` calls.
+        let retained: Vec<CustomCatalogProvider> =
+            data.custom_providers.values().cloned().collect();
+        for ccp in &retained {
+            apply_custom_provider_to_active(&mut data, &ccp.provider, &ccp.seed_models);
+        }
+    }
 }
 
 impl Default for CatalogService {
