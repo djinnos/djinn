@@ -25,6 +25,7 @@ mod graph_scoring;
 mod lifecycle_archive;
 mod lifecycle_decay;
 mod scope_paths_regressions;
+mod scope_overlap_trace_candidates;
 mod search_ranking;
 mod session_scoped_consolidation;
 mod wikilink_graph;
