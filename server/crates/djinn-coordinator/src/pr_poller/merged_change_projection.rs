@@ -54,6 +54,13 @@ struct ProvenanceDerivation {
 /// - **No tripwire events at all** → `None` (insufficient provenance; the
 ///   caller must record this as incomplete and exclude the merged change).
 fn derive_provenance(entries: &[ActivityEntry], head_sha: &str) -> Option<ProvenanceDerivation> {
+    // Ensure ascending created_at order so `.last()` always picks the latest
+    // event, regardless of the caller's ordering.  query_activity returns
+    // DESC; without this sort the payload vectors would be populated
+    // newest-first and `.last()` would select the oldest event.
+    let mut sorted: Vec<&ActivityEntry> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
     // Parse tripwire payloads from activity entries, filtering to the given head SHA.
     let mut gate_passed_payloads: Vec<TripwireGateDecisionPayload> = Vec::new();
     let mut gate_held_payloads: Vec<TripwireGateDecisionPayload> = Vec::new();
@@ -62,7 +69,7 @@ fn derive_provenance(entries: &[ActivityEntry], head_sha: &str) -> Option<Proven
     let mut break_glass_payloads: Vec<TripwireBreakGlassPayload> = Vec::new();
     let mut tamper_payloads: Vec<TripwireTamperPayload> = Vec::new();
 
-    for entry in entries {
+    for entry in sorted.iter().copied() {
         match entry.event_type.as_str() {
             TRIPWIRE_EVENT_GATE_PASSED => {
                 if let Ok(p) = serde_json::from_str::<TripwireGateDecisionPayload>(&entry.payload)
@@ -339,8 +346,14 @@ impl CoordinatorActor {
         } else {
             // No head SHA on the task — try to find one from any tripwire
             // gate event in the activity log so we still get a classification.
-            let fallback_head = activity_entries
+            // Sort ascending so .next_back() picks the latest gate event
+            // (query_activity returns DESC).
+            let mut sorted_for_fallback: Vec<&ActivityEntry> = activity_entries.iter().collect();
+            sorted_for_fallback.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+            let fallback_head = sorted_for_fallback
                 .iter()
+                .copied()
                 .filter(|e| {
                     matches!(
                         e.event_type.as_str(),
@@ -499,7 +512,9 @@ impl CoordinatorActor {
 mod tests {
     use super::*;
     use djinn_core::events::EventBus;
-    use djinn_db::{AuditSamplerRepository, Database, EpicRepository, TaskRepository};
+    use djinn_db::{
+        ActivityQuery, AuditSamplerRepository, Database, EpicRepository, TaskRepository,
+    };
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -564,6 +579,28 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    /// Query activity via the same `query_activity` path the live projection
+    /// uses (ORDER BY created_at DESC).  This is deliberately distinct from
+    /// `list_activity` (ORDER BY created_at ASC) so integration tests exercise
+    /// the real ordering.
+    async fn query_activity_desc(db: &Database, task_id: &str) -> Vec<ActivityEntry> {
+        let event_bus = EventBus::noop();
+        let task_repo = TaskRepository::new(db.clone(), event_bus);
+        task_repo
+            .query_activity(ActivityQuery {
+                task_id: Some(task_id.to_owned()),
+                event_type: None,
+                actor_role: None,
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 200,
+                offset: 0,
+            })
+            .await
+            .unwrap()
     }
 
     fn sample_gate_passed_payload(task_id: &str, head_sha: &str) -> serde_json::Value {
@@ -948,9 +985,8 @@ mod tests {
         .await;
 
         let repo = AuditSamplerRepository::new(db.clone());
-        let event_bus = EventBus::noop();
-        let task_repo = TaskRepository::new(db.clone(), event_bus);
-        let entries = task_repo.list_activity(&task.id).await.unwrap();
+        // Use query_activity (DESC) — the same path the live projection uses.
+        let entries = query_activity_desc(&db, &task.id).await;
         let derived = derive_provenance(&entries, "head_sha_1")
             .expect("gate-passed with matching activity must produce Some");
 
@@ -1007,9 +1043,8 @@ mod tests {
         .await;
 
         let repo = AuditSamplerRepository::new(db.clone());
-        let event_bus = EventBus::noop();
-        let task_repo = TaskRepository::new(db.clone(), event_bus);
-        let entries = task_repo.list_activity(&task.id).await.unwrap();
+        // Use query_activity (DESC) — the same path the live projection uses.
+        let entries = query_activity_desc(&db, &task.id).await;
         let derived = derive_provenance(&entries, "head_arb")
             .expect("autonomous release with matching activity must produce Some");
 
@@ -1057,9 +1092,8 @@ mod tests {
 
         // No tripwire activity logged for this task at all.
 
-        let event_bus = EventBus::noop();
-        let task_repo = TaskRepository::new(db.clone(), event_bus);
-        let entries = task_repo.list_activity(&task.id).await.unwrap();
+        // Use query_activity (DESC) — the same path the live projection uses.
+        let entries = query_activity_desc(&db, &task.id).await;
 
         // derive_provenance returns None because there are no tripwire events.
         let result = derive_provenance(&entries, "head_no_tripwire");
@@ -1068,18 +1102,36 @@ mod tests {
             "head SHA with no tripwire activity must return None"
         );
 
-        // The projection would then emit a warning and create an
-        // incomplete_provenance derivation. Verify the excluded state
-        // and that the head_sha from the task is carried through.
+        // The live projection would then emit a warning and create an
+        // incomplete_provenance derivation with the task's head SHA.
+        // Verify the excluded state and that the head_sha from the task
+        // is carried through, exactly as the live code path does.
         let repo = AuditSamplerRepository::new(db.clone());
-        let derived = ProvenanceDerivation {
-            gate_outcome: "incomplete_provenance".to_owned(),
-            stratum: AuditStratum::UnflaggedMerged,
-            gate_provenance: None,
-            release_provenance: None,
-            excluded: true,
-            exclusion_reason: Some("incomplete_provenance".to_owned()),
-            head_sha: "head_no_tripwire".to_owned(),
+        let derived = match derive_provenance(&entries, "head_no_tripwire") {
+            Some(d) => d,
+            None => ProvenanceDerivation {
+                gate_outcome: "incomplete_provenance".to_owned(),
+                stratum: AuditStratum::UnflaggedMerged,
+                gate_provenance: None,
+                release_provenance: None,
+                excluded: true,
+                exclusion_reason: Some("incomplete_provenance".to_owned()),
+                head_sha: "head_no_tripwire".to_owned(),
+            },
+        };
+
+        // The head_sha from the task row must be carried through.
+        assert_eq!(derived.head_sha, "head_no_tripwire");
+        assert!(derived.excluded);
+        assert_eq!(
+            derived.exclusion_reason.as_deref(),
+            Some("incomplete_provenance")
+        );
+
+        let effective_head = if derived.head_sha.is_empty() {
+            None
+        } else {
+            Some(derived.head_sha.as_str())
         };
 
         let row = repo
@@ -1087,7 +1139,7 @@ mod tests {
                 project_id: &task.project_id,
                 task_id: Some(&task.id),
                 pr_number: Some(55),
-                head_sha: Some(&derived.head_sha),
+                head_sha: effective_head,
                 merge_commit_sha: "merge_no_trip",
                 merged_at: "2026-07-01T12:00:00Z",
                 gate_outcome: &derived.gate_outcome,
@@ -1115,13 +1167,22 @@ mod tests {
         // No pr_url, no ci_head_sha.
         let task = seed_task(&db, None, None).await;
 
-        let repo = AuditSamplerRepository::new(db.clone());
-        let event_bus = EventBus::noop();
-        let task_repo = TaskRepository::new(db.clone(), event_bus);
-        let _entries = task_repo.list_activity(&task.id).await.unwrap();
+        // Use query_activity (DESC) — the same path the live projection uses.
+        let entries = query_activity_desc(&db, &task.id).await;
 
-        // When we have no head SHA and no gate events, the projection would
-        // emit a warning and mark excluded.
+        // No fallback head available: no tripwire events at all.
+        let fallback_gate: Option<&ActivityEntry> = entries.iter().find(|e| {
+            matches!(
+                e.event_type.as_str(),
+                TRIPWIRE_EVENT_GATE_PASSED
+                    | TRIPWIRE_EVENT_GATE_HELD
+                    | TRIPWIRE_EVENT_GATE_REPORT_ONLY
+            )
+        });
+        assert!(fallback_gate.is_none(), "no tripwire gate events expected");
+
+        // The live projection falls through to incomplete_provenance.
+        let repo = AuditSamplerRepository::new(db.clone());
         let derived = ProvenanceDerivation {
             gate_outcome: "incomplete_provenance".to_owned(),
             stratum: AuditStratum::UnflaggedMerged,
@@ -1132,12 +1193,18 @@ mod tests {
             head_sha: String::new(),
         };
 
+        let effective_head = if derived.head_sha.is_empty() {
+            None
+        } else {
+            Some(derived.head_sha.as_str())
+        };
+
         let row = repo
             .upsert_merged_change(UpsertMergedChangeParams {
                 project_id: &task.project_id,
                 task_id: Some(&task.id),
                 pr_number: None,
-                head_sha: None,
+                head_sha: effective_head,
                 merge_commit_sha: "merge_no_prov",
                 merged_at: "2026-07-01T12:00:00Z",
                 gate_outcome: &derived.gate_outcome,
@@ -1184,9 +1251,8 @@ mod tests {
         .await;
 
         let repo = AuditSamplerRepository::new(db.clone());
-        let event_bus = EventBus::noop();
-        let task_repo = TaskRepository::new(db.clone(), event_bus);
-        let entries = task_repo.list_activity(&task.id).await.unwrap();
+        // Use query_activity (DESC) — the same path the live projection uses.
+        let entries = query_activity_desc(&db, &task.id).await;
         let derived = derive_provenance(&entries, "head_bg")
             .expect("break-glass with matching activity must produce Some");
 
@@ -1219,7 +1285,8 @@ mod tests {
     ///
     /// When the task row has no `ci_head_sha` but a tripwire gate payload
     /// provides a head SHA, the ledger row must persist that head SHA rather
-    /// than NULL.
+    /// than NULL.  Uses `query_activity_desc` (DESC order) to exercise the
+    /// real path.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integration_fallback_head_sha_persisted() {
         let db = test_db();
@@ -1235,13 +1302,17 @@ mod tests {
         )
         .await;
 
-        let event_bus = EventBus::noop();
-        let task_repo = TaskRepository::new(db.clone(), event_bus);
-        let entries = task_repo.list_activity(&task.id).await.unwrap();
+        // Use query_activity (DESC) — the same path the live projection uses.
+        let entries = query_activity_desc(&db, &task.id).await;
 
-        // Simulate the projection's fallback path: discover head from activity.
-        let fallback_head = entries
+        // Reproduce the projection's fallback path with proper sorting:
+        // sort ascending so .next_back() picks the latest gate event.
+        let mut sorted: Vec<&ActivityEntry> = entries.iter().collect();
+        sorted.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+        let fallback_head = sorted
             .iter()
+            .copied()
             .filter(|e| {
                 matches!(
                     e.event_type.as_str(),
@@ -1270,12 +1341,18 @@ mod tests {
 
         // Upsert and verify the persisted head_sha is NOT null.
         let repo = AuditSamplerRepository::new(db.clone());
+        let effective_head = if derived.head_sha.is_empty() {
+            None
+        } else {
+            Some(derived.head_sha.as_str())
+        };
+
         let row = repo
             .upsert_merged_change(UpsertMergedChangeParams {
                 project_id: &task.project_id,
                 task_id: Some(&task.id),
                 pr_number: Some(88),
-                head_sha: Some(&derived.head_sha),
+                head_sha: effective_head,
                 merge_commit_sha: "merge_fallback",
                 merged_at: "2026-07-01T12:00:00Z",
                 gate_outcome: &derived.gate_outcome,
@@ -1293,5 +1370,131 @@ mod tests {
             Some("fallback_sha_123"),
             "fallback head SHA must be persisted, not NULL"
         );
+    }
+
+    /// **Integration: multiple gate events with different heads — latest
+    /// is used for fallback, and `derive_provenance` picks the latest
+    /// same-head event.**
+    ///
+    /// This test specifically verifies the ordering fix: with DESC activity
+    /// queries, the sorted `.next_back()` and `.last()` must still select
+    /// the latest event by `created_at`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integration_latest_event_picked_with_desc_ordering() {
+        let db = test_db();
+        // Task has no ci_head_sha — must use fallback path.
+        let task = seed_task(&db, Some("https://github.com/acme/repo/pull/100"), None).await;
+
+        // Log an OLDER gate-passed for head_sha "old_head".
+        log_tripwire_activity(
+            &db,
+            &task.id,
+            TRIPWIRE_EVENT_GATE_PASSED,
+            &sample_gate_passed_payload(&task.id, "old_head"),
+        )
+        .await;
+        // Log a NEWER gate-passed for head_sha "new_head".
+        log_tripwire_activity(
+            &db,
+            &task.id,
+            TRIPWIRE_EVENT_GATE_PASSED,
+            &sample_gate_passed_payload(&task.id, "new_head"),
+        )
+        .await;
+
+        // query_activity returns DESC (newest first).
+        let entries = query_activity_desc(&db, &task.id).await;
+        assert_eq!(entries.len(), 2, "expected 2 activity entries");
+        // DESC: newest first
+        assert!(
+            entries[0].created_at >= entries[1].created_at,
+            "query_activity must return DESC order"
+        );
+
+        // derive_provenance must pick the latest "new_head" event.
+        // Even though DESC order puts "new_head" first, the internal sort
+        // ensures .last() picks the latest.
+        let derived = derive_provenance(&entries, "new_head")
+            .expect("new_head gate-passed must produce Some");
+        assert_eq!(derived.gate_outcome, "pass");
+        assert!(!derived.excluded);
+        assert_eq!(derived.head_sha, "new_head");
+
+        // The fallback path with proper sorting must also pick "new_head".
+        let mut sorted: Vec<&ActivityEntry> = entries.iter().collect();
+        sorted.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+        let fallback_head = sorted
+            .iter()
+            .copied()
+            .filter(|e| {
+                matches!(
+                    e.event_type.as_str(),
+                    TRIPWIRE_EVENT_GATE_PASSED
+                        | TRIPWIRE_EVENT_GATE_HELD
+                        | TRIPWIRE_EVENT_GATE_REPORT_ONLY
+                )
+            })
+            .filter_map(|e| serde_json::from_str::<TripwireGateDecisionPayload>(&e.payload).ok())
+            .next_back()
+            .map(|p| p.head_sha);
+
+        assert_eq!(
+            fallback_head.as_deref(),
+            Some("new_head"),
+            "fallback must pick the latest gate event (new_head), not the oldest (old_head)"
+        );
+    }
+
+    /// **Integration: same-head events in DESC order — latest event wins.**
+    ///
+    /// A task has `ci_head_sha` and two release events on the same head:
+    /// an older human release and a newer non-human release. The derivation
+    /// must pick the latest (non-human) release.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integration_same_head_latest_release_picked() {
+        let db = test_db();
+        let task = seed_task(
+            &db,
+            Some("https://github.com/acme/repo/pull/200"),
+            Some("same_head"),
+        )
+        .await;
+
+        // Log an OLDER human release.
+        log_tripwire_activity(
+            &db,
+            &task.id,
+            TRIPWIRE_EVENT_GATE_HELD,
+            &sample_gate_held_payload(&task.id, "same_head"),
+        )
+        .await;
+        log_tripwire_activity(
+            &db,
+            &task.id,
+            TRIPWIRE_EVENT_HOLD_RELEASED,
+            &sample_hold_released_payload(&task.id, "same_head", "lead", false),
+        )
+        .await;
+
+        // Log a NEWER non-human release (carried-forward by planner).
+        log_tripwire_activity(
+            &db,
+            &task.id,
+            TRIPWIRE_EVENT_HOLD_RELEASED,
+            &sample_hold_released_payload(&task.id, "same_head", "planner", true),
+        )
+        .await;
+
+        // query_activity returns DESC (newest first).
+        let entries = query_activity_desc(&db, &task.id).await;
+        assert_eq!(entries.len(), 3, "expected 3 activity entries");
+
+        // derive_provenance must pick the latest release (planner, carried-forward).
+        let derived = derive_provenance(&entries, "same_head")
+            .expect("same_head with release must produce Some");
+        assert_eq!(derived.stratum, AuditStratum::AutonomousRelease);
+        assert!(!derived.excluded);
+        assert_eq!(derived.gate_outcome, "released_carried_forward");
     }
 }
