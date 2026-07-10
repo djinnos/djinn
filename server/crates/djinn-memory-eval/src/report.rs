@@ -65,6 +65,10 @@ pub struct Phase1Baseline {
     pub age_bucket_recall: HashMap<AgeBucket, RecallAtK>,
     /// Per-query top-k ranks, keyed by suite name.
     pub per_query_ranks: HashMap<String, Vec<QueryRankBaseline>>,
+    /// Signal comparison records (graph/entity and task-affinity assertions).
+    /// Proves which queries/cases demonstrate rank-change coverage for each signal.
+    #[serde(default)]
+    pub signal_comparisons: Vec<crate::run::SignalRankComparison>,
     /// Threshold policy version.
     pub threshold_policy_version: String,
 }
@@ -241,6 +245,32 @@ fn render_summary_markdown(report: &Phase1Report) -> String {
         }
     }
 
+    // ── Signal comparisons ────────────────────────────────────────────────
+    if !report.signal_comparisons.is_empty() {
+        out.push_str("## Signal Comparison Details\n\n");
+        out.push_str(
+            "These comparisons prove that graph/entity and task-affinity inputs \
+             each change at least one relevant note rank, preventing silent \
+             collapse to lexical/vector/temporal-only behavior.\n\n",
+        );
+        out.push_str("| Query ID | Signal | Rank With | Rank Without | Changed |\n");
+        out.push_str("|----------|--------|-----------|--------------|---------|\n");
+        for sc in &report.signal_comparisons {
+            let with_str = sc
+                .rank_with_signal
+                .map_or("—".to_string(), |r| r.to_string());
+            let without_str = sc
+                .rank_without_signal
+                .map_or("—".to_string(), |r| r.to_string());
+            let changed_str = if sc.rank_changed { "✅" } else { "—" };
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
+                sc.query_id, sc.signal, with_str, without_str, changed_str,
+            ));
+        }
+        out.push('\n');
+    }
+
     // ── Threshold policy ──────────────────────────────────────────────────
     out.push_str(&format!(
         "_Threshold policy version: {}_\n",
@@ -315,6 +345,7 @@ pub fn build_baseline(
         aggregate_metrics: report.aggregate_metrics.clone(),
         age_bucket_recall: report.age_bucket_recall.clone(),
         per_query_ranks,
+        signal_comparisons: report.signal_comparisons.clone(),
         threshold_policy_version: report.threshold_policy_version.clone(),
     }
 }
@@ -474,6 +505,7 @@ mod tests {
             aggregate_metrics: AggregateMetrics::default(),
             age_bucket_recall: HashMap::new(),
             per_query_ranks: HashMap::new(),
+            signal_comparisons: vec![],
             threshold_policy_version: THRESHOLD_POLICY_VERSION.to_string(),
         };
         let json = serde_json::to_string_pretty(&baseline).unwrap();
@@ -518,6 +550,7 @@ mod tests {
             },
             age_bucket_recall: HashMap::new(),
             per_query_ranks: HashMap::new(),
+            signal_comparisons: vec![],
             threshold_policy_version: THRESHOLD_POLICY_VERSION.to_string(),
         };
 
