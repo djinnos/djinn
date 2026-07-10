@@ -26,6 +26,7 @@
 //! | [`tool_defs_code_graph`] | Code-graph and PR-review-context tool schemas |
 //! | [`finalize_tools`] | Finalize tool schemas (submit_work, submit_review, etc.) |
 
+pub mod command_classifier;
 pub mod command_validator;
 pub mod context;
 pub mod dispatch;
