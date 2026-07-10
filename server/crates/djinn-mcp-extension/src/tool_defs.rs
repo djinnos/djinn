@@ -159,7 +159,7 @@ pub fn tool_write() -> RmcpTool {
 pub fn tool_edit() -> RmcpTool {
     RmcpTool::new(
         "edit".to_string(),
-        "Edit a file by replacing text. Provide path, old_text, and new_text. The implementation may safely rescue common whitespace, indentation, escape, boundary, and Unicode drift between old_text and the file, but it fails instead of guessing when the match is ambiguous (multiple candidates) or rejected by a safety guard (e.g. CRLF or UTF-8 boundary corruption).".to_string(),
+        "Edit a file by replacing text. Provide path, old_text, and new_text. Rescues common whitespace/indentation drift automatically; fails on ambiguous matches or safety-guard rejections.".to_string(),
         object!({
             "type": "object",
             "required": ["path", "old_text", "new_text"],

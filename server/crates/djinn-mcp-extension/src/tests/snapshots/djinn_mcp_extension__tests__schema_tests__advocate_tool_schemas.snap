@@ -522,7 +522,7 @@ expression: tool_schemas_advocate()
   },
   {
     "name": "edit",
-    "description": "Edit a file by replacing text. Provide path, old_text, and new_text. The implementation may safely rescue common whitespace, indentation, escape, boundary, and Unicode drift between old_text and the file, but it fails instead of guessing when the match is ambiguous (multiple candidates) or rejected by a safety guard (e.g. CRLF or UTF-8 boundary corruption).",
+    "description": "Edit a file by replacing text. Provide path, old_text, and new_text. Rescues common whitespace/indentation drift automatically; fails on ambiguous matches or safety-guard rejections.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -590,7 +590,7 @@ expression: tool_schemas_advocate()
   },
   {
     "name": "memory_write",
-    "description": "Create a new memory note. Memory notes live in Dolt — this is the canonical way to author them; do not attempt filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief [singleton], roadmap [singleton]). Use [[wikilinks]] in content to connect notes.",
+    "description": "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -632,7 +632,7 @@ expression: tool_schemas_advocate()
   },
   {
     "name": "memory_edit",
-    "description": "Edit an existing memory note in-place. Memory notes live in Dolt — this is the canonical way to amend them; do not attempt filesystem writes. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
+    "description": "Edit an existing memory note in-place via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -675,7 +675,7 @@ expression: tool_schemas_advocate()
   },
   {
     "name": "proposal_show",
-    "description": "Show a proposal's full detail by UUID or short_id. Returns title, body, status, acceptance_criteria, targets, and optionally revisions, feedback, signoffs, debate, epics, and gate_status. Use `fields` to select only the sections you need (accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all). Use `revision_bodies` to control revision verbosity: `excerpt` (default, 512-char body_excerpt + body_truncated), `full` (complete body text), or `omit` (no body data). Ignored when `fields` omits `revisions`.",
+    "description": "Show a proposal's full detail by UUID or short_id. Use `fields` to select sections (proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all) and `revision_bodies` to control verbosity (excerpt/full/omit).",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -715,7 +715,7 @@ expression: tool_schemas_advocate()
   },
   {
     "name": "proposal_debate_list",
-    "description": "List the tribunal debate trail for a proposal: every objection, rebuttal, and verdict across all rounds, with `round`, `agent_role`, `kind`, `blocking`, `resolved`, `against_revision_seq`, and `body`. Read this FIRST: the Adversary uses it to avoid re-raising objections already filed in prior rounds; the Advocate uses it to see exactly which objections it must address; the Judge uses it to verify each blocking objection was resolved or rebutted.",
+    "description": "List the tribunal debate trail for a proposal: every objection, rebuttal, and verdict across all rounds. The Adversary reads this to avoid re-raising objections; the Advocate reads it to address objections; the Judge reads it to verify resolution.",
     "inputSchema": {
       "type": "object",
       "required": [

@@ -522,7 +522,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "edit",
-    "description": "Edit a file by replacing text. Provide path, old_text, and new_text. The implementation may safely rescue common whitespace, indentation, escape, boundary, and Unicode drift between old_text and the file, but it fails instead of guessing when the match is ambiguous (multiple candidates) or rejected by a safety guard (e.g. CRLF or UTF-8 boundary corruption).",
+    "description": "Edit a file by replacing text. Provide path, old_text, and new_text. Rescues common whitespace/indentation drift automatically; fails on ambiguous matches or safety-guard rejections.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -897,7 +897,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "proposal_show",
-    "description": "Show a proposal's full detail by UUID or short_id. Returns title, body, status, acceptance_criteria, targets, and optionally revisions, feedback, signoffs, debate, epics, and gate_status. Use `fields` to select only the sections you need (accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all). Use `revision_bodies` to control revision verbosity: `excerpt` (default, 512-char body_excerpt + body_truncated), `full` (complete body text), or `omit` (no body data). Ignored when `fields` omits `revisions`.",
+    "description": "Show a proposal's full detail by UUID or short_id. Use `fields` to select sections (proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all) and `revision_bodies` to control verbosity (excerpt/full/omit).",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -974,7 +974,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "proposal_ac_amend",
-    "description": "Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index and uses operation `rewrite`, `drop`, or `waive`: rewrite replaces criterion text and requires `criterion`; drop removes the criterion; waive keeps the criterion visible with `waived: true`. Requires a non-empty top-level reason. This is a real spec edit: it bumps the proposal revision, retains sign-offs, and records feedback/audit. Use proposal_ac_set instead when only reconciling met flags.",
+    "description": "Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index with operation `rewrite`, `drop`, or `waive`; requires a non-empty reason. Bumps proposal revision, retains sign-offs. Use proposal_ac_set for met-flag reconciliation only.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1076,7 +1076,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "proposal_reconcile_obsolete_epic",
-    "description": "Scoped proposal-reconcile teardown for one obsolete graduated epic. Lists/validates only the requested proposal+epic link, blocks terminally if any task in that subtree has merged work (recording AI proposal feedback), otherwise force-closes only that epic's tasks, closes the epic, unlinks only that epic from the proposal, and leaves unrelated graduated epics untouched. Use this instead of whole-build proposal_stop_build during Reconcile proposal tasks.",
+    "description": "Scoped teardown for one obsolete graduated epic. Blocks if any task has merged work; otherwise force-closes that epic's tasks, closes the epic, and unlinks it from the proposal. Use instead of whole-build proposal_stop_build during Reconcile tasks.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1310,7 +1310,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "memory_write",
-    "description": "Create a new memory note. Memory notes live in Dolt — this is the canonical way to author them; do not attempt filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief [singleton], roadmap [singleton]). Use [[wikilinks]] in content to connect notes.",
+    "description": "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1352,7 +1352,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "memory_edit",
-    "description": "Edit an existing memory note in-place. Memory notes live in Dolt — this is the canonical way to amend them; do not attempt filesystem writes. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
+    "description": "Edit an existing memory note in-place via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
     "inputSchema": {
       "type": "object",
       "required": [

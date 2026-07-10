@@ -524,11 +524,9 @@ fn proposal_reconcile_obsolete_epic_schema_documents_scope_and_blocking() {
         .as_str()
         .expect("proposal_reconcile_obsolete_epic has a description");
     for required in [
-        "Scoped proposal-reconcile teardown",
-        "blocks terminally",
-        "AI proposal feedback",
-        "unlinks only that epic",
-        "leaves unrelated graduated epics untouched",
+        "Scoped teardown",
+        "Blocks if any task has merged work",
+        "unlinks it from the proposal",
         "instead of whole-build proposal_stop_build",
     ] {
         assert!(
@@ -1255,3 +1253,39 @@ fn lead_schema_does_not_expose_request_planner_or_escalate() {
 }
 
 // ── Expanded evidence-spike mutation exclusion tests ────────────────────────
+
+// ── Stale Dolt wording guard ───────────────────────────────────────────────
+// Ensures no tool description in the canonical schema surfaces contains stale
+// "Dolt" or "dolt" references. If this test fails, a tool description was
+// reintroduced with the old wording instead of accurate memory_* MCP guidance.
+
+#[test]
+fn no_dolt_references_in_tool_descriptions() {
+    let all_schemas: Vec<(&str, Vec<serde_json::Value>)> = vec![
+        ("worker", tool_schemas_worker()),
+        ("reviewer", tool_schemas_reviewer()),
+        ("lead", tool_schemas_lead()),
+        ("planner", tool_schemas_planner()),
+        ("architect", tool_schemas_architect()),
+        ("advocate", tool_schemas_advocate()),
+        ("adversary", tool_schemas_adversary()),
+        ("judge", tool_schemas_judge()),
+    ];
+
+    for (role, schemas) in &all_schemas {
+        for schema in schemas {
+            let name = schema
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("<unnamed>");
+            let desc = schema
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
+            assert!(
+                !desc.to_lowercase().contains("dolt"),
+                "tool '{name}' in role '{role}' contains stale 'Dolt' reference in description: {desc}"
+            );
+        }
+    }
+}
