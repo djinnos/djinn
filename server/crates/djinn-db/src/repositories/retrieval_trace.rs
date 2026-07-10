@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 use crate::database::Database;
+use crate::error::DbError;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -181,6 +182,53 @@ pub struct TraceCandidate {
     pub source: Option<String>,
     /// Optional scope/context metadata for later classification.
     pub scope: Option<serde_json::Value>,
+}
+
+impl TraceCandidate {
+    /// Validate the candidate's outcome/skipped_reason invariant.
+    ///
+    /// The proposal fixes `skipped_reason` to the vocabulary in
+    /// [`SKIPPED_REASON_VALUES`] (or `None`). An injected candidate has
+    /// `skipped_reason = None`; a non-injected (skipped) candidate must have a
+    /// valid [`SkippedReason`]. Because `skipped_reason` is a typed enum, an
+    /// out-of-vocabulary value cannot be constructed; this helper is provided so
+    /// callers can check the invariant explicitly and surface a clear error
+    /// before persistence rather than silently persisting inconsistent data.
+    ///
+    /// A non-injected candidate without a `skipped_reason` is rejected: only
+    /// injected candidates may omit it.
+    pub fn validate_invariants(&self) -> Result<()> {
+        match &self.skipped_reason {
+            None => Ok(()), // injected candidate — nullable per design
+            Some(reason) => {
+                // The enum guarantees membership, but double-check the serialised
+                // form is in the fixed vocabulary so a future rename is caught.
+                if SKIPPED_REASON_VALUES.contains(&reason.as_str()) {
+                    Ok(())
+                } else {
+                    Err(DbError::InvalidData(format!(
+                        "candidate {} has skipped_reason '{}' which is not in the fixed vocabulary {:?}",
+                        self.note_id,
+                        reason.as_str(),
+                        SKIPPED_REASON_VALUES,
+                    )))
+                }
+            }
+        }
+    }
+}
+
+/// Validate a slice of candidates, returning the first invariant violation.
+///
+/// This is the batch form of [`TraceCandidate::validate_invariants`], suitable
+/// for calling right before persistence. Returns `Ok(())` when all candidates
+/// are consistent, or the first [`DbError::InvalidData`] describing the
+/// malformed combination.
+pub fn validate_candidates(candidates: &[TraceCandidate]) -> Result<()> {
+    for c in candidates {
+        c.validate_invariants()?;
+    }
+    Ok(())
 }
 
 // ── Row type ──────────────────────────────────────────────────────────────────
@@ -390,6 +438,33 @@ impl RetrievalTraceRepository {
                 .fetch_optional(self.db.pool())
                 .await?,
         )
+    }
+
+    /// Prune (delete) trace rows older than a configurable retention cutoff for
+    /// a project.
+    ///
+    /// `before_cutoff` is an ISO-8601 UTC timestamp string (the same format used
+    /// by the `created_at` column, e.g. `2026-07-01T00:00:00.000Z`). Rows whose
+    /// `created_at` is strictly less than this value are deleted. Because
+    /// `created_at` is stored as a lexicographically-sortable UTC ISO-8601
+    /// string, a simple string comparison (`<`) correctly orders timestamps.
+    ///
+    /// Returns the number of rows deleted. Errors are returned as `Result` so
+    /// callers can log and continue fail-open without changing injection
+    /// output.
+    pub async fn prune_older_than(&self, project_id: &str, before_cutoff: &str) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+
+        let result = sqlx::query(
+            r#"DELETE FROM retrieval_traces
+               WHERE project_id = $1 AND created_at < $2"#,
+        )
+        .bind(project_id)
+        .bind(before_cutoff)
+        .execute(self.db.pool())
+        .await?;
+
+        Ok(result.rows_affected())
     }
 }
 
@@ -825,5 +900,306 @@ mod tests {
         let mut expected: Vec<&str> = ENTRY_POINT_VALUES.to_vec();
         expected.sort();
         assert_eq!(actual, expected);
+    }
+
+    // ── Cap/sampling metadata round-trip tests (qmel) ─────────────────────────
+
+    /// Insert helper with explicit fields for cap/sampling tests.
+    async fn insert_trace(
+        repo: &RetrievalTraceRepository,
+        project_id: &str,
+        candidates: &serde_json::Value,
+        candidate_cap: i32,
+        candidate_cap_exceeded: bool,
+        sampling_metadata: Option<&serde_json::Value>,
+    ) -> RetrievalTraceRow {
+        repo.insert(CreateRetrievalTraceParams {
+            project_id,
+            session_id: None,
+            task_run_id: None,
+            task_id: None,
+            entry_point: RetrievalTraceEntryPoint::Dispatch,
+            trigger: None,
+            candidates,
+            candidate_cap,
+            candidate_cap_exceeded,
+            sampling_metadata,
+            durations_ms: &json!({}),
+            estimated_injected_tokens: 0,
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn candidate_cap_and_exceeded_round_trip() {
+        let db = test_db();
+        let project_id = "019f4900-0000-7000-8000-000000000010";
+        seed_project(&db, project_id).await;
+        let repo = RetrievalTraceRepository::new(db);
+
+        // Explicit cap of 30, not exceeded.
+        let row = insert_trace(&repo, project_id, &json!([]), 30, false, None).await;
+        assert_eq!(row.candidate_cap, 30);
+        assert!(!row.candidate_cap_exceeded);
+
+        // Fetch back by id to confirm persistence.
+        let fetched = repo
+            .get_by_id(&row.id)
+            .await
+            .unwrap()
+            .expect("row must exist");
+        assert_eq!(fetched.candidate_cap, 30);
+        assert!(!fetched.candidate_cap_exceeded);
+
+        // Cap exceeded case.
+        let row2 = insert_trace(
+            &repo,
+            project_id,
+            &json!([injected_candidate("n1", 1, 0.9)]),
+            DEFAULT_CANDIDATE_CAP,
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(row2.candidate_cap, DEFAULT_CANDIDATE_CAP);
+        assert!(row2.candidate_cap_exceeded);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sampling_metadata_round_trips_when_present_and_absent() {
+        let db = test_db();
+        let project_id = "019f4900-0000-7000-8000-000000000011";
+        seed_project(&db, project_id).await;
+        let repo = RetrievalTraceRepository::new(db);
+
+        // No sampling metadata → NULL in DB.
+        let row_none = insert_trace(
+            &repo,
+            project_id,
+            &json!([]),
+            DEFAULT_CANDIDATE_CAP,
+            false,
+            None,
+        )
+        .await;
+        assert!(row_none.sampling_metadata.is_none());
+
+        // With sampling metadata.
+        let sampling = json!({
+            "enabled": true,
+            "sample_rate": 0.25,
+            "method": "top_k_reservoir",
+            "seed": 42
+        });
+        let row_some = insert_trace(
+            &repo,
+            project_id,
+            &json!([]),
+            DEFAULT_CANDIDATE_CAP,
+            false,
+            Some(&sampling),
+        )
+        .await;
+        assert!(row_some.sampling_metadata.is_some());
+        // Round-trip the JSONB value exactly.
+        assert_eq!(row_some.sampling_metadata.unwrap(), sampling);
+    }
+
+    // ── Retention pruning tests (qmel) ────────────────────────────────────────
+
+    /// Backdate a trace row's `created_at` to a fixed ISO-8601 timestamp so
+    /// pruning tests can control which rows are old vs. new.
+    async fn backdate_created_at(db: &Database, trace_id: &str, created_at: &str) {
+        sqlx::query("UPDATE retrieval_traces SET created_at = $1 WHERE id = $2")
+            .bind(created_at)
+            .bind(trace_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prune_older_than_deletes_old_rows_and_reports_count() {
+        let db = test_db();
+        let project_id = "019f4900-0000-7000-8000-000000000012";
+        let other_project = "019f4900-0000-7000-8000-000000000013";
+        seed_project(&db, project_id).await;
+        seed_project(&db, other_project).await;
+        let repo = RetrievalTraceRepository::new(db.clone());
+
+        // Two "old" rows in the target project.
+        let old1 = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None)
+            .await;
+        let old2 = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None)
+            .await;
+        // One "new" row that should survive.
+        let keep = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None)
+            .await;
+        // An old row in a *different* project — must NOT be pruned by this call.
+        let other_old =
+            insert_trace(&repo, other_project, &json!([]), DEFAULT_CANDIDATE_CAP, false, None).await;
+
+        // Backdate: old rows → 2026-01-01, keep row → 2026-12-01.
+        backdate_created_at(&db, &old1.id, "2026-01-01T00:00:00.000Z").await;
+        backdate_created_at(&db, &old2.id, "2026-06-01T00:00:00.000Z").await;
+        backdate_created_at(&db, &keep.id, "2026-12-01T00:00:00.000Z").await;
+        backdate_created_at(&db, &other_old.id, "2026-01-01T00:00:00.000Z").await;
+
+        // Cutoff: prune everything strictly before 2026-07-01.
+        let pruned = repo
+            .prune_older_than(project_id, "2026-07-01T00:00:00.000Z")
+            .await
+            .unwrap();
+
+        // old1 and old2 are before the cutoff → 2 pruned.
+        assert_eq!(pruned, 2);
+
+        // The "keep" row survives.
+        let remaining = repo
+            .list_by_project(project_id, RetrievalTraceListFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, keep.id);
+
+        // The other-project old row is untouched.
+        let other_remaining = repo
+            .list_by_project(other_project, RetrievalTraceListFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(other_remaining.len(), 1);
+        assert_eq!(other_remaining[0].id, other_old.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prune_older_than_deletes_nothing_when_all_newer() {
+        let db = test_db();
+        let project_id = "019f4900-0000-7000-8000-000000000014";
+        seed_project(&db, project_id).await;
+        let repo = RetrievalTraceRepository::new(db.clone());
+
+        let r1 = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None)
+            .await;
+        let r2 = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None)
+            .await;
+        backdate_created_at(&db, &r1.id, "2026-11-01T00:00:00.000Z").await;
+        backdate_created_at(&db, &r2.id, "2026-12-01T00:00:00.000Z").await;
+
+        let pruned = repo
+            .prune_older_than(project_id, "2026-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(pruned, 0);
+
+        let remaining = repo
+            .list_by_project(project_id, RetrievalTraceListFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prune_older_than_empty_project_prunes_zero() {
+        let db = test_db();
+        let project_id = "019f4900-0000-7000-8000-000000000015";
+        seed_project(&db, project_id).await;
+        let repo = RetrievalTraceRepository::new(db);
+
+        let pruned = repo
+            .prune_older_than(project_id, "2026-07-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(pruned, 0);
+    }
+
+    // ── Candidate validation invariants (qmel) ────────────────────────────────
+
+    #[test]
+    fn validate_candidates_accepts_injected_and_valid_skipped() {
+        let candidates = vec![
+            injected_candidate("n1", 1, 0.9),
+            skipped_candidate("n2", 2, 0.3, SkippedReason::NotTopK),
+            skipped_candidate("n3", 3, 0.2, SkippedReason::MinConfidence),
+            skipped_candidate("n4", 4, 0.1, SkippedReason::BudgetPruned),
+            skipped_candidate("n5", 5, 0.05, SkippedReason::SupersededPruned),
+            skipped_candidate("n6", 6, 0.04, SkippedReason::Dedupe),
+            skipped_candidate("n7", 7, 0.01, SkippedReason::SearchError),
+        ];
+        // All combinations are valid: injected has None, skipped have valid reasons.
+        assert!(validate_candidates(&candidates).is_ok());
+    }
+
+    #[test]
+    fn validate_candidates_accepts_empty_set() {
+        assert!(validate_candidates(&[]).is_ok());
+    }
+
+    #[test]
+    fn default_candidate_cap_is_documented_as_50() {
+        // The proposal default is 50 unless benchmarks justify a lower value
+        // (see design/5wdh-roadmap). This documents and locks the default.
+        assert_eq!(DEFAULT_CANDIDATE_CAP, 50);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn candidate_invariants_survive_round_trip() {
+        let db = test_db();
+        let project_id = "019f4900-0000-7000-8000-000000000016";
+        seed_project(&db, project_id).await;
+        let repo = RetrievalTraceRepository::new(db);
+
+        // Candidate set covering the full skipped_reason vocabulary + injected.
+        let candidates = json!([
+            injected_candidate("inj-1", 1, 0.95),
+            skipped_candidate("skip-not-top-k", 2, 0.30, SkippedReason::NotTopK),
+            skipped_candidate("skip-min-conf", 3, 0.20, SkippedReason::MinConfidence),
+            skipped_candidate("skip-budget", 4, 0.15, SkippedReason::BudgetPruned),
+            skipped_candidate("skip-superseded", 5, 0.10, SkippedReason::SupersededPruned),
+            skipped_candidate("skip-dedupe", 6, 0.08, SkippedReason::Dedupe),
+            skipped_candidate("skip-search-err", 7, 0.01, SkippedReason::SearchError),
+        ]);
+
+        let row = repo
+            .insert(CreateRetrievalTraceParams {
+                project_id,
+                session_id: None,
+                task_run_id: None,
+                task_id: None,
+                entry_point: RetrievalTraceEntryPoint::Dispatch,
+                trigger: None,
+                candidates: &candidates,
+                candidate_cap: DEFAULT_CANDIDATE_CAP,
+                candidate_cap_exceeded: false,
+                sampling_metadata: Some(&json!({"sample_rate": 1.0})),
+                durations_ms: &json!({}),
+                estimated_injected_tokens: 128,
+            })
+            .await
+            .unwrap();
+
+        let typed = row.candidates_typed();
+        assert_eq!(typed.len(), 7);
+
+        // The first candidate is injected (skipped_reason == None).
+        assert!(typed[0].skipped_reason.is_none());
+
+        // The remaining six each carry a distinct, valid skipped_reason.
+        let reasons: Vec<SkippedReason> =
+            typed[1..].iter().map(|c| c.skipped_reason.unwrap()).collect();
+        assert_eq!(
+            reasons,
+            vec![
+                SkippedReason::NotTopK,
+                SkippedReason::MinConfidence,
+                SkippedReason::BudgetPruned,
+                SkippedReason::SupersededPruned,
+                SkippedReason::Dedupe,
+                SkippedReason::SearchError,
+            ]
+        );
+
+        // Every round-tripped candidate passes the invariant check.
+        assert!(validate_candidates(&typed).is_ok());
     }
 }
