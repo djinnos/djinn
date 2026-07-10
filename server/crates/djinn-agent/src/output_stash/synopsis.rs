@@ -1,3 +1,8 @@
+// This module is developed in slices. `synopsize` and its helpers are not yet
+// called from non-test code; integration happens in a follow-up task.
+// `push_str` and `Shape.root` are reserved for that integration.
+#![allow(dead_code)]
+
 //! Deterministic bounded synopses for oversized tool-result payloads.
 //!
 //! Phase 1 of proposal `01ik` covers the JSON classifier only. The function
