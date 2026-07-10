@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::fixtures::BadCaseType;
+use crate::report::QueryRankBaseline;
 use crate::run::QueryRankRecord;
 
 // ── Age bucketing ─────────────────────────────────────────────────────────
@@ -440,6 +441,7 @@ pub fn evaluate_compare_policy(
     baseline_suites: &HashMap<String, SuiteMetrics>,
     baseline_aggregate: &AggregateMetrics,
     baseline_bad_case_zero_result_rate: f64,
+    baseline_per_query_ranks: &HashMap<String, Vec<QueryRankBaseline>>,
 ) -> CompareResult {
     let mut failures = Vec::new();
     let mut query_regressions = Vec::new();
@@ -477,19 +479,36 @@ pub fn evaluate_compare_policy(
 
     // 2. Bad-case hit-to-miss regressions → fail
     //    A bad case that previously had at least one hit now has zero hits.
+    //    Populate old_rank from baseline per-query rank data.
     for record in current_bad_case_records {
         if record.is_bad_case {
             let has_hit = record.relevant_ranks.iter().any(|r| r.is_some());
             if !has_hit && !record.expected_permalinks.is_empty() {
+                // Look up baseline per-query rank for this query.
+                let baseline_entry = baseline_per_query_ranks
+                    .values()
+                    .flatten()
+                    .find(|b| b.query_id == record.query_id);
+
                 // This is a zero-result bad case — report as a query regression
-                for permalink in record.expected_permalinks.iter() {
+                for (idx, permalink) in record.expected_permalinks.iter().enumerate() {
+                    // Find the old_rank for this specific permalink from baseline.
+                    let old_rank = baseline_entry.and_then(|b| {
+                        // Match by index in expected_permalinks ↔ relevant_ranks.
+                        b.relevant_ranks.get(idx).copied().flatten()
+                    });
+                    let new_rank = record.relevant_ranks.get(idx).and_then(|r| *r);
+                    let metric_delta = match (old_rank, new_rank) {
+                        (Some(old), Some(new)) => (1.0 / new as f64) - (1.0 / old as f64),
+                        _ => -1.0, // sentinel for hit-to-miss
+                    };
                     query_regressions.push(QueryRegressionDetail {
                         query_id: record.query_id.clone(),
                         query_text: record.query_text.clone(),
                         relevant_permalink: permalink.clone(),
-                        old_rank: None, // we don't have per-query baseline rank here
-                        new_rank: None,
-                        metric_delta: -1.0, // sentinel for hit-to-miss
+                        old_rank,
+                        new_rank,
+                        metric_delta,
                     });
                 }
                 failures.push(RegressionDetail {
@@ -944,8 +963,15 @@ mod tests {
         };
         let baseline_agg = current_agg.clone();
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         assert!(result.passed, "should pass with no regressions");
         assert!(result.failures.is_empty());
     }
@@ -980,8 +1006,15 @@ mod tests {
             query_count: 10,
         };
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         // recall@1 dropped 0.05 (> 0.02 threshold)
         assert!(!result.passed, "should fail on recall@1 drop > 0.02");
         assert!(
@@ -1022,8 +1055,15 @@ mod tests {
             query_count: 10,
         };
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         // MRR dropped 0.07 (> 0.02 suite threshold)
         assert!(!result.passed, "should fail on suite MRR drop > 0.02");
         assert!(
@@ -1065,8 +1105,15 @@ mod tests {
             query_count: 10,
         };
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         // Aggregate MRR dropped 0.015 (> 0.01 aggregate threshold)
         assert!(!result.passed, "should fail on aggregate MRR drop > 0.01");
         assert!(
@@ -1093,8 +1140,15 @@ mod tests {
         let current_agg = AggregateMetrics::default();
         let baseline_agg = AggregateMetrics::default();
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         // Bad-case zero-result went from 0.0 to 0.5 (any increase fails)
         assert!(
             !result.passed,
@@ -1125,8 +1179,15 @@ mod tests {
         };
 
         // Zero-result increased by 0.02 (> 0.01 threshold)
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         assert!(
             !result.passed,
             "should fail on aggregate zero-result increase > 0.01"
@@ -1172,8 +1233,15 @@ mod tests {
             query_count: 10,
         };
 
-        let result =
-            evaluate_compare_policy(&current, &current_agg, &[], &baseline, &baseline_agg, 0.0);
+        let result = evaluate_compare_policy(
+            &current,
+            &current_agg,
+            &[],
+            &baseline,
+            &baseline_agg,
+            0.0,
+            &HashMap::new(),
+        );
         // Drops smaller than threshold should pass
         assert!(
             result.passed,
@@ -1203,6 +1271,7 @@ mod tests {
             &baseline,
             &baseline_agg,
             0.0,
+            &HashMap::new(),
         );
         assert!(!result.passed, "should fail on bad-case hit-to-miss");
         assert!(
@@ -1235,6 +1304,7 @@ mod tests {
             &baseline,
             &baseline_agg,
             0.0,
+            &HashMap::new(),
         );
         assert!(result.passed, "should pass when bad case still has a hit");
     }
