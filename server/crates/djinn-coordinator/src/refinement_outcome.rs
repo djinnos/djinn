@@ -13,9 +13,8 @@ use djinn_core::models::{Proposal, ProposalDebateTrail, TransitionAction};
 use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
 
 use super::refinement::{
-    AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, ObjectionRecord,
-    RefinementLoopState, RefinementPhase, StopReason, build_revision_event_metadata,
-    select_refinement_model,
+    AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, RefinementLoopState,
+    RefinementPhase, StopReason, build_revision_event_metadata, select_refinement_model,
 };
 
 use super::actor::CoordinatorActor;
@@ -234,21 +233,22 @@ impl CoordinatorActor {
         let run_start = self.latest_refinement_run_start(proposal_id).await;
 
         let round = state.current_round;
-        let round_objections: Vec<ObjectionRecord> = entries
-            .iter()
-            .filter(|e| {
-                e.agent_role == "adversary"
-                    && e.kind == "objection"
-                    && e.round == round
-                    && entry_in_current_run(e, run_start.as_deref())
-            })
-            .map(|e| ObjectionRecord {
-                body: e.body.clone(),
-                blocking: e.blocking,
-                author_model: e.author_model.clone(),
-                entry_id: Some(e.id.clone()),
-            })
-            .collect();
+        let (round_objections, carried_over) =
+            super::refinement_objections::collect_adversary_round_objections(
+                &entries,
+                round,
+                run_start.as_deref(),
+            );
+
+        if carried_over {
+            tracing::info!(
+                proposal_id = %proposal_id,
+                round,
+                carried = round_objections.len(),
+                "Round-1 current-run objection set empty; carrying unresolved \
+                 prior-run objections so the Advocate resumes the interrupted refinement"
+            );
+        }
 
         let explicit_dry = round_objections.is_empty();
 
