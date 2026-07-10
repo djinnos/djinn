@@ -24,6 +24,19 @@
 //! Non-JSON inputs (text, code, binary, CSV, XML, YAML, …) return `None` in
 //! this slice; later tasks extend the classifier without changing the contract.
 
+/// Hard ceiling on the input text length (bytes) we will attempt to parse as
+/// JSON. Inputs exceeding this are rejected *before* calling
+/// [`serde_json::from_str`], so the deserializer never allocates for them.
+/// This is the primary defence against pathological memory consumption — a
+/// multi-MB valid-JSON blob would otherwise force a many-larger
+/// `serde_json::Value` tree before the post-parse token walk can bail out.
+///
+/// 1 MiB is generous enough for any realistic tool output we would summarize
+/// (the normal-case tool-result cap is 30 KB; stashed outputs rarely exceed a
+/// few hundred KB) while capping worst-case parse memory to ≈ 2–3× this
+/// value.
+const MAX_PARSE_BYTES: usize = 1_048_576; // 1 MiB
+
 /// Hard ceiling on the number of JSON tokens we will inspect before giving up
 /// and returning `None`. Anything well-formed that exceeds this is almost
 /// certainly hostile or pathological — we deliberately do not summarize it
@@ -190,10 +203,20 @@ fn classify_root(value: &serde_json::Value) -> RootKind {
 }
 
 /// Bounded parse: deserialize `text` into a [`serde_json::Value`], but bail
-/// to `None` if the token count exceeds [`MAX_JSON_TOKENS`]. We never unwrap
-/// the deserializer; both syntax errors and recursion-limit errors collapse to
+/// to `None` if the input exceeds [`MAX_PARSE_BYTES`] or the resulting token
+/// count exceeds [`MAX_JSON_TOKENS`]. The input-size check runs *before*
+/// calling the deserializer so that multi-MB inputs never cause unbounded
+/// allocation inside `serde_json::from_str`. We never unwrap the
+/// deserializer; both syntax errors and recursion-limit errors collapse to
 /// `None` so the caller can fall back to the byte-for-byte truncated stub.
 fn parse_bounded(text: &str) -> Option<serde_json::Value> {
+    // Pre-parse ceiling: reject oversized inputs before touching the
+    // deserializer. This caps worst-case memory to ≈ 2–3× MAX_PARSE_BYTES
+    // (serde_json::Value typically uses more memory than the source text).
+    if text.len() > MAX_PARSE_BYTES {
+        return None;
+    }
+
     // Parse into a Value. `serde_json`'s default recursion limit (128) is
     // the hard safety net for adversarial nesting; both syntax errors and
     // recursion-limit errors collapse to `None` so the caller degrades.
@@ -754,6 +777,27 @@ mod tests {
             s.push(']');
         }
         assert_eq!(synopsize("shell", &s, 4096), None);
+    }
+
+    #[test]
+    fn oversized_valid_json_returns_none() {
+        // Construct valid JSON just over MAX_PARSE_BYTES. The pre-parse
+        // ceiling must reject it *before* calling serde_json::from_str,
+        // so no unbounded allocation occurs.
+        let inner = "1,".repeat(MAX_PARSE_BYTES / 2 + 1);
+        // Remove the trailing comma and wrap in an array.
+        let trimmed_inner = inner.trim_end_matches(',');
+        let raw = format!("[{trimmed_inner}]");
+        assert!(
+            raw.len() > MAX_PARSE_BYTES,
+            "test setup: raw.len()={} should exceed MAX_PARSE_BYTES={MAX_PARSE_BYTES}",
+            raw.len()
+        );
+        assert_eq!(
+            synopsize("shell", &raw, 4096),
+            None,
+            "oversized valid JSON must return None without parsing"
+        );
     }
 
     #[test]
