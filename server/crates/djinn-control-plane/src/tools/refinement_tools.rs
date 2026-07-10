@@ -147,6 +147,27 @@ impl DjinnMcpServer {
             )));
         }
 
+        // Refinement dispatches tribunal tasks into the proposal's target
+        // project (see create_refinement_task_with_context, which reads
+        // targets[0].project_id). With no target the coordinator silently
+        // fails task creation and terminates with an opaque agent_failure and
+        // zero entries — so reject fast here with an actionable message.
+        match repo.targets(&proposal.id).await {
+            Ok(targets) if !targets.is_empty() => {}
+            Ok(_) => {
+                return Json(err_refinement_start(
+                    "proposal has no target project; add one with proposal_add_target \
+                     before starting refinement"
+                        .to_string(),
+                ));
+            }
+            Err(e) => {
+                return Json(err_refinement_start(format!(
+                    "failed to check proposal targets: {e}"
+                )));
+            }
+        }
+
         // Lifecycle-level duplicate check — fast-path early return before
         // hitting the coordinator channel.
         if refinement_is_active(&repo, &proposal.id).await {
@@ -343,6 +364,35 @@ impl DjinnMcpServer {
                 refinement: Some(current_refinement),
                 error: Some("refinement is already active for this proposal".to_string()),
             });
+        }
+
+        // Same missing-target blind spot as refinement_start: a demanded round
+        // dispatches a fresh tribunal task, which needs a target project. Reject
+        // fast here rather than terminating with an opaque agent_failure. Checked
+        // after the duplicate-active guard so a genuinely-active proposal still
+        // reports "already active" first.
+        match repo.targets(&proposal.id).await {
+            Ok(targets) if !targets.is_empty() => {}
+            Ok(_) => {
+                return Json(DemandRoundResponse {
+                    proposal_id: Some(proposal.id),
+                    accepted: false,
+                    refinement: None,
+                    error: Some(
+                        "proposal has no target project; add one with proposal_add_target \
+                         before demanding a refinement round"
+                            .to_string(),
+                    ),
+                });
+            }
+            Err(e) => {
+                return Json(DemandRoundResponse {
+                    proposal_id: Some(proposal.id),
+                    accepted: false,
+                    refinement: None,
+                    error: Some(format!("failed to check proposal targets: {e}")),
+                });
+            }
         }
 
         // Record the demand-round action as a lifecycle event.
