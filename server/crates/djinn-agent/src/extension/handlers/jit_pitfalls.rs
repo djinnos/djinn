@@ -393,13 +393,31 @@ fn estimate_injected_tokens(block_chars: usize) -> i32 {
     i32::try_from(tokens).unwrap_or(i32::MAX)
 }
 
-/// Persist an "empty result" trace row mirroring the empty-path semantic of
-/// `maybe_pitfall_hint`. The trace carries an empty candidates array,
-/// `rendered_note_count = 0`, and `result_count = 0` so downstream tooling
-/// can distinguish an empty-but-eligible search from a disabled rollout (no
-/// trace row at all).
+/// Persist an "empty production result" trace row mirroring the empty-path
+/// semantic of `maybe_pitfall_hint`.
+///
+/// This helper used to skip the trace candidate universe on this path: the
+/// production `query_by_scope_overlap(..., min_confidence=0.3, limit=8)`
+/// filtered below-threshold notes out before they reached the classifier, so
+/// a confidence-0.10 note overlapping a touched path silently disappeared
+/// from the trace. The 5wdh data-layer exposes
+/// [`djinn_db::NoteRepository::query_by_scope_overlap_trace_candidates`]
+/// specifically so the trace universe can include below-threshold candidates
+/// for deterministic `MinConfidence` classification.
+///
+/// This helper therefore performs the trace candidate fetch itself. The
+/// production search returned empty → the injected set is empty by
+/// construction → every fetched candidate is classified as either
+/// `SkippedReason::MinConfidence` (confidence below
+/// [`JIT_TRACE_PROD_MIN_CONFIDENCE`]) or `SkippedReason::NotTopK` (above the
+/// floor but no injected candidates means the top-K is empty). Failures in
+/// the universe fetch, the classification invariants, the JSON
+/// serialization, or the repository insert are each fail-open — a warning is
+/// logged and, where possible, a metadata-only row is still persisted so the
+/// trace ledger records the attempted search.
 #[allow(clippy::too_many_arguments)]
 async fn persist_jit_empty_trace(
+    note_repo: &djinn_db::NoteRepository,
     db: &djinn_db::Database,
     session_id: &str,
     project_id: &str,
@@ -407,24 +425,142 @@ async fn persist_jit_empty_trace(
     touched_paths: &[String],
     search_elapsed_ms: u64,
     candidate_cap: i32,
-    candidate_cap_exceeded: bool,
 ) {
+    use djinn_db::repositories::retrieval_trace::TraceCandidate;
+
+    let persist_started = SystemClockTrait::new().now_instant();
+    let trace_search_started = SystemClockTrait::new().now_instant();
+    let trace_universe = note_repo
+        .query_by_scope_overlap_trace_candidates(
+            project_id,
+            touched_paths,
+            JIT_TRACE_PROD_NOTE_TYPES,
+            candidate_cap as usize,
+        )
+        .await;
+    let trace_search_elapsed_ms = elapsed_millis(trace_search_started);
+
+    let scope_candidates = match trace_universe {
+        Ok(candidates) => candidates,
+        Err(trace_err) => {
+            // Fail-open: log a warning and persist a metadata-only row
+            // carrying the error in the trigger. Without candidate ids the
+            // trace row records the attempted search but not the typed
+            // `MinConfidence`/`NotTopK` classification.
+            tracing::warn!(
+                target: TELEMETRY_TARGET,
+                session_id = %session_id,
+                project_id = %project_id,
+                error = %trace_err,
+                "jit_pitfalls: empty-result trace candidate query failed; \
+                 persisting metadata-only JitPitfalls trace (fail-open)",
+            );
+            let trigger = build_trace_trigger(
+                rollout_mode,
+                touched_paths,
+                0,
+                0,
+                JIT_TRACE_PROD_MIN_CONFIDENCE,
+                JIT_TRACE_PROD_QUERY_LIMIT,
+                Some(&format!("trace_candidate_query: {trace_err}")),
+            );
+            let durations_ms =
+                build_trace_durations_ms(search_elapsed_ms, Some(trace_search_elapsed_ms), None);
+            persist_jit_trace(
+                db,
+                session_id,
+                project_id,
+                &serde_json::json!([]),
+                &durations_ms,
+                &trigger,
+                0,
+                candidate_cap,
+                false,
+            )
+            .await;
+            let persist_elapsed_ms = elapsed_millis(persist_started);
+            tracing::debug!(
+                target: TELEMETRY_TARGET,
+                session_id = %session_id,
+                project_id = %project_id,
+                trace_search_elapsed_ms = trace_search_elapsed_ms,
+                persist_elapsed_ms = persist_elapsed_ms,
+                "jit_pitfalls: persisted empty-result search_error trace (fail-open)",
+            );
+            return;
+        }
+    };
+
+    // Production returned no notes → the injected set is empty by
+    // construction. Classify the universe against that empty set so the
+    // boundary branch in `classify_trace_candidate` is exercised: anything
+    // below `JIT_TRACE_PROD_MIN_CONFIDENCE` surfaces as
+    // `SkippedReason::MinConfidence` (this is the deterministic
+    // classification the 5wdh data-layer was extended for), and anything
+    // above the floor lands in `SkippedReason::NotTopK` (no injected
+    // candidates means the production top-K is empty).
+    let empty_injected: HashSet<String> = HashSet::new();
+    let trace_candidates: Vec<TraceCandidate> = scope_candidates
+        .iter()
+        .map(|candidate| {
+            classify_trace_candidate(candidate, &empty_injected, JIT_TRACE_PROD_MIN_CONFIDENCE)
+        })
+        .collect();
+    let trace_universe_count = scope_candidates.len();
+    let candidate_cap_exceeded = (trace_universe_count as i64) > i64::from(candidate_cap);
+
+    if let Err(validation_err) =
+        djinn_db::repositories::retrieval_trace::validate_candidates(&trace_candidates)
+    {
+        // Fail-open: the production empty-result outcome is already decided;
+        // skip the trace row and warn-log. The returned `Option<String>` and
+        // the `Empty` telemetry outcome are unchanged.
+        tracing::warn!(
+            target: TELEMETRY_TARGET,
+            session_id = %session_id,
+            project_id = %project_id,
+            error = %validation_err,
+            "jit_pitfalls: empty-path trace candidates failed validation; \
+             skipping trace persistence (fail-open)",
+        );
+        return;
+    }
+    let trace_candidates_json = match serde_json::to_value(&trace_candidates) {
+        Ok(json) => json,
+        Err(ser_err) => {
+            tracing::warn!(
+                target: TELEMETRY_TARGET,
+                session_id = %session_id,
+                project_id = %project_id,
+                error = %ser_err,
+                "jit_pitfalls: failed to serialize empty-path trace candidates; \
+                 skipping trace persistence (fail-open)",
+            );
+            return;
+        }
+    };
+
+    // `rendered_note_count = 0` (no notes were rendered); `result_count` is
+    // the trace universe size so downstream tooling can distinguish
+    // "production returned empty, typed candidates persisted" from a
+    // metadata-only row.
     let trigger = build_trace_trigger(
         rollout_mode,
         touched_paths,
         0,
-        0,
+        trace_universe_count,
         JIT_TRACE_PROD_MIN_CONFIDENCE,
         JIT_TRACE_PROD_QUERY_LIMIT,
         None,
     );
-    let durations_ms = build_trace_durations_ms(search_elapsed_ms, None, None);
-    let empty_candidates = serde_json::json!([]);
+    let durations_ms =
+        build_trace_durations_ms(search_elapsed_ms, Some(trace_search_elapsed_ms), None);
+
     persist_jit_trace(
         db,
         session_id,
         project_id,
-        &empty_candidates,
+        &trace_candidates_json,
         &durations_ms,
         &trigger,
         0,
@@ -432,6 +568,16 @@ async fn persist_jit_empty_trace(
         candidate_cap_exceeded,
     )
     .await;
+    let persist_elapsed_ms = elapsed_millis(persist_started);
+    tracing::debug!(
+        target: TELEMETRY_TARGET,
+        session_id = %session_id,
+        project_id = %project_id,
+        trace_universe_count = trace_universe_count,
+        trace_search_elapsed_ms = trace_search_elapsed_ms,
+        persist_elapsed_ms = persist_elapsed_ms,
+        "jit_pitfalls: persisted empty-result JitPitfalls trace with typed candidates (fail-open)",
+    );
 }
 
 /// Persist a search-error trace row mirroring the error-path semantic of
@@ -661,10 +807,16 @@ pub(super) async fn maybe_pitfall_hint(
                 rendered_note_count = 0usize,
                 "jit_pitfalls telemetry outcome"
             );
-            // Trace persistence: empty-but-eligible → fail-open row, no DB
-            // candidate universe fetch (the production query itself
-            // returned empty, so a second query would be wasted work).
+            // Trace persistence: empty-but-eligible → the production search
+            // returned empty (no notes above the confidence floor), but the
+            // trace universe still contains below-threshold matches which the
+            // 5wdh `query_by_scope_overlap_trace_candidates` exposes for
+            // deterministic `MinConfidence` classification. The helper performs
+            // the trace fetch, classify, validate, serialize, and persist —
+            // every step is fail-open so the production `Empty` outcome and
+            // returned `None` are unchanged on any DB/serialization error.
             persist_jit_empty_trace(
+                &note_repo,
                 &state.db,
                 session_id,
                 project_id,
@@ -672,7 +824,6 @@ pub(super) async fn maybe_pitfall_hint(
                 touched_paths,
                 elapsed_ms,
                 djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP,
-                false,
             )
             .await;
             return None;
@@ -1362,6 +1513,78 @@ mod tests {
             JIT_TRACE_PROD_NOTE_TYPES,
             &["pitfall", "pattern"],
             "trace classification must mirror the production note-type filter"
+        );
+    }
+
+    /// Regression coverage for the empty-production-result trace path.
+    ///
+    /// Reviewer scenario (epic 3paf round 1):
+    /// `query_by_scope_overlap(..., min_confidence=0.3, limit=8)` returns
+    /// empty for a touched path that overlaps an active pitfall/pattern note
+    /// with confidence 0.10. Before the fix, `persist_jit_empty_trace`
+    /// short-circuited with an empty candidates array, so the below-threshold
+    /// note disappeared from the trace instead of being persisted as a typed
+    /// `MinConfidence` candidate. After the fix, `persist_jit_empty_trace`
+    /// fetches the unfiltered trace universe and classifies each candidate
+    /// against an empty `injected_note_ids` set — this test pins that
+    /// classification contract.
+    ///
+    /// Two candidates are exercised:
+    ///   * `note-below` (confidence 0.10) → `Skipped(MinConfidence)` — the
+    ///     deterministic classification that the empty path now produces.
+    ///   * `note-above` (confidence 0.85) → `Skipped(NotTopK)` — no injected
+    ///     candidates exist on this path, so every above-threshold row is
+    ///     outside the production top-K.
+    #[test]
+    fn empty_result_trace_path_classifies_below_threshold_as_min_confidence() {
+        use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+
+        let candidates = vec![
+            mk_scope_trace_candidate("note-below", 1, 0.10, "pitfall", "[]"),
+            mk_scope_trace_candidate("note-above", 2, 0.85, "pattern", "[]"),
+        ];
+        // The empty-path always classifies against an empty injected set
+        // because the production `query_by_scope_overlap` returned no notes
+        // to inject into the `<relevant-pitfalls>` block.
+        let empty_injected: HashSet<String> = HashSet::new();
+
+        let classified: Vec<_> = candidates
+            .iter()
+            .map(|candidate| {
+                classify_trace_candidate(candidate, &empty_injected, JIT_TRACE_PROD_MIN_CONFIDENCE)
+            })
+            .collect();
+
+        assert_eq!(classified.len(), 2);
+
+        // Below-threshold row → typed as `MinConfidence` (was silently
+        // dropped before the fix).
+        let below = classified
+            .iter()
+            .find(|c| c.note_id == "note-below")
+            .expect("below-threshold candidate must be classified");
+        assert_eq!(below.outcome, CandidateOutcome::Skipped);
+        assert_eq!(below.skipped_reason, Some(SkippedReason::MinConfidence));
+        assert_eq!(below.confidence, Some(0.10));
+
+        // Above-threshold row → typed as `NotTopK` (empty injected set means
+        // the production top-K is empty on this path).
+        let above = classified
+            .iter()
+            .find(|c| c.note_id == "note-above")
+            .expect("above-threshold candidate must be classified");
+        assert_eq!(above.outcome, CandidateOutcome::Skipped);
+        assert_eq!(above.skipped_reason, Some(SkippedReason::NotTopK));
+        assert_eq!(above.confidence, Some(0.85));
+
+        // Every classified candidate must satisfy the
+        // `Skipped has skipped_reason` invariant — this is the same shape
+        // check `persist_jit_empty_trace` runs before serialization, so a
+        // regression in the classifier surfaces here before the helper is
+        // reached.
+        assert!(
+            djinn_db::repositories::retrieval_trace::validate_candidates(&classified).is_ok(),
+            "empty-path classification must satisfy TraceCandidate invariants",
         );
     }
 }
