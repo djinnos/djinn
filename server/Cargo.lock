@@ -1252,6 +1252,7 @@ dependencies = [
  "futures",
  "globset",
  "hex",
+ "hmac",
  "insta",
  "libc",
  "regex",
