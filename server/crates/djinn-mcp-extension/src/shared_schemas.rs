@@ -89,7 +89,7 @@ pub fn annotate_tool_safety(value: &mut serde_json::Value, annotations: ToolSafe
 pub fn tool_memory_move() -> RmcpTool {
     RmcpTool::new(
         "memory_move".to_string(),
-        "Move a memory note to a different type via the memory_* MCP tools. Do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically. Use type=\"proposed_adr\" to recover a mis-routed ADR draft.".to_string(),
+        "Move a memory note to a different type via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem; do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically.".to_string(),
         object!({
             "type": "object",
             "required": ["identifier", "type"],
@@ -313,7 +313,7 @@ pub fn tool_proposal_debate_list() -> RmcpTool {
 pub fn tool_proposal_debate_resolve() -> RmcpTool {
     RmcpTool::new(
         "proposal_debate_resolve".to_string(),
-        "Mark a debate-trail objection as resolved, by its entry `id` (from `proposal_debate_list`). The Advocate calls this for each blocking objection it has addressed in its revision — this is what clears the objection from the readiness gate's `unresolved_blocking` set. Resolving WITHOUT actually fixing the spec leaves the gate technically green but the work undone, so only resolve objections your revision genuinely satisfies; pair it with a `proposal_debate_append` rebuttal (`kind=\"rebuttal\"`) that explains how.".to_string(),
+        "Mark a debate-trail objection as resolved by entry `id` (from `proposal_debate_list`). The Judge or Advocate calls this for each blocking objection the revision genuinely satisfies. Pair with a `proposal_debate_append` rebuttal explaining how.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -656,7 +656,7 @@ pub fn tool_memory_write() -> RmcpTool {
 pub fn tool_memory_edit() -> RmcpTool {
     RmcpTool::new(
         "memory_edit".to_string(),
-        "Edit an existing memory note in-place via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).".to_string(),
+        "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).".to_string(),
         object!({
             "type": "object",
             "required": ["identifier", "operation", "content"],

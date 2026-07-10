@@ -108,7 +108,7 @@ pub fn tool_read() -> RmcpTool {
 pub fn tool_code_search() -> RmcpTool {
     RmcpTool::new(
         "code_search".to_string(),
-        "Search code across registered repos with `git grep` (basic regex). Pass `project` (UUID or owner/repo slug) to search one repo, or omit it (or pass \"*\") to search ALL registered projects at once — e.g. find every caller of a gRPC service org-wide. Served from each repo's default branch (no checkout). For your own task repo's working tree (your uncommitted changes), use shell grep instead.".to_string(),
+        "Search code across registered repos with `git grep` (basic regex). Pass `project` to search one repo, or omit it to search ALL projects at once. Served from each repo's default branch (no checkout); use shell grep for local changes.".to_string(),
         object!({
             "type": "object",
             "required": ["query"],
@@ -497,8 +497,7 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
 }
 
 /// Tool schemas for Planner: base + task/epic management tools + memory/role
-/// management tools (per ADR-051 §1) + submit_grooming
-/// finalize tool.
+/// management tools (per ADR-051 §1) + submit_grooming finalize tool.
 ///
 /// The Planner now runs in two modes: (a) per-epic decomposition (the legacy
 /// mode) and (b) board-health maintenance (migrated from Architect). The tool

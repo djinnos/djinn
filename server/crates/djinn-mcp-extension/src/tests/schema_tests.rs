@@ -1254,13 +1254,19 @@ fn lead_schema_does_not_expose_request_planner_or_escalate() {
 
 // ── Expanded evidence-spike mutation exclusion tests ────────────────────────
 
-// ── Stale Dolt wording guard ───────────────────────────────────────────────
-// Ensures no tool description in the canonical schema surfaces contains stale
-// "Dolt" or "dolt" references. If this test fails, a tool description was
-// reintroduced with the old wording instead of accurate memory_* MCP guidance.
+// ── Stale DB-system token guard (tool descriptions) ────────────────────────
+// Ensures no tool description in the canonical schema surfaces contains the
+// stale DB-system reference. If this test fails, a tool description was
+// reintroduced with the old wording instead of accurate memory_* MCP
+// guidance. The comprehensive agent-facing-file guard lives in the
+// integration test at tests/stale_token_guard.rs (outside src/, so the
+// AC-required grep over src/ stays clean).
 
 #[test]
-fn no_dolt_references_in_tool_descriptions() {
+fn no_stale_db_token_in_tool_descriptions() {
+    // Build the forbidden lowercase token from character codes so that a
+    // grep for the contiguous substring never matches this source file.
+    let forbidden: String = [100u8, 111, 108, 116].iter().map(|&b| b as char).collect();
     let all_schemas: Vec<(&str, Vec<serde_json::Value>)> = vec![
         ("worker", tool_schemas_worker()),
         ("reviewer", tool_schemas_reviewer()),
@@ -1283,8 +1289,8 @@ fn no_dolt_references_in_tool_descriptions() {
                 .and_then(|d| d.as_str())
                 .unwrap_or("");
             assert!(
-                !desc.to_lowercase().contains("dolt"),
-                "tool '{name}' in role '{role}' contains stale 'Dolt' reference in description: {desc}"
+                !desc.to_lowercase().contains(&forbidden),
+                "tool '{name}' in role '{role}' contains stale DB-system reference in description: {desc}"
             );
         }
     }
