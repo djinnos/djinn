@@ -686,11 +686,9 @@ fn find_best_graph_rank(
 /// Assert that at least one graph/entity signal comparison changed a rank,
 /// and at least one task-affinity signal comparison changed a rank.
 ///
-/// **Phase 1 behaviour:** graph/entity comparisons are *recorded* but
-/// are a **warning**, not a hard failure, because the search pipeline's
-/// RRF fusion may absorb graph proximity into the combined score and the
-/// fixture corpus may not yet surface rank-level differences.
-/// Task-affinity comparisons remain a hard assertion.
+/// Both graph/entity and task-affinity are **hard assertions**: if comparisons
+/// are present but none changed rank, the run fails. This prevents silent
+/// collapse to lexical/vector/temporal-only behavior.
 fn assert_signal_effects(output: &RunOutput) -> Result<()> {
     // Check graph/entity signal
     let graph_changed = output
@@ -719,13 +717,8 @@ fn assert_signal_effects(output: &RunOutput) -> Result<()> {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        // Phase 1: graph proximity comparisons are recorded for the baseline
-        // but do not gate the initial snapshot.  Graph proximity still matters
-        // for build_context and will gate once fixtures are refined to surface
-        // rank-level differences in the search path.
-        warn!(
-            "graph/entity signal comparisons exist ({} comparisons) but none showed rank change — \
-             recorded for baseline but not gating Phase 1: {}",
+        bail!(
+            "graph/entity signal comparisons exist ({} comparisons) but none showed rank change: {}",
             graph_comparisons.len(),
             details
         );
@@ -792,7 +785,7 @@ mod tests {
         // Note 1: lexical source for graph traversal, connected to Note 2.
         let json1 = r#"{"permalink":"patterns/supervisor-guard","title":"Supervisor guard rollback covenant","content":"Supervisor guard rollback covenant pattern for managing supervisor lifecycle transitions safely. Supervisor guard rollback covenant source anchor.","note_type":"pattern","folder":"patterns","status":"active","tags":["guard","supervisor","rollback","covenant"],"timestamps":{"created_at":"2026-06-01T10:00:00.000Z","updated_at":"2026-06-15T14:30:00.000Z","last_accessed":"2026-07-01T09:00:00.000Z"},"confidence":0.85,"embedding":{"content_hash":"abc123def456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.1,0.2,0.3]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[{"source_permalink":"patterns/supervisor-guard","target_permalink":"patterns/connected-guard","kind":"builds_on","weight":1.0}],"expected_signals":{"vector":true,"lexical":true,"temporal":true,"graph":true,"entity":true,"task_affinity":false}}"#;
         // Note 2: relevant graph target; weak lexical match plus graph edge.
-        let json2 = r#"{"permalink":"patterns/connected-guard","title":"Connected release note","content":"Supervisor guard rollback covenant for automated deployment safety checks after rollout drift. Background appendix with neutral operational prose, rollout notes, audit notes, checklist notes, ownership notes, incident notes, recovery notes, and unrelated release commentary to keep the lexical-only rank below the directly matching source while the graph edge still boosts this relevant target.","note_type":"pattern","folder":"patterns","status":"active","tags":["deployment"],"timestamps":{"created_at":"2026-03-01T00:00:00.000Z","updated_at":"2026-03-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":0.4,"embedding":{"content_hash":"hash456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.4,0.5,0.6]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":true,"task_affinity":false}}"#;
+        let json2 = r#"{"permalink":"patterns/connected-guard","title":"Connected release note","content":"Supervisor guard rollback covenant for automated deployment safety checks after rollout drift. Background appendix with neutral operational prose, rollout notes, audit notes, checklist notes, ownership notes, incident notes, recovery notes, and unrelated release commentary to keep the lexical-only rank below the directly matching source while the graph edge still boosts this relevant target.","note_type":"pattern","folder":"patterns","status":"active","tags":["deployment"],"timestamps":{"created_at":"2026-03-01T00:00:00.000Z","updated_at":"2026-03-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":0.4,"embedding":{"content_hash":"hash456","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.4,0.5,0.6]},"labels":[{"entity_type":"concept","name":"guard"}],"graph_edges":[{"source_permalink":"patterns/connected-guard","target_permalink":"patterns/supervisor-guard","kind":"derived_from","weight":1.0}],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":true,"entity":true,"task_affinity":false}}"#;
         // Note 3: lexical distractor not connected to the graph target.
         let json3 = r#"{"permalink":"patterns/unconnected-guard","title":"Guard configuration reference","content":"Reference configuration for guard setup in test environments.","note_type":"pattern","folder":"patterns","status":"active","tags":["guard","config"],"timestamps":{"created_at":"2026-04-01T00:00:00.000Z","updated_at":"2026-04-15T00:00:00.000Z","last_accessed":"2026-06-01T00:00:00.000Z"},"confidence":1.0,"embedding":{"content_hash":"hash789","model_version":"text-embedding-3-small-v1","embedding_dim":3,"vector":[0.7,0.8,0.9]},"labels":[{"entity_type":"concept","name":"config"}],"graph_edges":[],"expected_signals":{"vector":true,"lexical":true,"temporal":false,"graph":false,"entity":false,"task_affinity":false}}"#;
         // Note 4: relevant task-memory target; weak lexical match plus task ref.
@@ -952,5 +945,136 @@ mod tests {
             "task-affinity comparisons must show rank change for at least one relevant note: {:?}",
             ta_comparisons
         );
+    }
+
+    /// Run the committed fixtures through the pipeline and write the baseline
+    /// with signal_comparisons. This test overwrites `baselines/phase1.json`
+    /// so reviewers can see graph/entity and task-affinity proof cases.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_baseline_with_committed_fixtures() {
+        let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixtures =
+            crate::loader::load_fixtures_from_disk(&crate_root).expect("load committed fixtures");
+
+        let output = execute_run_with_fixtures(&fixtures)
+            .await
+            .expect("run committed fixtures");
+
+        assert!(
+            !output.signal_comparisons.is_empty(),
+            "committed fixtures must produce signal comparisons"
+        );
+
+        let graph_count = output
+            .signal_comparisons
+            .iter()
+            .filter(|c| c.signal == "graph")
+            .count();
+        let ta_count = output
+            .signal_comparisons
+            .iter()
+            .filter(|c| c.signal == "task_affinity")
+            .count();
+        assert!(
+            graph_count > 0,
+            "must have graph signal comparisons from committed fixtures"
+        );
+        assert!(
+            ta_count > 0,
+            "must have task-affinity signal comparisons from committed fixtures"
+        );
+
+        // Build query result records
+        let all_records: Vec<&QueryRankRecord> = output
+            .query_records
+            .iter()
+            .chain(output.bad_case_records.iter())
+            .collect();
+
+        let query_result_records: Vec<crate::metrics::QueryResultRecord> = all_records
+            .iter()
+            .map(|r| crate::metrics::QueryResultRecord {
+                query_id: r.query_id.clone(),
+                query_text: r.query_text.clone(),
+                expected_permalinks: r.expected_permalinks.clone(),
+                result_permalinks: r.result_permalinks.clone(),
+                best_rank: r.relevant_ranks.iter().filter_map(|rank| *rank).min(),
+                relevant_ranks: r.relevant_ranks.clone(),
+                is_bad_case: r.is_bad_case,
+                bad_case_type: r.bad_case_type.clone(),
+                note_ages_days: vec![],
+            })
+            .collect();
+
+        // Compute metrics
+        let all_query_metrics = crate::metrics::compute_suite_metrics(&output.query_records);
+        let bad_case_metrics = crate::metrics::compute_suite_metrics(&output.bad_case_records);
+
+        let mut suite_metrics = std::collections::HashMap::new();
+        suite_metrics.insert("all_queries".to_string(), all_query_metrics.clone());
+        if !output.bad_case_records.is_empty() {
+            suite_metrics.insert("bad_cases".to_string(), bad_case_metrics.clone());
+        }
+
+        let agg_suites: Vec<(&str, &crate::metrics::SuiteMetrics)> =
+            suite_metrics.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let aggregate_metrics = crate::metrics::compute_aggregate_metrics(&agg_suites);
+
+        let age_bucket_recall = crate::metrics::compute_age_bucket_recall(
+            &output.query_records,
+            &std::collections::HashMap::new(),
+        );
+        let directional = crate::metrics::directional_metrics(&output.query_records);
+
+        // Build report
+        let fixture_hashes = fixtures.manifest.as_ref().map(|m| m.file_hashes.clone());
+        let report = crate::report::Phase1Report {
+            suite_metrics,
+            aggregate_metrics,
+            age_bucket_recall,
+            directional,
+            query_records: query_result_records,
+            signal_comparisons: output.signal_comparisons.clone(),
+            compare_result: None,
+            threshold_policy_version: crate::metrics::THRESHOLD_POLICY_VERSION.to_string(),
+            fixture_hashes,
+        };
+
+        // Build and write baseline
+        let refresh_commit = "local-test-refresh".to_string();
+        let baseline = crate::report::build_baseline(
+            &report,
+            report.fixture_hashes.clone(),
+            refresh_commit,
+            1752115200,
+        );
+
+        assert!(
+            !baseline.signal_comparisons.is_empty(),
+            "baseline must contain signal_comparisons"
+        );
+
+        crate::report::write_baseline(&crate_root, &baseline).expect("write baseline");
+
+        let reloaded = crate::report::load_baseline(&crate_root).expect("reload baseline");
+        assert!(
+            !reloaded.signal_comparisons.is_empty(),
+            "reloaded baseline must contain signal_comparisons"
+        );
+
+        eprintln!(
+            "=== Baseline refreshed with {} signal comparisons ===",
+            reloaded.signal_comparisons.len()
+        );
+        for sc in &reloaded.signal_comparisons {
+            eprintln!(
+                "  query={}, signal={}, with={:?}, without={:?}, changed={}",
+                sc.query_id,
+                sc.signal,
+                sc.rank_with_signal,
+                sc.rank_without_signal,
+                sc.rank_changed
+            );
+        }
     }
 }
