@@ -888,6 +888,20 @@ fn render_oversized_non_json_no_synopsis() {
     // Existing behavior preserved.
     assert!(text.contains("Full output stashed"));
     assert!(text.contains("output_view(tool_use_id=\"syn-bin-1\")"));
+
+    // Byte-for-byte compatibility with the pre-synopsis truncated-stub surface.
+    // The no-synopsis path must use the full MAX_TOOL_RESULT_CHARS budget, not
+    // the reduced budget, so the excerpt and omitted-byte marker are identical
+    // to what the old code produced.
+    let expected_truncated = crate::truncate::smart_truncate(&big, MAX_TOOL_RESULT_CHARS);
+    let expected = format!(
+        "{expected_truncated}\n\n[Full output stashed ({} bytes). Use output_view(tool_use_id=\"syn-bin-1\") to paginate or output_grep(tool_use_id=\"syn-bin-1\", pattern=\"...\") to search.]",
+        big.len()
+    );
+    assert_eq!(
+        text, expected,
+        "no-synopsis oversized stub must be byte-for-byte identical to the old truncated-stub surface"
+    );
 }
 
 #[test]

@@ -937,15 +937,17 @@ pub fn render_tool_result(
             .unwrap()
             .insert(tool_use_id.to_string(), tool_name.to_string(), stash_text);
         let full_bytes = text.len();
-        // Budget for the synopsis. Charged against the existing size envelope
-        // so the total rendered stub stays within current maximum-size
-        // expectations plus existing hint slack.
-        let synopsis_budget = 1_200;
         // Generate the synopsis from the full text (before truncation) so
-        // JSON/code/text classifiers see the complete payload.
+        // JSON/code/text classifiers see the complete payload. Only reduce the
+        // smart_truncate budget when a synopsis will actually be appended, so
+        // binary/undetectable payloads that return `None` preserve the previous
+        // byte-for-byte truncated-stub surface.
+        let synopsis_budget = 1_200;
         let synopsis = synopsis::synopsize(tool_name, &text, synopsis_budget);
-        // Reduce the smart_truncate budget to account for the synopsis.
-        let text_budget = MAX_TOOL_RESULT_CHARS.saturating_sub(synopsis_budget);
+        let text_budget = match &synopsis {
+            Some(_) => MAX_TOOL_RESULT_CHARS.saturating_sub(synopsis_budget),
+            None => MAX_TOOL_RESULT_CHARS,
+        };
         text = crate::truncate::smart_truncate(&text, text_budget);
         if let Some(synopsis) = synopsis {
             text.push_str("\n\nTool result synopsis:\n");
