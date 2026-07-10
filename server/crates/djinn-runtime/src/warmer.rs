@@ -22,6 +22,14 @@ use async_trait::async_trait;
 pub struct TaskrunJobRef {
     pub job_name: String,
     pub task_run_id: String,
+    /// The Job's `metadata.creation_timestamp`, as a std wall-clock instant.
+    /// The backstop reaper age-gates young Jobs against this: the worker
+    /// inserts the `task_runs` row from INSIDE the pod (only after pod
+    /// scheduling + image pull + worker boot), so a freshly-created Job
+    /// legitimately has no DB owner rows yet. `None` when the Job carries no
+    /// timestamp (shouldn't happen for live Jobs); callers treat `None` as
+    /// old/eligible so the backstop's cleanup guarantee is preserved.
+    pub created_at: Option<std::time::SystemTime>,
 }
 
 /// Server-wide canonical-graph warmer.

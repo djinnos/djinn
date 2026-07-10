@@ -87,6 +87,7 @@ impl RuntimeOps for AppState {
             .map(|job| TaskrunJobRef {
                 job_name: job.job_name,
                 task_run_id: job.task_run_id,
+                created_at: job.created_at,
             })
             .collect())
     }
