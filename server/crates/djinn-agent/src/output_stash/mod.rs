@@ -22,6 +22,8 @@ use std::sync::Mutex;
 use djinn_core::models::SessionStatus;
 use sha2::{Digest, Sha256};
 
+mod synopsis;
+
 /// Maximum number of stashed entries.
 const MAX_ENTRIES: usize = 10;
 /// Maximum total bytes across all entries.
