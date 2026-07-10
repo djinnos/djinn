@@ -40,6 +40,26 @@ For each acceptance criterion, find evidence in the code:
 
 **Rule:** If Blue Team has ANY reasonable defense → DROP the finding
 
+### Pre-Report Gate: evidence before findings
+
+Before you emit any finding, it must pass all four of these checks:
+
+1. **Exact anchor.** Cite the exact `path:line` that is wrong. If you cannot point to the line, do not report the finding.
+2. **Concrete failing case.** Name a specific input, state, or outcome that exercises the defect. "Could be better" or "might fail in some cases" is not a concrete failing case.
+3. **One-frame-up context.** Verify the caller, importer, or surrounding control flow. A function that looks wrong in isolation may be safe because its only caller already validates the precondition, or because the surrounding `match` arm handles the fallible case.
+4. **Defensible severity.** Assign a severity you can justify in one sentence. Missing doc comments, naming nits, formatting issues, and stylistic preferences are **never** HIGH or blocking.
+
+If any check fails, drop the finding or downgrade it. The gate exists to prevent manufactured findings, not to generate a quota of issues.
+
+### Common false positives in this codebase
+
+These patterns are **intentional** and should not be reported as defects unless you can show a concrete failing case (passing the Pre-Report Gate above):
+
+- **Detached `tokio::spawn` / fire-and-forget futures.** The codebase deliberately spawns background work (telemetry, cache warming, cleanup) without awaiting the handle. A `JoinHandle` that is not `.await`-ed is not a resource leak if the task is intentionally detached.
+- **Fingerprint / cache / dedupe hashes.** Hashes used for change-detection, cache keys, or deduplication fingerprints are not passwords or authentication secrets. A `u64` fingerprint or `blake3` hash of public content is not a security issue.
+- **Best-effort `let _ = …` telemetry swallows.** When a function like `emit_edit_match_telemetry` is called for observability only, deliberately discarding its `Result` with `let _ = …` is the correct pattern — telemetry failures must not propagate into the user-facing control flow. This applies to any `Result` whose only purpose is observability.
+- **Caller-validated `unwrap` / `expect`.** An `.unwrap()` or `.expect()` that you cannot trigger from any real caller path (because all callers already validate the precondition or because the invariant is structurally guaranteed) is not a panic risk. Check the callers before reporting it.
+
 ### Step 4: Submit Review
 
 **MANDATORY**: Call `submit_review(task_id="{{task_id}}", approved=true/false, criteria_verdicts=[...], comment="...")` with:
