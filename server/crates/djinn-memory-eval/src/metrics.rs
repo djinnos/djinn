@@ -503,9 +503,8 @@ pub fn evaluate_compare_policy(
 
                 // This is an actual hit-to-miss regression.
                 for (idx, permalink) in record.expected_permalinks.iter().enumerate() {
-                    let old_rank = baseline_entry.and_then(|b| {
-                        b.relevant_ranks.get(idx).copied().flatten()
-                    });
+                    let old_rank =
+                        baseline_entry.and_then(|b| b.relevant_ranks.get(idx).copied().flatten());
                     let new_rank = record.relevant_ranks.get(idx).and_then(|r| *r);
                     let metric_delta = match (old_rank, new_rank) {
                         (Some(old), Some(new)) => (1.0 / new as f64) - (1.0 / old as f64),
