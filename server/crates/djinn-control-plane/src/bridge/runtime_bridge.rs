@@ -11,6 +11,12 @@ use super::graph_data::SemanticQueryEmbedding;
 pub struct TaskrunJobRef {
     pub job_name: String,
     pub task_run_id: String,
+    /// The Job's `metadata.creation_timestamp`, as a std wall-clock instant.
+    /// Mirrors [`djinn_runtime::TaskrunJobRef::created_at`]; the coordinator's
+    /// backstop reaper uses it to grace-period young Jobs whose DB owner rows
+    /// may simply not exist yet (the worker creates them from inside the pod
+    /// after boot). `None` is treated as old/eligible for reaping.
+    pub created_at: Option<std::time::SystemTime>,
 }
 
 /// Structured error returned from runtime dispatch calls so callers can
