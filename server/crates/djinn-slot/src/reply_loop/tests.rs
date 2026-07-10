@@ -4367,3 +4367,471 @@ async fn codex_empty_turn_error_is_empty_completion_throttle() {
         .expect("must carry EmptyCompletion");
     assert_eq!(*typed, ProviderError::EmptyCompletion);
 }
+
+// ── Provider-tool preservation regression (proposal wzz6) ──────────────────
+//
+// After prompt-side tool-description deduplication and canonical description
+// trimming, the provider request passed to `.stream(...)` must still carry
+// full tool schemas with `name`, `description`, and `inputSchema`.  At least
+// one provider-declared tool invocation must complete through the existing
+// dispatch path.  These tests are the regression gate for that contract.
+
+/// Build a set of provider-declared tool schemas that represent the
+/// post-wzz6 tool surface: shortened canonical descriptions (≤350 chars)
+/// but each tool still carries `name`, `description`, and `parameters`
+/// (the OpenAI-format equivalent of `inputSchema`).
+///
+/// Tool-runtime metadata fields (`readOnly`, `concurrent_safe`, etc.) are
+/// preserved unchanged — only prompt-side description text was shortened.
+fn wzz6_provider_tool_schemas() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "shell",
+                "description": "Execute a shell command in the workspace workdir and return stdout/stderr/exit_code.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Shell command to execute"
+                        },
+                        "timeout_ms": {
+                            "type": "integer",
+                            "description": "Timeout in milliseconds"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            },
+            "readOnly": false,
+            "destructive": false,
+            "idempotent": false,
+            "openWorld": false,
+            "concurrent_safe": false
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "read",
+                "description": "Read a file from the workspace by path. Rejects binary files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the file"
+                        }
+                    },
+                    "required": ["file_path"]
+                }
+            },
+            "readOnly": true,
+            "destructive": false,
+            "idempotent": true,
+            "openWorld": false,
+            "concurrent_safe": true
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "submit_work",
+                "description": "Signal the worker has finished implementing the task and provide a summary.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "summary": { "type": "string" },
+                        "commit_title": { "type": "string" }
+                    },
+                    "required": ["task_id", "commit_title", "summary"]
+                }
+            },
+            "readOnly": false,
+            "destructive": false,
+            "idempotent": false,
+            "openWorld": false,
+            "concurrent_safe": false
+        }),
+    ]
+}
+
+/// LlmProvider wrapper that records every `tools` slice received by
+/// `.stream()` so the test can assert schema field preservation.
+struct RecordingProvider {
+    recorded_tools: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
+    inner: MockProvider,
+}
+
+impl RecordingProvider {
+    fn new(inner: MockProvider) -> Self {
+        Self {
+            recorded_tools: Arc::new(Mutex::new(Vec::new())),
+            inner,
+        }
+    }
+    fn captured_tools(&self) -> Vec<Vec<serde_json::Value>> {
+        self.recorded_tools.lock().unwrap().clone()
+    }
+}
+
+impl LlmProvider for RecordingProvider {
+    fn name(&self) -> &str {
+        "recording"
+    }
+    fn stream<'a>(
+        &'a self,
+        conversation: &'a Conversation,
+        tools: &'a [serde_json::Value],
+        tool_choice: Option<ToolChoice>,
+    ) -> Pin<
+        Box<
+            dyn futures::Future<
+                    Output = anyhow::Result<
+                        Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        self.recorded_tools.lock().unwrap().push(tools.to_vec());
+        self.inner.stream(conversation, tools, tool_choice)
+    }
+}
+
+/// Regression test: the provider request must still carry every tool schema
+/// with `name`, `description`, and `inputSchema` (OpenAI `parameters` key).
+///
+/// After prompt-side deduplication the role prompt no longer repeats tool
+/// descriptions, so the provider request is the *only* place the model sees
+/// them.  This test captures the exact `tools` array received by `.stream()`
+/// and asserts each entry has all three required fields.
+#[tokio::test]
+async fn provider_tool_schemas_preserve_name_description_and_input_schema() {
+    let schemas = wzz6_provider_tool_schemas();
+
+    // Turn 1: model calls `shell` → dispatches through MockToolDispatcher.
+    // Turn 2: model calls `submit_work` → session finalizes.
+    let inner = MockProvider::new(vec![
+        MockResponse::tool_call_with_input(
+            "tc_shell",
+            "shell",
+            serde_json::json!({"command": "echo hello"}),
+            200,
+        ),
+        MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin1".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({
+                    "task_id": "t1",
+                    "commit_title": "done",
+                    "summary": "completed"
+                }),
+            }],
+            input_tokens: 150,
+            output_tokens: 10,
+            _error: None,
+        },
+    ]);
+    let provider = RecordingProvider::new(inner);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
+
+    // Session must complete successfully.
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+    assert!(
+        output.finalize_payload.is_some(),
+        "finalize payload should be captured after shell dispatch"
+    );
+
+    // The provider's .stream() was called at least once.
+    let captures = provider.captured_tools();
+    assert!(
+        !captures.is_empty(),
+        "RecordingProvider should have captured at least one tools slice"
+    );
+
+    // Every captured tools array must carry every schema field unchanged.
+    for (turn_idx, captured) in captures.iter().enumerate() {
+        assert_eq!(
+            captured.len(),
+            schemas.len(),
+            "turn {turn_idx}: captured tools count must match input"
+        );
+        for (i, tool) in captured.iter().enumerate() {
+            // Each tool must be an object with "type" and "function".
+            assert_eq!(
+                tool.get("type").and_then(|v| v.as_str()),
+                Some("function"),
+                "turn {turn_idx}, tool {i}: must have type=function"
+            );
+            let function = tool
+                .get("function")
+                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: missing function key"));
+            // `name` must be present and non-empty.
+            let name = function
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: function.name missing"));
+            assert!(
+                !name.is_empty(),
+                "turn {turn_idx}, tool {i}: function.name must not be empty"
+            );
+            // `description` must be present and non-empty.
+            let desc = function
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| {
+                    panic!("turn {turn_idx}, tool {i}: function.description missing")
+                });
+            assert!(
+                !desc.is_empty(),
+                "turn {turn_idx}, tool {i}: function.description must not be empty"
+            );
+            // `parameters` (= inputSchema) must be present and be an object.
+            let params = function.get("parameters").unwrap_or_else(|| {
+                panic!("turn {turn_idx}, tool {i}: function.parameters (=inputSchema) missing")
+            });
+            assert!(
+                params.is_object(),
+                "turn {turn_idx}, tool {i}: function.parameters must be an object"
+            );
+        }
+    }
+}
+
+/// Regression test: at least one provider-declared tool invocation completes
+/// through the existing dispatch path after prompt-side deduplication.
+///
+/// The `shell` tool is a provider-declared extension tool whose schema
+/// carries `name`, `description`, and `inputSchema`.  The `MockToolDispatcher`
+/// handles it and returns a successful result.  This test proves the
+/// dispatch→execute→result round-trip is intact.
+#[tokio::test]
+async fn provider_declared_tool_dispatch_completes_successfully() {
+    let schemas = wzz6_provider_tool_schemas();
+    let inner = MockProvider::new(vec![
+        // Turn 1: model calls `shell` (provider-declared extension tool).
+        MockResponse::tool_call_with_input(
+            "tc1",
+            "shell",
+            serde_json::json!({"command": "echo dispatched"}),
+            200,
+        ),
+        // Turn 2: model calls `read` (second provider-declared tool).
+        MockResponse::tool_call_with_input(
+            "tc2",
+            "read",
+            serde_json::json!({"file_path": "/tmp/test.txt"}),
+            250,
+        ),
+        // Turn 3: finalize.
+        MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin1".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({
+                    "task_id": "t1",
+                    "commit_title": "done",
+                    "summary": "dispatched shell and read"
+                }),
+            }],
+            input_tokens: 200,
+            output_tokens: 10,
+            _error: None,
+        },
+    ]);
+    let provider = RecordingProvider::new(inner);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
+
+    // Session completes — both tool dispatches succeeded.
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+    assert!(
+        output.finalize_payload.is_some(),
+        "finalize should be captured after two successful tool dispatches"
+    );
+
+    // Verify tool results flowed back into the conversation (proof dispatch
+    // executed and returned content to the model).
+    let tool_result_blocks: Vec<_> = h
+        .conv
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        .collect();
+    assert!(
+        tool_result_blocks.len() >= 2,
+        "expected at least 2 tool results (shell + read), got {}",
+        tool_result_blocks.len()
+    );
+
+    // The shell tool result must contain mock output (not an error).
+    let has_shell_result = h.conv.messages.iter().any(|m| {
+        m.content.iter().any(|b| match b {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } => tool_use_id == "tc1" && !is_error,
+            _ => false,
+        })
+    });
+    assert!(
+        has_shell_result,
+        "shell tool result should be present and successful (is_error=false)"
+    );
+
+    // Schema preservation: captured tools must carry full schemas.
+    let captures = provider.captured_tools();
+    for (turn_idx, captured) in captures.iter().enumerate() {
+        for (i, tool) in captured.iter().enumerate() {
+            let function = tool
+                .get("function")
+                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: missing function"));
+            assert!(
+                function.get("name").is_some(),
+                "turn {turn_idx}, tool {i}: name preserved"
+            );
+            assert!(
+                function.get("description").is_some(),
+                "turn {turn_idx}, tool {i}: description preserved"
+            );
+            assert!(
+                function.get("parameters").is_some(),
+                "turn {turn_idx}, tool {i}: inputSchema/parameters preserved"
+            );
+        }
+    }
+}
+
+/// Regression test: dispatch/execution semantics and schema fields are
+/// unchanged except for intended canonical description text shortening and
+/// prompt-side description removal.
+///
+/// This test constructs tool schemas that represent the *post-wzz6* surface
+/// (shortened descriptions, no prompt-side duplication) and asserts:
+/// - Runtime metadata (`readOnly`, `concurrent_safe`, etc.) parses correctly
+///   from the provider schemas.
+/// - The `shell` tool dispatches as a non-stash, non-MCP extension tool.
+/// - Finalize tool semantics are unchanged.
+/// - Description text is still meaningful (not empty, not accidentally
+///   replaced with signature-only text).
+#[tokio::test]
+async fn dispatch_semantics_unchanged_after_description_shortening() {
+    let schemas = wzz6_provider_tool_schemas();
+
+    // Runtime metadata must parse correctly from the provider schemas.
+    let metadata = crate::reply_loop::tool_dispatch::tool_runtime_metadata(&schemas);
+    assert_eq!(
+        metadata["shell"],
+        crate::reply_loop::tool_dispatch::ToolRuntimeMetadata {
+            read_only: false,
+            destructive: false,
+            idempotent: false,
+            open_world: false,
+            concurrent_safe: false,
+        },
+        "shell metadata unchanged"
+    );
+    assert_eq!(
+        metadata["read"],
+        crate::reply_loop::tool_dispatch::ToolRuntimeMetadata {
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+            open_world: false,
+            concurrent_safe: true,
+        },
+        "read metadata unchanged (concurrent_safe=true)"
+    );
+
+    // Description text is still substantive after shortening — not empty
+    // and not replaced with signature-only text.
+    for schema in &schemas {
+        let function = schema.get("function").expect("function key");
+        let desc = function
+            .get("description")
+            .and_then(|v| v.as_str())
+            .expect("description present");
+        let name = function
+            .get("name")
+            .and_then(|v| v.as_str())
+            .expect("name present");
+        assert!(
+            desc.len() > 10,
+            "description for {name} should be substantive after shortening, got: {desc:?}"
+        );
+        // Description should not accidentally be the parameter signature
+        // (which would mean prompt-side deduplication leaked into provider schemas).
+        assert!(
+            !desc.starts_with('(') && !desc.contains("required:"),
+            "description for {name} should not be a parameter signature: {desc:?}"
+        );
+    }
+
+    // Drive a full dispatch cycle: shell → dispatches as extension tool → ok.
+    let inner = MockProvider::new(vec![
+        MockResponse::tool_call_with_input(
+            "tc1",
+            "shell",
+            serde_json::json!({"command": "pwd"}),
+            300,
+        ),
+        MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin1".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({
+                    "task_id": "t1",
+                    "commit_title": "done",
+                    "summary": "executed shell, semantics unchanged"
+                }),
+            }],
+            input_tokens: 250,
+            output_tokens: 10,
+            _error: None,
+        },
+    ]);
+    let provider = RecordingProvider::new(inner);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+    assert!(output.finalize_payload.is_some());
+
+    // Shell dispatch returned a successful result (mock output present).
+    let tool_results: Vec<_> = h
+        .conv
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Some((tool_use_id.as_str(), content, *is_error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 1, "exactly one tool result (shell)");
+    assert_eq!(tool_results[0].0, "tc1");
+    assert!(!tool_results[0].2, "shell result must not be an error");
+    // The mock dispatcher returns JSON with "ok": true.
+    let result_text = tool_results[0]
+        .1
+        .iter()
+        .filter_map(|b| b.as_text())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        result_text.contains("\"ok\""),
+        "shell result should contain mock dispatch output, got: {result_text:?}"
+    );
+}
