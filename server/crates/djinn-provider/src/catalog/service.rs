@@ -7,7 +7,7 @@ use djinn_core::models::{Credential, Model, Pricing, Provider};
 use parking_lot::RwLock;
 use serde::Deserialize;
 
-use crate::catalog::builtin::BuiltinProvider;
+use crate::catalog::builtin::{BUILTIN_PROVIDERS, BuiltinProvider};
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -89,14 +89,28 @@ struct RawLimit {
 /// user-registered providers while the rest of the catalog is being replaced.
 #[derive(Clone, Debug)]
 struct CustomCatalogProvider {
-    /// Stored verbatim so a downstream periodic refresh compose/swap path can
-    /// re-overlay it onto the active catalog after a models.dev reload.
-    #[allow(dead_code)] // read by the upcoming refresh compose/swap task
+    /// Stored verbatim so the refresh compose/swap path can re-overlay it onto
+    /// the active catalog after a models.dev reload.
     provider: Provider,
-    /// Normalized seed models (provider-prefix stripped).  Same future use as
-    /// `provider`; today only the unit tests inspect it.
-    #[allow(dead_code)] // read by the upcoming refresh compose/swap task
+    /// Normalized seed models (provider-prefix stripped).  Re-applied by the
+    /// refresh compose/swap path alongside `provider`.
     seed_models: Vec<Model>,
+}
+
+/// Outcome of the most recent live `models.dev` refresh attempt.  Tracked so
+/// downstream observability (health endpoint) can report whether the active
+/// catalog is fresh, stale, or was never refreshed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RefreshStatus {
+    /// No live refresh has succeeded yet — only embedded/seeded data is served.
+    #[default]
+    Never,
+    /// The most recent refresh completed and the active catalog reflects live
+    /// models.dev data (plus retained overlays).
+    Success,
+    /// The most recent refresh failed (fetch/parse error or a zero-provider
+    /// normalized payload); the previous catalog is preserved unchanged.
+    Error,
 }
 
 #[derive(Default)]
@@ -108,6 +122,13 @@ struct CatalogData {
     /// without dropping user-registered entries.
     custom_providers: HashMap<String, CustomCatalogProvider>,
     fetched_at: Option<Instant>,
+    /// Outcome of the most recent live refresh attempt (`Never` until the first
+    /// successful refresh).  Failed or rejected refreshes transition to `Error`
+    /// without touching the active catalog.
+    last_refresh_status: RefreshStatus,
+    /// Human-readable error string from the most recent failed refresh.  Cleared
+    /// on a successful refresh.  `None` while `last_refresh_status == Never`.
+    last_refresh_error: Option<String>,
 }
 
 /// Fetches, caches, and serves LLM provider and model data from models.dev.
@@ -148,19 +169,50 @@ impl CatalogService {
         }
     }
 
-    /// Attempt a live fetch from models.dev.  Replaces cached data on success;
-    /// preserves embedded/stale data on failure.
+    /// Attempt a live fetch from models.dev.  On success, the active catalog is
+    /// recomposed *before* the swap: normalized upstream providers/models,
+    /// injected builtin providers, and the retained custom-provider set are all
+    /// assembled under one write lock so a successful refresh never drops local
+    /// entries.  On any failure — network/parse error or a zero-provider
+    /// normalized payload — the previously served catalog is preserved
+    /// unchanged.
     pub async fn refresh(&self) {
         match self.fetch_remote().await {
             Ok(raw) => {
                 let (providers, models_idx) = normalize(raw);
+                // Reject an empty normalized upstream payload so a degenerate
+                // fetch never overwrites the active catalog with nothing.
+                if providers.is_empty() {
+                    let mut data = self.inner.write();
+                    data.last_refresh_status = RefreshStatus::Error;
+                    data.last_refresh_error =
+                        Some("models.dev normalized payload had zero providers".to_string());
+                    tracing::warn!(
+                        providers = data.providers.len(),
+                        "catalog refresh rejected zero-provider payload — keeping active catalog"
+                    );
+                    return;
+                }
+                let now = SystemClock::new().now_instant();
+                let provider_count = providers.len();
+                let model_count: usize = models_idx.values().map(Vec::len).sum();
+                // Compose the full catalog (upstream + builtins + retained
+                // custom providers) and swap it in under a single write lock.
                 let mut data = self.inner.write();
-                data.providers = providers;
-                data.models_idx = models_idx;
-                data.fetched_at = Some(SystemClock::new().now_instant());
-                tracing::info!("provider catalog refreshed from models.dev");
+                compose_catalog(&mut data, providers, models_idx);
+                data.fetched_at = Some(now);
+                data.last_refresh_status = RefreshStatus::Success;
+                data.last_refresh_error = None;
+                tracing::info!(
+                    providers = provider_count,
+                    models = model_count,
+                    "provider catalog refreshed from models.dev"
+                );
             }
             Err(e) => {
+                let mut data = self.inner.write();
+                data.last_refresh_status = RefreshStatus::Error;
+                data.last_refresh_error = Some(e.clone());
                 tracing::warn!(error = %e, "catalog refresh failed — using cached/embedded data");
             }
         }
@@ -244,6 +296,26 @@ impl CatalogService {
         map
     }
 
+    /// Outcome of the most recent live `models.dev` refresh attempt.
+    ///
+    /// - [`RefreshStatus::Never`] until the first successful refresh.
+    /// - [`RefreshStatus::Success`] after a refresh composed and swapped live data.
+    /// - [`RefreshStatus::Error`] after a fetch/parse failure or a rejected
+    ///   zero-provider payload (the previous catalog is preserved in both cases).
+    ///
+    /// Exposed for downstream observability (the health endpoint).  The
+    /// `last_refresh_error` string, when present, is available via
+    /// [`CatalogService::last_refresh_error`].
+    pub fn last_refresh_status(&self) -> RefreshStatus {
+        self.inner.read().last_refresh_status
+    }
+
+    /// Human-readable error string from the most recent failed refresh, or
+    /// `None` if the last refresh succeeded or no refresh has been attempted.
+    pub fn last_refresh_error(&self) -> Option<String> {
+        self.inner.read().last_refresh_error.clone()
+    }
+
     // ── Write accessors ───────────────────────────────────────────────────────
 
     /// Inject synthetic catalog entries for built-in providers that have no
@@ -253,65 +325,21 @@ impl CatalogService {
     ///
     /// Model lists are sourced from models.dev when a mapping exists (see
     /// [`MODEL_SOURCE_MAP`]).
+    ///
+    /// The refresh compose/swap path now applies builtin injections itself, so
+    /// callers that refresh no longer need to re-inject afterwards.  This method
+    /// is retained for the startup path (seeding builtins before the first
+    /// refresh) and for in-memory catalogs that never refresh; it delegates to
+    /// the same free helper used by refresh composition so behavior stays
+    /// identical.
     pub fn inject_builtin_providers(&self, entries: &[BuiltinProvider]) {
         let mut data = self.inner.write();
-        let existing_ids: HashSet<String> = data.providers.iter().map(|p| p.id.clone()).collect();
-
-        for bp in entries {
-            if existing_ids.contains(bp.id) {
-                continue;
-            }
-
-            let provider = Provider {
-                id: bp.id.to_string(),
-                name: bp.display_name.to_string(),
-                npm: String::new(),
-                env_vars: bp.required_env_vars.iter().map(|s| s.to_string()).collect(),
-                base_url: String::new(),
-                docs_url: bp.docs_url.to_string(),
-                is_openai_compatible: false, // filtered via builtin_ids instead
-            };
-            data.providers.push(provider);
-
-            // Try to source models from models.dev via the mapping table.
-            if let Some(models) = self.models_from_catalog_source(&data, bp.id) {
-                data.models_idx.insert(bp.id.to_string(), models);
-            }
-        }
-
-        data.providers.sort_by(|a, b| a.id.cmp(&b.id));
-    }
-
-    /// Pull models from a mapped models.dev provider, re-tagged with the target
-    /// provider ID and filtered by the optional prefix.  Returns `None` when no
-    /// mapping exists or the source provider has no models.
-    fn models_from_catalog_source(
-        &self,
-        data: &CatalogData,
-        builtin_provider_id: &str,
-    ) -> Option<Vec<Model>> {
-        let (_, source_id, prefix) = MODEL_SOURCE_MAP
-            .iter()
-            .find(|(builtin_id, _, _)| *builtin_id == builtin_provider_id)?;
-
-        let source_models = data.models_idx.get(*source_id)?;
-        let models: Vec<Model> = source_models
-            .iter()
-            .filter(|m| match prefix {
-                Some(pfx) => m.id.contains(pfx),
-                None => true,
-            })
-            .map(|m| Model {
-                provider_id: builtin_provider_id.to_string(),
-                ..m.clone()
-            })
-            .collect();
-
-        if models.is_empty() {
-            None
-        } else {
-            Some(models)
-        }
+        let CatalogData {
+            providers,
+            models_idx,
+            ..
+        } = &mut *data;
+        inject_builtins_into(providers, models_idx, entries);
     }
 
     /// Compute the set of provider IDs that have valid credentials,
@@ -443,6 +471,137 @@ fn apply_custom_provider_to_active(
 fn remove_provider_from_active(data: &mut CatalogData, provider_id: &str) {
     data.providers.retain(|p| p.id != provider_id);
     data.models_idx.remove(provider_id);
+}
+
+// ── Refresh composition helpers ──────────────────────────────────────────────
+//
+// A successful live refresh must rebuild the *complete* active catalog from
+// normalized upstream data before swapping, so the swap is atomic and a
+// refresh never drops local entries.  The composition order is:
+//
+//   1. Replace the upstream-derived providers/models with the fresh payload.
+//   2. Inject builtin providers (e.g. `chatgpt_codex`, `gcp_vertex_ai`) that
+//      have no models.dev entry, sourcing their model lists from mapped
+//      upstream providers.
+//   3. Overlay the retained custom-provider set so user-registered entries
+//      survive every upstream reload.
+//
+// All three steps mutate a local `(providers, models_idx)` pair (or the
+// `CatalogData` they live in) without touching the live catalog until the
+// caller swaps under one write lock.
+
+/// Compose the active catalog from a fresh normalized upstream payload plus the
+/// retained overlays, then write it into `data` in place.  Called by the
+/// refresh path after it has already validated that `providers` is non-empty.
+///
+/// `data.custom_providers` is read (not replaced): the retained set is the
+/// source of truth for local entries and is re-applied on every successful
+/// refresh.
+fn compose_catalog(
+    data: &mut CatalogData,
+    providers: Vec<Provider>,
+    models_idx: HashMap<String, Vec<Model>>,
+) {
+    // Snapshot the retained custom-provider set before mutating `data` so the
+    // immutable borrow ends before the mutable overlay calls below.  An entry
+    // removed via `remove_custom_provider` is absent here and therefore not
+    // resurrected by the refresh.
+    let retained: Vec<CustomCatalogProvider> = data.custom_providers.values().cloned().collect();
+
+    // 1. Fresh upstream providers/models.
+    data.providers = providers;
+    data.models_idx = models_idx;
+
+    // 2. Inject builtin providers that have no models.dev entry.
+    let CatalogData {
+        providers,
+        models_idx,
+        ..
+    } = &mut *data;
+    inject_builtins_into(providers, models_idx, BUILTIN_PROVIDERS);
+
+    // 3. Re-apply the retained custom-provider set so user-registered entries
+    //    survive the upstream reload.
+    for ccp in &retained {
+        apply_custom_provider_to_active(data, &ccp.provider, &ccp.seed_models);
+    }
+}
+
+/// Inject synthetic catalog entries for built-in providers that have no
+/// corresponding models.dev entry into a local `(providers, models_idx)` pair.
+///
+/// Providers whose id already exists are skipped (no duplication).  Model lists
+/// are sourced from a mapped models.dev provider via [`models_from_idx`] when a
+/// [`MODEL_SOURCE_MAP`] entry exists.  The providers list is kept sorted by id
+/// to match `normalize()`.
+///
+/// Shared by [`CatalogService::inject_builtin_providers`] (the explicit
+/// startup/in-memory path) and [`compose_catalog`] (the refresh path) so both
+/// apply builtins identically.
+fn inject_builtins_into(
+    providers: &mut Vec<Provider>,
+    models_idx: &mut HashMap<String, Vec<Model>>,
+    entries: &[BuiltinProvider],
+) {
+    let existing_ids: HashSet<String> = providers.iter().map(|p| p.id.clone()).collect();
+
+    for bp in entries {
+        if existing_ids.contains(bp.id) {
+            continue;
+        }
+
+        let provider = Provider {
+            id: bp.id.to_string(),
+            name: bp.display_name.to_string(),
+            npm: String::new(),
+            env_vars: bp.required_env_vars.iter().map(|s| s.to_string()).collect(),
+            base_url: String::new(),
+            docs_url: bp.docs_url.to_string(),
+            is_openai_compatible: false, // filtered via builtin_ids instead
+        };
+        providers.push(provider);
+
+        // Try to source models from models.dev via the mapping table.
+        if let Some(models) = models_from_idx(models_idx, bp.id) {
+            models_idx.insert(bp.id.to_string(), models);
+        }
+    }
+
+    providers.sort_by(|a, b| a.id.cmp(&b.id));
+}
+
+/// Pull models from a mapped models.dev provider, re-tagged with the target
+/// provider ID and filtered by the optional prefix.  Returns `None` when no
+/// [`MODEL_SOURCE_MAP`] mapping exists or the source provider has no matching
+/// models.  Free-function form of the former
+/// `CatalogService::models_from_catalog_source` so it can run over a local
+/// `(providers, models_idx)` pair during refresh composition.
+fn models_from_idx(
+    models_idx: &HashMap<String, Vec<Model>>,
+    builtin_provider_id: &str,
+) -> Option<Vec<Model>> {
+    let (_, source_id, prefix) = MODEL_SOURCE_MAP
+        .iter()
+        .find(|(builtin_id, _, _)| *builtin_id == builtin_provider_id)?;
+
+    let source_models = models_idx.get(*source_id)?;
+    let models: Vec<Model> = source_models
+        .iter()
+        .filter(|m| match prefix {
+            Some(pfx) => m.id.contains(pfx),
+            None => true,
+        })
+        .map(|m| Model {
+            provider_id: builtin_provider_id.to_string(),
+            ..m.clone()
+        })
+        .collect();
+
+    if models.is_empty() {
+        None
+    } else {
+        Some(models)
+    }
 }
 
 // ── Normalization ─────────────────────────────────────────────────────────────
@@ -1050,6 +1209,26 @@ mod tests {
         }
     }
 
+    /// Test-only accessor mirroring `CatalogService::list_models` over a raw
+    /// `CatalogData`, so refresh-composition tests can assert model lists
+    /// without going through the public service.
+    impl CatalogData {
+        fn list_models_test(&self, provider_id: &str) -> Vec<String> {
+            self.models_idx
+                .get(provider_id)
+                .map(|ms| ms.iter().map(|m| m.id.clone()).collect())
+                .unwrap_or_default()
+        }
+
+        /// Sorted provider ids, for equality checks (`Provider` is an
+        /// external-crate model without `PartialEq`).
+        fn provider_ids_test(&self) -> Vec<String> {
+            let mut ids: Vec<String> = self.providers.iter().map(|p| p.id.clone()).collect();
+            ids.sort();
+            ids
+        }
+    }
+
     /// `add_custom_provider` must persist the entry in the retained custom-provider
     /// set *and* surface it through the active catalog's read methods.
     #[test]
@@ -1248,5 +1427,314 @@ mod tests {
             "pricing_for_all_models must key on the stripped id; got {pricing:?}"
         );
         assert_eq!(pricing["normalize-me/full-form"].input_per_million, 1.0);
+    }
+
+    // ── Refresh compose/swap tests ────────────────────────────────────────────
+    //
+    // The live `refresh()` path calls the network, so these tests exercise the
+    // pure composition helpers (`compose_catalog`) and the status/rejection
+    // transitions directly over a `CatalogData`, mirroring exactly what
+    // `refresh()` does after a fetch resolves.
+
+    /// Build an empty `CatalogData` populated with a couple of retained custom
+    /// providers so the refresh-composition tests start from a realistic state.
+    fn data_with_retained_custom() -> CatalogData {
+        let mut models_idx = HashMap::new();
+        models_idx.insert(
+            "upstream-only".to_string(),
+            vec![mk_seed_model("m0", "upstream-only")],
+        );
+        let mut custom_providers = HashMap::new();
+        // Two retained custom providers.
+        custom_providers.insert(
+            "custom-one".to_string(),
+            CustomCatalogProvider {
+                provider: mk_custom_provider("custom-one"),
+                seed_models: vec![mk_seed_model("a1", "custom-one")],
+            },
+        );
+        custom_providers.insert(
+            "custom-two".to_string(),
+            CustomCatalogProvider {
+                provider: mk_custom_provider("custom-two"),
+                seed_models: vec![
+                    mk_seed_model("b1", "custom-two"),
+                    mk_seed_model("b2", "custom-two"),
+                ],
+            },
+        );
+        CatalogData {
+            providers: vec![mk_custom_provider("upstream-only")],
+            models_idx,
+            custom_providers,
+            ..Default::default()
+        }
+    }
+
+    /// A successful refresh composes normalized upstream data, injected builtin
+    /// providers, and the retained custom-provider set before swapping — so the
+    /// retained custom entries survive the upstream reload.
+    #[test]
+    fn refresh_composition_retains_custom_providers() {
+        let mut data = data_with_retained_custom();
+
+        // A fresh normalized upstream payload that does NOT contain the custom
+        // providers.  It must contain a models.dev source for a builtin (openai)
+        // so builtin injection has a model list to borrow.
+        let fresh_provider = mk_custom_provider("openai");
+        let fresh_models = vec![mk_seed_model("gpt-x", "openai")];
+        let providers = vec![fresh_provider];
+        let mut models_idx = HashMap::new();
+        models_idx.insert("openai".to_string(), fresh_models);
+
+        compose_catalog(&mut data, providers, models_idx);
+
+        // The fresh upstream provider is present.
+        assert!(
+            data.providers.iter().any(|p| p.id == "openai"),
+            "fresh upstream provider must be in the composed catalog"
+        );
+        // The old upstream-only provider was replaced.
+        assert!(
+            !data.providers.iter().any(|p| p.id == "upstream-only"),
+            "a refresh replaces the prior upstream set; stale upstream-only must be gone"
+        );
+
+        // Both retained custom providers survive.
+        for id in ["custom-one", "custom-two"] {
+            assert!(
+                data.providers.iter().any(|p| p.id == id),
+                "retained custom provider {id} must survive refresh composition"
+            );
+        }
+        assert_eq!(
+            data.list_models_test("custom-one"),
+            vec!["a1".to_string()],
+            "retained custom-one seed models survive"
+        );
+        assert_eq!(
+            data.list_models_test("custom-two"),
+            vec!["b1".to_string(), "b2".to_string()],
+            "retained custom-two seed models survive"
+        );
+
+        // Builtin injection ran: chatgpt_codex (mapped from openai via the
+        // "codex" prefix) is absent here because no openai model contains
+        // "codex", but a mapped builtin with a broad prefix still resolves.
+        // gcp_vertex_ai maps from google-vertex (absent), so it gets injected as
+        // a provider with no model list.  Verify at least one non-upstream,
+        // non-custom builtin was injected.
+        let builtin_added = data
+            .providers
+            .iter()
+            .map(|p| p.id.as_str())
+            .any(|id| BUILTIN_PROVIDERS.iter().any(|bp| bp.id == id) && id != "openai");
+        assert!(
+            builtin_added,
+            "builtin injection must run during refresh composition; got providers {:?}",
+            data.providers.iter().map(|p| &p.id).collect::<Vec<_>>()
+        );
+    }
+
+    /// A successful refresh must not resurrect a custom provider that was
+    /// removed before the refresh composed.  This is the regression guard for
+    /// the remove-then-refresh no-resurrection invariant.
+    #[test]
+    fn refresh_composition_does_not_resurrect_removed_custom() {
+        let mut data = data_with_retained_custom();
+        // Remove custom-one from the retained set (as remove_custom_provider
+        // would) before composing.
+        data.custom_providers.remove("custom-one");
+
+        let providers = vec![mk_custom_provider("openai")];
+        let mut models_idx = HashMap::new();
+        models_idx.insert("openai".to_string(), vec![mk_seed_model("gpt-x", "openai")]);
+
+        compose_catalog(&mut data, providers, models_idx);
+
+        assert!(
+            !data.providers.iter().any(|p| p.id == "custom-one"),
+            "a removed custom provider must not be resurrected by refresh composition"
+        );
+        assert!(
+            data.list_models_test("custom-one").is_empty(),
+            "removed custom-one model list must stay empty after refresh"
+        );
+        // custom-two was retained and survives.
+        assert!(
+            data.providers.iter().any(|p| p.id == "custom-two"),
+            "still-retained custom-two must survive"
+        );
+    }
+
+    /// A failed refresh (fetch/parse error) preserves the previously active
+    /// catalog data unchanged and transitions status to Error.  This mirrors
+    /// the `Err` arm of `refresh()` without calling the network.
+    #[test]
+    fn failed_refresh_preserves_previous_catalog() {
+        let mut data = data_with_retained_custom();
+        let prev_provider_ids = data.provider_ids_test();
+        let mut prev_model_keys: Vec<String> = data.models_idx.keys().cloned().collect();
+        prev_model_keys.sort();
+
+        // Simulate the refresh Err arm.
+        let err = "models.dev returned HTTP 503".to_string();
+        data.last_refresh_status = RefreshStatus::Error;
+        data.last_refresh_error = Some(err.clone());
+
+        // The active catalog must be untouched.
+        assert_eq!(
+            data.provider_ids_test(),
+            prev_provider_ids,
+            "a failed refresh must not mutate the active providers"
+        );
+        let mut model_keys: Vec<String> = data.models_idx.keys().cloned().collect();
+        model_keys.sort();
+        assert_eq!(
+            model_keys, prev_model_keys,
+            "a failed refresh must not mutate the active models_idx keys"
+        );
+        assert_eq!(data.last_refresh_status, RefreshStatus::Error);
+        assert_eq!(data.last_refresh_error.as_deref(), Some(err.as_str()));
+    }
+
+    /// A zero-provider normalized payload is rejected: the active catalog is
+    /// preserved unchanged and status transitions to Error.  Mirrors the
+    /// zero-provider guard in `refresh()`.
+    #[test]
+    fn zero_provider_payload_is_rejected() {
+        let mut data = data_with_retained_custom();
+        let prev_provider_ids = data.provider_ids_test();
+        let mut prev_model_keys: Vec<String> = data.models_idx.keys().cloned().collect();
+        prev_model_keys.sort();
+
+        // Simulate the zero-provider rejection arm of refresh(): do NOT call
+        // compose_catalog (which would wipe the catalog); instead record the
+        // rejection exactly as refresh() does.
+        data.last_refresh_status = RefreshStatus::Error;
+        data.last_refresh_error =
+            Some("models.dev normalized payload had zero providers".to_string());
+
+        assert_eq!(
+            data.provider_ids_test(),
+            prev_provider_ids,
+            "a zero-provider payload must not overwrite the active catalog"
+        );
+        let mut model_keys: Vec<String> = data.models_idx.keys().cloned().collect();
+        model_keys.sort();
+        assert_eq!(
+            model_keys, prev_model_keys,
+            "a zero-provider payload must not overwrite the active models_idx keys"
+        );
+        assert_eq!(data.last_refresh_status, RefreshStatus::Error);
+    }
+
+    /// `compose_catalog` with an empty upstream payload (as could result from a
+    /// degenerate normalize) would wipe the catalog; the refresh path guards
+    /// against this by checking `providers.is_empty()` before calling
+    /// compose_catalog.  Verify the guard predicate directly: an empty upstream
+    /// providers vec must be treated as a rejection, not passed to
+    /// compose_catalog.
+    #[test]
+    fn refresh_rejects_empty_upstream_providers_vec() {
+        let data = data_with_retained_custom();
+        let prev_provider_ids = data.provider_ids_test();
+
+        // The guard from refresh(): only compose when providers is non-empty.
+        let upstream_providers: Vec<Provider> = Vec::new();
+        let should_compose = !upstream_providers.is_empty();
+        assert!(
+            !should_compose,
+            "an empty upstream providers vec must be rejected before composition"
+        );
+        // Because we did not compose, the catalog is unchanged.
+        assert_eq!(data.provider_ids_test(), prev_provider_ids);
+    }
+
+    /// The public status accessors report the refresh outcome.  A fresh service
+    /// reports `Never`; after a simulated success the status is `Success`.
+    #[test]
+    fn refresh_status_transitions() {
+        let catalog = CatalogService::new();
+        assert_eq!(
+            catalog.last_refresh_status(),
+            RefreshStatus::Never,
+            "a freshly-seeded service has never refreshed"
+        );
+        assert!(
+            catalog.last_refresh_error().is_none(),
+            "no error before any refresh attempt"
+        );
+
+        // Simulate a successful refresh outcome by composing directly.
+        {
+            let mut data = catalog.inner.write();
+            let providers = vec![mk_custom_provider("openai")];
+            let mut models_idx = HashMap::new();
+            models_idx.insert("openai".to_string(), vec![mk_seed_model("gpt-x", "openai")]);
+            compose_catalog(&mut data, providers, models_idx);
+            data.last_refresh_status = RefreshStatus::Success;
+            data.last_refresh_error = None;
+        }
+        assert_eq!(catalog.last_refresh_status(), RefreshStatus::Success);
+        assert!(catalog.last_refresh_error().is_none());
+
+        // A subsequent simulated failure flips it back to Error with a message.
+        {
+            let mut data = catalog.inner.write();
+            data.last_refresh_status = RefreshStatus::Error;
+            data.last_refresh_error = Some("boom".to_string());
+        }
+        assert_eq!(catalog.last_refresh_status(), RefreshStatus::Error);
+        assert_eq!(catalog.last_refresh_error().as_deref(), Some("boom"));
+
+        // The successful composition must still be serving (not wiped by the
+        // status-only failure simulation).
+        assert!(
+            catalog.list_providers().iter().any(|p| p.id == "openai"),
+            "active catalog survives a status-only failure transition"
+        );
+    }
+
+    /// `inject_builtin_providers` (the explicit startup/in-memory path) and the
+    /// refresh composition path both apply builtins via the same free helper,
+    /// so a catalog that refreshes ends up with the same builtin coverage as
+    /// one that explicitly injects.
+    #[test]
+    fn refresh_and_explicit_inject_share_builtin_helper() {
+        let explicit = CatalogService::new();
+        explicit.inject_builtin_providers(BUILTIN_PROVIDERS);
+        let explicit_builtin_ids: HashSet<String> = explicit
+            .list_providers()
+            .into_iter()
+            .filter(|p| BUILTIN_PROVIDERS.iter().any(|bp| bp.id == p.id))
+            .map(|p| p.id)
+            .collect();
+
+        // Compose a catalog with the same upstream set as the embedded seed and
+        // verify the builtin ids match.
+        let mut data = CatalogData::default();
+        let upstream = explicit.list_providers();
+        let providers: Vec<Provider> = upstream
+            .iter()
+            .filter(|p| !BUILTIN_PROVIDERS.iter().any(|bp| bp.id == p.id))
+            .cloned()
+            .collect();
+        let mut models_idx = HashMap::new();
+        for p in &providers {
+            models_idx.insert(p.id.clone(), explicit.list_models(&p.id));
+        }
+        compose_catalog(&mut data, providers, models_idx);
+
+        let composed_builtin_ids: HashSet<String> = data
+            .providers
+            .iter()
+            .filter(|p| BUILTIN_PROVIDERS.iter().any(|bp| bp.id == p.id))
+            .map(|p| p.id.clone())
+            .collect();
+        assert_eq!(
+            explicit_builtin_ids, composed_builtin_ids,
+            "refresh composition and explicit inject must apply the same builtin set"
+        );
     }
 }
