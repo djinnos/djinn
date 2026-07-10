@@ -310,6 +310,32 @@ case was made worse. To add a new bad case:
 3. Run the benchmark and refresh the baseline.
 4. Commit the updated fixtures and baseline together.
 
+### Aggregate metrics scope
+
+The aggregate metrics include **all labeled Phase 1 queries** — both
+mined `memory_ref_queries` and append-only `bad_cases` — so
+`aggregate_metrics.query_count` always equals the total number of
+labeled queries in the committed fixtures. This prevents silent count
+mismatches where bad-case rows could be dropped from aggregate
+computations without detection.
+
+The `validate-fixtures` command verifies that the baseline's
+`aggregate_metrics.query_count` matches the sum of
+`memory_ref_queries.len()` + `bad_cases.len()`, and that
+`per_query_ranks` covers both suites.
+
+### Minimum useful-baseline expectations
+
+A baseline that passes `validate-fixtures` must:
+
+- Have `aggregate_metrics.query_count` equal to the total fixture
+  query count (memory_ref + bad_cases).
+- Have `aggregate_metrics.zero_result_rate < 1.0` (not all-miss).
+- Have at least one gating retrieval metric (recall@k or MRR)
+  greater than zero.
+- Include `per_query_ranks` entries for both `all_queries` and
+  `bad_cases` suites with counts matching the fixture file lengths.
+
 ### First-snapshot signal exclusions
 
 The Phase 1 initial fixture snapshot has the following limitations:
@@ -320,11 +346,6 @@ The Phase 1 initial fixture snapshot has the following limitations:
   assertion is deferred to the CI gate task (1tk3). The fixture data
   includes graph edges and signal coverage declarations; signal
   comparisons are recorded but do not gate the initial baseline.
-
-- **Full-text search coverage**: Some fixture queries return zero
-  results because PostgreSQL `tsvector` full-text search requires
-  exact token/stem matches. Query texts are designed to exercise the
-  pipeline; a follow-up corpus refinement can improve lexical recall.
 
 These exclusions are documented here per the design requirement:
 "If first-snapshot exclusions remain for a retrieval signal, document
