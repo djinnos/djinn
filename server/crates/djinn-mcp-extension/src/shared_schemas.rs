@@ -89,7 +89,7 @@ pub fn annotate_tool_safety(value: &mut serde_json::Value, annotations: ToolSafe
 pub fn tool_memory_move() -> RmcpTool {
     RmcpTool::new(
         "memory_move".to_string(),
-        "Move a memory note to a different type. Memory notes live in Dolt — this is the canonical way to relocate them; do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically. Use type=\"proposed_adr\" to recover a mis-routed ADR draft.".to_string(),
+        "Move a memory note to a different type via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem; do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically.".to_string(),
         object!({
             "type": "object",
             "required": ["identifier", "type"],
@@ -161,7 +161,7 @@ pub fn tool_epic_create() -> RmcpTool {
 pub fn tool_epic_close() -> RmcpTool {
     RmcpTool::new(
         "epic_close".to_string(),
-        "Close an epic. Use when all work is complete and no further waves are needed.".to_string(),
+        "Close an epic when all work is complete and no further task waves are needed. Marks the epic as done.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -175,7 +175,7 @@ pub fn tool_epic_close() -> RmcpTool {
 pub fn tool_epic_show() -> RmcpTool {
     RmcpTool::new(
         "epic_show".to_string(),
-        "Show details for an epic by UUID or short ID.".to_string(),
+        "Show full details of an epic by UUID or short ID, including its task breakdown and blocker status.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -210,7 +210,8 @@ pub fn tool_epic_update() -> RmcpTool {
 pub fn tool_epic_tasks() -> RmcpTool {
     RmcpTool::new(
         "epic_tasks".to_string(),
-        "List tasks for an epic with pagination.".to_string(),
+        "List tasks belonging to an epic, showing status and assignee. Supports pagination."
+            .to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -254,7 +255,7 @@ pub fn tool_epic_blocked_list() -> RmcpTool {
 pub fn tool_proposal_show() -> RmcpTool {
     RmcpTool::new(
         "proposal_show".to_string(),
-        "Show a proposal's full detail by UUID or short_id. Returns title, body, status, acceptance_criteria, targets, and optionally revisions, feedback, signoffs, debate, epics, and gate_status. Use `fields` to select only the sections you need (accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all). Use `revision_bodies` to control revision verbosity: `excerpt` (default, 512-char body_excerpt + body_truncated), `full` (complete body text), or `omit` (no body data). Ignored when `fields` omits `revisions`.".to_string(),
+        "Show a proposal's full detail by UUID or short_id. Use `fields` to select sections (proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all) and `revision_bodies` to control verbosity (excerpt/full/omit).".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -279,7 +280,7 @@ pub fn tool_proposal_show() -> RmcpTool {
 pub fn tool_proposal_debate_append() -> RmcpTool {
     RmcpTool::new(
         "proposal_debate_append".to_string(),
-        "Record a tribunal debate-trail entry against a proposal. This is the ONLY channel the refinement loop reads: an Adversary's objections and a Judge's verdict MUST be filed here — text placed in `submit_review`/`submit_decision` is NOT read by the loop. File one entry per objection. `kind` is `objection` (Adversary), `verdict` (Judge), or `rebuttal`. `blocking=true` means it blocks readiness (use for blocking objections and for a not-ready verdict). Read `proposal_id`, `round`, and `against_revision_seq` from your task description and pass them on every call; `agent_role` is your role (`adversary` or `judge`).".to_string(),
+        "Record a tribunal debate-trail entry. This is the ONLY channel the refinement loop reads. `kind` is `objection` (Adversary), `verdict` (Judge), or `rebuttal`. `blocking=true` blocks readiness. Read `proposal_id`, `round`, `against_revision_seq` from your task description; `agent_role` is `adversary` or `judge`.".to_string(),
         object!({
             "type": "object",
             "required": ["proposal_id", "kind", "body", "agent_role", "against_revision_seq", "round"],
@@ -299,7 +300,7 @@ pub fn tool_proposal_debate_append() -> RmcpTool {
 pub fn tool_proposal_debate_list() -> RmcpTool {
     RmcpTool::new(
         "proposal_debate_list".to_string(),
-        "List the tribunal debate trail for a proposal: every objection, rebuttal, and verdict across all rounds, with `round`, `agent_role`, `kind`, `blocking`, `resolved`, `against_revision_seq`, and `body`. Read this FIRST: the Adversary uses it to avoid re-raising objections already filed in prior rounds; the Advocate uses it to see exactly which objections it must address; the Judge uses it to verify each blocking objection was resolved or rebutted.".to_string(),
+        "List the tribunal debate trail for a proposal: every objection, rebuttal, and verdict across all rounds. The Adversary reads this to avoid re-raising objections; the Advocate reads it to address objections; the Judge reads it to verify resolution.".to_string(),
         object!({
             "type": "object",
             "required": ["proposal_id"],
@@ -313,7 +314,7 @@ pub fn tool_proposal_debate_list() -> RmcpTool {
 pub fn tool_proposal_debate_resolve() -> RmcpTool {
     RmcpTool::new(
         "proposal_debate_resolve".to_string(),
-        "Mark a debate-trail objection as resolved, by its entry `id` (from `proposal_debate_list`). The Advocate calls this for each blocking objection it has addressed in its revision — this is what clears the objection from the readiness gate's `unresolved_blocking` set. Resolving WITHOUT actually fixing the spec leaves the gate technically green but the work undone, so only resolve objections your revision genuinely satisfies; pair it with a `proposal_debate_append` rebuttal (`kind=\"rebuttal\"`) that explains how.".to_string(),
+        "Mark a debate-trail objection as resolved by entry `id` (from `proposal_debate_list`). The Judge or Advocate calls this for each blocking objection the revision genuinely satisfies. Pair with a `proposal_debate_append` rebuttal explaining how.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -327,7 +328,7 @@ pub fn tool_proposal_debate_resolve() -> RmcpTool {
 pub fn tool_proposal_refinement_demand_evidence() -> RmcpTool {
     RmcpTool::new(
         "proposal_refinement_demand_evidence".to_string(),
-        "Demand a read-only evidence spike for an insufficiently-evidenced feasibility claim. The Judge calls this when in-session research cannot resolve a load-bearing claim in the spec. Validates the proposal and refinement state, checks the per-run needs-evidence cap (max 2 per refinement run), records the structured claim, and parks refinement until spike findings arrive. Read `proposal_id`, `round`, and `against_revision_seq` from your task description.".to_string(),
+        "Demand a read-only evidence spike for an insufficiently-evidenced feasibility claim. The Judge calls this when in-session research cannot resolve a load-bearing claim. Checks the per-run cap (max 2), records the claim, and parks refinement until spike findings arrive.".to_string(),
         object!({
             "type": "object",
             "required": ["proposal_id", "round", "against_revision_seq", "question", "target_subsystem", "spec_unknown_anchor", "insufficient_in_session_research", "expected_findings"],
@@ -388,7 +389,7 @@ pub fn tool_proposal_ac_set() -> RmcpTool {
 pub fn tool_proposal_ac_amend() -> RmcpTool {
     RmcpTool::new(
         "proposal_ac_amend".to_string(),
-        "Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index and uses operation `rewrite`, `drop`, or `waive`: rewrite replaces criterion text and requires `criterion`; drop removes the criterion; waive keeps the criterion visible with `waived: true`. Requires a non-empty top-level reason. This is a real spec edit: it bumps the proposal revision, retains sign-offs, and records feedback/audit. Use proposal_ac_set instead when only reconciling met flags.".to_string(),
+        "Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index with operation `rewrite`, `drop`, or `waive`; requires a non-empty reason. Bumps proposal revision, retains sign-offs. Use proposal_ac_set for met-flag reconciliation only.".to_string(),
         object!({
             "type": "object",
             "required": ["id", "reason", "amendments"],
@@ -506,7 +507,7 @@ pub fn tool_proposal_blocks() -> RmcpTool {
 pub fn tool_proposal_reconcile_obsolete_epic() -> RmcpTool {
     RmcpTool::new(
         "proposal_reconcile_obsolete_epic".to_string(),
-        "Scoped proposal-reconcile teardown for one obsolete graduated epic. Lists/validates only the requested proposal+epic link, blocks terminally if any task in that subtree has merged work (recording AI proposal feedback), otherwise force-closes only that epic's tasks, closes the epic, unlinks only that epic from the proposal, and leaves unrelated graduated epics untouched. Use this instead of whole-build proposal_stop_build during Reconcile proposal tasks.".to_string(),
+        "Scoped teardown for one obsolete graduated epic. Blocks if any task has merged work; otherwise force-closes that epic's tasks, closes the epic, and unlinks it from the proposal. Use instead of whole-build proposal_stop_build during Reconcile tasks.".to_string(),
         object!({
             "type": "object",
             "required": ["proposal_id", "epic_id"],
@@ -522,7 +523,7 @@ pub fn tool_proposal_reconcile_obsolete_epic() -> RmcpTool {
 pub fn tool_task_list() -> RmcpTool {
     RmcpTool::new(
         "task_list".to_string(),
-        "List tasks with optional filters and pagination.".to_string(),
+        "List tasks with optional filters for status, priority, label, and text search. Supports pagination.".to_string(),
         object!({
             "type": "object",
             "properties": {
@@ -588,7 +589,7 @@ pub fn tool_task_show() -> RmcpTool {
 pub fn tool_memory_read() -> RmcpTool {
     RmcpTool::new(
         "memory_read".to_string(),
-        "Read a note by permalink or title.".to_string(),
+        "Read a memory note by permalink or title from the database-backed memory store. Returns full content and metadata.".to_string(),
         object!({
             "type": "object",
             "required": ["identifier"],
@@ -638,7 +639,7 @@ pub fn tool_memory_list() -> RmcpTool {
 pub fn tool_memory_write() -> RmcpTool {
     RmcpTool::new(
         "memory_write".to_string(),
-        "Create a new memory note. Memory notes live in Dolt — this is the canonical way to author them; do not attempt filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief [singleton], roadmap [singleton]). Use [[wikilinks]] in content to connect notes.".to_string(),
+        "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.".to_string(),
         object!({
             "type": "object",
             "required": ["title", "content", "type"],
@@ -656,7 +657,7 @@ pub fn tool_memory_write() -> RmcpTool {
 pub fn tool_memory_edit() -> RmcpTool {
     RmcpTool::new(
         "memory_edit".to_string(),
-        "Edit an existing memory note in-place. Memory notes live in Dolt — this is the canonical way to amend them; do not attempt filesystem writes. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).".to_string(),
+        "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).".to_string(),
         object!({
             "type": "object",
             "required": ["identifier", "operation", "content"],
@@ -826,7 +827,7 @@ pub fn tool_task_update() -> RmcpTool {
 pub fn tool_task_transition() -> RmcpTool {
     RmcpTool::new(
         "task_transition".to_string(),
-        "Transition a task using a named workflow action.".to_string(),
+        "Transition a task to a new status using a named workflow action. Valid transitions depend on the current status.".to_string(),
         object!({
             "type": "object",
             "required": ["id", "action"],
