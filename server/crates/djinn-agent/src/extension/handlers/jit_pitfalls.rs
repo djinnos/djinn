@@ -38,6 +38,32 @@ use crate::context::AgentContext;
 
 const TELEMETRY_TARGET: &str = "djinn_agent::jit_pitfalls";
 
+// ── Trace classification constants (synced with the production query) ────────
+//
+// These mirror the threshold/limit values passed to
+// `NoteRepository::query_by_scope_overlap` below in `maybe_pitfall_hint`. They
+// live here as constants so the trace classifier and helper tests can reason
+// about the `min_confidence` vs `not_top_k` boundary without re-parsing the
+// call site. Changing the production call MUST update these constants in
+// lock-step, otherwise traces will misclassify the boundary cases.
+const JIT_TRACE_PROD_MIN_CONFIDENCE: f64 = 0.3;
+/// Top-K rendered into the `<relevant-pitfalls>` hint block. Trace candidates
+/// ranked above this in the unfiltered universe are recorded as
+/// `SkippedReason::NotTopK` when not selected for injection.
+const JIT_TRACE_PROD_TOP_K: usize = 2;
+/// Over-fetch multiplier used by the production `query_by_scope_overlap`
+/// call. The production call asks for `top_k * overfetch` rows up front and
+/// then takes the top `top_k`. We surface this in trace metadata so operators
+/// can tell why some over-fetched rows were not rendered.
+const JIT_TRACE_PROD_OVERFETCH: usize = 4;
+/// Note type filter mirrored from the production `query_by_scope_overlap`
+/// call. Trace candidate classification and trigger metadata use this list
+/// verbatim so trace rows reflect exactly what the production query asked
+/// for.
+const JIT_TRACE_PROD_NOTE_TYPES: &[&str] = &["pitfall", "pattern"];
+/// Production over-fetch upper bound — `top_k * overfetch`.
+const JIT_TRACE_PROD_QUERY_LIMIT: usize = JIT_TRACE_PROD_TOP_K * JIT_TRACE_PROD_OVERFETCH;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JitPitfallOutcome {
     DisabledDefaultOff,
@@ -155,6 +181,299 @@ fn claim_first_modification(session_id: &str) -> bool {
         Ok(mut set) => set.insert(session_id.to_string()),
         Err(_) => false,
     }
+}
+
+// ── Trace persistence helpers (epic 3paf) ────────────────────────────────────
+//
+// `maybe_pitfall_hint` calls the helpers below from every eligible search
+// path (gated to non-disabled, first-modification) and never from the
+// disabled/non-first shortcuts. Failures inside these helpers log a warning
+// and never change the returned `Option<String>` or any Prometheus counter.
+// Helpers are pure/synchronous where possible so unit tests can cover
+// classification without DB setup.
+
+/// Build the JSON trigger payload describing the trace row that
+/// [`persist_jit_trace`] will persist for one eligible JIT search.
+///
+/// `search_error` is set only for the error path — otherwise the trace row
+/// records the search that ran without leaking an outcome that has not yet
+/// been observed (the search has just completed by the time we trace it).
+fn build_trace_trigger(
+    rollout_mode: JitPitfallRolloutMode,
+    touched_paths: &[String],
+    rendered_note_count: usize,
+    result_count: usize,
+    min_confidence: f64,
+    production_limit: usize,
+    search_error: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "rollout_mode": rollout_mode.label(),
+        "touched_paths": touched_paths,
+        "touched_path_count": touched_paths.len(),
+        "touched_path_summary": touched_path_summary(touched_paths),
+        "rendered_note_count": rendered_note_count,
+        "result_count": result_count,
+        "min_confidence": min_confidence,
+        "production_limit": production_limit,
+        "note_types": JIT_TRACE_PROD_NOTE_TYPES,
+        "search_error": search_error,
+    })
+}
+
+/// Build the per-phase durations JSON object for the trace row.
+///
+/// `search_elapsed_ms` is mandatory for every trace (it covers the production
+/// search). `trace_search_elapsed_ms` and `persist_elapsed_ms` are populated
+/// only when those phases actually ran and are absent (key missing) when
+/// skipped, preserving a clear "did this phase run?" signal in metadata
+/// rather than baking it into the durations object.
+fn build_trace_durations_ms(
+    search_elapsed_ms: u64,
+    trace_search_elapsed_ms: Option<u64>,
+    persist_elapsed_ms: Option<u64>,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "search_elapsed_ms".to_owned(),
+        serde_json::Value::Number(search_elapsed_ms.into()),
+    );
+    if let Some(trace_ms) = trace_search_elapsed_ms {
+        obj.insert(
+            "trace_search_elapsed_ms".to_owned(),
+            serde_json::Value::Number(trace_ms.into()),
+        );
+    }
+    if let Some(persist_ms) = persist_elapsed_ms {
+        obj.insert(
+            "persist_elapsed_ms".to_owned(),
+            serde_json::Value::Number(persist_ms.into()),
+        );
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Classify a single `ScopeOverlapTraceCandidate` row into a
+/// [`TraceCandidate`] for JSONB persistence.
+///
+/// The boundary rule (mirrors the production `maybe_pitfall_hint` semantics):
+///
+/// 1. If `candidate.note_id` appears in `injected_note_ids`, the candidate
+///    is marked `CandidateOutcome::Injected` and `skipped_reason = None`.
+///    This is the deterministic "top-2 over-fetched, then take top 2" merge
+///    with the production selection.
+/// 2. Otherwise, if `candidate.confidence < min_confidence`, it is marked
+///    `CandidateOutcome::Skipped` with `SkippedReason::MinConfidence` —
+///    the deterministic production confidence floor.
+/// 3. Otherwise, it is marked `CandidateOutcome::Skipped` with
+///    `SkippedReason::NotTopK`.
+///
+/// `source` is `"scope_overlap"` to match the existing `5wdh` data-layer
+/// contract; `scope` carries the `scope_paths`/`note_type`/`folder` triple
+/// consumed by `liso` (`memory_recall_trace` tooling).
+fn classify_trace_candidate(
+    candidate: &djinn_db::repositories::note::ScopeOverlapTraceCandidate,
+    injected_note_ids: &HashSet<String>,
+    min_confidence: f64,
+) -> djinn_db::repositories::retrieval_trace::TraceCandidate {
+    use djinn_db::repositories::retrieval_trace::{
+        CandidateOutcome, SkippedReason, TraceCandidate,
+    };
+
+    let rank_i32 = i32::try_from(candidate.rank).unwrap_or(i32::MAX);
+    let scope_value = serde_json::from_str::<serde_json::Value>(&candidate.scope_paths)
+        .unwrap_or_else(|_| serde_json::Value::String(candidate.scope_paths.clone()));
+    let scope_object = serde_json::json!({
+        "scope_paths": scope_value,
+        "note_type": candidate.note_type,
+        "folder": candidate.folder,
+    });
+
+    if injected_note_ids.contains(&candidate.id) {
+        TraceCandidate {
+            note_id: candidate.id.clone(),
+            permalink: Some(candidate.permalink.clone()),
+            title: Some(candidate.title.clone()),
+            outcome: CandidateOutcome::Injected,
+            rank: Some(rank_i32),
+            confidence: Some(candidate.confidence),
+            skipped_reason: None,
+            source: Some("scope_overlap".to_owned()),
+            scope: Some(scope_object),
+        }
+    } else if candidate.confidence < min_confidence {
+        TraceCandidate {
+            note_id: candidate.id.clone(),
+            permalink: Some(candidate.permalink.clone()),
+            title: Some(candidate.title.clone()),
+            outcome: CandidateOutcome::Skipped,
+            rank: Some(rank_i32),
+            confidence: Some(candidate.confidence),
+            skipped_reason: Some(SkippedReason::MinConfidence),
+            source: Some("scope_overlap".to_owned()),
+            scope: Some(scope_object),
+        }
+    } else {
+        TraceCandidate {
+            note_id: candidate.id.clone(),
+            permalink: Some(candidate.permalink.clone()),
+            title: Some(candidate.title.clone()),
+            outcome: CandidateOutcome::Skipped,
+            rank: Some(rank_i32),
+            confidence: Some(candidate.confidence),
+            skipped_reason: Some(SkippedReason::NotTopK),
+            source: Some("scope_overlap".to_owned()),
+            scope: Some(scope_object),
+        }
+    }
+}
+
+/// Persist a `RetrievalTraceEntryPoint::JitPitfalls` row, fail-open.
+///
+/// The function NEVER returns an error and NEVER changes the
+/// caller-visible `Option<String>` value of `maybe_pitfall_hint`. Repository
+/// insert failures log a warning and continue. The trace row's `candidates`
+/// JSONB is whatever the caller passes (typically already-validated by
+/// `TraceCandidate::validate_invariants`).
+// Allow the wide signature: each argument is a distinct piece of trace
+// metadata that should stay separate at the call sites for grep-ability.
+#[allow(clippy::too_many_arguments)]
+async fn persist_jit_trace(
+    db: &djinn_db::Database,
+    session_id: &str,
+    project_id: &str,
+    trace_candidates_json: &serde_json::Value,
+    durations_ms: &serde_json::Value,
+    trigger: &serde_json::Value,
+    estimated_injected_tokens: i32,
+    candidate_cap: i32,
+    candidate_cap_exceeded: bool,
+) {
+    use djinn_db::repositories::retrieval_trace::{
+        CreateRetrievalTraceParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
+    };
+
+    let trace_repo = RetrievalTraceRepository::new(db.clone());
+    let params = CreateRetrievalTraceParams {
+        project_id,
+        session_id: Some(session_id),
+        task_run_id: None,
+        task_id: None,
+        entry_point: RetrievalTraceEntryPoint::JitPitfalls,
+        trigger: Some(trigger),
+        candidates: trace_candidates_json,
+        candidate_cap,
+        candidate_cap_exceeded,
+        sampling_metadata: None,
+        durations_ms,
+        estimated_injected_tokens,
+    };
+
+    if let Err(e) = trace_repo.insert(params).await {
+        tracing::warn!(
+            target: TELEMETRY_TARGET,
+            session_id = %session_id,
+            project_id = %project_id,
+            error = %e,
+            "jit_pitfalls: failed to persist retrieval trace; continuing fail-open",
+        );
+    }
+}
+
+/// Estimate the number of tokens represented by a rendered hint block.
+///
+/// Approximation: `chars / 4` rounded up. Documented here as the canonical
+/// JIT estimator so downstream analysis can compare measurements against a
+/// single shared assumption; the column is documented as an estimate rather
+/// than an exact token count.
+fn estimate_injected_tokens(block_chars: usize) -> i32 {
+    let chars = u32::try_from(block_chars).unwrap_or(u32::MAX);
+    // Round-up division so a non-empty block always reports >= 1.
+    let tokens = chars.div_ceil(4);
+    i32::try_from(tokens).unwrap_or(i32::MAX)
+}
+
+/// Persist an "empty result" trace row mirroring the empty-path semantic of
+/// `maybe_pitfall_hint`. The trace carries an empty candidates array,
+/// `rendered_note_count = 0`, and `result_count = 0` so downstream tooling
+/// can distinguish an empty-but-eligible search from a disabled rollout (no
+/// trace row at all).
+#[allow(clippy::too_many_arguments)]
+async fn persist_jit_empty_trace(
+    db: &djinn_db::Database,
+    session_id: &str,
+    project_id: &str,
+    rollout_mode: JitPitfallRolloutMode,
+    touched_paths: &[String],
+    search_elapsed_ms: u64,
+    candidate_cap: i32,
+    candidate_cap_exceeded: bool,
+) {
+    let trigger = build_trace_trigger(
+        rollout_mode,
+        touched_paths,
+        0,
+        0,
+        JIT_TRACE_PROD_MIN_CONFIDENCE,
+        JIT_TRACE_PROD_QUERY_LIMIT,
+        None,
+    );
+    let durations_ms = build_trace_durations_ms(search_elapsed_ms, None, None);
+    let empty_candidates = serde_json::json!([]);
+    persist_jit_trace(
+        db,
+        session_id,
+        project_id,
+        &empty_candidates,
+        &durations_ms,
+        &trigger,
+        0,
+        candidate_cap,
+        candidate_cap_exceeded,
+    )
+    .await;
+}
+
+/// Persist a search-error trace row mirroring the error-path semantic of
+/// `maybe_pitfall_hint`. The trace carries an empty candidates array so the
+/// row exists (the search was attempted) but the `search_error` field lives
+/// in the trigger metadata. Failure path is fail-open — exactly like a
+/// successful insert.
+#[allow(clippy::too_many_arguments)]
+async fn persist_jit_error_trace(
+    db: &djinn_db::Database,
+    session_id: &str,
+    project_id: &str,
+    rollout_mode: JitPitfallRolloutMode,
+    touched_paths: &[String],
+    search_elapsed_ms: u64,
+    error: &str,
+    candidate_cap: i32,
+    candidate_cap_exceeded: bool,
+) {
+    let trigger = build_trace_trigger(
+        rollout_mode,
+        touched_paths,
+        0,
+        0,
+        JIT_TRACE_PROD_MIN_CONFIDENCE,
+        JIT_TRACE_PROD_QUERY_LIMIT,
+        Some(error),
+    );
+    let durations_ms = build_trace_durations_ms(search_elapsed_ms, None, None);
+    let empty_candidates = serde_json::json!([]);
+    persist_jit_trace(
+        db,
+        session_id,
+        project_id,
+        &empty_candidates,
+        &durations_ms,
+        &trigger,
+        0,
+        candidate_cap,
+        candidate_cap_exceeded,
+    )
+    .await;
 }
 
 fn touched_path_summary(touched_paths: &[String]) -> String {
@@ -315,12 +634,12 @@ pub(super) async fn maybe_pitfall_hint(
         .query_by_scope_overlap(
             project_id,
             touched_paths,
-            &["pitfall", "pattern"],
-            0.3,
+            JIT_TRACE_PROD_NOTE_TYPES,
+            JIT_TRACE_PROD_MIN_CONFIDENCE,
             // Over-fetch a little, then take the top 2 below — keeps the
             // confidence-DESC ordering from the query while tolerating
             // duplicate-scope rows.
-            8,
+            JIT_TRACE_PROD_QUERY_LIMIT,
         )
         .await
     {
@@ -342,6 +661,20 @@ pub(super) async fn maybe_pitfall_hint(
                 rendered_note_count = 0usize,
                 "jit_pitfalls telemetry outcome"
             );
+            // Trace persistence: empty-but-eligible → fail-open row, no DB
+            // candidate universe fetch (the production query itself
+            // returned empty, so a second query would be wasted work).
+            persist_jit_empty_trace(
+                &state.db,
+                session_id,
+                project_id,
+                rollout_mode,
+                touched_paths,
+                elapsed_ms,
+                djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP,
+                false,
+            )
+            .await;
             return None;
         }
         Err(e) => {
@@ -361,12 +694,27 @@ pub(super) async fn maybe_pitfall_hint(
                 error = %e,
                 "jit_pitfalls: scoped note search failed; skipping hint",
             );
+            // Trace persistence: search-error → fail-open row carrying the
+            // error string in `trigger.search_error`. Failures inside the
+            // trace row writer also stay fail-open.
+            persist_jit_error_trace(
+                &state.db,
+                session_id,
+                project_id,
+                rollout_mode,
+                touched_paths,
+                elapsed_ms,
+                &e.to_string(),
+                djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP,
+                false,
+            )
+            .await;
             return None;
         }
     };
 
     let elapsed_ms = elapsed_millis(search_started);
-    let rendered_note_count = notes.len().min(2);
+    let rendered_note_count = notes.len().min(JIT_TRACE_PROD_TOP_K);
     let note_metadata = safe_note_metadata(&notes);
     djinn_telemetry::jit_pitfalls::increment_outcome(JitPitfallOutcome::Injected.label());
     tracing::info!(
@@ -384,6 +732,243 @@ pub(super) async fn maybe_pitfall_hint(
         "jit_pitfalls telemetry outcome"
     );
 
+    // ── Trace persistence (epic 3paf) ──────────────────────────────────────
+    //
+    // The eligible-search path now persists a `JitPitfalls` trace row that
+    // captures the unfiltered scope-overlap candidate universe alongside the
+    // production selection. Trace classification uses
+    // [`classify_trace_candidate`] to label injected candidates as
+    // `Injected` and the remaining universe as `MinConfidence` (below
+    // [`JIT_TRACE_PROD_MIN_CONFIDENCE`]) or `NotTopK` (above threshold but
+    // outside the production top-K).
+    //
+    // Failures in either the candidate universe fetch, the classification,
+    // the JSON serialization, or the repository insert are fail-open: the
+    // warning log path is the only side-effect and the returned
+    // `Option<String>` plus counters are unchanged.
+    let trace_search_started = SystemClockTrait::new().now_instant();
+    let trace_universe = note_repo
+        .query_by_scope_overlap_trace_candidates(
+            project_id,
+            touched_paths,
+            JIT_TRACE_PROD_NOTE_TYPES,
+            djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize,
+        )
+        .await;
+    let trace_search_elapsed_ms = elapsed_millis(trace_search_started);
+
+    let persist_started = SystemClockTrait::new().now_instant();
+    let candidate_cap: i32 = djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP;
+    let mut candidate_cap_exceeded = false;
+    let mut trace_candidates_json = serde_json::json!([]);
+
+    match trace_universe {
+        Ok(scope_candidates) if !scope_candidates.is_empty() => {
+            // We don't truncate to the cap inside the DB: the SQL already
+            // applies LIMIT, so the cap is recorded as "configured" but never
+            // "exceeded" by the raw row count. Downstream tooling reads
+            // `candidate_cap_exceeded` for sampling decisions, not for
+            // hard-cap enforcement — see epic 3paf design notes.
+            candidate_cap_exceeded = (scope_candidates.len() as i64) > i64::from(candidate_cap);
+
+            // The "injected" set is exactly the production-rendered notes
+            // (`render_pitfall_block` takes `min(2, notes.len())` items from
+            // `notes` — which is already over-fetched DESC-ordered), so the
+            // first `rendered_note_count` ids form the injected set.
+            let injected_note_ids: HashSet<String> = notes
+                .iter()
+                .take(rendered_note_count)
+                .map(|note| note.id.clone())
+                .collect();
+
+            let trace_candidates: Vec<djinn_db::repositories::retrieval_trace::TraceCandidate> =
+                scope_candidates
+                    .iter()
+                    .map(|candidate| {
+                        classify_trace_candidate(
+                            candidate,
+                            &injected_note_ids,
+                            JIT_TRACE_PROD_MIN_CONFIDENCE,
+                        )
+                    })
+                    .collect();
+
+            // Defensive: validate invariants before persistence so a
+            // regression in the classifier surfaces as a log warning rather
+            // than a database constraint violation. Failures here are
+            // fail-open.
+            if let Err(validation_err) =
+                djinn_db::repositories::retrieval_trace::validate_candidates(&trace_candidates)
+            {
+                tracing::warn!(
+                    target: TELEMETRY_TARGET,
+                    session_id = %session_id,
+                    project_id = %project_id,
+                    error = %validation_err,
+                    "jit_pitfalls: trace candidates failed validation; \
+                     skipping trace persistence (fail-open)",
+                );
+            } else {
+                match serde_json::to_value(&trace_candidates) {
+                    Ok(json) => {
+                        let candidate_count = trace_candidates.len();
+                        let trace_universe_count = scope_candidates.len();
+
+                        // Render the hint block BEFORE the async persistence
+                        // path so the trace metadata refers to the same
+                        // block returned to the caller (and matches the
+                        // existing `result_count` / `rendered_note_count`).
+                        let block = render_pitfall_block(&notes);
+                        let estimated_tokens = estimate_injected_tokens(block.chars().count());
+
+                        let trigger = build_trace_trigger(
+                            rollout_mode,
+                            touched_paths,
+                            rendered_note_count,
+                            trace_universe_count,
+                            JIT_TRACE_PROD_MIN_CONFIDENCE,
+                            JIT_TRACE_PROD_QUERY_LIMIT,
+                            None,
+                        );
+                        let durations_ms = build_trace_durations_ms(
+                            elapsed_ms,
+                            Some(trace_search_elapsed_ms),
+                            None,
+                        );
+
+                        trace_candidates_json = json;
+
+                        persist_jit_trace(
+                            &state.db,
+                            session_id,
+                            project_id,
+                            &trace_candidates_json,
+                            &durations_ms,
+                            &trigger,
+                            estimated_tokens,
+                            candidate_cap,
+                            candidate_cap_exceeded,
+                        )
+                        .await;
+                        let persist_elapsed_ms = elapsed_millis(persist_started);
+                        tracing::debug!(
+                            target: TELEMETRY_TARGET,
+                            session_id = %session_id,
+                            project_id = %project_id,
+                            candidates = candidate_count,
+                            injected = injected_note_ids.len(),
+                            trace_search_elapsed_ms = trace_search_elapsed_ms,
+                            persist_elapsed_ms = persist_elapsed_ms,
+                            estimated_injected_tokens = estimated_tokens,
+                            "jit_pitfalls: persisted JitPitfalls trace (fail-open)",
+                        );
+                        return Some(block);
+                    }
+                    Err(ser_err) => {
+                        tracing::warn!(
+                            target: TELEMETRY_TARGET,
+                            session_id = %session_id,
+                            project_id = %project_id,
+                            error = %ser_err,
+                            "jit_pitfalls: failed to serialize trace candidates; \
+                             skipping trace persistence (fail-open)",
+                        );
+                    }
+                }
+            }
+            // Validation-failure fall-through: trace persistence was skipped
+            // because the candidate classification failed invariants, but the
+            // rendered block is still valid. Fall through to the trailing
+            // return below (fail-open).
+        }
+        Ok(_) => {
+            // Empty trace universe (production already returned some notes,
+            // but the unfiltered query returned none — can happen if notes
+            // were filtered out between calls or if scope_wider matches an
+            // edge case we don't model). Still persist a metadata-only row
+            // so the trace ledger records the attempt.
+            let block = render_pitfall_block(&notes);
+            let estimated_tokens = estimate_injected_tokens(block.chars().count());
+            let trigger = build_trace_trigger(
+                rollout_mode,
+                touched_paths,
+                rendered_note_count,
+                0,
+                JIT_TRACE_PROD_MIN_CONFIDENCE,
+                JIT_TRACE_PROD_QUERY_LIMIT,
+                None,
+            );
+            let durations_ms =
+                build_trace_durations_ms(elapsed_ms, Some(trace_search_elapsed_ms), None);
+            persist_jit_trace(
+                &state.db,
+                session_id,
+                project_id,
+                &trace_candidates_json,
+                &durations_ms,
+                &trigger,
+                estimated_tokens,
+                candidate_cap,
+                candidate_cap_exceeded,
+            )
+            .await;
+            let persist_elapsed_ms = elapsed_millis(persist_started);
+            tracing::debug!(
+                target: TELEMETRY_TARGET,
+                session_id = %session_id,
+                project_id = %project_id,
+                persist_elapsed_ms = persist_elapsed_ms,
+                estimated_injected_tokens = estimated_tokens,
+                "jit_pitfalls: persisted empty-universe JitPitfalls trace (fail-open)",
+            );
+            return Some(block);
+        }
+        Err(trace_err) => {
+            // The trace candidate query is best-effort: production semantics
+            // are already locked in (we have the rendered block ready). Log
+            // a warning and persist a metadata-only row so the trace ledger
+            // records the primary outcome anyway.
+            let block = render_pitfall_block(&notes);
+            let estimated_tokens = estimate_injected_tokens(block.chars().count());
+            let trigger = build_trace_trigger(
+                rollout_mode,
+                touched_paths,
+                rendered_note_count,
+                notes.len(),
+                JIT_TRACE_PROD_MIN_CONFIDENCE,
+                JIT_TRACE_PROD_QUERY_LIMIT,
+                Some(&format!("trace_candidate_query: {trace_err}")),
+            );
+            let durations_ms =
+                build_trace_durations_ms(elapsed_ms, Some(trace_search_elapsed_ms), None);
+            tracing::warn!(
+                target: TELEMETRY_TARGET,
+                session_id = %session_id,
+                project_id = %project_id,
+                error = %trace_err,
+                "jit_pitfalls: trace candidate query failed; \
+                 persisting metadata-only JitPitfalls trace (fail-open)",
+            );
+            persist_jit_trace(
+                &state.db,
+                session_id,
+                project_id,
+                &trace_candidates_json,
+                &durations_ms,
+                &trigger,
+                estimated_tokens,
+                candidate_cap,
+                candidate_cap_exceeded,
+            )
+            .await;
+            return Some(block);
+        }
+    }
+
+    // Reachable only on the JSON-serialization-failure or
+    // validate-invariants-failure paths inside the success arm above, both
+    // of which are fail-open — the rendered block is still valid and the
+    // trace row is intentionally skipped.
     Some(render_pitfall_block(&notes))
 }
 
@@ -559,6 +1144,224 @@ mod tests {
         assert_eq!(
             rollout_mode_from_values(Some("unknown"), Some("1")),
             JitPitfallRolloutMode::DefaultOff
+        );
+    }
+
+    // ── Trace helper tests (epic 3paf) ──────────────────────────────────────────
+    //
+    // These tests exercise the pure-classification helpers added by the
+    // JIT-pitfalls trace instrumentation. They avoid DB setup so they
+    // always run in the unit-test lane; integration-style coverage of the
+    // persistence path lives in `tool_dispatch_tests.rs` and other integration
+    // test files.
+
+    fn mk_scope_trace_candidate(
+        id: &str,
+        rank: i64,
+        confidence: f64,
+        note_type: &str,
+        scope_paths_json: &str,
+    ) -> djinn_db::repositories::note::ScopeOverlapTraceCandidate {
+        djinn_db::repositories::note::ScopeOverlapTraceCandidate {
+            id: id.into(),
+            permalink: format!("permalinks/{id}"),
+            title: format!("Title {id}"),
+            folder: String::new(),
+            note_type: note_type.into(),
+            scope_paths: scope_paths_json.into(),
+            confidence,
+            rank,
+        }
+    }
+
+    #[test]
+    fn classify_trace_candidate_marks_injected_note_as_injected() {
+        // Candidate 1 is in the injected set → Injected, no skipped_reason.
+        use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+        let candidate = mk_scope_trace_candidate("note-injected", 1, 0.95, "pitfall", "[]");
+        let mut injected = HashSet::new();
+        injected.insert("note-injected".to_owned());
+
+        let tc = classify_trace_candidate(&candidate, &injected, 0.3);
+        assert_eq!(tc.note_id, "note-injected");
+        assert_eq!(tc.outcome, CandidateOutcome::Injected);
+        assert_eq!(tc.skipped_reason, None);
+        assert_eq!(tc.rank, Some(1));
+        assert_eq!(tc.confidence, Some(0.95));
+        assert_eq!(tc.source.as_deref(), Some("scope_overlap"));
+        // Injected candidates must satisfy the "Injected without skipped_reason"
+        // invariant (validate_candidates is the canonical checker; here we
+        // assert the same shape directly).
+        let reason: Option<SkippedReason> = tc.skipped_reason;
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn classify_trace_candidate_below_threshold_is_min_confidence() {
+        use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+        let candidate = mk_scope_trace_candidate("note-below", 3, 0.10, "pattern", "[]");
+        let injected = HashSet::new(); // not injected
+
+        let tc = classify_trace_candidate(&candidate, &injected, 0.3);
+        assert_eq!(tc.outcome, CandidateOutcome::Skipped);
+        assert_eq!(tc.skipped_reason, Some(SkippedReason::MinConfidence));
+        assert_eq!(tc.confidence, Some(0.10));
+    }
+
+    #[test]
+    fn classify_trace_candidate_above_threshold_outside_top_k_is_not_top_k() {
+        use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+        // Confidence above the 0.3 floor but rank beyond the top-2 over-fetch
+        // and the id is not in the injected set → NotTopK.
+        let candidate = mk_scope_trace_candidate("note-overfetch", 4, 0.85, "pattern", "[]");
+        let mut injected = HashSet::new();
+        injected.insert("note-a".to_owned());
+        injected.insert("note-b".to_owned());
+
+        let tc = classify_trace_candidate(&candidate, &injected, 0.3);
+        assert_eq!(tc.outcome, CandidateOutcome::Skipped);
+        assert_eq!(tc.skipped_reason, Some(SkippedReason::NotTopK));
+        assert_eq!(tc.confidence, Some(0.85));
+    }
+
+    #[test]
+    fn classify_trace_candidate_at_threshold_boundary_is_over_floor() {
+        // Confidence equal to the floor (0.3) is NOT below it — should land in
+        // the NotTopK branch (since the id is not in the injected set).
+        use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+        let candidate = mk_scope_trace_candidate("note-edge", 5, 0.30, "pattern", "[]");
+        let injected = HashSet::new();
+
+        let tc = classify_trace_candidate(&candidate, &injected, 0.3);
+        assert_eq!(tc.outcome, CandidateOutcome::Skipped);
+        assert_eq!(tc.skipped_reason, Some(SkippedReason::NotTopK));
+    }
+
+    #[test]
+    fn classify_trace_candidate_preserves_identity_fields() {
+        // Identity fields (note_id/permalink/title) and provenance (source,
+        // scope) must round-trip so `liso` tooling can list/detail the row.
+        use djinn_db::repositories::retrieval_trace::SkippedReason;
+        let candidate = mk_scope_trace_candidate("n1", 2, 0.42, "pitfall", r#"["src/handlers"]"#);
+        let injected = HashSet::new();
+
+        let tc = classify_trace_candidate(&candidate, &injected, 0.3);
+        assert_eq!(tc.note_id, "n1");
+        assert_eq!(tc.permalink.as_deref(), Some("permalinks/n1"));
+        assert_eq!(tc.title.as_deref(), Some("Title n1"));
+        assert_eq!(tc.skipped_reason, Some(SkippedReason::NotTopK));
+        assert_eq!(tc.source.as_deref(), Some("scope_overlap"));
+        let scope = tc.scope.as_ref().expect("scope must be set");
+        assert_eq!(scope["note_type"].as_str(), Some("pitfall"));
+        assert_eq!(
+            scope["scope_paths"],
+            serde_json::json!(["src/handlers"]),
+            "scope_paths must parse to a JSON array when the source row is valid JSON"
+        );
+    }
+
+    #[test]
+    fn build_trace_trigger_includes_rollout_paths_and_optional_search_error() {
+        // Success path: search_error key is present but null so the shape is
+        // stable for downstream readers.
+        let touched = vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()];
+        let trigger = build_trace_trigger(
+            JitPitfallRolloutMode::Cohort,
+            &touched,
+            2,
+            5,
+            JIT_TRACE_PROD_MIN_CONFIDENCE,
+            JIT_TRACE_PROD_QUERY_LIMIT,
+            None,
+        );
+        assert_eq!(trigger["rollout_mode"], "cohort");
+        assert_eq!(trigger["touched_paths"][0], "src/a.rs");
+        assert_eq!(trigger["touched_path_count"], 2);
+        assert_eq!(trigger["rendered_note_count"], 2);
+        assert_eq!(trigger["result_count"], 5);
+        assert_eq!(trigger["min_confidence"], 0.3);
+        assert_eq!(trigger["production_limit"], 8);
+        assert_eq!(
+            trigger["note_types"],
+            serde_json::json!(["pitfall", "pattern"])
+        );
+        assert!(trigger["search_error"].is_null());
+
+        // Error path: search_error is set.
+        let trigger_err = build_trace_trigger(
+            JitPitfallRolloutMode::Enabled,
+            &touched,
+            0,
+            0,
+            JIT_TRACE_PROD_MIN_CONFIDENCE,
+            JIT_TRACE_PROD_QUERY_LIMIT,
+            Some("scoped note search failed"),
+        );
+        assert_eq!(
+            trigger_err["search_error"].as_str(),
+            Some("scoped note search failed"),
+        );
+        assert_eq!(trigger_err["rollout_mode"], "enabled");
+    }
+
+    #[test]
+    fn build_trace_durations_ms_only_includes_phases_that_actually_ran() {
+        // Only `search_elapsed_ms` is set → only that key is present.
+        let d = build_trace_durations_ms(123, None, None);
+        let obj = d.as_object().expect("durations must be an object");
+        assert_eq!(obj.len(), 1);
+        assert_eq!(obj["search_elapsed_ms"], serde_json::json!(123));
+
+        // Both phases ran → all three keys present.
+        let d2 = build_trace_durations_ms(10, Some(20), Some(30));
+        let obj2 = d2.as_object().expect("durations must be an object");
+        assert_eq!(obj2.len(), 3);
+        assert_eq!(obj2["search_elapsed_ms"], serde_json::json!(10));
+        assert_eq!(obj2["trace_search_elapsed_ms"], serde_json::json!(20));
+        assert_eq!(obj2["persist_elapsed_ms"], serde_json::json!(30));
+
+        // Only trace-search ran → persist_elapsed_ms is absent.
+        let d3 = build_trace_durations_ms(0, Some(7), None);
+        let obj3 = d3.as_object().expect("durations must be an object");
+        assert_eq!(obj3.len(), 2);
+        assert!(obj3.get("persist_elapsed_ms").is_none());
+    }
+
+    #[test]
+    fn estimate_injected_tokens_uses_chars_per_4_with_round_up() {
+        // Empty block → 0 tokens.
+        assert_eq!(estimate_injected_tokens(0), 0);
+        // 1 char → ceil(1/4) = 1.
+        assert_eq!(estimate_injected_tokens(1), 1);
+        // Exactly 4 chars → 1 token.
+        assert_eq!(estimate_injected_tokens(4), 1);
+        // 5 chars → ceil(5/4) = 2 tokens.
+        assert_eq!(estimate_injected_tokens(5), 2);
+        // A large block scales proportionally to its size and remains strictly
+        // positive for any non-zero character count.
+        let big = usize::from(u16::MAX) * 4;
+        let tokens = estimate_injected_tokens(big);
+        assert!(tokens > 0, "non-empty block must report positive tokens");
+        assert!(
+            tokens > estimate_injected_tokens(4),
+            "larger blocks must report strictly more tokens than 4-char blocks"
+        );
+    }
+
+    #[test]
+    fn trace_constants_lock_step_with_production_call() {
+        // These constants must match the production `query_by_scope_overlap`
+        // call in `maybe_pitfall_hint` and the over-fetch heuristic in
+        // `render_pitfall_block`. Changing them should fail loudly here so
+        // the trace classifier and the production path stay aligned.
+        assert_eq!(JIT_TRACE_PROD_MIN_CONFIDENCE, 0.3);
+        assert_eq!(JIT_TRACE_PROD_TOP_K, 2);
+        assert_eq!(JIT_TRACE_PROD_OVERFETCH, 4);
+        assert_eq!(JIT_TRACE_PROD_QUERY_LIMIT, 8);
+        assert_eq!(
+            JIT_TRACE_PROD_NOTE_TYPES,
+            &["pitfall", "pattern"],
+            "trace classification must mirror the production note-type filter"
         );
     }
 }
