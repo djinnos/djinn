@@ -695,6 +695,88 @@ pub struct ResumeLifecycleConfig {
     pub max_checkpoint_age_secs: Option<u64>,
 }
 
+/// Environment-source tri-state for the resume lifecycle enable flag.
+///
+/// `Unset` means the environment variable was absent, so the DB/runtime value
+/// decides. `True`/`False` are explicit operator overrides. An explicit `False`
+/// is a **global rollback gate**: it suppresses DB-enabled resume behavior
+/// regardless of what the DB says (proposal `phif` AC 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeLifecycleEnvFlag {
+    /// Environment variable absent — defer to the DB/runtime value.
+    Unset,
+    /// Explicitly enabled via environment.
+    True,
+    /// Explicitly disabled via environment — global rollback gate.
+    False,
+}
+
+impl ResumeLifecycleEnvFlag {
+    /// Parse the `DJINN_WORKER_RESUME_LIFECYCLE_ENABLED` environment value.
+    /// Accepts `1`/`true`/`yes` (case-insensitive) as `True`; anything else
+    /// (including `0`/`false`/`no` and unrecognized values) as `False`
+    /// (fail-safe: an unrecognized value disables resume rather than
+    /// accidentally enabling it).
+    pub fn from_value(val: &str) -> Self {
+        match val.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => Self::True,
+            _ => Self::False,
+        }
+    }
+
+    /// Read the flag from the [`ENV_RESUME_LIFECYCLE_ENABLED`] env var,
+    /// returning `Unset` when the variable is absent.
+    pub fn from_env() -> Self {
+        match std::env::var(ENV_RESUME_LIFECYCLE_ENABLED) {
+            Ok(v) => Self::from_value(&v),
+            Err(_) => Self::Unset,
+        }
+    }
+}
+
+/// Environment variable name for the resume lifecycle global enable/rollback
+/// gate.
+pub const ENV_RESUME_LIFECYCLE_ENABLED: &str = "DJINN_WORKER_RESUME_LIFECYCLE_ENABLED";
+
+impl ResumeLifecycleConfig {
+    /// Resolve the effective resume lifecycle config from an environment flag
+    /// and an optional DB/runtime-config source.
+    ///
+    /// Precedence (proposal `phif`):
+    /// 1. **Env `False` is a global rollback gate** — always disabled, ignoring
+    ///    the DB value entirely.
+    /// 2. **Env `True`** — enabled, using DB fields where present.
+    /// 3. **Env `Unset`** — the DB/runtime value decides. When the DB value is
+    ///    `None` (no row / not configured), resume stays default-off.
+    ///
+    /// This is a pure function: it performs no I/O. The caller reads the env
+    /// var and DB row, then hands the resolved values here. This separation
+    /// makes the precedence logic unit-testable without process-env mutation.
+    pub fn resolve(
+        env_flag: ResumeLifecycleEnvFlag,
+        db_config: Option<&ResumeLifecycleConfig>,
+    ) -> ResumeLifecycleConfig {
+        // Explicit env false is the global rollback gate: always disabled.
+        if env_flag == ResumeLifecycleEnvFlag::False {
+            return ResumeLifecycleConfig::default();
+        }
+
+        let db = db_config.cloned().unwrap_or_default();
+
+        match env_flag {
+            ResumeLifecycleEnvFlag::True => ResumeLifecycleConfig {
+                enabled: true,
+                prefer_checkpoint: db.prefer_checkpoint,
+                max_checkpoint_age_secs: db.max_checkpoint_age_secs,
+            },
+            // Env unset: DB value decides. Default-off when DB is absent.
+            ResumeLifecycleEnvFlag::Unset => db,
+            // Already handled False above.
+            ResumeLifecycleEnvFlag::False => unreachable!(),
+        }
+    }
+}
+
 /// Classification for resume checkpoint selection decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
