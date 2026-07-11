@@ -38,6 +38,7 @@
 
 pub mod frame;
 pub mod random;
+pub mod scheduler;
 
 #[cfg(test)]
 mod tests;
@@ -50,4 +51,8 @@ pub use frame::{
 pub use random::{
     DrawResult, DrawnItem, HMAC_SHA256_COUNTER_V1, ReplayVerification, SeedCommitment, commit_seed,
     draw_selections, verify_replay,
+};
+pub use scheduler::{
+    AuditSchedulerConfig, AuditSchedulerResult, BacklogPauseReason, EVENT_AUDIT_MATERIALIZED,
+    EVENT_BACKLOG_PAUSE, MaterializedAuditItem, run_audit_scheduler,
 };
