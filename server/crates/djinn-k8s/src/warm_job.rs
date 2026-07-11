@@ -623,7 +623,7 @@ mod tests {
         // Defaults pin the documented values. Memory limit bumped 4Gi → 6Gi to
         // cover the added test-compile warm pass (--all-targets test codegen).
         assert_eq!(cfg.warm_cpu_request, "1");
-        assert_eq!(cfg.warm_cpu_limit, "2");
+        assert_eq!(cfg.warm_cpu_limit, "4");
         assert_eq!(cfg.warm_memory_request, "2Gi");
         assert_eq!(cfg.warm_memory_limit, "6Gi");
     }

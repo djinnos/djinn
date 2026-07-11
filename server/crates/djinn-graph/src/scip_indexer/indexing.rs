@@ -255,6 +255,7 @@ pub(crate) async fn run_indexers_already_locked(
     target_dir: Option<&Path>,
     language_filter: Option<&[SupportedIndexer]>,
     declared_workspaces: Option<&[djinn_stack::Workspace]>,
+    priors: Option<&super::PriorTimingMap>,
 ) -> Result<IndexingRun> {
     let _guard = target_dir.map(CargoTargetDirGuard::new);
     run_indexers(
@@ -262,28 +263,65 @@ pub(crate) async fn run_indexers_already_locked(
         output_root,
         language_filter,
         declared_workspaces,
+        priors,
     )
     .await
 }
 
 /// Compute the wall-clock timeout for a planned indexer command.
 ///
-/// In the default production path (no active deadline, no prior timing), the
-/// budget model yields the indexer baseline which is combined with the legacy
-/// `SupportedIndexer::timeout()` cap via `max()`. This guarantees the shipped
-/// fixed-cap behavior is preserved exactly — the budget model only *raises*
-/// timeouts when workspace size / prior timing warrant it, and only *lowers*
-/// them when an active deadline is supplied (which the current flow does not
-/// do yet; the deadline/prior inputs are hooks for later integration tasks).
-fn budgeted_timeout_for_plan(plan: &PlannedIndexerCommand) -> std::time::Duration {
+/// When no prior timing exists (a project's first-ever warm), the budget model
+/// yields the size-scaled baseline, combined with the legacy
+/// `SupportedIndexer::timeout()` cap via `max()` — byte-identical to the
+/// shipped fixed-cap behavior. When prior timings ARE supplied (fed from
+/// persisted `scip_indexer_timing` rows), the budget adapts: a slow-but-passing
+/// run raises the timeout within `max_cap`, and a run that keeps TIMING OUT
+/// grows headroom above `max_cap` up to the adaptive ceiling (`max_cap * 3`),
+/// so a heavy workspace stops silently dropping out of the graph on every warm.
+/// The `max(..., timeout())` floor guarantees the adaptive value never dips
+/// below today's static cap.
+fn budgeted_timeout_for_plan(
+    plan: &PlannedIndexerCommand,
+    prior: Option<&super::IndexerPriorTiming>,
+) -> std::time::Duration {
     let size = super::budget::estimate_workspace_size(&plan.working_directory, plan.indexer);
-    let budget = super::budget::budget_for_indexer(plan.indexer, &size, None, None);
+    let prior_timing = prior.map(|p| super::budget::PriorIndexerTiming {
+        last_success_ms: p.last_success_ms,
+        last_timed_out_ms: p.last_timed_out_ms,
+        ..Default::default()
+    });
+    let budget =
+        super::budget::budget_for_indexer(plan.indexer, &size, prior_timing.as_ref(), None);
 
-    // Preserve the legacy fixed cap: `max(budget.per_invocation, timeout())`.
-    // This ensures equivalent behavior when no deadline/prior timing exists:
-    // the budget model may raise the timeout above the fixed cap (for large
-    // workspaces) but never lowers it below the shipped cap.
+    // Preserve the legacy fixed cap as a floor: `max(budget, timeout())`. The
+    // budget model may raise the timeout above the fixed cap (large workspaces
+    // or timeout headroom) but never lowers it below the shipped cap.
     budget.per_invocation.max(plan.indexer.timeout())
+}
+
+/// Classify a completed plan execution into the outcome recorded for the
+/// adaptive budget. Cache hits and deadline-skipped plans never invoked the
+/// indexer, so they yield no observation (`None`).
+fn timing_outcome_for(execution: &PlanExecution) -> Option<super::IndexerRunOutcome> {
+    use super::IndexerRunOutcome;
+    match execution {
+        PlanExecution::CachedHit | PlanExecution::DeadlineExhausted(_) => None,
+        PlanExecution::Ran(Ok(output)) if output.status.success() => {
+            Some(IndexerRunOutcome::Success)
+        }
+        PlanExecution::Ran(Ok(_)) => Some(IndexerRunOutcome::Failed),
+        PlanExecution::Ran(Err(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
+            Some(IndexerRunOutcome::TimedOut)
+        }
+        PlanExecution::Ran(Err(_)) => Some(IndexerRunOutcome::Failed),
+        PlanExecution::Partitioned(summary) => match summary.status.as_str() {
+            "timed_out" => Some(IndexerRunOutcome::TimedOut),
+            "failed" => Some(IndexerRunOutcome::Failed),
+            // "artifact_pending" / "ready" / "ready_with_quarantine": at least
+            // one partition produced an index → treat as a successful run.
+            _ => Some(IndexerRunOutcome::Success),
+        },
+    }
 }
 
 /// Result of running a single planned indexer command (with optional cache
@@ -389,9 +427,10 @@ impl GoPackageLister for CommandGoPackageLister {
 async fn execute_plan_with_cache(
     plan: PlannedIndexerCommand,
     timeout: std::time::Duration,
+    prior: Option<&super::IndexerPriorTiming>,
 ) -> PlanExecution {
     if matches!(plan.indexer, SupportedIndexer::Go | SupportedIndexer::Clang) {
-        return execute_partitioned_plan(plan).await;
+        return execute_partitioned_plan(plan, prior).await;
     }
     // Attempt cache lookup. Any error is a non-fatal miss — we fall through
     // to running the indexer.
@@ -452,11 +491,14 @@ async fn execute_plan_with_cache(
     PlanExecution::Ran(result)
 }
 
-async fn execute_partitioned_plan(plan: PlannedIndexerCommand) -> PlanExecution {
+async fn execute_partitioned_plan(
+    plan: PlannedIndexerCommand,
+    prior: Option<&super::IndexerPriorTiming>,
+) -> PlanExecution {
     let units = match partition_units_for_plan(&plan, &CommandGoPackageLister) {
         Ok(units) if !units.is_empty() => units,
         Ok(_) | Err(_) => {
-            let timeout = budgeted_timeout_for_plan(&plan);
+            let timeout = budgeted_timeout_for_plan(&plan, prior);
             return execute_workspace_plan_with_cache(plan, timeout).await;
         }
     };
@@ -1006,6 +1048,7 @@ pub(crate) async fn run_indexers(
     output_root: impl AsRef<Path>,
     language_filter: Option<&[SupportedIndexer]>,
     declared_workspaces: Option<&[djinn_stack::Workspace]>,
+    priors: Option<&super::PriorTimingMap>,
 ) -> Result<IndexingRun> {
     let project_root = project_root.as_ref().to_path_buf();
     let output_root = output_root.as_ref().to_path_buf();
@@ -1045,22 +1088,44 @@ pub(crate) async fn run_indexers(
     let futures: Vec<_> = plans
         .into_iter()
         .map(|plan| {
-            // Compute a scaled budget for this workspace/indexer. When no
-            // active deadline or prior timing is available (the current
-            // production path), the budget is combined with the legacy
-            // `SupportedIndexer::timeout()` cap so runtime behavior stays
-            // equivalent — the budget model never shortens a timeout below
-            // the shipped fixed cap in the default case.
-            let timeout = budgeted_timeout_for_plan(&plan);
+            // Size the timeout from persisted prior timings for this
+            // (workspace, indexer). With no history the budget resolves to the
+            // size-scaled baseline floored by the legacy `timeout()` cap —
+            // byte-identical to the shipped behaviour. With history it adapts:
+            // slow-but-passing runs raise within `max_cap`; repeated timeouts
+            // grow headroom above it (up to the adaptive ceiling).
+            let prior = priors.and_then(|m| m.get(&(plan.workspace_slug.clone(), plan.indexer)));
+            let timeout = budgeted_timeout_for_plan(&plan, prior);
+            let prior = prior.copied();
             let plan_for_future = plan.clone();
             async move {
-                let outcome = execute_plan_with_cache(plan_for_future, timeout).await;
-                (plan, outcome)
+                use djinn_core::clock::{Clock, SystemClock};
+                let started = SystemClock::new().now_instant();
+                let outcome =
+                    execute_plan_with_cache(plan_for_future, timeout, prior.as_ref()).await;
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                (plan, outcome, elapsed_ms)
             }
         })
         .collect();
 
-    let results = futures::future::join_all(futures).await;
+    let raw_results = futures::future::join_all(futures).await;
+
+    // Split the timing observations off before tally consumes the executions.
+    // Only actual invocations (not cache hits / deadline skips) yield a row.
+    let mut timings: Vec<super::IndexerTimingObservation> = Vec::with_capacity(raw_results.len());
+    let mut results = Vec::with_capacity(raw_results.len());
+    for (plan, outcome, elapsed_ms) in raw_results {
+        if let Some(run_outcome) = timing_outcome_for(&outcome) {
+            timings.push(super::IndexerTimingObservation {
+                workspace_slug: plan.workspace_slug.clone(),
+                indexer: plan.indexer,
+                outcome: run_outcome,
+                elapsed_ms,
+            });
+        }
+        results.push((plan, outcome));
+    }
 
     let mut tally = tally_indexer_results(results)?;
 
@@ -1081,6 +1146,7 @@ pub(crate) async fn run_indexers(
         commands: tally.commands,
         artifacts,
         workspace_statuses: tally.workspace_statuses,
+        timings,
     })
 }
 
@@ -1900,7 +1966,7 @@ mod tests {
         let output_root = tmp.path().join("scip-out");
 
         let result =
-            run_indexers_already_locked(&project_root, &output_root, None, None, None).await;
+            run_indexers_already_locked(&project_root, &output_root, None, None, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert!(std::env::var_os("CARGO_TARGET_DIR").is_none());
     }
