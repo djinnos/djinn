@@ -980,6 +980,7 @@ impl CoordinatorActor {
             rpc_registry: self.rpc_registry.clone(),
             default_project_id: None,
             reconciliation_sweep: crate::context::ReconciliationSweepConfig::from_env(),
+            cache_cleanup: crate::context::CacheCleanupConfig::from_env(),
         }
     }
 
