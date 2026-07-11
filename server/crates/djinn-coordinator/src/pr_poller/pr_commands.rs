@@ -735,13 +735,14 @@ pub(crate) async fn enable_auto_merge_best_effort(
     pull_number: u64,
     pr_node_id: &str,
     pr_title: &str,
+    method: MergeMethod,
 ) {
     match gh_client
         .enable_auto_merge(
             "", // owner unused by GraphQL mutation
             "", // repo unused by GraphQL mutation
             pull_number,
-            MergeMethod::Squash,
+            method,
             pr_node_id,
             pr_title,
         )
