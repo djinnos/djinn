@@ -1,7 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { UserModel } from "@/api/userConfig";
-import { render, screen } from "@/test/test-utils";
+import {
+  fetchUserConnectedModels,
+  fetchUserModelSelection,
+  saveUserModelSelection,
+  type UserModel,
+} from "@/api/userConfig";
+import { render, screen, userEvent, waitFor, within } from "@/test/test-utils";
 
 import { ModelSection } from "./ModelSection";
 import {
@@ -33,6 +38,42 @@ function um(id: string, opts: Partial<UserModel> = {}): UserModel {
     },
     ...opts,
   } as UserModel;
+}
+
+/**
+ * Rich fixture set covering the browse/search picker edge cases mandated by the
+ * task design:
+ * - `acme` provider with recommended `Zeta` whose name sorts AFTER the
+ *   non-recommended `Alpha` alphabetically — catches alphabetical-only sort.
+ * - `beta` provider with no recommendations → all models visible by fallback.
+ * - `fireworks` provider with a multi-segment id + full metadata.
+ */
+function pickerFixtures(): UserModel[] {
+  return [
+    // acme: recommended Zeta (name "Zeta") sorts AFTER non-recommended Alpha.
+    um("acme/alpha", { provider_id: "acme", name: "Alpha", recommended: false }),
+    um("acme/zeta", { provider_id: "acme", name: "Zeta", recommended: true }),
+    // beta: no recommendations → all models visible by fallback.
+    um("beta/b1", { provider_id: "beta", name: "Beta One", recommended: false }),
+    um("beta/b2", { provider_id: "beta", name: "Beta Two", recommended: false }),
+    // fireworks: multi-segment id + full metadata.
+    um("fireworks/accounts/fireworks/models/mimo-v2.5-pro", {
+      provider_id: "fireworks",
+      name: "MiMo v2.5 Pro",
+      recommended: false,
+      context_window: 1_048_576,
+      output_limit: 16_384,
+      pricing: {
+        input_per_million: 3,
+        output_per_million: 12,
+        cache_read_per_million: 0.3,
+        cache_write_per_million: 3.75,
+      },
+      reasoning: true,
+      tool_call: true,
+      attachment: true,
+    }),
+  ];
 }
 
 vi.mock("@/lib/toast", () => ({
@@ -134,6 +175,25 @@ describe("providerDefaultModels", () => {
     expect(ids).toContain("local/x");
     expect(ids).toContain("local/y");
   });
+
+  it("default view hides non-recommended models when the provider has recommendations", () => {
+    // Alpha (non-rec) vs Zeta (rec): Zeta name sorts AFTER Alpha.
+    const models = [
+      um("acme/alpha", { provider_id: "acme", name: "Alpha", recommended: false }),
+      um("acme/zeta", { provider_id: "acme", name: "Zeta", recommended: true }),
+    ];
+    const defaults = providerDefaultModels(models);
+    expect(defaults.map((m) => m.id)).toEqual(["acme/zeta"]);
+  });
+
+  it("default view shows ALL models for a provider with no recommendations", () => {
+    const models = [
+      um("beta/b1", { provider_id: "beta", name: "Beta One", recommended: false }),
+      um("beta/b2", { provider_id: "beta", name: "Beta Two", recommended: false }),
+    ];
+    const defaults = providerDefaultModels(models);
+    expect(defaults.map((m) => m.id).sort()).toEqual(["beta/b1", "beta/b2"]);
+  });
 });
 
 describe("allModelsSorted", () => {
@@ -163,6 +223,16 @@ describe("allModelsSorted", () => {
     expect(sorted[0]!.id).toBe("p/a"); // recommended first
     expect(sorted[1]!.id).toBe("p/b"); // name B < C
     expect(sorted[2]!.id).toBe("p/c");
+  });
+
+  it("puts recommended first even when its name sorts after a non-recommended one", () => {
+    // Alpha (non-rec) vs Zeta (rec): pure alphabetical-only sort would put
+    // Alpha first. Recommended-first must put Zeta before Alpha.
+    const sorted = allModelsSorted([
+      um("acme/alpha", { name: "Alpha", recommended: false }),
+      um("acme/zeta", { name: "Zeta", recommended: true }),
+    ]);
+    expect(sorted.map((m) => m.id)).toEqual(["acme/zeta", "acme/alpha"]);
   });
 });
 
@@ -241,6 +311,17 @@ describe("groupModelsByProvider", () => {
     expect(g1.flatMap((g) => g.models.map((m) => m.id))).toEqual(
       g2.flatMap((g) => g.models.map((m) => m.id)),
     );
+  });
+
+  it("orders recommended-first within a group even when its name sorts last", () => {
+    // Alpha (non-rec) sorts before Zeta (rec) alphabetically. Recommended-first
+    // must place Zeta first inside the acme group.
+    const groups = groupModelsByProvider([
+      um("acme/alpha", { name: "Alpha", recommended: false }),
+      um("acme/zeta", { name: "Zeta", recommended: true }),
+    ]);
+    expect(groups[0]!.providerId).toBe("acme");
+    expect(groups[0]!.models.map((m) => m.id)).toEqual(["acme/zeta", "acme/alpha"]);
   });
 });
 
@@ -350,7 +431,243 @@ describe("formatModelMetadata", () => {
   });
 });
 
+/**
+ * Component-level regression coverage for the browse-all / search model picker.
+ * These tests drive the actual rendered UI through the AddModelButton picker:
+ * open it, assert default rows, click Browse all, type a global search, select
+ * a result, and inspect lane rendering / the save mutation payload.
+ */
+describe("ModelSection picker (browse/search)", () => {
+  beforeEach(() => {
+    vi.mocked(fetchUserConnectedModels).mockResolvedValue(pickerFixtures());
+    vi.mocked(fetchUserModelSelection).mockResolvedValue({
+      lanes: { plan: [], implement: [], review: [] },
+      maxSessions: {},
+      diverseReview: true,
+      diverseRefinement: true,
+    });
+    // The save mutation's onSuccess reads saved.lanes/maxSessions — return a
+    // valid echo so it does not crash.
+    vi.mocked(saveUserModelSelection).mockImplementation(
+      async (_targetId, lanes, maxSessions, diverseReview, diverseRefinement) => ({
+        lanes,
+        maxSessions,
+        diverseReview: diverseReview ?? true,
+        diverseRefinement: diverseRefinement ?? true,
+      }),
+    );
+  });
+
+  it("default view shows recommended entries for curated providers and hides non-recommended ones", async () => {
+    render(<ModelSection targetId="target-user" />);
+
+    const addButtons = await screen.findAllByRole("button", { name: "Add model" });
+    const user = userEvent.setup();
+    await user.click(addButtons[0]!);
+
+    // Wait for the dialog content to render.
+    await screen.findByText("Add a model");
+
+    // Recommended "Zeta" (acme) is visible by default; non-recommended "Alpha" is NOT.
+    expect(screen.getByText("Zeta")).toBeInTheDocument();
+    expect(screen.queryByText("Alpha")).not.toBeInTheDocument();
+  });
+
+  it("default view shows ALL models for a provider with no recommendations (fallback)", async () => {
+    render(<ModelSection targetId="target-user" />);
+
+    const addButtons = await screen.findAllByRole("button", { name: "Add model" });
+    const user = userEvent.setup();
+    await user.click(addButtons[0]!);
+
+    await screen.findByText("Add a model");
+
+    // beta has no recommendations → both models visible by fallback.
+    expect(screen.getByText("Beta One")).toBeInTheDocument();
+    expect(screen.getByText("Beta Two")).toBeInTheDocument();
+  });
+
+  it("Browse all exposes the hidden non-recommended curated-provider model", async () => {
+    render(<ModelSection targetId="target-user" />);
+
+    const addButtons = await screen.findAllByRole("button", { name: "Add model" });
+    const user = userEvent.setup();
+    await user.click(addButtons[0]!);
+
+    await screen.findByText("Add a model");
+
+    // Alpha is hidden by default; the "Browse all Acme models" affordance reveals it.
+    expect(screen.queryByText("Alpha")).not.toBeInTheDocument();
+    const browseAll = await screen.findByRole("button", { name: /browse all acme models/i });
+    await user.click(browseAll);
+
+    expect(await screen.findByText("Alpha")).toBeInTheDocument();
+  });
+
+  it("global search exposes the hidden non-recommended curated-provider model", async () => {
+    render(<ModelSection targetId="target-user" />);
+
+    const addButtons = await screen.findAllByRole("button", { name: "Add model" });
+    const user = userEvent.setup();
+    await user.click(addButtons[0]!);
+
+    const search = await screen.findByPlaceholderText("Search models…");
+    await user.type(search, "alpha");
+
+    // Searching surfaces the hidden non-recommended model.
+    expect(await screen.findByText("Alpha")).toBeInTheDocument();
+  });
+
+  it("browse/search results stay grouped by provider", async () => {
+    render(<ModelSection targetId="target-user" />);
+
+    const addButtons = await screen.findAllByRole("button", { name: "Add model" });
+    const user = userEvent.setup();
+    await user.click(addButtons[0]!);
+
+    const search = await screen.findByPlaceholderText("Search models…");
+    // A broad query that matches across multiple providers.
+    await user.type(search, "a");
+
+    // Provider group headings are present for matched providers.
+    expect(screen.getByText("Acme")).toBeInTheDocument();
+    expect(screen.getByText("Beta")).toBeInTheDocument();
+  });
+
+  it("browse/search ordering is recommended-first, not alphabetical-only (Alpha vs Zeta)", async () => {
+    render(<ModelSection targetId="target-user" />);
+
+    const addButtons = await screen.findAllByRole("button", { name: "Add model" });
+    const user = userEvent.setup();
+    await user.click(addButtons[0]!);
+
+    const search = await screen.findByPlaceholderText("Search models…");
+    // Query "a" matches both "Alpha" and "Zeta" (via the acme provider id).
+    await user.type(search, "acme");
+
+    // Wait for the acme group to render with both items.
+    const acmeGroup = await screen.findByText("Acme");
+    const groupEl = acmeGroup.closest("[data-slot='command-group']");
+    expect(groupEl).not.toBeNull();
+    const items = within(groupEl as HTMLElement).getAllByRole("button");
+    // First item must be the recommended "Zeta" even though "Alpha" sorts first
+    // alphabetically. (Filter out the "Browse all" button by checking names.)
+    const names = items.map((el) => el.textContent ?? "");
+    // The recommended Zeta appears before Alpha in the listed model rows.
+    const zetaIdx = names.findIndex((n) => n.includes("Zeta"));
+    const alphaIdx = names.findIndex((n) => n.includes("Alpha"));
+    expect(zetaIdx).toBeGreaterThanOrEqual(0);
+    expect(alphaIdx).toBeGreaterThanOrEqual(0);
+    expect(zetaIdx).toBeLessThan(alphaIdx);
+  });
+
+  it("renders metadata chips for browse/search rows (context, pricing, capabilities)", async () => {
+    render(<ModelSection targetId="target-user" />);
+
+    const addButtons = await screen.findAllByRole("button", { name: "Add model" });
+    const user = userEvent.setup();
+    await user.click(addButtons[0]!);
+
+    const search = await screen.findByPlaceholderText("Search models…");
+    await user.type(search, "mimo");
+
+    // The multi-segment fireworks model with full metadata is found.
+    const mimoRow = await screen.findByText("MiMo v2.5 Pro");
+    expect(mimoRow).toBeInTheDocument();
+
+    // Metadata pieces render within the same item.
+    const item = mimoRow.closest("[data-slot='command-item']");
+    expect(item).not.toBeNull();
+    const itemText = (item as HTMLElement).textContent ?? "";
+    expect(itemText).toContain("1M ctx");
+    expect(itemText).toContain("$3.00/$12.00 per M tok");
+    expect(itemText).toContain("reasoning");
+    expect(itemText).toContain("tools");
+    expect(itemText).toContain("vision");
+  });
+
+  it("renders the Recommended badge for a recommended model in browse/search", async () => {
+    render(<ModelSection targetId="target-user" />);
+
+    const addButtons = await screen.findAllByRole("button", { name: "Add model" });
+    const user = userEvent.setup();
+    await user.click(addButtons[0]!);
+
+    const search = await screen.findByPlaceholderText("Search models…");
+    await user.type(search, "zeta");
+
+    const zetaRow = await screen.findByText("Zeta");
+    const item = zetaRow.closest("[data-slot='command-item']");
+    expect(item).not.toBeNull();
+    expect(within(item as HTMLElement).getByText("Recommended")).toBeInTheDocument();
+  });
+
+  it("selecting a multi-segment model id adds the exact full id without truncation", async () => {
+    vi.mocked(saveUserModelSelection).mockClear();
+    render(<ModelSection targetId="target-user" />);
+
+    const addButtons = await screen.findAllByRole("button", { name: "Add model" });
+    const user = userEvent.setup();
+    await user.click(addButtons[0]!);
+
+    const search = await screen.findByPlaceholderText("Search models…");
+    await user.type(search, "mimo");
+
+    const mimoRow = await screen.findByText("MiMo v2.5 Pro");
+    // Click the command item to select it.
+    const item = mimoRow.closest("[data-slot='command-item']")!;
+    await user.click(item);
+
+    // The full multi-segment id now appears in the lane as a selected model.
+    const fullId = "fireworks/accounts/fireworks/models/mimo-v2.5-pro";
+    await waitFor(() => {
+      expect(screen.getByText("MiMo v2.5 Pro")).toBeInTheDocument();
+    });
+    // The provider display name for fireworks renders next to it.
+    expect(screen.getByText("Fireworks")).toBeInTheDocument();
+
+    // Save and assert the mutation payload carries the exact full id.
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(saveUserModelSelection).toHaveBeenCalledTimes(1);
+    });
+    const call = vi.mocked(saveUserModelSelection).mock.calls[0]!;
+    // args: (targetUserId, lanes, maxSessions, diverseReview, diverseRefinement)
+    const lanes = call[1];
+    const allIds = [...lanes.plan, ...lanes.implement, ...lanes.review];
+    expect(allIds).toContain(fullId);
+    // maxSessions keys by the full id.
+    expect(call[2]).toHaveProperty(fullId);
+  });
+});
+
 describe("ModelSection", () => {
+  beforeEach(() => {
+    // Reset to the simple default fixtures for the smoke tests.
+    vi.mocked(fetchUserConnectedModels).mockResolvedValue([
+      {
+        id: "openai/gpt-5",
+        name: "GPT-5",
+        provider_id: "openai",
+        tool_call: true,
+      } as UserModel,
+      {
+        id: "anthropic/claude-sonnet-4",
+        name: "Claude Sonnet 4",
+        provider_id: "anthropic",
+        tool_call: true,
+      } as UserModel,
+    ]);
+    vi.mocked(fetchUserModelSelection).mockResolvedValue({
+      lanes: { plan: ["openai/gpt-5"], implement: [], review: [] },
+      maxSessions: { "openai/gpt-5": 3 },
+      diverseReview: true,
+      diverseRefinement: true,
+    });
+  });
+
   it("strips provider prefixes for fallback model display", () => {
     expect(stripProviderPrefix("openai/gpt-5")).toBe("gpt-5");
     expect(stripProviderPrefix("custom-model")).toBe("custom-model");
