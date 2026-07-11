@@ -12,6 +12,10 @@ use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use crate::context::ExtensionContext;
 
 const TELEMETRY_TARGET: &str = "djinn_agent::jit_pitfalls";
+const JIT_MIN_CONFIDENCE: f64 = 0.3;
+const JIT_TOP_K: usize = 2;
+const JIT_QUERY_LIMIT: usize = 8;
+const JIT_NOTE_TYPES: &[&str] = &["pitfall", "pattern"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JitPitfallOutcome {
@@ -260,7 +264,13 @@ pub(crate) async fn maybe_pitfall_hint(
     let search_started = SystemClockTrait::new().now_instant();
 
     let notes = match note_repo
-        .query_by_scope_overlap(project_id, touched_paths, &["pitfall", "pattern"], 0.3, 8)
+        .query_by_scope_overlap(
+            project_id,
+            touched_paths,
+            JIT_NOTE_TYPES,
+            JIT_MIN_CONFIDENCE,
+            JIT_QUERY_LIMIT,
+        )
         .await
     {
         Ok(notes) if !notes.is_empty() => notes,
@@ -280,6 +290,16 @@ pub(crate) async fn maybe_pitfall_hint(
                 rendered_note_count = 0usize,
                 "jit_pitfalls telemetry outcome"
             );
+            persist_empty_trace(
+                &note_repo,
+                &ctx.db(),
+                session_id,
+                project_id,
+                rollout_mode,
+                touched_paths,
+                elapsed_ms,
+            )
+            .await;
             return None;
         }
         Err(e) => {
@@ -299,12 +319,23 @@ pub(crate) async fn maybe_pitfall_hint(
                 error = %e,
                 "jit_pitfalls: scoped note search failed; skipping hint",
             );
+            persist_trace(
+                &ctx.db(),
+                session_id,
+                project_id,
+                &serde_json::json!([]),
+                &trace_trigger(rollout_mode, touched_paths, 0, 0, Some(&e.to_string())),
+                elapsed_ms,
+                None,
+                0,
+            )
+            .await;
             return None;
         }
     };
 
     let elapsed_ms = elapsed_millis(search_started);
-    let rendered_note_count = notes.len().min(2);
+    let rendered_note_count = notes.len().min(JIT_TOP_K);
     let note_metadata = safe_note_metadata(&notes);
     djinn_telemetry::jit_pitfalls::increment_outcome(JitPitfallOutcome::Injected.label());
     tracing::info!(
@@ -322,7 +353,24 @@ pub(crate) async fn maybe_pitfall_hint(
         "jit_pitfalls telemetry outcome"
     );
 
-    Some(render_pitfall_block(&notes))
+    let block = render_pitfall_block(&notes);
+    // This observational lookup follows all production logging and selection.
+    // Any trace failure is logged in its helper and cannot alter the MCP hint.
+    persist_injected_trace(
+        &note_repo,
+        &ctx.db(),
+        session_id,
+        project_id,
+        rollout_mode,
+        touched_paths,
+        elapsed_ms,
+        &notes,
+        rendered_note_count,
+        estimate_tokens(block.chars().count()),
+    )
+    .await;
+
+    Some(block)
 }
 
 fn render_pitfall_block(notes: &[djinn_memory::Note]) -> String {
@@ -348,4 +396,220 @@ fn render_pitfall_block(notes: &[djinn_memory::Note]) -> String {
     }
     out.push_str("</relevant-pitfalls>");
     out
+}
+
+/// Build the stable, detail-ready trigger. `shape` explicitly identifies the
+/// touched-file trigger while retaining all touched paths used by the query.
+fn trace_trigger(
+    rollout_mode: JitPitfallRolloutMode,
+    touched_paths: &[String],
+    rendered_note_count: usize,
+    result_count: usize,
+    search_error: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "shape": "touched_file",
+        "touched_paths": touched_paths,
+        "touched_path_count": touched_paths.len(),
+        "touched_path_summary": touched_path_summary(touched_paths),
+        "rollout_mode": rollout_mode.label(),
+        "note_types": JIT_NOTE_TYPES,
+        "min_confidence": JIT_MIN_CONFIDENCE,
+        "production_limit": JIT_QUERY_LIMIT,
+        "rendered_note_count": rendered_note_count,
+        "result_count": result_count,
+        "search_error": search_error,
+    })
+}
+
+fn classify_candidate(
+    candidate: &djinn_db::repositories::note::ScopeOverlapTraceCandidate,
+    injected_ids: &HashSet<String>,
+) -> djinn_db::repositories::retrieval_trace::TraceCandidate {
+    use djinn_db::repositories::retrieval_trace::{
+        CandidateOutcome, SkippedReason, TraceCandidate,
+    };
+
+    let scope_paths = serde_json::from_str::<serde_json::Value>(&candidate.scope_paths)
+        .unwrap_or_else(|_| serde_json::Value::String(candidate.scope_paths.clone()));
+    let (outcome, skipped_reason) = if injected_ids.contains(&candidate.id) {
+        (CandidateOutcome::Injected, None)
+    } else if candidate.confidence < JIT_MIN_CONFIDENCE {
+        (
+            CandidateOutcome::Skipped,
+            Some(SkippedReason::MinConfidence),
+        )
+    } else {
+        (CandidateOutcome::Skipped, Some(SkippedReason::NotTopK))
+    };
+    TraceCandidate {
+        note_id: candidate.id.clone(),
+        permalink: Some(candidate.permalink.clone()),
+        title: Some(candidate.title.clone()),
+        outcome,
+        rank: Some(i32::try_from(candidate.rank).unwrap_or(i32::MAX)),
+        confidence: Some(candidate.confidence),
+        skipped_reason,
+        source: Some("scope_overlap".to_owned()),
+        scope: Some(serde_json::json!({
+            "scope_paths": scope_paths,
+            "note_type": candidate.note_type,
+            "folder": candidate.folder,
+        })),
+    }
+}
+
+fn estimate_tokens(chars: usize) -> i32 {
+    i32::try_from(u32::try_from(chars).unwrap_or(u32::MAX).div_ceil(4)).unwrap_or(i32::MAX)
+}
+
+/// Insert a JIT trace without exposing any data-layer error to the MCP handler.
+#[allow(clippy::too_many_arguments)]
+async fn persist_trace(
+    db: &djinn_db::Database,
+    session_id: &str,
+    project_id: &str,
+    candidates: &serde_json::Value,
+    trigger: &serde_json::Value,
+    search_elapsed_ms: u64,
+    candidate_fetch_elapsed_ms: Option<u64>,
+    estimated_injected_tokens: i32,
+) {
+    use djinn_db::repositories::retrieval_trace::{
+        CreateRetrievalTraceParams, DEFAULT_CANDIDATE_CAP, RetrievalTraceEntryPoint,
+        RetrievalTraceRepository,
+    };
+
+    let mut durations = serde_json::Map::new();
+    durations.insert("search_elapsed_ms".into(), search_elapsed_ms.into());
+    if let Some(elapsed) = candidate_fetch_elapsed_ms {
+        durations.insert("trace_candidate_fetch_elapsed_ms".into(), elapsed.into());
+    }
+    let durations = serde_json::Value::Object(durations);
+    if let Err(error) = RetrievalTraceRepository::new(db.clone())
+        .insert(CreateRetrievalTraceParams {
+            project_id,
+            session_id: Some(session_id),
+            task_run_id: None,
+            task_id: None,
+            entry_point: RetrievalTraceEntryPoint::JitPitfalls,
+            trigger: Some(trigger),
+            candidates,
+            candidate_cap: DEFAULT_CANDIDATE_CAP,
+            candidate_cap_exceeded: false,
+            sampling_metadata: None,
+            durations_ms: &durations,
+            estimated_injected_tokens,
+        })
+        .await
+    {
+        tracing::warn!(target: TELEMETRY_TARGET, session_id = %session_id,
+            project_id = %project_id, error = %error,
+            "jit_pitfalls: failed to persist retrieval trace; continuing fail-open");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_injected_trace(
+    note_repo: &djinn_db::NoteRepository,
+    db: &djinn_db::Database,
+    session_id: &str,
+    project_id: &str,
+    rollout_mode: JitPitfallRolloutMode,
+    touched_paths: &[String],
+    search_elapsed_ms: u64,
+    notes: &[djinn_memory::Note],
+    rendered_note_count: usize,
+    estimated_injected_tokens: i32,
+) {
+    let started = SystemClockTrait::new().now_instant();
+    let universe = note_repo
+        .query_by_scope_overlap_trace_candidates(
+            project_id,
+            touched_paths,
+            JIT_NOTE_TYPES,
+            djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize,
+        )
+        .await;
+    let fetch_elapsed = elapsed_millis(started);
+    let (candidates, result_count, error) = match universe {
+        Ok(universe) => {
+            let injected_ids = notes
+                .iter()
+                .take(rendered_note_count)
+                .map(|note| note.id.clone())
+                .collect();
+            let typed = universe
+                .iter()
+                .map(|candidate| classify_candidate(candidate, &injected_ids))
+                .collect::<Vec<_>>();
+            if let Err(error) = djinn_db::repositories::retrieval_trace::validate_candidates(&typed)
+            {
+                tracing::warn!(target: TELEMETRY_TARGET, error = %error,
+                    "jit_pitfalls: invalid trace candidates; skipping trace persistence");
+                return;
+            }
+            match serde_json::to_value(typed) {
+                Ok(value) => (value, universe.len(), None),
+                Err(error) => {
+                    tracing::warn!(target: TELEMETRY_TARGET, error = %error,
+                        "jit_pitfalls: failed to serialize trace candidates; skipping trace persistence");
+                    return;
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(target: TELEMETRY_TARGET, error = %error,
+                "jit_pitfalls: trace candidate query failed; persisting metadata-only trace");
+            (
+                serde_json::json!([]),
+                notes.len(),
+                Some(format!("trace_candidate_query: {error}")),
+            )
+        }
+    };
+    persist_trace(
+        db,
+        session_id,
+        project_id,
+        &candidates,
+        &trace_trigger(
+            rollout_mode,
+            touched_paths,
+            rendered_note_count,
+            result_count,
+            error.as_deref(),
+        ),
+        search_elapsed_ms,
+        Some(fetch_elapsed),
+        estimated_injected_tokens,
+    )
+    .await;
+}
+
+async fn persist_empty_trace(
+    note_repo: &djinn_db::NoteRepository,
+    db: &djinn_db::Database,
+    session_id: &str,
+    project_id: &str,
+    rollout_mode: JitPitfallRolloutMode,
+    touched_paths: &[String],
+    search_elapsed_ms: u64,
+) {
+    // The unfiltered universe keeps a miss explainable: candidates below the
+    // production floor are `min_confidence`; the remaining candidates are
+    // deterministically `not_top_k` because nothing was injected.
+    persist_injected_trace(
+        note_repo,
+        db,
+        session_id,
+        project_id,
+        rollout_mode,
+        touched_paths,
+        search_elapsed_ms,
+        &[],
+        0,
+        0,
+    )
+    .await;
 }
