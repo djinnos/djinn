@@ -7,26 +7,109 @@ export function stripProviderPrefix(modelId: string): string {
 }
 
 /**
- * The curated set of models offered in the "Add model" picker: only each
- * provider's recommended flagship(s) (PR-1's `recommended`), so users stop
- * scrolling past GPT-5.2/5.3/5.4/o1/o3 clutter. A provider with NO curated
- * recommendation falls back to ALL its models, so nothing becomes unselectable.
- * There is intentionally no "show all" escape hatch — the lanes stay clean.
- *
- * (Already-selected non-flagship models still render in their lane via the
- * separate `modelsById` lookup; this only governs what the picker OFFERS.)
+ * Compare two models for deterministic ordering:
+ *  1. recommended models first
+ *  2. then by display name (case-insensitive, falling back to id)
+ *  3. then by full id as a tie-breaker (preserves multi-segment ids like
+ *     "fireworks/accounts/fireworks/models/mimo-v2.5-pro")
  */
-export function pickableModels(models: UserModel[]): UserModel[] {
+export function compareModels(a: UserModel, b: UserModel): number {
+  // Recommended first
+  if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
+  // By name (case-insensitive); fall back to id when name is empty
+  const aName = (a.name || a.id).toLowerCase();
+  const bName = (b.name || b.id).toLowerCase();
+  const nameCmp = aName.localeCompare(bName);
+  if (nameCmp !== 0) return nameCmp;
+  // Tie-breaker by full id
+  return a.id.localeCompare(b.id);
+}
+
+/**
+ * Return a new array sorted: recommended first, then by display name, then by
+ * full id. Does not mutate the input.
+ */
+export function sortModels(models: UserModel[]): UserModel[] {
+  return [...models].sort(compareModels);
+}
+
+export interface ProviderGroup {
+  /** `provider_id ?? "unknown"` — the grouping key and display identifier. */
+  providerId: string;
+  /** Models belonging to this provider, sorted recommended-first → name → id. */
+  models: UserModel[];
+}
+
+/**
+ * Group models by `provider_id` (falling back to `"unknown"` when absent).
+ * Providers are sorted alphabetically by id; models within each group use the
+ * recommended-first → name → id sort.
+ *
+ * The UI task can iterate these groups to render per-provider sections with a
+ * consistent, deterministic layout.
+ */
+export function groupModelsByProvider(models: UserModel[]): ProviderGroup[] {
   const byProvider = new Map<string, UserModel[]>();
   for (const model of models) {
     const provider = model.provider_id ?? "unknown";
-    if (!byProvider.has(provider)) byProvider.set(provider, []);
-    byProvider.get(provider)!.push(model);
+    let bucket = byProvider.get(provider);
+    if (!bucket) {
+      bucket = [];
+      byProvider.set(provider, bucket);
+    }
+    bucket.push(model);
   }
-  const pickable: UserModel[] = [];
-  for (const providerModels of byProvider.values()) {
-    const recommended = providerModels.filter((m) => m.recommended);
-    pickable.push(...(recommended.length > 0 ? recommended : providerModels));
+
+  const groups: ProviderGroup[] = [];
+  // Sort provider ids alphabetically for deterministic ordering
+  const providerIds = [...byProvider.keys()].sort();
+  for (const providerId of providerIds) {
+    groups.push({
+      providerId,
+      models: sortModels(byProvider.get(providerId)!),
+    });
   }
-  return pickable;
+  return groups;
+}
+
+/**
+ * Per-provider "default" list: recommended-only when the provider has any
+ * recommendation, otherwise all of the provider's models. This is the set the
+ * collapsed/default picker UI should display (preserves the original
+ * `pickableModels` semantics with consistent sorting).
+ *
+ * Use `allModelsSorted` for the expanded/browse/search state where every
+ * connected model should be reachable.
+ */
+export function providerDefaultModels(models: UserModel[]): UserModel[] {
+  const groups = groupModelsByProvider(models);
+  const defaults: UserModel[] = [];
+  for (const group of groups) {
+    const recommended = group.models.filter((m) => m.recommended);
+    defaults.push(...(recommended.length > 0 ? recommended : group.models));
+  }
+  return defaults;
+}
+
+/**
+ * Every connected model in recommended-first → name → id order — nothing is
+ * dropped. This is the full list for browse/search states where users need to
+ * reach any model.
+ */
+export function allModelsSorted(models: UserModel[]): UserModel[] {
+  return sortModels(models);
+}
+
+/**
+ * The curated set of models offered in the "Add model" picker: only each
+ * provider's recommended flagship(s), so users stop scrolling past clutter. A
+ * provider with NO curated recommendation falls back to ALL its models, so
+ * nothing becomes unselectable.
+ *
+ * @deprecated Use `providerDefaultModels` for the same semantics with
+ * consistent sorting, or `allModelsSorted` / `groupModelsByProvider` for the
+ * browse/search surface. Kept for backward compatibility during migration.
+ */
+export function pickableModels(models: UserModel[]): UserModel[] {
+  return providerDefaultModels(models);
 }
