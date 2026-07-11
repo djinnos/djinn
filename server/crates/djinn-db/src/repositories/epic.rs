@@ -300,26 +300,35 @@ impl EpicRepository {
     pub async fn close(&self, id: &str) -> Result<Epic> {
         self.db.ensure_initialized().await?;
 
-        // ── Step 1: Classify children (read-only, outside transaction) ──────
+        // ── Transactional child disposition + epic close ───────────────────
+        //
+        // All child selection, classification, and mutation happen inside a
+        // single transaction.  For each candidate child we lock the row with
+        // `FOR UPDATE`, then call `classify_child_tx` which re-runs the full
+        // normative guard order (already-terminal, other-open-parent,
+        // external-dependent, status matrix) under the same connection.
+        // This closes every TOCTOU gap: no pre-transaction plan can go stale,
+        // and no status change between selection and mutation can cause a
+        // child to be skipped or mis-classified.
         let scope = DispositionScope::for_epic_close(id);
-        let task_repo = TaskRepository::new(self.db.clone(), self.events.clone());
-        let plan = task_repo.classify_parent_disposition(&scope).await?;
-
-        // ── Step 2: Transactional child mutation + epic close ───────────────
         let mut tx = self.db.pool().begin().await?;
+
+        // Select every direct child id of the closing epic inside the
+        // transaction so the candidate set is consistent with mutations.
+        let child_ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM tasks WHERE epic_id = $1 ORDER BY created_at")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
 
         // Track post-commit work: (task_id, from_status, disposition_kind)
         let mut child_mutations: Vec<(String, String, String)> = Vec::new();
 
-        for finding in &plan.findings {
-            if !finding.disposition.applies_change() {
-                continue;
-            }
-
-            // Lock the child row and re-check status hasn't changed.
+        for child_id in &child_ids {
+            // Lock the child row under the transaction.
             let current_status: Option<String> =
                 sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1 FOR UPDATE")
-                    .bind(&finding.task_id)
+                    .bind(child_id)
                     .fetch_optional(&mut *tx)
                     .await?;
 
@@ -328,23 +337,18 @@ impl EpicRepository {
                 None => continue,
             };
 
-            if current_status != finding.status {
+            // Classify using the current (locked) status, with ALL guards
+            // (already-terminal, other-open-parent, external-dependent,
+            // status matrix) checked under the same transaction and row
+            // lock.  No pre-computed plan is consulted — the disposition
+            // is derived entirely from the locked state.
+            let disposition = classify_child_tx(&mut tx, child_id, &current_status, &scope).await?;
+
+            if !disposition.applies_change() {
                 continue;
             }
 
-            // Re-classify the child under the transaction so that guards 2
-            // (other-open-parent) and 3 (external-dependent) are checked
-            // atomically with the mutation, closing the TOCTOU gap between the
-            // read-time plan and the write-time disposition.
-            let tx_disposition =
-                classify_child_tx(&mut tx, &finding.task_id, &current_status, &scope).await?;
-
-            if !tx_disposition.applies_change() {
-                // Retained by a guard that fired between plan and lock.
-                continue;
-            }
-
-            if tx_disposition.closes() {
+            if disposition.closes() {
                 // Close-ready child: close with close_reason = parent_closed.
                 sqlx::query(
                     r#"UPDATE tasks SET
@@ -354,13 +358,13 @@ impl EpicRepository {
                         updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                      WHERE id = $1"#,
                 )
-                .bind(&finding.task_id)
+                .bind(child_id)
                 .execute(&mut *tx)
                 .await?;
 
                 // Standard status_changed activity row (normal transition evidence).
                 let status_payload = serde_json::json!({
-                    "from_status": finding.status,
+                    "from_status": current_status,
                     "to_status": "closed",
                     "reason": "parent_closed",
                 });
@@ -370,7 +374,7 @@ impl EpicRepository {
                      VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(&sc_id)
-                .bind(&finding.task_id)
+                .bind(child_id)
                 .bind("system")
                 .bind("system")
                 .bind("status_changed")
@@ -383,7 +387,7 @@ impl EpicRepository {
                     "parent_kind": "epic",
                     "parent_id": id,
                     "entry_point": "epic_close",
-                    "from_status": finding.status,
+                    "from_status": current_status,
                     "to_status": "closed",
                 });
                 let activity_id = uuid::Uuid::now_v7().to_string();
@@ -392,7 +396,7 @@ impl EpicRepository {
                      VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(&activity_id)
-                .bind(&finding.task_id)
+                .bind(child_id)
                 .bind("system")
                 .bind("system")
                 .bind("parent_child_disposed")
@@ -401,13 +405,13 @@ impl EpicRepository {
                 .await?;
 
                 child_mutations.push((
-                    finding.task_id.clone(),
-                    finding.status.clone(),
+                    child_id.clone(),
+                    current_status.clone(),
                     "close".to_owned(),
                 ));
-            } else if tx_disposition.parks() {
+            } else if disposition.parks() {
                 // In-flight/PR-active child: park to needs_lead_intervention.
-                let park_reason = park_reason_for_status(&finding.status);
+                let park_reason = park_reason_for_status(&current_status);
 
                 sqlx::query(
                     r#"UPDATE tasks SET
@@ -418,13 +422,13 @@ impl EpicRepository {
                         updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                      WHERE id = $1"#,
                 )
-                .bind(&finding.task_id)
+                .bind(child_id)
                 .execute(&mut *tx)
                 .await?;
 
                 // Standard status_changed activity row (normal transition evidence).
                 let status_payload = serde_json::json!({
-                    "from_status": finding.status,
+                    "from_status": current_status,
                     "to_status": "needs_lead_intervention",
                     "reason": park_reason,
                 });
@@ -434,7 +438,7 @@ impl EpicRepository {
                      VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(&sc_id)
-                .bind(&finding.task_id)
+                .bind(child_id)
                 .bind("system")
                 .bind("system")
                 .bind("status_changed")
@@ -447,7 +451,7 @@ impl EpicRepository {
                     "parent_kind": "epic",
                     "parent_id": id,
                     "entry_point": "epic_close",
-                    "from_status": finding.status,
+                    "from_status": current_status,
                     "to_status": "needs_lead_intervention",
                     "park_reason": park_reason,
                 });
@@ -457,7 +461,7 @@ impl EpicRepository {
                      VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(&activity_id)
-                .bind(&finding.task_id)
+                .bind(child_id)
                 .bind("system")
                 .bind("system")
                 .bind("parent_child_parked")
@@ -465,11 +469,7 @@ impl EpicRepository {
                 .execute(&mut *tx)
                 .await?;
 
-                child_mutations.push((
-                    finding.task_id.clone(),
-                    finding.status.clone(),
-                    "park".to_owned(),
-                ));
+                child_mutations.push((child_id.clone(), current_status.clone(), "park".to_owned()));
             }
         }
 
@@ -497,7 +497,8 @@ impl EpicRepository {
 
         tx.commit().await?;
 
-        // ── Step 3: Post-commit events ─────────────────────────────────────
+        // ── Post-commit events ─────────────────────────────────────────────
+        let task_repo = TaskRepository::new(self.db.clone(), self.events.clone());
         for (task_id, _from_status, _kind) in &child_mutations {
             if let Some(task) = task_repo.get(task_id).await? {
                 self.events
