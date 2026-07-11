@@ -3,7 +3,7 @@ use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Epic;
 
 use crate::database::Database;
-use crate::repositories::task::{DispositionScope, TaskRepository};
+use crate::repositories::task::{DispositionScope, TaskRepository, classify_child_tx};
 use crate::{Error, Result};
 
 // Inlined EPIC_COLS projection for each `query_as!(Epic, ...)` call site.
@@ -332,7 +332,19 @@ impl EpicRepository {
                 continue;
             }
 
-            if finding.disposition.closes() {
+            // Re-classify the child under the transaction so that guards 2
+            // (other-open-parent) and 3 (external-dependent) are checked
+            // atomically with the mutation, closing the TOCTOU gap between the
+            // read-time plan and the write-time disposition.
+            let tx_disposition =
+                classify_child_tx(&mut tx, &finding.task_id, &current_status, &scope).await?;
+
+            if !tx_disposition.applies_change() {
+                // Retained by a guard that fired between plan and lock.
+                continue;
+            }
+
+            if tx_disposition.closes() {
                 // Close-ready child: close with close_reason = parent_closed.
                 sqlx::query(
                     r#"UPDATE tasks SET
@@ -393,7 +405,7 @@ impl EpicRepository {
                     finding.status.clone(),
                     "close".to_owned(),
                 ));
-            } else if finding.disposition.parks() {
+            } else if tx_disposition.parks() {
                 // In-flight/PR-active child: park to needs_lead_intervention.
                 let park_reason = park_reason_for_status(&finding.status);
 

@@ -472,6 +472,84 @@ impl TaskRepository {
     }
 }
 
+// ── Transactional re-classification ─────────────────────────────────────────
+
+/// Re-classify a single child under an active database transaction.
+///
+/// Re-runs the full normative guard order using the transaction connection so
+/// that guards 2 (other-open-parent) and 3 (external-dependent) are checked
+/// under the same row lock that protects the mutation. This closes the TOCTOU
+/// gap between read-time classification and mutation-time application that
+/// exists when [`TaskRepository::classify_parent_disposition`] is called
+/// outside the transaction.
+///
+/// Call this after locking the child row with `FOR UPDATE` and confirming the
+/// status has not changed; pass the `current_status` obtained from the lock.
+pub async fn classify_child_tx(
+    conn: &mut sqlx::PgConnection,
+    task_id: &str,
+    status: &str,
+    scope: &DispositionScope,
+) -> Result<ChildDisposition> {
+    // Guard 1: already-terminal child — no action.
+    if is_terminal_task_status(status) {
+        return Ok(ChildDisposition::RetainedAlreadyTerminal);
+    }
+
+    // Guard 2: other-open-proposal-parent — retained.
+    // The child's epic_id is the join key into proposal_epics. We exclude the
+    // scope's own aborting proposal (if any) and any terminal proposal status.
+    let excluded = scope.proposal_id.as_deref();
+    let other_parent_count: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+             FROM proposal_epics pe
+             JOIN proposals p ON p.id = pe.proposal_id
+             JOIN tasks t ON t.id = $1 AND t.epic_id = pe.epic_id
+            WHERE p.status NOT IN ('archived', 'superseded', 'rejected', 'done')
+              AND ($2::text IS NULL OR p.id <> $2)"#,
+    )
+    .bind(task_id)
+    .bind(excluded)
+    .fetch_one(&mut *conn)
+    .await?;
+
+    if other_parent_count > 0 {
+        return Ok(ChildDisposition::RetainedOtherParent);
+    }
+
+    // Guard 3: external-open-dependent — retained.
+    // Candidate child is blockers.blocking_task_id; open dependents are
+    // blockers.task_id rows whose task status is not 'closed'. Internal
+    // dependents (same closing epic) are excluded.
+    let external_count: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+             FROM blockers b
+             JOIN tasks t ON t.id = b.task_id
+            WHERE b.blocking_task_id = $1
+              AND t.status <> 'closed'
+              AND (t.epic_id IS NULL OR t.epic_id <> ALL($2))"#,
+    )
+    .bind(task_id)
+    .bind(&scope.epic_ids)
+    .fetch_one(&mut *conn)
+    .await?;
+
+    if external_count > 0 {
+        return Ok(ChildDisposition::RetainedExternalDependent);
+    }
+
+    // Guard 4: status matrix.
+    if CLOSE_READY_STATUSES.contains(&status) {
+        return Ok(ChildDisposition::Close);
+    }
+    if PARK_STATUSES.contains(&status) {
+        return Ok(ChildDisposition::Park);
+    }
+
+    // Unknown / unmapped status: retain conservatively rather than guess.
+    Ok(ChildDisposition::RetainedAlreadyTerminal)
+}
+
 // ── Internal row + helpers ───────────────────────────────────────────────────
 
 /// Raw candidate-child row projected by `select_candidate_children`.
