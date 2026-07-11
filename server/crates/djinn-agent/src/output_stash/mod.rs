@@ -960,6 +960,70 @@ pub fn render_tool_result(
     text
 }
 
+/// Externalize an already-rendered tool-result string using the canonical
+/// `[djinn-output-stash ...]` stub contract with `reason="turn_budget"`.
+///
+/// Unlike [`render_tool_result`], which renders from a raw JSON `value`, this
+/// helper takes the *already-rendered text* (e.g. the inline result produced by
+/// a prior `render_result` call) and replaces it inline with a smaller stash
+/// stub when the rendered text exceeds `preview_chars`. This is the seam the
+/// per-turn inline-budget post-pass consumes: it re-externalizes the largest
+/// results of a parallel batch *after* they have been rendered, keeping
+/// `tool_use_id` / `tool_name` / recovery metadata intact.
+///
+/// Behaviour:
+/// * The complete original `rendered` text is preserved in `OutputStash` under
+///   `tool_use_id` so `output_view` / `output_grep` can recover it in full.
+/// * The inline body is `smart_truncate(rendered, preview_chars)`.
+/// * The canonical header records `full_chars` and `preview_chars` as
+///   **character** counts (not bytes).
+/// * **Non-shrinking guard:** if the generated stub would not be smaller than
+///   `rendered`, the original text is returned unchanged and no stash insertion
+///   or replacement occurs. This prevents replacing useful text with a stub that
+///   is longer or equal.
+///
+/// `preview_chars` is clamped to a minimum of `1` so a caller cannot request a
+/// degenerate zero-width preview.
+pub fn externalize_rendered_tool_result(
+    stash: &Mutex<OutputStash>,
+    tool_use_id: &str,
+    tool_name: &str,
+    rendered: &str,
+    preview_chars: usize,
+) -> String {
+    let full_chars = rendered.chars().count();
+    let preview_chars = preview_chars.max(1);
+
+    // Build the preview body from the already-rendered text.
+    let preview_body = crate::truncate::smart_truncate(rendered, preview_chars);
+    let preview_body_chars = preview_body.chars().count();
+
+    // Canonical parseable header. Character counts, not bytes.
+    let header = format!(
+        "[djinn-output-stash tool_use_id=\"{tool_use_id}\" tool_name=\"{tool_name}\" reason=\"turn_budget\" full_chars=\"{full_chars}\" preview_chars=\"{preview_body_chars}\"]"
+    );
+
+    let recovery_hint = format!(
+        "\n\n[Full output stashed ({full_chars} chars). Use output_view(tool_use_id=\"{tool_use_id}\") to paginate or output_grep(tool_use_id=\"{tool_use_id}\", pattern=\"...\") to search.]"
+    );
+
+    let stub = format!("{header}\n{preview_body}{recovery_hint}");
+
+    // Non-shrinking guard: only replace when the stub is strictly smaller.
+    if stub.chars().count() >= full_chars {
+        return rendered.to_string();
+    }
+
+    // Preserve the full rendered text for output_view / output_grep recovery.
+    stash.lock().unwrap().insert(
+        tool_use_id.to_string(),
+        tool_name.to_string(),
+        rendered.to_string(),
+    );
+
+    stub
+}
+
 /// `true` for the two stash-navigation tools handled in-process against the
 /// [`OutputStash`] rather than dispatched to a real handler.
 pub fn is_stash_tool(name: &str) -> bool {
