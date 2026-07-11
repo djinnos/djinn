@@ -528,6 +528,13 @@ mod tests {
         );
         assert_eq!(envs.get("SCCACHE_CACHE_SIZE").copied(), Some("20G"));
         assert_eq!(envs.get("SQLX_OFFLINE").copied(), Some("true"));
+        // Fast linker: mold is installed in the devcontainer image; wire it in
+        // for the warm build so the warm base is linked (and fingerprinted)
+        // identically to the task-run pods that seed from it.
+        assert_eq!(
+            envs.get("CARGO_BUILD_RUSTFLAGS").copied(),
+            Some("-Clink-arg=-fuse-ld=mold"),
+        );
 
         let mounts = container.volume_mounts.as_ref().expect("mounts");
         assert_eq!(mounts.len(), 4, "mirror + workspace + cache + env-config");

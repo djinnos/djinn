@@ -532,6 +532,32 @@
               "description": "Shared-credit completed-task count (== task_count); surfaced separately\nso the UI can label the attribution semantics.",
               "type": "integer",
               "format": "int64"
+            },
+            "first_pass_rejection_rate": {
+              "description": "First-pass rejection rate (0.0–1.0): fraction of this model's worker\nsessions that were superseded by a later worker session on a reopened\ntask — the pass did not land and the task was reworked. Discriminates\nfirst-pass quality that shared-credit success_rate hides. `None` when\nthe model ran no worker sessions.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "final_pass_share": {
+              "description": "Final-pass share (0.0–1.0): fraction of this model's shared-credit\ncompleted tasks where THIS model ran the last worker session before the\ntask closed — i.e. who actually landed the merge. `None` when the model\nhas no completed-task credits.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "first_pass_rejected_session_count": {
+              "description": "Worker sessions superseded on a reopened task (numerator of\n`first_pass_rejection_rate`).",
+              "type": "integer",
+              "format": "int64"
+            },
+            "final_pass_completed_task_count": {
+              "description": "Completed tasks landed by this model's final worker session (numerator of\n`final_pass_share`).",
+              "type": "integer",
+              "format": "int64"
             }
           },
           "required": [
@@ -543,7 +569,9 @@
             "tokens_out",
             "tokens_cached",
             "session_count",
-            "completed_task_count"
+            "completed_task_count",
+            "first_pass_rejected_session_count",
+            "final_pass_completed_task_count"
           ]
         },
         "ProjectModelCellDto": {
