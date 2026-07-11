@@ -978,7 +978,7 @@ fn planner_prompt_shrinks_by_at_least_8kb() {
     // Build a baseline tools section using the old format (with descriptions).
     let baseline_tools = schemas
         .iter()
-        .map(|s| format_tool_line_with_description(s))
+        .map(format_tool_line_with_description)
         .collect::<Vec<_>>()
         .join("\n");
     let current_tools = format_tools_section(&schemas);
@@ -1005,7 +1005,7 @@ fn worker_prompt_shrinks_by_at_least_4kb() {
     // Build a baseline tools section using the old format.
     let baseline_tools = schemas
         .iter()
-        .map(|s| format_tool_line_with_description(s))
+        .map(format_tool_line_with_description)
         .collect::<Vec<_>>()
         .join("\n");
     let current_tools = format_tools_section(&schemas);

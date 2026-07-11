@@ -37,7 +37,9 @@
 //! - Verifiability: replay helpers recompute scores from stored frame content
 
 pub mod frame;
+pub mod outcome;
 pub mod random;
+pub mod report;
 pub mod scheduler;
 
 #[cfg(test)]
@@ -48,9 +50,17 @@ pub use frame::{
     ExclusionReason, FrameBuilder, FrameBuilderError, SamplePolicy, SealedFrame,
     SealedFrameEventPayload, StratumFrame,
 };
+pub use outcome::{
+    AuditOutcomeRecordResult, EVENT_OUTCOME_RECORDED, RecordAuditOutcomeParams,
+    record_audit_outcome,
+};
 pub use random::{
     DrawResult, DrawnItem, HMAC_SHA256_COUNTER_V1, ReplayVerification, SeedCommitment, commit_seed,
     draw_selections, verify_replay,
+};
+pub use report::{
+    FalseNegativeReport, RevalidationCandidate, RevalidationResult, StratumReport,
+    generate_false_negative_report, query_revalidation_ground_truth,
 };
 pub use scheduler::{
     AuditSchedulerConfig, AuditSchedulerResult, BacklogPauseReason, EVENT_AUDIT_MATERIALIZED,
