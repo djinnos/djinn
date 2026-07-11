@@ -556,15 +556,7 @@ async fn trace_candidate_search_failure_does_not_change_prompt_output() {
     // excludes NULL rows, so it will only return note B. The trace-candidate
     // query has no confidence filter and includes the NULL row, causing
     // `query_as` to fail when mapping NULL → f64.
-    sqlx::query("ALTER TABLE notes ALTER COLUMN confidence DROP NOT NULL")
-        .execute(db.pool())
-        .await
-        .expect("drop not null");
-    sqlx::query("UPDATE notes SET confidence = NULL WHERE id = $1")
-        .bind(&note_a)
-        .execute(db.pool())
-        .await
-        .expect("nullify confidence");
+    djinn_db::test_support::nullify_note_confidence_for_test(&db, &note_a).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
 

@@ -180,6 +180,25 @@ pub async fn drop_table_for_test(db: &Database, table_name: &str) {
         .unwrap();
 }
 
+/// Make the `notes.confidence` column nullable and set one note's confidence
+/// to NULL. Test-fixture helper for fail-open retrieval tests that need the
+/// production note query to exclude one row while a trace/query mapping path
+/// observes malformed data.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn nullify_note_confidence_for_test(db: &Database, note_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("ALTER TABLE notes ALTER COLUMN confidence DROP NOT NULL")
+        .execute(db.pool())
+        .await
+        .expect("failed to make notes.confidence nullable");
+    sqlx::query("UPDATE notes SET confidence = NULL WHERE id = $1")
+        .bind(note_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to nullify note confidence");
+}
+
 /// Add a test-only constraint that leaves existing `task_arbitrations` rows
 /// readable but makes subsequent INSERTs fail.  This lets coordinator
 /// regressions exercise the real `TaskArbitrationRepository::try_create` error
