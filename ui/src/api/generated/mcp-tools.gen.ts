@@ -1909,18 +1909,20 @@ export namespace GetProjectDevcontainerStatusOutputSchema {
   error?: string
   /**
    * Derived status for the UI banner. One of
-   * `pending | running | ready | warning | failed`. `pending` means no warm has
-   * ever run; `running` means the image is ready and a warm should be
-   * in flight (or imminent); `ready` means derived graph freshness exists;
-   * `warning` means a non-fatal graph-cache shrink backstop fired
-   * (see `scip_indexer::append_graph_cache_shrink_warning` and
-   * `canonical_graph::detect_graph_cache_shrink_warning`) — the cache
-   * is still fresh and graph usage is unaffected, but operators should
-   * inspect the matching `workspace_warm_statuses` row carrying the
-   * old/new node counts and commit SHA; `failed` mirrors the image
-   * build's failed status (no warm possible) or any
-   * `failed`/`timed_out` workspace warm status (which always overrides
-   * a shrink warning).
+   * `pending | running | ready | warning | degraded | failed`.
+   * `pending` means no warm has ever run; `running` means the image is
+   * ready and a warm should be in flight (or imminent); `ready` means
+   * derived graph freshness exists and every workspace warmed cleanly;
+   * `warning` means a non-fatal graph-cache shrink backstop fired — the
+   * cache is still fresh and graph usage is unaffected, but operators
+   * should inspect the matching `workspace_warm_statuses` row;
+   * `degraded` means the overall graph warmed but at least one workspace
+   * row is `failed`/`timed_out` (partial success — the graph is usable
+   * but incomplete; the failing workspaces are listed in
+   * `workspace_warm_statuses`); `failed` means the image build failed
+   * (no warm possible) or a `failed`/`timed_out` workspace exists with
+   * no successful warm at all. `failed`/`timed_out` always override a
+   * shrink warning.
    */
   graph_warm_status: string
   /**
@@ -1953,17 +1955,38 @@ export namespace GetProjectDevcontainerStatusOutputSchema {
    */
   needs_image: boolean
   /**
-   * Per-workspace graph warm results from the most recent indexer run.
-   * Entries with `failed` or `timed_out` explain which workspace did not
-   * produce a SCIP artifact even when another workspace succeeded.
+   * Per-workspace graph warm results, sourced from the durable
+   * `project_workspace_graph` rows (the same source the `code_graph
+   * workspaces` op reads). Entries with `failed` or `timed_out` explain
+   * which workspace did not produce a SCIP artifact even when another
+   * workspace succeeded and the overall warm reports `degraded`.
    */
   workspace_warm_statuses?: WorkspaceWarmStatusEntry[]
   [k: string]: any
   }
+  /**
+   * A single per-workspace graph-warm result, projected from a
+   * `project_workspace_graph` row (the durable freshness source of truth).
+   */
   export interface WorkspaceWarmStatusEntry {
-  detail?: string
-  indexer: string
+  /**
+   * Commit SHA the row was warmed at, when recorded.
+   */
+  commit_sha?: string
+  /**
+   * Persisted warm status: `ready | warming | failed | timed_out`.
+   * `failed`/`timed_out` mean the indexer produced no SCIP artifact for
+   * this workspace, even if the overall project graph warmed from other
+   * workspaces.
+   */
   status: string
+  /**
+   * ISO-8601 UTC timestamp of the last warm attempt for this workspace.
+   */
+  warmed_at?: string
+  /**
+   * Workspace slug (matches the `code_graph workspaces` op).
+   */
   workspace_slug: string
   [k: string]: any
   }
@@ -4520,10 +4543,18 @@ export type OrgPolicyGetInput = OrgPolicyGetInputSchema.OrgPolicyGetInput;
 export namespace OrgPolicyGetOutputSchema {
   export interface OrgPolicyGetOutput {
   /**
+   * Fully-qualified `provider/model-id` entries to add to the recommended set.
+   */
+  additional_recommended_model_ids: string[]
+  /**
    * The blocked subscription provider ids (subset of `subscriptions`).
    */
   blocked_subscriptions: string[]
   default_lanes: OrgDefaultLanesPayload
+  /**
+   * Fully-qualified `provider/model-id` entries to demote from the recommended set.
+   */
+  demoted_recommended_model_ids: string[]
   error?: string
   /**
    * `flexible` (members may override) | `locked` (org assignment authoritative).
@@ -4579,6 +4610,12 @@ export type OrgPolicyGetOutput = OrgPolicyGetOutputSchema.OrgPolicyGetOutput;
 export namespace OrgPolicySetInputSchema {
   export interface OrgPolicySetInput {
   /**
+   * Fully-qualified `provider/model-id` entries to add to the recommended
+   * set on top of the baseline. Omit to keep the current value; pass an
+   * empty list to clear.
+   */
+  additional_recommended_model_ids?: string[]
+  /**
    * Replacement set of blocked subscription provider ids. Only subscription
    * providers are honored; any non-subscription id is ignored. Omit to keep
    * the current value.
@@ -4589,6 +4626,12 @@ export namespace OrgPolicySetInputSchema {
    * Omit to keep the current value.
    */
   default_lanes?: (OrgDefaultLanesPayload | null)
+  /**
+   * Fully-qualified `provider/model-id` entries to demote from the
+   * recommended set. Omit to keep the current value; pass an empty list to
+   * clear.
+   */
+  demoted_recommended_model_ids?: string[]
   /**
    * Lane lock level: `flexible` or `locked`. Omit to keep the current value.
    */
@@ -4617,9 +4660,11 @@ export namespace OrgPolicySetInputSchema {
 export type OrgPolicySetInput = OrgPolicySetInputSchema.OrgPolicySetInput;
 export namespace OrgPolicySetOutputSchema {
   export interface OrgPolicySetOutput {
+  additional_recommended_model_ids: string[]
   applied: boolean
   blocked_subscriptions: string[]
   default_lanes: OrgDefaultLanesPayload
+  demoted_recommended_model_ids: string[]
   error?: string
   lock_level: string
   ok: boolean
