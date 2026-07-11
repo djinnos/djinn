@@ -490,6 +490,32 @@ imagePipeline:
     # pipeline — avoids wiring pull-secrets onto every Job Pod Spec.
     # Leave false in environments where image confidentiality matters.
     anonymousPull: false
+    # Catalog image tag retention policy. When enabled, Zot prunes old tags
+    # from djinn-image-* catalog repositories on a schedule, keeping only the
+    # newest N tags per repo. BuildKit cache repos (djinn-buildkitd-*) and any
+    # other non-catalog repos are never touched.
+    #
+    # Safety model:
+    # - `retention.enabled` controls whether the policy is rendered into
+    #   zot-configmap at all. When false, no retention policy exists.
+    # - `retention.dryRun` (default true) puts Zot in dry-run mode: it reports
+    #   what it WOULD delete but does not actually delete. Safe to enable
+    #   alongside monitoring without risk.
+    # - `retention.deleteUntagged` (default true) tells Zot to also delete
+    #   manifests with no remaining tags after tag pruning.
+    # - `retention.newestTags` (default 5) is the number of newest tags to keep
+    #   per catalog repo.
+    #
+    # The image-controller preflight gate (retention_preflight) independently
+    # verifies that every currently-selected catalog image remains pullable
+    # by retained tag or digest pin BEFORE destructive deletion can proceed.
+    # If the preflight finds an unsafe image, it blocks and reports —
+    # destructive retention never silently removes a selected image.
+    retention:
+      enabled: false
+      dryRun: true
+      deleteUntagged: true
+      newestTags: 5
     storage:
       size: 100Gi
       storageClassName: ""   # "" → cluster default
