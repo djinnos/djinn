@@ -4544,6 +4544,50 @@ async fn provider_tool_schemas_preserve_name_description_and_input_schema() {
     ]);
     let provider = RecordingProvider::new(inner);
     let mut h = ReplyLoopHarness::new_with_worker_prompt().await;
+
+    // ── Prompt-side assertion: the rendered system prompt must be
+    // signature-only — tool description bodies must NOT appear on the
+    // tool-signature lines in the system prompt.  Capture before run()
+    // so compaction cannot alter the system message. ──
+    let system_prompt_text = h.conv.messages[0].text_content();
+    for schema in &schemas {
+        let name = schema
+            .get("name")
+            .and_then(|v| v.as_str())
+            .expect("schema has name");
+        let desc = schema
+            .get("description")
+            .and_then(|v| v.as_str())
+            .expect("schema has description");
+
+        // The tools section must contain a signature-only line like
+        //   - `shell(command, timeout_ms?)`
+        let has_sig_line = system_prompt_text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with(&format!("- `{name}("))
+        });
+        assert!(
+            has_sig_line,
+            "rendered worker prompt must contain signature-only tool line \
+             for {name}; this indicates format_tools_section regression"
+        );
+
+        // That same line must NOT carry the old description-extended format
+        //   - `shell(command, timeout_ms?)` — Execute shell commands…
+        // If this assertion fails, format_tools_section is duplicating
+        // provider descriptions in the prompt again.
+        let desc_on_sig_line = system_prompt_text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with(&format!("- `{name}(")) && trimmed.contains(&format!(" — {desc}"))
+        });
+        assert!(
+            !desc_on_sig_line,
+            "rendered worker prompt tool line for {name} must NOT include \
+             description body (' — {desc}'); format_tools_section is \
+             duplicating provider descriptions in the prompt"
+        );
+    }
+
     let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
 
     // Session must complete successfully.
@@ -4831,4 +4875,169 @@ async fn dispatch_semantics_unchanged_after_description_shortening() {
         result_text.contains("\"ok\""),
         "shell result should contain mock dispatch output, got: {result_text:?}"
     );
+}
+
+/// Standalone regression test: the rendered worker system prompt must use
+/// signature-only tool lines (no provider description bodies), while
+/// provider-declared tool schemas still carry full `description` fields.
+///
+/// This test does NOT run the reply loop — it inspects the prompt and schemas
+/// directly so it catches regressions in `format_tools_section` rendering
+/// independently of dispatch/stream behaviour.
+#[tokio::test]
+async fn rendered_worker_prompt_uses_signature_only_tool_section() {
+    let schemas = real_worker_tool_schemas();
+
+    // Build the real post-wzz6 worker prompt surface using a minimal Task
+    // constructed directly — no database dependency, so the test runs in
+    // any environment (CI sidecar, local dev) without needing the Postgres
+    // test template.
+    let tool_schemas_fn = djinn_mcp_extension::tool_defs::tool_schemas_worker;
+    let role_config = djinn_roles::config::config_for(djinn_roles::AgentType::Worker);
+    let task = djinn_core::models::Task {
+        id: "test-task-id".to_string(),
+        project_id: "test-project-id".to_string(),
+        short_id: "t-wzz6".to_string(),
+        epic_id: None,
+        title: "wzz6 regression probe".to_string(),
+        description: "Verify prompt-side tool-description deduplication.".to_string(),
+        design: String::new(),
+        issue_type: "task".to_string(),
+        status: "in_progress".to_string(),
+        priority: 1,
+        owner: "test-owner".to_string(),
+        labels: "[]".to_string(),
+        acceptance_criteria: "[]".to_string(),
+        reopen_count: 0,
+        continuation_count: 0,
+        total_reopen_count: 0,
+        intervention_count: 0,
+        last_intervention_at: None,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        closed_at: None,
+        close_reason: None,
+        merge_commit_sha: None,
+        pr_url: None,
+        merge_conflict_metadata: None,
+        memory_refs: "[]".to_string(),
+        agent_type: None,
+        created_by_user_id: None,
+        ci_status: "unknown".to_string(),
+        ci_head_sha: None,
+        ci_pr_number: None,
+        ci_blocking_required_check_names: "[]".to_string(),
+        ci_failure_fingerprint: None,
+        ci_first_seen_at: None,
+        ci_last_seen_at: None,
+        ci_same_signature_count: 0,
+        ci_last_remediation_base_sha: None,
+        ci_mirror_head_sha: None,
+        ci_github_head_sha: None,
+        ci_heads_diverged: None,
+        ci_head_observation_error: None,
+        unresolved_blocker_count: 0,
+    };
+    let task_ctx = djinn_roles::prompts::TaskContext {
+        project_path: "/tmp/project".to_string(),
+        workspace_path: "/tmp/workspace".to_string(),
+        diff: None,
+        commits: None,
+        start_commit: None,
+        end_commit: None,
+        conflict_files: None,
+        merge_base_branch: None,
+        merge_target_branch: None,
+        merge_failure_context: None,
+        setup_commands: None,
+        activity: None,
+        worker_summary: None,
+        worker_concerns: None,
+        epic_context: None,
+        knowledge_context: None,
+        code_graph_context: None,
+        reviewer_diff_context: None,
+        ci_blocking_directive: None,
+        worker_resume_note: None,
+        arbiter_directive: None,
+    };
+    let system_prompt = djinn_roles::prompts::render_prompt_for_role(
+        role_config,
+        tool_schemas_fn,
+        &task,
+        &task_ctx,
+    );
+
+    // ── Provider schemas: every schema must carry `name`, `description`,
+    // and `inputSchema` (the canonical three-field contract). ──
+    for schema in &schemas {
+        let name = schema
+            .get("name")
+            .and_then(|v| v.as_str())
+            .expect("provider schema must have top-level `name`");
+        let desc = schema
+            .get("description")
+            .and_then(|v| v.as_str())
+            .expect("provider schema must have top-level `description`");
+        assert!(
+            !desc.is_empty(),
+            "provider schema description for {name} must not be empty"
+        );
+        let input_schema = schema
+            .get("inputSchema")
+            .expect("provider schema must have top-level `inputSchema`");
+        assert!(
+            input_schema.is_object(),
+            "provider schema inputSchema for {name} must be an object"
+        );
+    }
+
+    // ── Prompt-side: the rendered system prompt must contain
+    // signature-only tool lines.  For each tool, verify:
+    //   1. A line matching `- `name(` exists (the signature).
+    //   2. That line does NOT contain ` — ` followed by the description
+    //      (the old format_tool_line_with_description format).
+    //
+    // If assertion #2 fails, format_tools_section is duplicating provider
+    // description bodies in the system prompt — a direct regression of the
+    // wzz6 prompt-side deduplication. ──
+    for schema in &schemas {
+        let name = schema
+            .get("name")
+            .and_then(|v| v.as_str())
+            .expect("schema has name");
+        let desc = schema
+            .get("description")
+            .and_then(|v| v.as_str())
+            .expect("schema has description");
+
+        // Find the signature-only line for this tool.
+        let sig_line = system_prompt.lines().find(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with(&format!("- `{name}("))
+        });
+
+        assert!(
+            sig_line.is_some(),
+            "rendered worker prompt must contain signature-only tool line \
+             for {name} (format: '- `{name}(...)`'); prompt may be missing \
+             the tools section entirely"
+        );
+
+        let sig_line = sig_line.unwrap();
+        assert!(
+            !sig_line.contains(&format!(" — {desc}")),
+            "rendered worker prompt tool line for {name} contains provider \
+             description body after ' — ' separator (got: {sig_line:?}); \
+             format_tools_section must emit signature-only lines"
+        );
+        // Also verify the line ends with `)` (or `)``) — just the signature,
+        // no trailing description prose.
+        let trimmed = sig_line.trim();
+        assert!(
+            trimmed.ends_with('`') || trimmed.ends_with(')'),
+            "rendered worker prompt tool line for {name} should end with \
+             closing backtick/paren, got: {trimmed:?}"
+        );
+    }
 }
