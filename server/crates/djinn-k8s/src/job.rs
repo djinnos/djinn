@@ -587,7 +587,8 @@ fn build_task_run_env(
 /// Runtime env vars routing the shared Rust toolchain caches to the persistent
 /// `/cache` PVC. Warm Pods use the per-project base target dir;
 /// task-run Pods use `task_run_cache_env_vars` so their writable target dir is
-/// private per task run while still sharing registry and sccache settings.
+/// private per task run while still sharing registry settings and preserving a
+/// legacy, repo-compatibility `SCCACHE_DIR` fallback.
 /// The common cache routing stays single-sourced here on
 /// purpose: the DB env once drifted because the task-run path was updated and
 /// the warm path was missed (see the comment in warm_job.rs) — keeping shared
@@ -614,10 +615,9 @@ fn build_task_run_env(
 ///   write the shared base directly or contend on Cargo's shared build-dir lock,
 ///   and recompile only their delta incrementally. (Default is
 ///   <workspace>/target inside the ephemeral clone — lost when the Pod dies.)
-/// - SCCACHE_DIR: repos routinely pin `rustc-wrapper = "sccache"` in
-///   .cargo/config.toml (e.g. the platform repo, which also sets
-///   CARGO_INCREMENTAL=0 as sccache requires), so cargo invokes sccache
-///   regardless of any env var. Without SCCACHE_DIR sccache falls back to
+/// - SCCACHE_DIR: this is only a compatibility fallback for a repo/tool that
+///   explicitly invokes sccache; Djinn build pods clear `RUSTC_WRAPPER` and do
+///   not depend on the directory. Without SCCACHE_DIR such an invocation falls back to
 ///   $HOME/.cache/sccache (/home/djinn/.cache/sccache), which is (1) ephemeral
 ///   and (2) NOT in the Landlock allowlist (only $HOME/.cache/djinn is), so the
 ///   sandboxed sccache server is denied write there. Namespaced per project
@@ -646,10 +646,10 @@ fn common_cache_env_vars(project_id: &str, cpu_limit: &str) -> Vec<EnvVar> {
         // private run target dir from that base and recompile only their delta
         // incrementally. Forcing sccache (which requires CARGO_INCREMENTAL=0)
         // disables incremental and was the wrong lever — it made every
-        // task-run cold-build (~14-29min clippy). SCCACHE_DIR is left set
-        // below so a repo that *itself* pins `rustc-wrapper = "sccache"` in its
-        // .cargo/config.toml still gets a writable, Landlock-allowed cache dir;
-        // we just don't impose the wrapper on repos that don't ask for it.
+        // task-run cold-build (~14-29min clippy). SCCACHE_DIR remains below
+        // only as a writable, Landlock-allowed compatibility fallback when a
+        // repo tool explicitly invokes sccache; coordinator cleanup may remove
+        // stale contents, so Djinn's build path must not rely on it.
         env_var(
             "SCCACHE_DIR",
             &format!("{CACHE_MOUNT_DIR}/sccache/{project_id}"),
