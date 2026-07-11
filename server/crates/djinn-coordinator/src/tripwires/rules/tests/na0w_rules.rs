@@ -417,7 +417,24 @@ fn ci_workflow_circleci_triggers() {
     assert_eq!(findings.len(), 1);
 }
 
-/// Deploy directory triggers.
+/// Project-specific globs (deploy/release/Tiltfile/Makefile/boundary scripts)
+/// are NOT in the ecosystem-generic SHIPPED default — a project opts into them
+/// via org/project tripwire policy. This helper models that override so the
+/// matcher tests still exercise those path shapes without baking djinn's own
+/// repo layout into the default.
+fn policy_with_project_ci_globs() -> TripwirePolicy {
+    let mut p = default_policy();
+    p.ci_workflow.path_globs.extend([
+        "deploy/**".to_owned(),
+        "release/**".to_owned(),
+        "Tiltfile".to_owned(),
+        "Makefile".to_owned(),
+        "scripts/check-*-boundary.sh".to_owned(),
+    ]);
+    p
+}
+
+/// Deploy directory triggers when a project configures the glob.
 #[test]
 fn ci_workflow_deploy_directory_triggers() {
     let files = vec![simple_file(
@@ -426,11 +443,27 @@ fn ci_workflow_deploy_directory_triggers() {
         5,
         2,
     )];
-    let findings = evaluate_ci_workflow_changes(&default_policy(), &files);
+    let findings = evaluate_ci_workflow_changes(&policy_with_project_ci_globs(), &files);
     assert_eq!(findings.len(), 1);
 }
 
-/// Release directory triggers.
+/// Deploy directory does NOT trigger under the generic SHIPPED default.
+#[test]
+fn ci_workflow_deploy_directory_not_in_default() {
+    let files = vec![simple_file(
+        "deploy/production/manifest.yaml",
+        ChangedFileStatus::Modified,
+        5,
+        2,
+    )];
+    let findings = evaluate_ci_workflow_changes(&default_policy(), &files);
+    assert!(
+        findings.is_empty(),
+        "deploy/** must not be a SHIPPED default — it is a repo-specific path"
+    );
+}
+
+/// Release directory triggers when a project configures the glob.
 #[test]
 fn ci_workflow_release_directory_triggers() {
     let files = vec![simple_file(
@@ -439,27 +472,27 @@ fn ci_workflow_release_directory_triggers() {
         100,
         0,
     )];
-    let findings = evaluate_ci_workflow_changes(&default_policy(), &files);
+    let findings = evaluate_ci_workflow_changes(&policy_with_project_ci_globs(), &files);
     assert_eq!(findings.len(), 1);
 }
 
-/// Tiltfile triggers.
+/// Tiltfile triggers when a project configures the glob.
 #[test]
 fn ci_workflow_tiltfile_triggers() {
     let files = vec![simple_file("Tiltfile", ChangedFileStatus::Modified, 10, 5)];
-    let findings = evaluate_ci_workflow_changes(&default_policy(), &files);
+    let findings = evaluate_ci_workflow_changes(&policy_with_project_ci_globs(), &files);
     assert_eq!(findings.len(), 1);
 }
 
-/// Makefile triggers.
+/// Makefile triggers when a project configures the glob.
 #[test]
 fn ci_workflow_makefile_triggers() {
     let files = vec![simple_file("Makefile", ChangedFileStatus::Modified, 5, 3)];
-    let findings = evaluate_ci_workflow_changes(&default_policy(), &files);
+    let findings = evaluate_ci_workflow_changes(&policy_with_project_ci_globs(), &files);
     assert_eq!(findings.len(), 1);
 }
 
-/// Boundary check script triggers.
+/// Boundary check script triggers when a project configures the glob.
 #[test]
 fn ci_workflow_boundary_check_script_triggers() {
     let files = vec![simple_file(
@@ -468,7 +501,7 @@ fn ci_workflow_boundary_check_script_triggers() {
         10,
         5,
     )];
-    let findings = evaluate_ci_workflow_changes(&default_policy(), &files);
+    let findings = evaluate_ci_workflow_changes(&policy_with_project_ci_globs(), &files);
     assert_eq!(findings.len(), 1);
 }
 
@@ -490,7 +523,7 @@ fn ci_workflow_multiple_files_multiple_findings() {
         ),
         simple_file("Makefile", ChangedFileStatus::Modified, 3, 1),
     ];
-    let findings = evaluate_ci_workflow_changes(&default_policy(), &files);
+    let findings = evaluate_ci_workflow_changes(&policy_with_project_ci_globs(), &files);
     assert_eq!(findings.len(), 3);
 }
 

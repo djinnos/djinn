@@ -232,6 +232,33 @@ fn emit_path(df: &mut String) {
         "ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build GOBIN=/cache/go/bin"
     )
     .unwrap();
+    // Node + Python dependency caches — same rationale as GOMODCACHE/GOCACHE
+    // above, applied to pnpm/npm/yarn (node) and pip/uv (python). Left at their
+    // defaults these stores land under $HOME (pnpm store → $XDG_DATA_HOME/pnpm/
+    // store i.e. ~/.local/share/pnpm/store; npm → ~/.npm; yarn → ~/.cache/yarn;
+    // pip → ~/.cache/pip; uv → ~/.cache/uv), which are (1) ephemeral home paths
+    // lost when the Pod dies, so every task-run re-downloads the whole
+    // dependency closure, and (2) OUTSIDE the Landlock sandbox writable
+    // allowlist (only /cache and ~/.cache/djinn are writable — see
+    // djinn-sandbox/src/linux.rs), so a sandboxed `pnpm install` / `pip install`
+    // is denied and fails. Point them at the djinn-owned, persistent,
+    // sandbox-writable /cache PVC — the same volume CARGO_HOME/GOMODCACHE use.
+    // These stores are content-addressed by package@version (like the Cargo
+    // registry and the Go module cache), so a SINGLE shared store across
+    // projects is correct and de-dupes common packages — no per-project
+    // namespacing (unlike SCCACHE_DIR / CARGO_TARGET_DIR, which hold
+    // workspace-specific compiled artifacts). PNPM_HOME governs pnpm's global
+    // dir AND its store, whose default is $PNPM_HOME/store. As with the Cargo/Go
+    // ENV above these are unconditional and harmless when the language isn't
+    // installed. Baked as image ENV (not per-language RUN blocks) so warm Pods
+    // and task-run Pods inherit identical values from the image, with no runtime
+    // override in djinn-k8s/src/job.rs.
+    writeln!(
+        df,
+        "ENV PNPM_HOME=/cache/pnpm npm_config_cache=/cache/npm YARN_CACHE_FOLDER=/cache/yarn"
+    )
+    .unwrap();
+    writeln!(df, "ENV PIP_CACHE_DIR=/cache/pip UV_CACHE_DIR=/cache/uv").unwrap();
 }
 
 fn emit_system_packages(df: &mut String, config: &EnvironmentConfig) {

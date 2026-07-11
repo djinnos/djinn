@@ -84,14 +84,6 @@ capability = "git"
 
 [[entries]]
 capability = "git"
-	path = "server/crates/djinn-coordinator/src/preapproval_gate.rs"
-	matcher = "Command::new(\"git\")"
-	owner = "team/coordinator"
-	rationale = "Test-local helper for creating temporary git repos in unit tests. Not used by production preapproval logic."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
 	path = "server/crates/djinn-coordinator/src/tests/mod.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/coordinator"

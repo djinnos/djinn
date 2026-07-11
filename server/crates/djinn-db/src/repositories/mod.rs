@@ -23,6 +23,7 @@ pub mod repo_graph_cache;
 pub mod retrieval_trace;
 #[cfg(test)]
 pub mod retrieval_trace_tests;
+pub mod scip_indexer_timing;
 pub mod service;
 pub mod session;
 pub mod session_auth;

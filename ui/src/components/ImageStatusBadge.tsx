@@ -19,37 +19,15 @@ import {
 } from "@/api/devcontainer";
 import { showToast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+import {
+  deriveState,
+  failingWorkspaces,
+  type BadgeState,
+} from "./imageStatusBadge.helpers";
 
 interface ImageStatusBadgeProps {
   projectId: string;
   projectName?: string;
-}
-
-type BadgeState =
-  | { kind: "needs_image" }
-  | { kind: "building"; status: DevcontainerStatus }
-  | { kind: "failed"; status: DevcontainerStatus }
-  | { kind: "warming"; status: DevcontainerStatus }
-  | { kind: "ready" }
-  | { kind: "unknown" };
-
-function deriveState(status: DevcontainerStatus | null): BadgeState {
-  if (!status) return { kind: "unknown" };
-  // A project with no catalog image assigned can't build/dispatch — surface
-  // the setup state ahead of any build/warm status (migration 46 cut-over).
-  if (status.needs_image) {
-    return { kind: "needs_image" };
-  }
-  if (status.image_status === "building") {
-    return { kind: "building", status };
-  }
-  if (status.image_status === "failed") {
-    return { kind: "failed", status };
-  }
-  if (status.image_status === "ready" && status.graph_warm_status !== "ready") {
-    return { kind: "warming", status };
-  }
-  return { kind: "ready" };
 }
 
 type Tone = "info" | "warn" | "error" | "ok";
@@ -68,6 +46,8 @@ function describeBadge(state: BadgeState): BadgeDescriptor | null {
       return { tone: "info", label: "Building", pulse: true };
     case "warming":
       return { tone: "info", label: "Warming", pulse: true };
+    case "degraded":
+      return { tone: "warn", label: "Graph degraded", pulse: false };
     case "failed":
       return { tone: "error", label: "Build failed", pulse: false };
     case "ready":
@@ -242,16 +222,21 @@ function StatusDetail({
 
   const isError = state.kind === "failed";
   const isInfo = state.kind === "building" || state.kind === "warming";
+  const isWarn = state.kind === "degraded";
 
   const iconBg = isError ? "bg-red-500/20" : isInfo ? "bg-sky-500/20" : "bg-amber-500/20";
   const iconText = isError ? "text-red-300" : isInfo ? "text-sky-300" : "text-amber-300";
   const titleColor = isError ? "text-red-200" : isInfo ? "text-sky-200" : "text-amber-200";
+
+  const failing = state.kind === "degraded" ? failingWorkspaces(state.status) : [];
 
   const title =
     state.kind === "building"
       ? `Building catalog image${label}`
       : state.kind === "warming"
       ? `Warming code graph${label}`
+      : state.kind === "degraded"
+      ? `Code graph degraded${label}`
       : `Image build failed${label}`;
 
   const description =
@@ -259,6 +244,8 @@ function StatusDetail({
       ? "The shared catalog image this project uses is being built in the cluster. This usually takes 1–3 minutes on first build; cached layers make subsequent rebuilds much faster, and every project on this image shares the result."
       : state.kind === "warming"
       ? "The image is ready. Djinn is now indexing the project's code graph inside that image — task dispatch stays paused until the first warm completes."
+      : state.kind === "degraded"
+      ? "The code graph warmed, but one or more workspaces failed to index. The graph is usable but incomplete — code_graph queries against the affected workspaces will be empty until the next warm succeeds."
       : state.status.image_last_error
       ? `The last build failed: ${state.status.image_last_error}`
       : "The last build failed.";
@@ -279,7 +266,7 @@ function StatusDetail({
             />
           ) : (
             <HugeiconsIcon
-              icon={isError ? Alert02Icon : FileValidationIcon}
+              icon={isError || isWarn ? Alert02Icon : FileValidationIcon}
               className={cn("size-3.5", iconText)}
             />
           )}
@@ -290,8 +277,18 @@ function StatusDetail({
         </div>
       </div>
 
+      {failing.length > 0 && (
+        <ul className="flex flex-col gap-0.5 rounded-md bg-amber-500/10 p-2 text-[11px] text-amber-200">
+          {failing.map((entry) => (
+            <li key={entry} className="font-mono">
+              {entry}
+            </li>
+          ))}
+        </ul>
+      )}
+
       <div className="flex items-center gap-1.5">
-        {state.kind === "failed" && (
+        {(state.kind === "failed" || state.kind === "degraded") && (
           <Button
             variant="ghost"
             size="sm"
@@ -338,6 +335,10 @@ function pipelineLabel(raw: string | undefined | null): string {
       return "building…";
     case "ready":
       return "ready";
+    case "warning":
+      return "warning";
+    case "degraded":
+      return "degraded (partial)";
     case "failed":
       return "failed";
     case "pending":

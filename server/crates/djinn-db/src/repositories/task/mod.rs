@@ -1149,6 +1149,94 @@ mod tests {
         assert!(mapped.ci_failure_fingerprint.is_none());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_snapshot_unknown_does_not_clobber_passing_on_same_head() {
+        // Regression: on a vanilla (no-CI) repo the pr_review path re-observes
+        // empty check-runs every tick and would write `unknown`, downgrading the
+        // `passing` snapshot the pr_draft path established for the same head SHA.
+        // The CI merge gate then maps `unknown → Hold` and the task wedges in
+        // pr_review forever. The upsert downgrade guard must preserve `passing`.
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        // 1. Establish Passing for head `sha-green` (pr_draft no-CI fast path).
+        repo.upsert_ci_snapshot(TaskPrCiSnapshotInput {
+            task_id: task.id.clone(),
+            pr_number: 77,
+            head_sha: "sha-green".to_string(),
+            ci_status: CiStatus::Passing,
+            blocking_required_check_names: vec![],
+            failure_fingerprint: None,
+            same_signature_count: 0,
+            last_remediation_base_sha: None,
+        })
+        .await
+        .unwrap();
+
+        // 2. A later `unknown` observation for the SAME head must be a no-op on
+        //    ci_status — the guard keeps Passing.
+        let after_unknown = repo
+            .upsert_ci_snapshot(TaskPrCiSnapshotInput {
+                task_id: task.id.clone(),
+                pr_number: 77,
+                head_sha: "sha-green".to_string(),
+                ci_status: CiStatus::Unknown,
+                blocking_required_check_names: vec![],
+                failure_fingerprint: None,
+                same_signature_count: 0,
+                last_remediation_base_sha: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            after_unknown.ci_status,
+            CiStatus::Passing,
+            "unknown must not downgrade passing on the same head SHA"
+        );
+
+        // 3. A real regression (`failing`) on the same head is still allowed
+        //    through — the guard only blocks the passing→unknown transition.
+        let after_failing = repo
+            .upsert_ci_snapshot(TaskPrCiSnapshotInput {
+                task_id: task.id.clone(),
+                pr_number: 77,
+                head_sha: "sha-green".to_string(),
+                ci_status: CiStatus::Failing,
+                blocking_required_check_names: vec!["Tests".to_string()],
+                failure_fingerprint: Some("fp".to_string()),
+                same_signature_count: 1,
+                last_remediation_base_sha: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            after_failing.ci_status,
+            CiStatus::Failing,
+            "failing must still overwrite passing on the same head SHA"
+        );
+
+        // 4. On a NEW head, `unknown` overwrites freely (reset semantics).
+        let new_head = repo
+            .upsert_ci_snapshot(TaskPrCiSnapshotInput {
+                task_id: task.id.clone(),
+                pr_number: 77,
+                head_sha: "sha-new".to_string(),
+                ci_status: CiStatus::Unknown,
+                blocking_required_check_names: vec![],
+                failure_fingerprint: None,
+                same_signature_count: 0,
+                last_remediation_base_sha: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(new_head.ci_status, CiStatus::Unknown);
+        assert_eq!(new_head.head_sha, "sha-new");
+    }
+
     // ── CI head reconciliation tests (m116) ─────────────────────────────
 
     /// Helper: create a task attempt row with optional head SHAs and

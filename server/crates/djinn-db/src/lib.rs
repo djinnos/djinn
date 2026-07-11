@@ -120,6 +120,10 @@ pub use repositories::{
         ProposalUpdateInput,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
+    scip_indexer_timing::{
+        ScipIndexerTiming, ScipIndexerTimingObservation, ScipIndexerTimingRepository,
+        TIMING_STATUS_FAILED, TIMING_STATUS_SUCCESS, TIMING_STATUS_TIMED_OUT,
+    },
     service::{ServicePreset, ServicePresetRepository},
     session::{
         CreateSessionParams, ExtractionBackfillCandidate, OrphanSessionCandidate,

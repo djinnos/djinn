@@ -43,9 +43,16 @@ pub const RESERVED_WORKTREE_PREFIX: char = '_';
 pub const INDEX_TREE_DIR_NAME: &str = "_index";
 
 /// Sibling directory used as a dedicated `CARGO_TARGET_DIR` when running
-/// indexer-invoked Rust builds against the index tree.  Sharing sccache with
-/// the rest of the workspace is preserved automatically by the user's sccache
-/// configuration; this directory only isolates the build outputs.
+/// indexer-invoked Rust builds against the index tree **in the in-process
+/// (dev/peer) path**.  Sharing sccache with the rest of the workspace is
+/// preserved automatically by the user's sccache configuration; this directory
+/// only isolates the build outputs so an indexer run never corrupts the host
+/// server's own target directory.
+///
+/// In the K8s warm-Pod path this directory is **not** used: the Pod routes
+/// `CARGO_TARGET_DIR=/cache/cargo-target/<project>` (a persistent PVC
+/// pre-warmed by `warm_cargo_target_base`) and the indexer inherits that
+/// warmed base instead — see [`IndexTreeHandle::indexer_target_dir_override`].
 pub const INDEX_TREE_TARGET_DIR_NAME: &str = "_index-target";
 
 /// Default fetch cooldown.  `IndexTreeHandle::fetch_if_stale` skips a fetch
@@ -57,6 +64,25 @@ pub const DEFAULT_FETCH_COOLDOWN: Duration = Duration::from_secs(60);
 #[inline]
 pub fn is_reserved_worktree_entry(entry_name: &str) -> bool {
     entry_name.starts_with(RESERVED_WORKTREE_PREFIX)
+}
+
+/// Pure resolution behind [`IndexTreeHandle::indexer_target_dir_override`].
+///
+/// Returns `None` (inherit the ambient warmed `CARGO_TARGET_DIR`) only in
+/// pod-workspace mode when the process already carries a `CARGO_TARGET_DIR`;
+/// otherwise returns `Some(isolated_target_dir)` so the in-process path keeps
+/// isolating indexer builds from the host server's target directory. Kept
+/// side-effect-free so it can be unit-tested without mutating process env.
+fn resolve_indexer_target_dir_override(
+    pod_workspace_mode: bool,
+    cargo_target_dir_env_present: bool,
+    isolated_target_dir: &Path,
+) -> Option<PathBuf> {
+    if pod_workspace_mode && cargo_target_dir_env_present {
+        None
+    } else {
+        Some(isolated_target_dir.to_path_buf())
+    }
 }
 
 fn last_fetch_map() -> &'static Mutex<HashMap<String, Instant>> {
@@ -92,6 +118,12 @@ pub struct IndexTreeHandle {
     index_tree_path: PathBuf,
     target_dir: PathBuf,
     commit_sha: String,
+    /// `true` when this handle was constructed in K8s warm-Pod workspace mode
+    /// (`DJINN_PROJECT_ROOT` set at [`IndexTree::ensure`] time). In that mode
+    /// the Pod's whole filesystem is the index tree and the persistent warm
+    /// cargo target base is routed via the process's `CARGO_TARGET_DIR`, so
+    /// indexer builds inherit it rather than isolating into `_index-target`.
+    pod_workspace_mode: bool,
 }
 
 impl IndexTreeHandle {
@@ -101,9 +133,41 @@ impl IndexTreeHandle {
     }
 
     /// Dedicated `CARGO_TARGET_DIR` for indexer-invoked builds against the
-    /// index tree.
+    /// index tree in the in-process path. Prefer
+    /// [`Self::indexer_target_dir_override`] at the indexer call site — it
+    /// applies the pod-mode carve-out.
     pub fn target_dir(&self) -> &Path {
         &self.target_dir
+    }
+
+    /// Resolve the `CARGO_TARGET_DIR` override to install for indexer-invoked
+    /// Rust builds against this index tree, or `None` to leave the ambient
+    /// `CARGO_TARGET_DIR` untouched.
+    ///
+    /// - **In-process (dev/peer) mode** — always returns
+    ///   `Some(<_index-target>)`. The `CargoTargetDirGuard` installed from
+    ///   this value isolates indexer builds from the host server's own target
+    ///   directory (the guard's SAFETY contract), so the server's own builds
+    ///   are never corrupted by an indexer run.
+    /// - **Pod-workspace warm mode** with an ambient `CARGO_TARGET_DIR` — the
+    ///   warm Pod routes `CARGO_TARGET_DIR=/cache/cargo-target/<project>` (a
+    ///   persistent PVC pre-seeded and pre-warmed by `warm_cargo_target_base`
+    ///   with the exact compiles `rust-analyzer scip` needs). Returns `None`
+    ///   so the indexer inherits that warmed base instead of recompiling the
+    ///   whole workspace into the Pod's ephemeral emptyDir `_index-target`
+    ///   every warm — the bug that blew the 1200s indexer timeout and yielded
+    ///   0 nodes. The Pod's per-run isolation makes the host-corruption
+    ///   concern moot: nothing else shares the Pod's process env, so skipping
+    ///   the guard is safe.
+    /// - **Pod-workspace mode without** an ambient `CARGO_TARGET_DIR` (e.g. a
+    ///   non-Rust repo, or the warm-cache env wiring absent) — falls back to
+    ///   `Some(<_index-target>)`, leaving behaviour unchanged from before.
+    pub fn indexer_target_dir_override(&self) -> Option<PathBuf> {
+        resolve_indexer_target_dir_override(
+            self.pod_workspace_mode,
+            std::env::var_os("CARGO_TARGET_DIR").is_some(),
+            &self.target_dir,
+        )
     }
 
     /// Project ID this index tree belongs to.
@@ -246,6 +310,7 @@ impl IndexTree {
             index_tree_path,
             target_dir,
             commit_sha,
+            pod_workspace_mode,
         })
     }
 }
@@ -277,6 +342,45 @@ pub fn reset_last_fetch_for_tests() {
 mod tests {
     use super::*;
     use crate::test_helpers::workspace_tempdir;
+
+    #[test]
+    fn indexer_target_dir_override_in_process_mode_isolates() {
+        // Dev/peer (in-process) mode: always isolate into `_index-target` so
+        // an indexer run can't corrupt the host server's own target dir. This
+        // holds regardless of whether the ambient CARGO_TARGET_DIR is set.
+        let isolated = PathBuf::from("/proj/.djinn/worktrees/_index-target");
+        assert_eq!(
+            resolve_indexer_target_dir_override(false, false, &isolated),
+            Some(isolated.clone()),
+            "non-pod, no ambient CARGO_TARGET_DIR must isolate"
+        );
+        assert_eq!(
+            resolve_indexer_target_dir_override(false, true, &isolated),
+            Some(isolated.clone()),
+            "non-pod with ambient CARGO_TARGET_DIR must still isolate"
+        );
+    }
+
+    #[test]
+    fn indexer_target_dir_override_pod_mode_inherits_warmed_base() {
+        // Warm-Pod mode WITH an ambient CARGO_TARGET_DIR (the warm base at
+        // /cache/cargo-target/<project>): inherit it (None) so the indexer
+        // reuses the pre-warmed target instead of recompiling into the Pod's
+        // ephemeral `_index-target` every warm.
+        let isolated = PathBuf::from("/workspace/proj/.djinn/worktrees/_index-target");
+        assert_eq!(
+            resolve_indexer_target_dir_override(true, true, &isolated),
+            None,
+            "pod mode with warmed CARGO_TARGET_DIR must inherit it"
+        );
+        // Warm-Pod mode WITHOUT an ambient CARGO_TARGET_DIR (non-Rust repo or
+        // env wiring absent): fall back to isolation, unchanged from before.
+        assert_eq!(
+            resolve_indexer_target_dir_override(true, false, &isolated),
+            Some(isolated),
+            "pod mode without CARGO_TARGET_DIR must fall back to isolation"
+        );
+    }
 
     #[test]
     fn reserved_prefix_filter_matches_underscore_entries() {
