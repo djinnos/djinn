@@ -12,6 +12,11 @@ use crate::catalog::builtin::{BUILTIN_PROVIDERS, BuiltinProvider};
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Default freshness window used when computing the source tier for structured
+/// log fields inside `refresh()`.  This is intentionally a service-local default
+/// for log context only — the health endpoint and callers own the real policy.
+const REFRESH_LOG_MAX_AGE: Duration = Duration::from_secs(60 * 60); // 1 hour
+
 fn has_nonzero_pricing(pricing: &Pricing) -> bool {
     pricing.input_per_million != 0.0
         || pricing.output_per_million != 0.0
@@ -149,6 +154,24 @@ struct CatalogData {
     last_refresh_error: Option<String>,
 }
 
+/// Compute the source tier from the raw `CatalogData` state without going through
+/// the public `CatalogService::source_tier` accessor (which would require a
+/// second read lock while the caller already holds a write lock).
+fn source_tier_from_data(data: &CatalogData, max_age: Duration) -> SourceTier {
+    let Some(fetched_at) = data.fetched_at else {
+        return SourceTier::Embedded;
+    };
+    if SystemClock::new()
+        .now_instant()
+        .saturating_duration_since(fetched_at)
+        <= max_age
+    {
+        SourceTier::Live
+    } else {
+        SourceTier::Stale
+    }
+}
+
 /// Fetches, caches, and serves LLM provider and model data from models.dev.
 ///
 /// Resilience tiers (in order):
@@ -207,7 +230,7 @@ impl CatalogService {
                         Some("models.dev normalized payload had zero providers".to_string());
                     tracing::warn!(
                         status = ?data.last_refresh_status,
-                        source_tier = ?SourceTier::Embedded,
+                        source_tier = ?source_tier_from_data(&data, REFRESH_LOG_MAX_AGE),
                         providers = data.providers.len(),
                         error = "models.dev normalized payload had zero providers",
                         "catalog refresh rejected zero-provider payload — keeping active catalog"
@@ -238,6 +261,8 @@ impl CatalogService {
                 data.last_refresh_error = Some(e.clone());
                 tracing::warn!(
                     status = ?data.last_refresh_status,
+                    source_tier = ?source_tier_from_data(&data, REFRESH_LOG_MAX_AGE),
+                    providers = data.providers.len(),
                     error = %e,
                     "catalog refresh failed — using cached/embedded data"
                 );
