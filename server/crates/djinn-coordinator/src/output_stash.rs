@@ -8,6 +8,11 @@
 //! Bounded: max 10 entries, max 5 MB total. FIFO eviction when either limit is
 //! hit. Each reply-loop instance owns its own stash — no cross-session sharing.
 //!
+//! rdx6 note: the agent/slot turn-budget externalization seam remains a
+//! transcript-text contract. It reuses the existing `tool_use_id` recovery path
+//! and does not introduce a new durable blob or pointer format, so the
+//! coordinator parser below intentionally stays behaviorally unchanged.
+//!
 //! Durable read-through (C6): in addition to the in-memory map, every stashed
 //! blob is written once to a content-addressed file under the djinn cache dir
 //! (keyed by `sha256(content)`), plus a tiny id-pointer so `output_view` /

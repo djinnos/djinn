@@ -42,6 +42,11 @@ const CARGO_TARGET_RUNS_ROOT: &str = djinn_supervisor::CARGO_TARGET_RUNS_ROOT;
 /// Terminal-session stash pointers are eligible for GC after 30 days by
 /// default. Operators may override this with
 /// `DJINN_OUTPUT_STASH_GC_RETENTION_DAYS` (whole days, minimum 1).
+///
+/// rdx6 did not change the durable stash wire format: turn-budget
+/// externalization is still transcript text pointing at the existing
+/// `tool_use_id` stash entry. Coordinator GC therefore continues to classify and
+/// reap the same v1/legacy pointer records without agent-helper mirroring.
 const OUTPUT_STASH_GC_DEFAULT_RETENTION_DAYS: u64 = 30;
 const OUTPUT_STASH_GC_RETENTION_ENV: &str = "DJINN_OUTPUT_STASH_GC_RETENTION_DAYS";
 
