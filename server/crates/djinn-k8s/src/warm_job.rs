@@ -166,7 +166,11 @@ exec {bin} warm-graph "{project_id}"
     // settings. Single-sourced in job.rs to avoid the
     // task-run-updated-but-warm-missed drift that bit DJINN_*_URL.
     // Needs the cache volume mounted below.
-    env.extend(crate::job::warm_cache_env_vars(project_id, policy));
+    env.extend(crate::job::warm_cache_env_vars(
+        project_id,
+        &config.warm_cpu_limit,
+        policy,
+    ));
 
     let container = Container {
         name: "warmer".to_string(),
@@ -535,6 +539,12 @@ mod tests {
             envs.get("CARGO_BUILD_RUSTFLAGS").copied(),
             Some("-Clink-arg=-fuse-ld=mold"),
         );
+        // Cargo/nextest parallelism is pinned to the WARM pod's OWN CPU limit
+        // (warm_cpu_limit default "4"), not the host core count — the same
+        // load-103 oversubscription guard the task-run pods get, derived from
+        // each pod type's own limit.
+        assert_eq!(envs.get("CARGO_BUILD_JOBS").copied(), Some("4"));
+        assert_eq!(envs.get("NEXTEST_TEST_THREADS").copied(), Some("4"));
 
         let mounts = container.volume_mounts.as_ref().expect("mounts");
         assert_eq!(mounts.len(), 4, "mirror + workspace + cache + env-config");

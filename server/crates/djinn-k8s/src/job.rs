@@ -575,7 +575,12 @@ fn build_task_run_env(
         env.push(env_var("DJINN_DEBUG_PROVIDER_REQUEST", &v));
     }
 
-    env.extend(task_run_cache_env_vars(project_id, task_run_id_str, policy));
+    env.extend(task_run_cache_env_vars(
+        project_id,
+        task_run_id_str,
+        &config.cpu_limit,
+        policy,
+    ));
     env
 }
 
@@ -620,7 +625,17 @@ fn build_task_run_env(
 ///   multiple concurrent server processes sharing one directory, and Pods share
 ///   the /cache PVC, so a single /cache/sccache would risk multi-writer
 ///   corruption across projects.
-fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
+fn common_cache_env_vars(project_id: &str, cpu_limit: &str) -> Vec<EnvVar> {
+    // Cap build/test parallelism at the pod's OWN CPU limit. Cargo (and nextest)
+    // otherwise default their job/thread count to the number of CPUs the cgroup
+    // reports, which on a shared node is the HOST core count, NOT the pod's
+    // limit. A deploy that cold-rebuilds ~8 task-run pods simultaneously on one
+    // 12-core node therefore launched ~8 × `-j12` ≈ 96 runnable compile
+    // processes → node load average 103 → kubelet/postgres/djinn-server probe
+    // timeouts and probe-kill restarts (server 521 for a minute). Deriving the
+    // job count from the pod's declared CPU limit keeps the aggregate runnable
+    // process count bounded by the node's real capacity.
+    let jobs = cpu_limit_to_jobs(cpu_limit).to_string();
     vec![
         env_var("CARGO_HOME", &format!("{CACHE_MOUNT_DIR}/cargo")),
         // NOTE: we deliberately do NOT force `RUSTC_WRAPPER=sccache` or
@@ -679,14 +694,45 @@ fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
         // rustflags change → fingerprints change → the first warm after deploy
         // rebuilds the per-project base); steady state is fast links thereafter.
         env_var("CARGO_BUILD_RUSTFLAGS", "-Clink-arg=-fuse-ld=mold"),
+        // Pin cargo's parallel job count to the pod's CPU limit (see the
+        // load-103 incident note above). Without it cargo reads the host core
+        // count through the cgroup and oversubscribes the node.
+        env_var("CARGO_BUILD_JOBS", &jobs),
+        // Nextest picks its default test-thread count the same way (num-cpus →
+        // host cores under a shared cgroup), so a single pod's `cargo nextest
+        // run` would spawn host-core-many test threads. Pin it to the same
+        // per-pod value so test execution parallelism matches build
+        // parallelism.
+        env_var("NEXTEST_TEST_THREADS", &jobs),
     ]
+}
+
+/// Derive a cargo/nextest parallel-job count from a Kubernetes CPU limit
+/// quantity, flooring to whole cores with a floor of 1.
+///
+/// Kubernetes CPU quantities are either a plain (possibly fractional) core
+/// count (`"6"`, `"2"`, `"1.5"`) or an integer millicore value with an `m`
+/// suffix (`"1500m"` = 1.5 cores, `"500m"` = 0.5 cores). Cargo's `-j` and
+/// nextest's `--test-threads` are whole numbers ≥ 1, so we floor to cores and
+/// clamp to a minimum of 1 (a sub-core limit like `"500m"` still gets one job).
+/// An unparseable value falls back to 1 rather than to the host core count.
+fn cpu_limit_to_jobs(cpu_limit: &str) -> u32 {
+    let trimmed = cpu_limit.trim();
+    let cores = match trimmed.strip_suffix('m') {
+        Some(milli) => milli.trim().parse::<f64>().ok().map(|m| m / 1000.0),
+        None => trimmed.parse::<f64>().ok(),
+    };
+    match cores {
+        Some(c) if c >= 1.0 => c.floor() as u32,
+        _ => 1,
+    }
 }
 
 /// Base cache env vars routing CARGO_TARGET_DIR at the shared per-project warm
 /// base. Warm Pods write this base directly; task-run Pods seed a private
 /// run dir from it (the worker overrides CARGO_TARGET_DIR to a private run dir).
-pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
-    let mut env = common_cache_env_vars(project_id);
+pub(crate) fn cache_env_vars(project_id: &str, cpu_limit: &str) -> Vec<EnvVar> {
+    let mut env = common_cache_env_vars(project_id, cpu_limit);
     env.push(env_var(
         "CARGO_TARGET_DIR",
         &format!("{CACHE_MOUNT_DIR}/cargo-target/{project_id}"),
@@ -713,9 +759,10 @@ pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
 /// djinn build pods.
 pub(crate) fn warm_cache_env_vars(
     project_id: &str,
+    cpu_limit: &str,
     _policy: Option<&djinn_stack::environment::CargoCachePolicy>,
 ) -> Vec<EnvVar> {
-    let mut env = cache_env_vars(project_id);
+    let mut env = cache_env_vars(project_id, cpu_limit);
     env.push(env_var("CARGO_INCREMENTAL", "1"));
     env.push(env_var("RUSTC_WRAPPER", ""));
     env
@@ -738,9 +785,10 @@ pub(crate) fn warm_cache_env_vars(
 fn task_run_cache_env_vars(
     project_id: &str,
     task_run_id: &str,
+    cpu_limit: &str,
     _policy: Option<&djinn_stack::environment::CargoCachePolicy>,
 ) -> Vec<EnvVar> {
-    let mut env = common_cache_env_vars(project_id);
+    let mut env = common_cache_env_vars(project_id, cpu_limit);
     env.push(env_var(
         "CARGO_TARGET_DIR",
         &cargo_target_run_dir(task_run_id).display().to_string(),
@@ -1277,6 +1325,19 @@ mod tests {
             Some("-Clink-arg=-fuse-ld=mold"),
             "task-runs default to the mold fast linker (installed in the devcontainer image)"
         );
+        // Cargo/nextest parallelism is capped at the task-run pod's CPU LIMIT
+        // (for_testing default "2") so a node full of cold-rebuilding pods can't
+        // oversubscribe on the host core count (load-103 incident).
+        assert_eq!(
+            envs.get("CARGO_BUILD_JOBS").copied(),
+            Some("2"),
+            "task-run CARGO_BUILD_JOBS must be pinned to the pod's CPU limit, not the host core count"
+        );
+        assert_eq!(
+            envs.get("NEXTEST_TEST_THREADS").copied(),
+            Some("2"),
+            "task-run NEXTEST_TEST_THREADS must match the pod's CPU limit"
+        );
     }
 
     /// Regression guard: warm and task-run must resolve the same shared cache
@@ -1296,12 +1357,12 @@ mod tests {
         let project_id = "test-project";
         let task_run_id = Uuid::now_v7().to_string();
 
-        let warm_vars = warm_cache_env_vars(project_id, None);
+        let warm_vars = warm_cache_env_vars(project_id, "4", None);
         let warm_env: BTreeMap<&str, &str> = warm_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
-        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, None);
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, "2", None);
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
@@ -1411,6 +1472,98 @@ mod tests {
         );
     }
 
+    /// Warm and task-run must EACH cap cargo/nextest parallelism at their OWN
+    /// CPU limit, not the host core count (load-103 incident). Parity here is
+    /// "both derive the value from their own limit" — NOT "identical value":
+    /// warm and task-run pods can be sized differently (warm_cpu_limit vs
+    /// cpu_limit), so the two job counts legitimately differ.
+    #[test]
+    fn warm_and_worker_pin_cargo_jobs_to_their_own_cpu_limit() {
+        let project_id = "jobs-parity";
+        let task_run_id = Uuid::now_v7().to_string();
+
+        // Distinct limits so a "both must be identical" regression would fail.
+        let warm_vars = warm_cache_env_vars(project_id, "4", None);
+        let warm_env: BTreeMap<&str, &str> = warm_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, "6", None);
+        let worker_env: BTreeMap<&str, &str> = worker_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        // Both set the vars (neither pod type may fall back to host cores) ...
+        assert_eq!(
+            warm_env.get("CARGO_BUILD_JOBS").copied(),
+            Some("4"),
+            "warm must pin CARGO_BUILD_JOBS to its OWN cpu limit"
+        );
+        assert_eq!(
+            warm_env.get("NEXTEST_TEST_THREADS").copied(),
+            Some("4"),
+            "warm must pin NEXTEST_TEST_THREADS to its OWN cpu limit"
+        );
+        assert_eq!(
+            worker_env.get("CARGO_BUILD_JOBS").copied(),
+            Some("6"),
+            "task-run must pin CARGO_BUILD_JOBS to its OWN cpu limit"
+        );
+        assert_eq!(
+            worker_env.get("NEXTEST_TEST_THREADS").copied(),
+            Some("6"),
+            "task-run must pin NEXTEST_TEST_THREADS to its OWN cpu limit"
+        );
+        // ... and the values are derived per-pod (differ when the limits differ).
+        assert_ne!(
+            warm_env.get("CARGO_BUILD_JOBS"),
+            worker_env.get("CARGO_BUILD_JOBS"),
+            "each pod type derives CARGO_BUILD_JOBS from its own limit (parity != identical value)"
+        );
+    }
+
+    /// Unit coverage for the CPU-limit → job-count parser: whole cores,
+    /// millicores (floor to cores), sub-core clamp, and unparseable fallback.
+    #[test]
+    fn cpu_limit_to_jobs_parses_quantities() {
+        assert_eq!(cpu_limit_to_jobs("6"), 6, "plain integer cores");
+        assert_eq!(cpu_limit_to_jobs("2"), 2, "plain integer cores");
+        assert_eq!(cpu_limit_to_jobs("1"), 1, "one core");
+        assert_eq!(cpu_limit_to_jobs("1.5"), 1, "fractional cores floor down");
+        assert_eq!(
+            cpu_limit_to_jobs("1500m"),
+            1,
+            "1500 millicores = 1.5 cores → 1"
+        );
+        assert_eq!(cpu_limit_to_jobs("2000m"), 2, "2000 millicores = 2 cores");
+        assert_eq!(
+            cpu_limit_to_jobs("500m"),
+            1,
+            "sub-core millicores clamp to 1"
+        );
+        assert_eq!(
+            cpu_limit_to_jobs("100m"),
+            1,
+            "sub-core millicores clamp to 1"
+        );
+        assert_eq!(
+            cpu_limit_to_jobs(" 6 "),
+            6,
+            "surrounding whitespace tolerated"
+        );
+        assert_eq!(
+            cpu_limit_to_jobs(""),
+            1,
+            "empty falls back to 1, not host cores"
+        );
+        assert_eq!(
+            cpu_limit_to_jobs("garbage"),
+            1,
+            "unparseable falls back to 1"
+        );
+    }
+
     /// Same invariant as [`warm_and_worker_resolve_same_cache_strategy`] but for
     /// a single-crate no-sccache project shape. The cache routing env vars are
     /// identical regardless of project shape — the per-project namespace is the
@@ -1426,12 +1579,12 @@ mod tests {
         let project_id = "single-crate-project";
         let task_run_id = Uuid::now_v7().to_string();
 
-        let warm_vars = warm_cache_env_vars(project_id, None);
+        let warm_vars = warm_cache_env_vars(project_id, "4", None);
         let warm_env: BTreeMap<&str, &str> = warm_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
-        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, None);
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, "2", None);
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
@@ -1499,13 +1652,13 @@ mod tests {
             },
         );
 
-        let warm_vars = warm_cache_env_vars(project_id, Some(&policy));
+        let warm_vars = warm_cache_env_vars(project_id, "4", Some(&policy));
         let warm_env: BTreeMap<&str, &str> = warm_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, "2", Some(&policy));
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
@@ -1548,13 +1701,13 @@ mod tests {
             },
         );
 
-        let warm_vars = warm_cache_env_vars(project_id, Some(&policy));
+        let warm_vars = warm_cache_env_vars(project_id, "4", Some(&policy));
         let warm_env: BTreeMap<&str, &str> = warm_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, "2", Some(&policy));
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
@@ -1582,15 +1735,16 @@ mod tests {
         let task_run_id = Uuid::now_v7().to_string();
         let policy = djinn_stack::environment::CargoCachePolicy::AutoDetected;
 
-        let warm_vars_none = warm_cache_env_vars(project_id, None);
-        let warm_vars_auto = warm_cache_env_vars(project_id, Some(&policy));
+        let warm_vars_none = warm_cache_env_vars(project_id, "4", None);
+        let warm_vars_auto = warm_cache_env_vars(project_id, "4", Some(&policy));
         assert_eq!(
             warm_vars_none, warm_vars_auto,
             "AutoDetected must match None for warm"
         );
 
-        let worker_vars_none = task_run_cache_env_vars(project_id, &task_run_id, None);
-        let worker_vars_auto = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
+        let worker_vars_none = task_run_cache_env_vars(project_id, &task_run_id, "2", None);
+        let worker_vars_auto =
+            task_run_cache_env_vars(project_id, &task_run_id, "2", Some(&policy));
         assert_eq!(
             worker_vars_none, worker_vars_auto,
             "AutoDetected must match None for task-run"
@@ -1823,13 +1977,13 @@ mod tests {
             },
         );
 
-        let warm_vars = warm_cache_env_vars(project_id, Some(&policy));
+        let warm_vars = warm_cache_env_vars(project_id, "4", Some(&policy));
         let warm_env: BTreeMap<&str, &str> = warm_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, "2", Some(&policy));
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
