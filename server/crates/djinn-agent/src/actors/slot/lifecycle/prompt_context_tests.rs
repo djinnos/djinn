@@ -547,6 +547,116 @@ mod load_knowledge_context_trace_tests {
             "no candidates persisted for empty result"
         );
     }
+
+    /// Fail-open: when `RetrievalTraceRepository::insert` returns an error
+    /// (simulated by dropping the `retrieval_traces` table after DB init),
+    /// `load_knowledge_context` must still return the rendered prompt — not
+    /// `None`.  This exercises the `Err(e)` branch of `persist_knowledge_context_trace`
+    /// and verifies the AC4 requirement that trace persistence errors never
+    /// change the returned knowledge context.
+    #[tokio::test]
+    async fn load_knowledge_context_returns_rendered_when_trace_persist_fails() {
+        let db = Database::ephemeral().await.expect("create ephemeral db");
+        let events = EventBus::noop();
+        let task = create_project_epic_task(
+            &db,
+            &events,
+            "Trace persist fail epic",
+            "Trace persist fail task",
+        )
+        .await;
+        let project_id = task.project_id.clone();
+
+        let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let _seeded =
+            seed_active_notes(&db, &note_repo, &project_id, &[("Persist fail note", 0.85)]).await;
+
+        // Drop the retrieval_traces table so the trace insert will fail with
+        // a "relation does not exist" error.  The production path (notes
+        // table) is unaffected.
+        sqlx::query("DROP TABLE IF EXISTS retrieval_traces CASCADE")
+            .execute(db.pool())
+            .await
+            .expect("drop retrieval_traces");
+
+        let app_state = agent_context_from_db(db, CancellationToken::new());
+
+        // The function must return Some(rendered) despite the trace
+        // persistence failure — the fail-open contract.
+        let rendered = load_knowledge_context(&task, None, &app_state)
+            .await
+            .expect("rendered should be Some even when trace insert fails");
+        assert!(
+            rendered.contains("Persist fail note"),
+            "rendered prompt must include the note content despite trace failure"
+        );
+    }
+
+    /// Fail-open: when the trace-candidate search fails (simulated by
+    /// making a note's `confidence` NULL, which causes `query_as` to fail
+    /// on the non-nullable `ScopeOverlapTraceCandidate::confidence: f64`
+    /// field), `load_knowledge_context` must still return the rendered
+    /// prompt from the production query.  This exercises the `Err(e)`
+    /// branch on `trace_result` at the top of the trace-classification
+    /// path and verifies the AC4 requirement that trace-candidate search
+    /// errors never change the returned knowledge context.
+    #[tokio::test]
+    async fn load_knowledge_context_returns_rendered_when_trace_candidate_search_fails() {
+        let db = Database::ephemeral().await.expect("create ephemeral db");
+        let events = EventBus::noop();
+        let task = create_project_epic_task(
+            &db,
+            &events,
+            "Trace search fail epic",
+            "Trace search fail task",
+        )
+        .await;
+        let project_id = task.project_id.clone();
+
+        let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let seeded = seed_active_notes(
+            &db,
+            &note_repo,
+            &project_id,
+            &[("Search fail note A", 0.85), ("Search fail note B", 0.75)],
+        )
+        .await;
+        assert_eq!(seeded.len(), 2);
+
+        // Make confidence nullable and NULL-ify one note.  The production
+        // query (`confidence >= 0.3`) filters out the NULL row, so it
+        // still returns "Search fail note A".  The trace-candidate query
+        // has no confidence filter and includes the NULL row, causing
+        // `query_as` to fail when mapping NULL → `f64`.
+        sqlx::query("ALTER TABLE notes ALTER COLUMN confidence DROP NOT NULL")
+            .execute(db.pool())
+            .await
+            .expect("drop not null");
+        sqlx::query("UPDATE notes SET confidence = NULL WHERE title = $1")
+            .bind("Search fail note B")
+            .execute(db.pool())
+            .await
+            .expect("nullify confidence");
+
+        let app_state = agent_context_from_db(db, CancellationToken::new());
+
+        // The function must return Some(rendered) despite the trace
+        // candidate search failure — the fail-open contract.
+        let rendered = load_knowledge_context(&task, None, &app_state)
+            .await
+            .expect("rendered should be Some even when trace candidate search fails");
+        assert!(
+            rendered.contains("Search fail note A"),
+            "rendered prompt must include the non-NULL-confidence note"
+        );
+        // The NULL-confidence note is excluded from production results by
+        // the `confidence >= 0.3` filter, so it must NOT appear in the
+        // rendered prompt.
+        assert!(
+            !rendered.contains("Search fail note B"),
+            "NULL-confidence note excluded from production results"
+        );
+    }
 }
 
 #[tokio::test]
