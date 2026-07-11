@@ -1031,6 +1031,166 @@ fn render_synopsis_navigation_hint_at_bottom_with_synopsis() {
 }
 
 #[test]
+fn externalize_rendered_tool_result_turn_budget_stashes_and_renders_stub() {
+    let stash = Mutex::new(OutputStash::new());
+    let rendered = "line 0\n".repeat(500);
+    let stub = externalize_rendered_tool_result(&stash, "turn-budget-1", "shell", &rendered, 100);
+
+    // The inline stub is strictly smaller than the original rendered text.
+    assert!(stub.chars().count() < rendered.chars().count());
+    // Canonical header with reason="turn_budget".
+    assert!(stub.starts_with(
+        "[djinn-output-stash tool_use_id=\"turn-budget-1\" tool_name=\"shell\" reason=\"turn_budget\""
+    ));
+    // Recovery hint references the right tool and recovery tools.
+    assert!(stub.contains("output_view(tool_use_id=\"turn-budget-1\")"));
+    assert!(stub.contains("output_grep(tool_use_id=\"turn-budget-1\""));
+
+    // The complete rendered text was stashed and is recoverable.
+    let viewed = handle_stash_tool(
+        &stash,
+        "output_view",
+        Some(
+            &serde_json::json!({"tool_use_id": "turn-budget-1", "limit": 500})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+    )
+    .unwrap();
+    assert!(viewed.contains("line 0"));
+    assert_eq!(viewed.matches("line 0").count(), 500);
+}
+
+#[test]
+fn externalize_rendered_tool_result_counts_full_and_preview_chars() {
+    let stash = Mutex::new(OutputStash::new());
+    let rendered = "x".repeat(5_000);
+    let preview_budget = 200;
+    let stub = externalize_rendered_tool_result(
+        &stash,
+        "char-count-1",
+        "shell",
+        &rendered,
+        preview_budget,
+    );
+
+    let full_chars = rendered.chars().count();
+    let preview_body = crate::truncate::smart_truncate(&rendered, preview_budget);
+    let preview_body_chars = preview_body.chars().count();
+
+    let header = stub.lines().next().expect("canonical header");
+    assert!(header.contains(&format!("full_chars=\"{full_chars}\"")));
+    assert!(header.contains(&format!("preview_chars=\"{preview_body_chars}\"")));
+    // Counts are character counts, not bytes.
+    assert_eq!(full_chars, 5_000);
+    assert!(preview_body_chars <= preview_budget);
+}
+
+#[test]
+fn externalize_rendered_tool_result_escapes_header_values() {
+    let stash = Mutex::new(OutputStash::new());
+    let tool_use_id = "call-\\\"é";
+    let tool_name = "tool-\\\"name";
+    let rendered = "é".repeat(2_000);
+    let stub = externalize_rendered_tool_result(&stash, tool_use_id, tool_name, &rendered, 200);
+
+    let header = stub.lines().next().expect("canonical header");
+    // Escaped quote and backslash so the header stays parseable.
+    assert!(header.starts_with(
+        "[djinn-output-stash tool_use_id=\"call-\\\\\\\"é\" tool_name=\"tool-\\\\\\\"name\" reason=\"turn_budget\""
+    ));
+    // Character count is still correct for the multibyte payload.
+    assert!(header.contains("full_chars=\"2000\""));
+    assert!(header.contains("reason=\"turn_budget\""));
+    // preview_chars reports the actual character count of the truncated preview.
+    assert!(header.contains("preview_chars=\""));
+}
+
+#[test]
+fn externalize_rendered_tool_result_non_shrinking_guard_returns_original() {
+    let stash = Mutex::new(OutputStash::new());
+    let rendered = "small result";
+    let output = externalize_rendered_tool_result(&stash, "small-1", "read", rendered, 10);
+
+    // The stub would not be smaller, so the original is returned unchanged.
+    assert_eq!(output, rendered);
+    // No stash insertion happened.
+    assert!(stash.lock().unwrap().view("small-1", 0, 10).is_err());
+}
+
+#[test]
+fn externalize_rendered_tool_result_preview_size_is_configurable() {
+    let stash = Mutex::new(OutputStash::new());
+    let rendered = "0123456789".repeat(200);
+
+    let stub_small =
+        externalize_rendered_tool_result(&stash, "preview-small-1", "shell", &rendered, 50);
+    let stub_large =
+        externalize_rendered_tool_result(&stash, "preview-large-1", "shell", &rendered, 500);
+
+    // Larger preview budget → larger inline body and larger reported preview_chars.
+    let preview_chars_small = extract_header_preview_chars(stub_small.lines().next().unwrap());
+    let preview_chars_large = extract_header_preview_chars(stub_large.lines().next().unwrap());
+    assert!(preview_chars_small < preview_chars_large);
+    assert!(stub_large.len() > stub_small.len());
+}
+
+#[test]
+fn externalize_rendered_tool_result_matches_single_threshold_escaping_semantics() {
+    let tool_use_id = "call-\\\"é";
+    let tool_name = "tool-\\\"name";
+    let full = "é".repeat(MAX_TOOL_RESULT_CHARS + 1);
+
+    // Single-threshold path renders from a JSON value.
+    let single_stash = Mutex::new(OutputStash::new());
+    let single = render_tool_result(
+        &single_stash,
+        tool_use_id,
+        tool_name,
+        &serde_json::Value::String(full.clone()),
+    );
+    let single_header = single.lines().next().unwrap();
+
+    // Turn-budget path re-externalizes the already-rendered text.
+    let turn_stash = Mutex::new(OutputStash::new());
+    let turn = externalize_rendered_tool_result(
+        &turn_stash,
+        tool_use_id,
+        tool_name,
+        &full,
+        MAX_TOOL_RESULT_CHARS,
+    );
+    let turn_header = turn.lines().next().unwrap();
+
+    // Both use the same escaping for tool_use_id / tool_name.
+    let expected_prefix = format!(
+        "[djinn-output-stash tool_use_id=\"{}\" tool_name=\"{}\"",
+        escape_stash_header_value(tool_use_id),
+        escape_stash_header_value(tool_name),
+    );
+    assert!(single_header.starts_with(&expected_prefix));
+    assert!(turn_header.starts_with(&expected_prefix));
+
+    // Both report the same full character count.
+    let full_chars = full.chars().count();
+    assert!(single_header.contains(&format!("full_chars=\"{full_chars}\"")));
+    assert!(turn_header.contains(&format!("full_chars=\"{full_chars}\"")));
+}
+
+fn extract_header_preview_chars(header: &str) -> usize {
+    header
+        .split("preview_chars=\"")
+        .nth(1)
+        .unwrap()
+        .split('\"')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
 fn render_synopsis_does_not_appear_for_small_json() {
     let stash = Mutex::new(OutputStash::new());
     // Small JSON — under MAX_TOOL_RESULT_CHARS, so no truncation.
