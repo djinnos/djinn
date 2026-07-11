@@ -842,6 +842,12 @@ jobs:
           DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
         run: cargo run -p djinn-memory-eval -- run
 
+      # Phase 2 QA judge is intentionally NOT run here. It is a nightly-only
+      # non-gating workflow in memory-qa-nightly.yml and must not be invoked as
+      # a PR or merge-queue check, because it depends on LLM providers and
+      # credentialed model slots. Phase 1 remains deterministic, no-LLM, and
+      # required.
+
       # Compare current metrics against the committed baseline. Exits non-zero
       # (failing the job) on any unapproved threshold regression. Re-writes the
       # reports with per-query regression details (query id, text, permalink,

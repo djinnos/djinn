@@ -989,6 +989,10 @@ async fn dispatch_tool_call(
             // persisted history nor the next provider request can carry
             // an unbounded string. The model browses the full output via
             // `output_view` / `output_grep` against `output_stash`.
+            // Chat remains per-result-only for rdx6: it deliberately calls the
+            // existing render_tool_result chokepoint and does not run the
+            // turn-budget group post-pass planned for the worker reply loop in
+            // sibling epic v9ie.
             let output =
                 djinn_agent::output_stash::render_tool_result(output_stash, &id, &name, &value);
             let elapsed_ms = started_at.elapsed().as_millis() as u64;
