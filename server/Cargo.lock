@@ -1516,6 +1516,7 @@ dependencies = [
  "djinn-db",
  "djinn-git",
  "djinn-memory",
+ "djinn-slot",
  "serde",
  "serde_json",
  "sha2 0.10.9",
