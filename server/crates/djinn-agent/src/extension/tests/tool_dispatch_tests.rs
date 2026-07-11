@@ -891,12 +891,150 @@ async fn seed_pitfall(
     title: &str,
     body: &str,
     scope_path: &str,
-) {
+) -> String {
     let repo = NoteRepository::new(db.clone(), EventBus::noop());
     let scope_json = format!("[\"{scope_path}\"]");
     repo.create_db_note_with_scope(project_id, title, body, "pitfall", "[]", &scope_json)
         .await
-        .expect("seed pitfall note");
+        .expect("seed pitfall note")
+        .id
+}
+
+async fn latest_jit_trace(
+    db: &djinn_db::Database,
+    project_id: &str,
+) -> djinn_db::repositories::retrieval_trace::RetrievalTraceRow {
+    use djinn_db::repositories::retrieval_trace::{
+        RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceRepository,
+    };
+
+    RetrievalTraceRepository::new(db.clone())
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                entry_point: Some(RetrievalTraceEntryPoint::JitPitfalls),
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list JIT traces")
+        .into_iter()
+        .next()
+        .expect("JIT trace should be persisted")
+}
+
+/// The normal JIT path preserves the rendered top-two hint while recording its
+/// complete candidate universe for MCP trace consumers.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_trace_preserves_top_two_output_and_candidate_outcomes() {
+    use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "cohort");
+    }
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-trace-normal-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+
+    let first = seed_pitfall(&db, pid, "Trace First", "first body", "src").await;
+    let second = seed_pitfall(&db, pid, "Trace Second", "second body", "src").await;
+    let third = seed_pitfall(&db, pid, "Trace Third", "third body", "src").await;
+    let below = seed_pitfall(&db, pid, "Trace Below", "below body", "src").await;
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    for (id, confidence) in [(&first, 0.95), (&second, 0.90), (&third, 0.85), (&below, 0.10)] {
+        note_repo
+            .set_confidence(id, confidence)
+            .await
+            .expect("set deterministic confidence");
+    }
+
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// trace\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
+        .await
+        .expect("write");
+    let hint = response["jit_pitfalls"].as_str().expect("rendered hint");
+    assert!(hint.contains("Trace First") && hint.contains("Trace Second"));
+    assert!(!hint.contains("Trace Third") && !hint.contains("Trace Below"));
+
+    let trace = latest_jit_trace(&db, pid).await;
+    assert_eq!(trace.entry_point, "jit_pitfalls");
+    assert_eq!(trace.candidate_cap, 50);
+    assert!(!trace.candidate_cap_exceeded);
+    assert!(trace.estimated_injected_tokens > 0);
+    assert!(trace.durations_ms.get("search_elapsed_ms").is_some());
+    assert!(trace.durations_ms.get("trace_search_elapsed_ms").is_some());
+    let trigger = trace.trigger.expect("trigger metadata");
+    assert_eq!(trigger["rollout_mode"], "cohort");
+    assert_eq!(trigger["rendered_note_count"], 2);
+    assert_eq!(trigger["production_limit"], 8);
+
+    let candidates = trace.candidates_typed();
+    let candidate = |id: &str| candidates.iter().find(|c| c.note_id == id).expect("traced note");
+    for id in [&first, &second] {
+        assert_eq!(candidate(id).outcome, CandidateOutcome::Injected);
+        assert_eq!(candidate(id).skipped_reason, None);
+    }
+    assert_eq!(candidate(&third).outcome, CandidateOutcome::Skipped);
+    assert_eq!(candidate(&third).skipped_reason, Some(SkippedReason::NotTopK));
+    assert_eq!(candidate(&below).skipped_reason, Some(SkippedReason::MinConfidence));
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
+    }
+}
+
+/// A failed trace insert is strictly observational: normal JIT rendering stays
+/// successful even after persistence is made unavailable.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_trace_insert_failure_is_fail_open_for_rendered_hint() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "enabled");
+    }
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-trace-insert-fail-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+    seed_pitfall(&db, pid, "Insert Failure Pitfall", "still rendered", "src").await;
+    djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
+
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// x\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
+        .await
+        .expect("trace insert failure must not fail write");
+    assert!(response["jit_pitfalls"]
+        .as_str()
+        .expect("hint remains present")
+        .contains("Insert Failure Pitfall"));
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
+    }
 }
 
 /// With the gate OFF (default), a write must produce byte-identical output:

@@ -27,6 +27,23 @@
 //! ## Resilience
 //! A search error or empty result NEVER fails the write — the hint is simply
 //! skipped and the original tool result is returned unchanged.
+//!
+//! ## Retrieval-trace contract
+//! `maybe_pitfall_hint` is the `RetrievalTraceEntryPoint::JitPitfalls` entry
+//! point for sibling `memory_recall_trace` MCP consumers. Only an eligible,
+//! first-modification search produces a trace: its trigger records rollout
+//! mode, touched-path metadata, the 0.3 confidence floor, production
+//! over-fetch limit (8), note types, rendered count, and result count. The
+//! trace universe is capped at `DEFAULT_CANDIDATE_CAP`; the row records that
+//! cap and whether it was exceeded. The two notes rendered into
+//! `<relevant-pitfalls>` are `injected` (with no skipped reason); every other
+//! candidate is deterministically `min_confidence` when below the floor or
+//! `not_top_k` otherwise. Durations separate production search, trace-universe
+//! search, and persistence where those phases ran; injected tokens are the
+//! rendered block's character count divided by four, rounded up. Candidate
+//! fetch, validation, serialization, and repository insertion are all
+//! fail-open: they may warn and omit/degrade trace persistence, but must never
+//! alter the returned `Option<String>` or the pre-existing Prometheus outcomes.
 
 mod trace;
 
