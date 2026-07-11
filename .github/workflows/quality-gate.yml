@@ -252,6 +252,15 @@ jobs:
           echo "::error::cargo-deny check failed after 3 attempts"
           exit 1
 
+      # Fail fast — see the note above the Quality Gate job.
+      - name: Fail fast
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
+            || echo "::warning::Fail-fast cancel failed; letting the run finish."
+
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Server Lint (PR + merge queue)                                  ║
   # ║                                                                  ║
@@ -303,6 +312,15 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --features qdrant -- -D warnings
+
+      # Fail fast — see the note above the Quality Gate job.
+      - name: Fail fast
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
+            || echo "::warning::Fail-fast cancel failed; letting the run finish."
 
   # Cross-check the Linux sandbox layer for aarch64. Everything else in CI
   # compiles x86_64-only, which let an aarch64-breaking seccomp deny list
@@ -369,6 +387,15 @@ jobs:
       - name: cargo check (aarch64)
         run: cargo check -p djinn-sandbox --all-targets --target aarch64-unknown-linux-gnu
 
+      # Fail fast — see the note above the Quality Gate job.
+      - name: Fail fast
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
+            || echo "::warning::Fail-fast cancel failed; letting the run finish."
+
   # Pure-shell PR-time guard for Rust source file size; independent from clippy.
   # Runs in changed-file mode (--files-from-stdin) so the job enforces the
   # "new or edited Rust file" regression guard and does not fail on the
@@ -422,6 +449,15 @@ jobs:
           git diff --name-only --diff-filter=AMR "$BASE_SHA...HEAD" \
             | ./scripts/check-file-size.sh --files-from-stdin
 
+      # Fail fast — see the note above the Quality Gate job.
+      - name: Fail fast
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
+            || echo "::warning::Fail-fast cancel failed; letting the run finish."
+
   # Pure-shell PR-time guard: already-applied sqlx migrations are immutable.
   # Editing/renaming/deleting a migration that exists on the base branch breaks
   # the `migrate` init container on every EXISTING database (sqlx checksum
@@ -451,6 +487,15 @@ jobs:
                || '' }}
         run: ./scripts/check-migrations-immutable.sh
 
+      # Fail fast — see the note above the Quality Gate job.
+      - name: Fail fast
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
+            || echo "::warning::Fail-fast cancel failed; letting the run finish."
+
   # Pure-shell PR-time guard: raw sqlx query usage is confined to djinn-db.
   # Enforces the boundary that all direct sqlx::query / sqlx::query! calls
   # must live inside `server/crates/djinn-db/` and not leak into other crates.
@@ -479,6 +524,15 @@ jobs:
                || github.event.merge_group.base_sha
                || '' }}
         run: ./scripts/check-raw-sql-boundary.sh
+
+      # Fail fast — see the note above the Quality Gate job.
+      - name: Fail fast
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
+            || echo "::warning::Fail-fast cancel failed; letting the run finish."
 
   # Pure-shell PR-time guard for the git, HTTP, and Kubernetes capability
   # boundaries.  All direct git usage (git2::, Command::new("git")), outbound
@@ -517,6 +571,15 @@ jobs:
           ./scripts/check-http-boundary.sh
           ./scripts/check-k8s-boundary.sh
 
+      # Fail fast — see the note above the Quality Gate job.
+      - name: Fail fast
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
+            || echo "::warning::Fail-fast cancel failed; letting the run finish."
+
   # Pure-script PR-time guard: architectural layering boundaries.
   # Enforces the forbidden-edge rules in `server/boundary_rules.toml`
   # against the workspace's declared crate dependencies + a source scan
@@ -534,6 +597,15 @@ jobs:
 
       - name: Check architectural boundaries
         run: python3 scripts/check_boundaries.py
+
+      # Fail fast — see the note above the Quality Gate job.
+      - name: Fail fast
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
+            || echo "::warning::Fail-fast cancel failed; letting the run finish."
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Server Tests (merge queue only)                                 ║
@@ -744,6 +816,15 @@ jobs:
         working-directory: .
         run: make sqlx-verify
 
+      # Fail fast — see the note above the Quality Gate job.
+      - name: Fail fast
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
+            || echo "::warning::Fail-fast cancel failed; letting the run finish."
+
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Memory-eval Phase 1 PR gate (PR + merge queue)                  ║
   # ║                                                                  ║
@@ -875,6 +956,16 @@ jobs:
             cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # Fail fast — see the note above the Quality Gate job. Placed after the
+      # always() artifact/summary steps so the report still uploads first.
+      - name: Fail fast
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
+            || echo "::warning::Fail-fast cancel failed; letting the run finish."
+
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  UI (PR + merge queue)                                           ║
   # ╚══════════════════════════════════════════════════════════════════╝
@@ -930,7 +1021,30 @@ jobs:
       - name: Production build
         run: pnpm build
 
+      # Fail fast — see the note above the Quality Gate job.
+      - name: Fail fast
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
+            || echo "::warning::Fail-fast cancel failed; letting the run finish."
+
   # ── Quality gate ────────────────────────────────────────────────────
+  # FAIL FAST: most jobs above end with a `Fail fast` step (if: failure())
+  # that cancels this whole run the moment that job fails, instead of letting
+  # the remaining jobs burn runners for minutes before this gate can even
+  # start (a 14s boundary-guard failure used to wait ~7 min for the test
+  # shards). Cancellation semantics make this safe: the failing job keeps its
+  # red conclusion + logs (it fails before issuing the cancel), sibling jobs
+  # flip to `cancelled`, and this gate — `if: always()` — still RUNS after
+  # the cancellation (GitHub re-evaluates job `if` conditions on cancel and
+  # lets true ones proceed), sees the non-success results below, and
+  # concludes `failure` like any other red run. Server Test shards carry no
+  # fail-fast step on purpose: they fail near the END of their runs (after
+  # compile), so cancelling siblings would hide the other shards' failures
+  # and feed the rework loop partial results while saving almost nothing.
+  #
   # If you change this job's name, also update the branch-protection rule
   # (and the merge-queue config) that requires "Quality Gate" as THE
   # single required status check. The individual jobs above must NOT be
@@ -942,6 +1056,10 @@ jobs:
     runs-on: ubuntu-latest
     if: always() && github.event_name != 'push'
     needs:
+      # `changes` is listed so a paths-filter failure cannot silently skip
+      # every gated job (skipped needs read as success below) and let the
+      # gate go green on a run where no CI actually executed.
+      - changes
       - server-cargo-deny
       - server-clippy
       - server-aarch64-check
@@ -958,6 +1076,7 @@ jobs:
       - name: Check results
         run: |
           results=(
+            "${{ needs.changes.result }}"
             "${{ needs.server-cargo-deny.result }}"
             "${{ needs.server-clippy.result }}"
             "${{ needs.server-aarch64-check.result }}"
