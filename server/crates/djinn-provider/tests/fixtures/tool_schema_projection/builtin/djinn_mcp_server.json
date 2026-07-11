@@ -9763,7 +9763,7 @@
   },
   {
     "name": "org_policy_get",
-    "description": "Admin-only: read the org AI policy — the subscription allow/block table (with data-residency jurisdiction per provider), the org-default per-role model lanes, and the lane lock level.",
+    "description": "Admin-only: read the org AI policy — the subscription allow/block table (with data-residency jurisdiction per provider), the org-default per-role model lanes, the lane lock level, and the recommended-model override lists (additional/demoted).",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -9856,6 +9856,20 @@
           "description": "`flexible` (members may override) | `locked` (org assignment authoritative).",
           "type": "string"
         },
+        "additional_recommended_model_ids": {
+          "description": "Fully-qualified `provider/model-id` entries to add to the recommended set.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "demoted_recommended_model_ids": {
+          "description": "Fully-qualified `provider/model-id` entries to demote from the recommended set.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "error": {
           "type": [
             "string",
@@ -9868,7 +9882,9 @@
         "subscriptions",
         "blocked_subscriptions",
         "default_lanes",
-        "lock_level"
+        "lock_level",
+        "additional_recommended_model_ids",
+        "demoted_recommended_model_ids"
       ]
     },
     "annotations": {
@@ -9885,7 +9901,7 @@
   },
   {
     "name": "org_policy_set",
-    "description": "Admin-only: update the org AI policy. Patch the blocked subscription set (only subscription providers are honored; admin API keys are never blocked), the org-default per-role lanes, and/or the lane lock level. Omitted fields keep their current value.",
+    "description": "Admin-only: update the org AI policy. Patch the blocked subscription set (only subscription providers are honored; admin API keys are never blocked), the org-default per-role lanes, the lane lock level, and/or the recommended-model override lists (additional/demoted). Omitted fields keep their current value.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$defs": {
@@ -9952,6 +9968,28 @@
             "null"
           ],
           "default": null
+        },
+        "additional_recommended_model_ids": {
+          "description": "Fully-qualified `provider/model-id` entries to add to the recommended\nset on top of the baseline. Omit to keep the current value; pass an\nempty list to clear.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "demoted_recommended_model_ids": {
+          "description": "Fully-qualified `provider/model-id` entries to demote from the\nrecommended set. Omit to keep the current value; pass an empty list to\nclear.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
         }
       },
       "additionalProperties": false
@@ -10010,6 +10048,18 @@
         "lock_level": {
           "type": "string"
         },
+        "additional_recommended_model_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "demoted_recommended_model_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "error": {
           "type": [
             "string",
@@ -10022,7 +10072,9 @@
         "applied",
         "blocked_subscriptions",
         "default_lanes",
-        "lock_level"
+        "lock_level",
+        "additional_recommended_model_ids",
+        "demoted_recommended_model_ids"
       ]
     },
     "readOnly": false,

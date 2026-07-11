@@ -241,6 +241,31 @@ session_count: number
  * so the UI can label the attribution semantics.
  */
 completed_task_count: number
+/**
+ * First-pass rejection rate (0.0–1.0): fraction of this model's worker
+ * sessions that were superseded by a later worker session on a reopened
+ * task — the pass did not land and the task was reworked. Discriminates
+ * first-pass quality that shared-credit success_rate hides. `None` when
+ * the model ran no worker sessions.
+ */
+first_pass_rejection_rate?: number
+/**
+ * Final-pass share (0.0–1.0): fraction of this model's shared-credit
+ * completed tasks where THIS model ran the last worker session before the
+ * task closed — i.e. who actually landed the merge. `None` when the model
+ * has no completed-task credits.
+ */
+final_pass_share?: number
+/**
+ * Worker sessions superseded on a reopened task (numerator of
+ * `first_pass_rejection_rate`).
+ */
+first_pass_rejected_session_count: number
+/**
+ * Completed tasks landed by this model's final worker session (numerator of
+ * `final_pass_share`).
+ */
+final_pass_completed_task_count: number
 }
 /**
  * Project × model matrix cell, renamed to the frontend contract.
