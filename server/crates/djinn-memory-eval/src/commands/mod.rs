@@ -691,6 +691,61 @@ pub fn validate_baseline_not_all_miss(
     Ok(())
 }
 
+/// Run the Phase 2 QA execution: extract QA pairs from pitfall/case notes,
+/// run each question through real `NoteRepository::search` with top-k 10,
+/// render results through `format_knowledge_notes(2000)`, and record
+/// retrieval hit, gold rank, context recall, note type, and age bucket.
+///
+/// This path is deterministic/no-LLM: it prepares judge inputs but does not
+/// call a provider. Phase 2 output is written adjacent to Phase 1 reports
+/// and does not modify Phase 1 baselines or compare semantics.
+pub async fn cmd_qa_run(crate_root: &std::path::Path) -> Result<()> {
+    let output = crate::qa_run::execute_qa_run(crate_root).await?;
+
+    info!("=== Phase 2 QA Run ===");
+    info!(corpus = output.corpus_note_count, "corpus notes");
+    info!(pairs = output.qa_count, "QA pairs processed");
+    info!(
+        extraction_pairs = output.extraction.pairs.len(),
+        skipped = output.extraction.skipped.len(),
+        eligible = output.extraction.eligible_count,
+        "QA extraction"
+    );
+    info!(
+        retrieval_hits = output.retrieval_hit_count,
+        context_recalls = output.context_recall_count,
+        "QA results"
+    );
+
+    // Write Phase 2 QA report to target/memory-eval alongside Phase 1 reports.
+    let target_dir = std::path::PathBuf::from("target/memory-eval");
+    std::fs::create_dir_all(&target_dir)
+        .with_context(|| format!("creating output directory {}", target_dir.display()))?;
+
+    let report_json =
+        serde_json::to_string_pretty(&output).context("serializing Phase 2 QA run output")?;
+    let report_path = target_dir.join("phase2-qa-report.json");
+    std::fs::write(&report_path, report_json)
+        .with_context(|| format!("writing {}", report_path.display()))?;
+    info!(path = %report_path.display(), "Phase 2 QA report written");
+
+    // Print per-QA summary to info log
+    for record in &output.records {
+        info!(
+            qa_id = %record.qa_id,
+            note_type = %record.note_type,
+            retrieval_hit = record.retrieval_hit,
+            gold_rank = ?record.gold_rank,
+            context_recall = record.context_recall,
+            age_bucket = %record.age_bucket,
+            age_days = record.age_days,
+            "QA result"
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
