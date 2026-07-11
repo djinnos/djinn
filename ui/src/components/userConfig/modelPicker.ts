@@ -73,6 +73,52 @@ export function groupModelsByProvider(models: UserModel[]): ProviderGroup[] {
 }
 
 /**
+ * Format a numeric value as millions of tokens with one decimal when useful.
+ * Returns undefined for zero/null/undefined/negative values so the caller can
+ * decide whether to render.
+ */
+function formatTokens(value: number | null | undefined): string | undefined {
+  if (value == null || value <= 0) return undefined;
+  if (value >= 1_000_000) {
+    const millions = value / 1_000_000;
+    const rounded = Math.round(millions * 10) / 10;
+    return `${rounded}M`;
+  }
+  return `${value}`;
+}
+
+function formatPrice(value: number | null | undefined): string | undefined {
+  if (value == null || value <= 0) return undefined;
+  if (value >= 100) return `$${Math.round(value)}`;
+  if (value >= 0.01) return `$${value.toFixed(2)}`;
+  return `$${value.toPrecision(2)}`;
+}
+
+export function formatModelMetadata(model: UserModel): string {
+  const parts: string[] = [];
+  const context = formatTokens(model.context_window);
+  if (context) parts.push(`${context} ctx`);
+  const pricing = model.pricing;
+  if (pricing) {
+    const inputPrice = formatPrice(pricing.input_per_million);
+    const outputPrice = formatPrice(pricing.output_per_million);
+    if (inputPrice && outputPrice) {
+      parts.push(`${inputPrice}/${outputPrice} per M tok`);
+    } else if (inputPrice) {
+      parts.push(`${inputPrice} in`);
+    } else if (outputPrice) {
+      parts.push(`${outputPrice} out`);
+    }
+  }
+  const chips: string[] = [];
+  if (model.reasoning) chips.push("reasoning");
+  if (model.tool_call) chips.push("tools");
+  if (model.attachment) chips.push("vision");
+  if (chips.length > 0) parts.push(chips.join(" "));
+  return parts.join(" · ");
+}
+
+/**
  * Per-provider "default" list: recommended-only when the provider has any
  * recommendation, otherwise all of the provider's models. This is the set the
  * collapsed/default picker UI should display (preserves the original
