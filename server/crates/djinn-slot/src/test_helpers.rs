@@ -303,6 +303,39 @@ pub fn mock_externalize_rendered_result(
     stub
 }
 
+#[cfg(test)]
+mod externalization_seam_tests {
+    use super::*;
+
+    #[test]
+    fn mock_dispatcher_exposes_turn_budget_externalization_through_slot_trait() {
+        let dispatcher: Arc<dyn SlotToolDispatcher> = Arc::new(MockToolDispatcher);
+        let rendered = "0123456789".repeat(80);
+
+        let stub =
+            dispatcher.externalize_rendered_result("call-turn-budget-1", "shell", &rendered, 12);
+
+        assert!(stub.len() < rendered.len());
+        assert!(stub.starts_with(
+            "[djinn-output-stash tool_use_id=\"call-turn-budget-1\" tool_name=\"shell\" reason=\"turn_budget\""
+        ));
+        assert!(stub.contains("full_chars=\"800\""));
+        assert!(stub.contains("preview_chars=\"12\""));
+        assert!(stub.contains("\n012345678901\n"));
+    }
+
+    #[test]
+    fn configurable_dispatcher_uses_same_non_shrinking_contract() {
+        let dispatcher: Arc<dyn SlotToolDispatcher> =
+            Arc::new(ConfigurableToolDispatcher::new(Vec::new(), HashMap::new()));
+        let rendered = "short result";
+
+        let output = dispatcher.externalize_rendered_result("call-small-1", "read", rendered, 4);
+
+        assert_eq!(output, rendered);
+    }
+}
+
 /// Map a `StageOutcome` to `(SessionStatus, Option<park_reason>)`.
 ///
 /// Slot-local copy of the agent's `session_settlement_for_stage_outcome` so

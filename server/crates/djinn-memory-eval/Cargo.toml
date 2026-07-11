@@ -26,6 +26,7 @@ djinn-memory = { path = "../djinn-memory" }
 djinn-slot = { path = "../djinn-slot" }
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
 djinn-git = { path = "../djinn-git" }
+djinn-provider = { path = "../djinn-provider" }
 workspace-hack.workspace = true
 
 [dev-dependencies]
