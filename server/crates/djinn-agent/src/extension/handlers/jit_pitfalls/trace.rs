@@ -57,6 +57,7 @@ pub(super) fn build_trace_trigger(
     search_error: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
+        "shape": "touched_file",
         "rollout_mode": rollout_mode.label(),
         "touched_paths": touched_paths,
         "touched_path_count": touched_paths.len(),
@@ -65,22 +66,24 @@ pub(super) fn build_trace_trigger(
         "result_count": result_count,
         "min_confidence": min_confidence,
         "production_limit": production_limit,
+        "candidate_cap": djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP,
+        "candidate_cap_source": "DEFAULT_CANDIDATE_CAP",
         "note_types": JIT_TRACE_PROD_NOTE_TYPES,
         "search_error": search_error,
     })
 }
 
-/// Build the per-phase durations JSON object for the trace row.
+/// Build the pre-insert per-phase durations JSON object for the trace row.
 ///
 /// `search_elapsed_ms` is mandatory for every trace (it covers the production
-/// search). `trace_search_elapsed_ms` and `persist_elapsed_ms` are populated
-/// only when those phases actually ran and are absent (key missing) when
-/// skipped, preserving a clear "did this phase run?" signal in metadata
-/// rather than baking it into the durations object.
+/// search). `trace_search_elapsed_ms` is populated only when that phase ran and
+/// is absent (key missing) when skipped. `persist_elapsed_ms` is intentionally
+/// added inside [`persist_jit_trace`] after measuring the awaited repository
+/// insert path, so callers cannot accidentally persist a row that only logs the
+/// insert duration after the fact.
 pub(super) fn build_trace_durations_ms(
     search_elapsed_ms: u64,
     trace_search_elapsed_ms: Option<u64>,
-    persist_elapsed_ms: Option<u64>,
 ) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert(
@@ -93,12 +96,18 @@ pub(super) fn build_trace_durations_ms(
             serde_json::Value::Number(trace_ms.into()),
         );
     }
-    if let Some(persist_ms) = persist_elapsed_ms {
-        obj.insert(
-            "persist_elapsed_ms".to_owned(),
-            serde_json::Value::Number(persist_ms.into()),
-        );
-    }
+    serde_json::Value::Object(obj)
+}
+
+fn with_persist_elapsed_ms(
+    durations_ms: &serde_json::Value,
+    persist_elapsed_ms: u64,
+) -> serde_json::Value {
+    let mut obj = durations_ms.as_object().cloned().unwrap_or_default();
+    obj.insert(
+        "persist_elapsed_ms".to_owned(),
+        serde_json::Value::Number(persist_elapsed_ms.into()),
+    );
     serde_json::Value::Object(obj)
 }
 
@@ -190,7 +199,7 @@ pub(super) async fn persist_jit_trace(
     estimated_injected_tokens: i32,
     candidate_cap: i32,
     candidate_cap_exceeded: bool,
-) {
+) -> Option<u64> {
     use djinn_db::repositories::retrieval_trace::{
         CreateRetrievalTraceParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
     };
@@ -211,14 +220,39 @@ pub(super) async fn persist_jit_trace(
         estimated_injected_tokens,
     };
 
-    if let Err(e) = trace_repo.insert(params).await {
-        tracing::warn!(
-            target: TELEMETRY_TARGET,
-            session_id = %session_id,
-            project_id = %project_id,
-            error = %e,
-            "jit_pitfalls: failed to persist retrieval trace; continuing fail-open",
-        );
+    let insert_started = SystemClockTrait::new().now_instant();
+    let inserted = trace_repo.insert(params).await;
+    let persist_elapsed_ms = elapsed_millis(insert_started);
+
+    match inserted {
+        Ok(row) => {
+            let persisted_durations_ms = with_persist_elapsed_ms(durations_ms, persist_elapsed_ms);
+            if let Err(e) = trace_repo
+                .update_durations_ms(&row.id, &persisted_durations_ms)
+                .await
+            {
+                tracing::warn!(
+                    target: TELEMETRY_TARGET,
+                    session_id = %session_id,
+                    project_id = %project_id,
+                    trace_id = %row.id,
+                    error = %e,
+                    "jit_pitfalls: failed to store measured retrieval-trace insert duration; continuing fail-open",
+                );
+            }
+            Some(persist_elapsed_ms)
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: TELEMETRY_TARGET,
+                session_id = %session_id,
+                project_id = %project_id,
+                persist_elapsed_ms = ?persist_elapsed_ms,
+                error = %e,
+                "jit_pitfalls: failed to persist retrieval trace; continuing fail-open",
+            );
+            None
+        }
     }
 }
 
@@ -256,8 +290,6 @@ pub(super) async fn persist_jit_empty_trace(
     candidate_cap: i32,
 ) {
     use djinn_db::repositories::retrieval_trace::TraceCandidate;
-
-    let persist_started = SystemClockTrait::new().now_instant();
     let trace_search_started = SystemClockTrait::new().now_instant();
     let trace_universe = note_repo
         .query_by_scope_overlap_trace_candidates(
@@ -292,8 +324,8 @@ pub(super) async fn persist_jit_empty_trace(
                 Some(&format!("trace_candidate_query: {trace_err}")),
             );
             let durations_ms =
-                build_trace_durations_ms(search_elapsed_ms, Some(trace_search_elapsed_ms), None);
-            persist_jit_trace(
+                build_trace_durations_ms(search_elapsed_ms, Some(trace_search_elapsed_ms));
+            let persist_elapsed_ms = persist_jit_trace(
                 db,
                 session_id,
                 project_id,
@@ -305,13 +337,12 @@ pub(super) async fn persist_jit_empty_trace(
                 false,
             )
             .await;
-            let persist_elapsed_ms = elapsed_millis(persist_started);
             tracing::debug!(
                 target: TELEMETRY_TARGET,
                 session_id = %session_id,
                 project_id = %project_id,
                 trace_search_elapsed_ms = trace_search_elapsed_ms,
-                persist_elapsed_ms = persist_elapsed_ms,
+                persist_elapsed_ms = ?persist_elapsed_ms,
                 "jit_pitfalls: persisted empty-result search_error trace (fail-open)",
             );
             return;
@@ -375,10 +406,9 @@ pub(super) async fn persist_jit_empty_trace(
         JIT_TRACE_PROD_QUERY_LIMIT,
         None,
     );
-    let durations_ms =
-        build_trace_durations_ms(search_elapsed_ms, Some(trace_search_elapsed_ms), None);
+    let durations_ms = build_trace_durations_ms(search_elapsed_ms, Some(trace_search_elapsed_ms));
 
-    persist_jit_trace(
+    let persist_elapsed_ms = persist_jit_trace(
         db,
         session_id,
         project_id,
@@ -390,14 +420,13 @@ pub(super) async fn persist_jit_empty_trace(
         candidate_cap_exceeded,
     )
     .await;
-    let persist_elapsed_ms = elapsed_millis(persist_started);
     tracing::debug!(
         target: TELEMETRY_TARGET,
         session_id = %session_id,
         project_id = %project_id,
         trace_universe_count = trace_universe_count,
         trace_search_elapsed_ms = trace_search_elapsed_ms,
-        persist_elapsed_ms = persist_elapsed_ms,
+        persist_elapsed_ms = ?persist_elapsed_ms,
         "jit_pitfalls: persisted empty-result JitPitfalls trace with typed candidates (fail-open)",
     );
 }
@@ -427,9 +456,9 @@ pub(super) async fn persist_jit_error_trace(
         JIT_TRACE_PROD_QUERY_LIMIT,
         Some(error),
     );
-    let durations_ms = build_trace_durations_ms(search_elapsed_ms, None, None);
+    let durations_ms = build_trace_durations_ms(search_elapsed_ms, None);
     let empty_candidates = serde_json::json!([]);
-    persist_jit_trace(
+    let _persist_elapsed_ms = persist_jit_trace(
         db,
         session_id,
         project_id,
@@ -554,6 +583,7 @@ mod tests {
             JIT_TRACE_PROD_QUERY_LIMIT,
             None,
         );
+        assert_eq!(trigger["shape"], "touched_file");
         assert_eq!(trigger["rollout_mode"], "cohort");
         assert_eq!(trigger["touched_paths"][0], "src/a.rs");
         assert_eq!(trigger["touched_path_count"], 2);
@@ -561,6 +591,11 @@ mod tests {
         assert_eq!(trigger["result_count"], 5);
         assert_eq!(trigger["min_confidence"], 0.3);
         assert_eq!(trigger["production_limit"], 8);
+        assert_eq!(
+            trigger["candidate_cap"],
+            djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP
+        );
+        assert_eq!(trigger["candidate_cap_source"], "DEFAULT_CANDIDATE_CAP");
         assert_eq!(
             trigger["note_types"],
             serde_json::json!(["pitfall", "pattern"])
@@ -585,22 +620,31 @@ mod tests {
 
     #[test]
     fn build_trace_durations_ms_only_includes_phases_that_actually_ran() {
-        let d = build_trace_durations_ms(123, None, None);
+        let d = build_trace_durations_ms(123, None);
         let obj = d.as_object().expect("durations must be an object");
         assert_eq!(obj.len(), 1);
         assert_eq!(obj["search_elapsed_ms"], serde_json::json!(123));
 
-        let d2 = build_trace_durations_ms(10, Some(20), Some(30));
+        let d2 = build_trace_durations_ms(10, Some(20));
         let obj2 = d2.as_object().expect("durations must be an object");
-        assert_eq!(obj2.len(), 3);
+        assert_eq!(obj2.len(), 2);
         assert_eq!(obj2["search_elapsed_ms"], serde_json::json!(10));
         assert_eq!(obj2["trace_search_elapsed_ms"], serde_json::json!(20));
-        assert_eq!(obj2["persist_elapsed_ms"], serde_json::json!(30));
 
-        let d3 = build_trace_durations_ms(0, Some(7), None);
+        let d3 = build_trace_durations_ms(0, Some(7));
         let obj3 = d3.as_object().expect("durations must be an object");
         assert_eq!(obj3.len(), 2);
         assert!(obj3.get("persist_elapsed_ms").is_none());
+    }
+
+    #[test]
+    fn with_persist_elapsed_ms_adds_measured_insert_duration() {
+        let d = build_trace_durations_ms(10, Some(20));
+        let persisted = with_persist_elapsed_ms(&d, 30);
+        let obj = persisted.as_object().expect("durations must be an object");
+        assert_eq!(obj["search_elapsed_ms"], serde_json::json!(10));
+        assert_eq!(obj["trace_search_elapsed_ms"], serde_json::json!(20));
+        assert_eq!(obj["persist_elapsed_ms"], serde_json::json!(30));
     }
 
     #[test]

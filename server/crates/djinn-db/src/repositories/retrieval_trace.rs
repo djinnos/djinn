@@ -551,6 +551,25 @@ impl RetrievalTraceRepository {
         )
     }
 
+    /// Replace the per-phase durations JSON for an existing trace row.
+    ///
+    /// Some instrumentation measures the awaited insert path itself before the
+    /// final `durations_ms` payload is known. Keep that update inside this
+    /// repository layer so application crates never issue raw SQL directly.
+    pub async fn update_durations_ms(
+        &self,
+        id: &str,
+        durations_ms: &serde_json::Value,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE retrieval_traces SET durations_ms = $2 WHERE id = $1")
+            .bind(id)
+            .bind(durations_ms)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Prune (delete) trace rows older than a configurable retention cutoff for
     /// a project.
     ///

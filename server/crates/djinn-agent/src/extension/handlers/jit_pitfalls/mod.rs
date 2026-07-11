@@ -449,7 +449,6 @@ pub(super) async fn maybe_pitfall_hint(
         .await;
     let trace_search_elapsed_ms = elapsed_millis(trace_search_started);
 
-    let persist_started = SystemClockTrait::new().now_instant();
     let candidate_cap: i32 = djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP;
     let mut candidate_cap_exceeded = false;
     let mut trace_candidates_json = serde_json::json!([]);
@@ -505,15 +504,12 @@ pub(super) async fn maybe_pitfall_hint(
                             JIT_TRACE_PROD_QUERY_LIMIT,
                             None,
                         );
-                        let durations_ms = build_trace_durations_ms(
-                            elapsed_ms,
-                            Some(trace_search_elapsed_ms),
-                            None,
-                        );
+                        let durations_ms =
+                            build_trace_durations_ms(elapsed_ms, Some(trace_search_elapsed_ms));
 
                         trace_candidates_json = json;
 
-                        persist_jit_trace(
+                        let persist_elapsed_ms = persist_jit_trace(
                             &state.db,
                             session_id,
                             project_id,
@@ -525,7 +521,6 @@ pub(super) async fn maybe_pitfall_hint(
                             candidate_cap_exceeded,
                         )
                         .await;
-                        let persist_elapsed_ms = elapsed_millis(persist_started);
                         tracing::debug!(
                             target: TELEMETRY_TARGET,
                             session_id = %session_id,
@@ -533,7 +528,7 @@ pub(super) async fn maybe_pitfall_hint(
                             candidates = candidate_count,
                             injected = injected_note_ids.len(),
                             trace_search_elapsed_ms = trace_search_elapsed_ms,
-                            persist_elapsed_ms = persist_elapsed_ms,
+                            persist_elapsed_ms = ?persist_elapsed_ms,
                             estimated_injected_tokens = estimated_tokens,
                             "jit_pitfalls: persisted JitPitfalls trace (fail-open)",
                         );
@@ -568,9 +563,8 @@ pub(super) async fn maybe_pitfall_hint(
                 JIT_TRACE_PROD_QUERY_LIMIT,
                 None,
             );
-            let durations_ms =
-                build_trace_durations_ms(elapsed_ms, Some(trace_search_elapsed_ms), None);
-            persist_jit_trace(
+            let durations_ms = build_trace_durations_ms(elapsed_ms, Some(trace_search_elapsed_ms));
+            let persist_elapsed_ms = persist_jit_trace(
                 &state.db,
                 session_id,
                 project_id,
@@ -582,12 +576,11 @@ pub(super) async fn maybe_pitfall_hint(
                 candidate_cap_exceeded,
             )
             .await;
-            let persist_elapsed_ms = elapsed_millis(persist_started);
             tracing::debug!(
                 target: TELEMETRY_TARGET,
                 session_id = %session_id,
                 project_id = %project_id,
-                persist_elapsed_ms = persist_elapsed_ms,
+                persist_elapsed_ms = ?persist_elapsed_ms,
                 estimated_injected_tokens = estimated_tokens,
                 "jit_pitfalls: persisted empty-universe JitPitfalls trace (fail-open)",
             );
@@ -607,8 +600,7 @@ pub(super) async fn maybe_pitfall_hint(
                 JIT_TRACE_PROD_QUERY_LIMIT,
                 Some(&format!("trace_candidate_query: {trace_err}")),
             );
-            let durations_ms =
-                build_trace_durations_ms(elapsed_ms, Some(trace_search_elapsed_ms), None);
+            let durations_ms = build_trace_durations_ms(elapsed_ms, Some(trace_search_elapsed_ms));
             tracing::warn!(
                 target: TELEMETRY_TARGET,
                 session_id = %session_id,
@@ -617,7 +609,7 @@ pub(super) async fn maybe_pitfall_hint(
                 "jit_pitfalls: trace candidate query failed; \
                  persisting metadata-only JitPitfalls trace (fail-open)",
             );
-            persist_jit_trace(
+            let persist_elapsed_ms = persist_jit_trace(
                 &state.db,
                 session_id,
                 project_id,
@@ -629,6 +621,14 @@ pub(super) async fn maybe_pitfall_hint(
                 candidate_cap_exceeded,
             )
             .await;
+            tracing::debug!(
+                target: TELEMETRY_TARGET,
+                session_id = %session_id,
+                project_id = %project_id,
+                persist_elapsed_ms = ?persist_elapsed_ms,
+                estimated_injected_tokens = estimated_tokens,
+                "jit_pitfalls: persisted metadata-only JitPitfalls trace after trace-candidate error (fail-open)",
+            );
             return Some(block);
         }
     }
