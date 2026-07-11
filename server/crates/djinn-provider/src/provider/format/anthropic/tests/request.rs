@@ -352,20 +352,16 @@ fn test_populated_segments_unchanged() {
     );
 }
 
-// ─── Provider-internal thinking block skip guards ─────────────────────────
-// These tests verify that shared ContentBlock provider-state variants (signed
-// Thinking, RedactedThinking, Unknown passthrough) do not silently become
-// empty text placeholders in Anthropic request assembly. Native Anthropic
-// signed-thinking replay serialization is intentionally out of scope here and is
-// owned by sibling epic `xw13`.
+// ─── Native assistant thinking replay ──────────────────────────────────────
 
 #[test]
-fn test_build_request_skips_signed_thinking_block() {
+fn test_build_request_replays_signed_thinking_in_original_position() {
     let provider = test_provider();
     let mut conv = Conversation::default();
     conv.push(crate::message::Message {
         role: djinn_core::message::Role::Assistant,
         content: vec![
+            ContentBlock::text("before thinking"),
             ContentBlock::Thinking {
                 thinking: "internal reasoning".to_string(),
                 signature: Some("sig_abc".to_string()),
@@ -379,11 +375,13 @@ fn test_build_request_skips_signed_thinking_block() {
     let messages = req["messages"].as_array().expect("messages array");
     assert_eq!(messages.len(), 1);
     let content = messages[0]["content"].as_array().unwrap();
-    assert_eq!(content.len(), 1);
+    assert_eq!(content.len(), 3);
+    assert_eq!(content[0], json!({"type": "text", "text": "before thinking"}));
     assert_eq!(
-        content[0],
-        json!({"type": "text", "text": "visible output"})
+        content[1],
+        json!({"type": "thinking", "thinking": "internal reasoning", "signature": "sig_abc"})
     );
+    assert_eq!(content[2], json!({"type": "text", "text": "visible output"}));
     assert!(
         !content
             .iter()
@@ -392,7 +390,7 @@ fn test_build_request_skips_signed_thinking_block() {
 }
 
 #[test]
-fn test_build_request_skips_redacted_thinking_block() {
+fn test_build_request_replays_redacted_thinking_without_empty_text() {
     let provider = test_provider();
     let mut conv = Conversation::default();
     conv.push(crate::message::Message {
@@ -408,11 +406,12 @@ fn test_build_request_skips_redacted_thinking_block() {
 
     let req = provider.build_request(&conv, &[], None);
     let content = req["messages"][0]["content"].as_array().unwrap();
-    assert_eq!(content.len(), 1);
+    assert_eq!(content.len(), 2);
     assert_eq!(
         content[0],
-        json!({"type": "text", "text": "visible output"})
+        json!({"type": "redacted_thinking", "data": "opaque_data_blob"})
     );
+    assert_eq!(content[1], json!({"type": "text", "text": "visible output"}));
     assert!(
         !content
             .iter()
@@ -421,10 +420,11 @@ fn test_build_request_skips_redacted_thinking_block() {
 }
 
 #[test]
-fn test_build_request_skips_unknown_passthrough_block() {
+fn test_build_request_replays_unknown_passthrough_without_type_override() {
     let provider = test_provider();
     let mut extra = serde_json::Map::new();
     extra.insert("foo".to_string(), json!("bar"));
+    extra.insert("type".to_string(), json!("attempted_override"));
     let mut conv = Conversation::default();
     conv.push(crate::message::Message {
         role: djinn_core::message::Role::Assistant,
@@ -440,11 +440,12 @@ fn test_build_request_skips_unknown_passthrough_block() {
 
     let req = provider.build_request(&conv, &[], None);
     let content = req["messages"][0]["content"].as_array().unwrap();
-    assert_eq!(content.len(), 1);
+    assert_eq!(content.len(), 2);
     assert_eq!(
         content[0],
-        json!({"type": "text", "text": "visible output"})
+        json!({"type": "custom_provider_block", "foo": "bar"})
     );
+    assert_eq!(content[1], json!({"type": "text", "text": "visible output"}));
     assert!(
         !content
             .iter()
@@ -453,7 +454,7 @@ fn test_build_request_skips_unknown_passthrough_block() {
 }
 
 #[test]
-fn test_build_request_all_internal_blocks_yield_empty_content() {
+fn test_build_request_replays_all_anthropic_thinking_blocks() {
     let provider = test_provider();
     let mut conv = Conversation::default();
     conv.push(crate::message::Message {
@@ -472,5 +473,11 @@ fn test_build_request_all_internal_blocks_yield_empty_content() {
 
     let req = provider.build_request(&conv, &[], None);
     let content = req["messages"][0]["content"].as_array().unwrap();
-    assert_eq!(content.len(), 0);
+    assert_eq!(
+        content,
+        &vec![
+            json!({"type": "thinking", "thinking": "internal reasoning", "signature": "sig_abc"}),
+            json!({"type": "redacted_thinking", "data": "opaque"}),
+        ]
+    );
 }
