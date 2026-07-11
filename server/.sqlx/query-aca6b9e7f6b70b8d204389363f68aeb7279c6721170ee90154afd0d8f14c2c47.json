@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT commit_sha\n             FROM repo_graph_cache\n             WHERE project_id = $1\n             ORDER BY built_at DESC\n             LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "commit_sha",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "aca6b9e7f6b70b8d204389363f68aeb7279c6721170ee90154afd0d8f14c2c47"
+}
