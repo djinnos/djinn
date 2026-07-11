@@ -186,6 +186,20 @@ async fn make_context() -> (
     String,
     CancellationToken,
 ) {
+    let (ctx, project_path, task_id, session_id, cancel, _task) = make_context_with_task().await;
+    (ctx, project_path, task_id, session_id, cancel)
+}
+
+/// Extended `make_context` that also returns the `Task` model so callers can
+/// pass it to `render_prompt_for_role` for realistic prompt rendering.
+async fn make_context_with_task() -> (
+    crate::host::SlotContext,
+    String,
+    String,
+    String,
+    CancellationToken,
+    djinn_core::models::Task,
+) {
     let cancel = CancellationToken::new();
     let db = test_helpers::create_test_db();
     let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
@@ -210,7 +224,9 @@ async fn make_context() -> (
     let project_path = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
         .to_string_lossy()
         .into_owned();
-    (ctx, project_path, task.id, session.id, cancel)
+    let task_id = task.id.clone();
+    let session_id = session.id.clone();
+    (ctx, project_path, task_id, session_id, cancel, task)
 }
 
 /// Holds common test state for reply-loop tests, eliminating the repeated
@@ -232,6 +248,61 @@ impl ReplyLoopHarness {
         let mut conv = Conversation::new();
         conv.push(Message::system("You are a worker."));
         conv.push(Message::user("Do the task."));
+        Self {
+            slot_ctx,
+            project_path,
+            task_id,
+            session_id,
+            cancel,
+            conv,
+        }
+    }
+
+    /// Build a harness with the **real** post-wzz6 worker prompt surface:
+    /// the actual rendered role prompt with `format_tools_section` applied to
+    /// the real canonical tool schemas.  This is the harness used by the
+    /// provider-tool preservation regression tests so that a regression in
+    /// prompt rendering or canonical tool schema generation would be caught.
+    async fn new_with_worker_prompt() -> Self {
+        let (slot_ctx, project_path, task_id, session_id, cancel, task) =
+            make_context_with_task().await;
+        let tool_schemas_fn = djinn_mcp_extension::tool_defs::tool_schemas_worker;
+        let role_config = djinn_roles::config::config_for(djinn_roles::AgentType::Worker);
+        let task_ctx = djinn_roles::prompts::TaskContext {
+            project_path: project_path.clone(),
+            workspace_path: "/tmp".to_string(),
+            diff: None,
+            commits: None,
+            start_commit: None,
+            end_commit: None,
+            conflict_files: None,
+            merge_base_branch: None,
+            merge_target_branch: None,
+            merge_failure_context: None,
+            setup_commands: None,
+            activity: None,
+            worker_summary: None,
+            worker_concerns: None,
+            epic_context: None,
+            knowledge_context: None,
+            code_graph_context: None,
+            reviewer_diff_context: None,
+            ci_blocking_directive: None,
+            worker_resume_note: None,
+            arbiter_directive: None,
+        };
+        let system_prompt = djinn_roles::prompts::render_prompt_for_role(
+            role_config,
+            tool_schemas_fn,
+            &task,
+            &task_ctx,
+        );
+        let mut conv = Conversation::new();
+        conv.push(Message::system(system_prompt));
+        conv.push(Message::user(format!(
+            "Implement task {}: {}",
+            task.short_id, task.title
+        )));
         Self {
             slot_ctx,
             project_path,
@@ -4376,85 +4447,20 @@ async fn codex_empty_turn_error_is_empty_completion_throttle() {
 // one provider-declared tool invocation must complete through the existing
 // dispatch path.  These tests are the regression gate for that contract.
 
-/// Build a set of provider-declared tool schemas that represent the
-/// post-wzz6 tool surface: shortened canonical descriptions (≤350 chars)
-/// but each tool still carries `name`, `description`, and `parameters`
-/// (the OpenAI-format equivalent of `inputSchema`).
+/// Fetch the real canonical worker tool schemas from `djinn-mcp-extension`.
 ///
-/// Tool-runtime metadata fields (`readOnly`, `concurrent_safe`, etc.) are
-/// preserved unchanged — only prompt-side description text was shortened.
-fn wzz6_provider_tool_schemas() -> Vec<serde_json::Value> {
-    vec![
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "shell",
-                "description": "Execute a shell command in the workspace workdir and return stdout/stderr/exit_code.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "Shell command to execute"
-                        },
-                        "timeout_ms": {
-                            "type": "integer",
-                            "description": "Timeout in milliseconds"
-                        }
-                    },
-                    "required": ["command"]
-                }
-            },
-            "readOnly": false,
-            "destructive": false,
-            "idempotent": false,
-            "openWorld": false,
-            "concurrent_safe": false
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "read",
-                "description": "Read a file from the workspace by path. Rejects binary files.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {
-                            "type": "string",
-                            "description": "Path to the file"
-                        }
-                    },
-                    "required": ["file_path"]
-                }
-            },
-            "readOnly": true,
-            "destructive": false,
-            "idempotent": true,
-            "openWorld": false,
-            "concurrent_safe": true
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "submit_work",
-                "description": "Signal the worker has finished implementing the task and provide a summary.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": { "type": "string" },
-                        "summary": { "type": "string" },
-                        "commit_title": { "type": "string" }
-                    },
-                    "required": ["task_id", "commit_title", "summary"]
-                }
-            },
-            "readOnly": false,
-            "destructive": false,
-            "idempotent": false,
-            "openWorld": false,
-            "concurrent_safe": false
-        }),
-    ]
+/// These are the same schemas that the production reply loop passes to
+/// `.stream(...)` — sourced from `tool_schemas_worker()` via the
+/// `djinn-roles` tool-schema registry.  Using the real schemas (rather
+/// than hand-written facsimiles) ensures the regression tests catch any
+/// change to the canonical schema surface (e.g. dropping `description`
+/// or renaming `inputSchema`).
+///
+/// The schemas use the native format with top-level `name`, `description`,
+/// and `inputSchema` keys — matching the wire format seen by
+/// `RecordingProvider::stream()`.
+fn real_worker_tool_schemas() -> Vec<serde_json::Value> {
+    djinn_mcp_extension::tool_defs::tool_schemas_worker()
 }
 
 /// LlmProvider wrapper that records every `tools` slice received by
@@ -4501,7 +4507,7 @@ impl LlmProvider for RecordingProvider {
 }
 
 /// Regression test: the provider request must still carry every tool schema
-/// with `name`, `description`, and `inputSchema` (OpenAI `parameters` key).
+/// with `name`, `description`, and `inputSchema` (native format).
 ///
 /// After prompt-side deduplication the role prompt no longer repeats tool
 /// descriptions, so the provider request is the *only* place the model sees
@@ -4509,7 +4515,7 @@ impl LlmProvider for RecordingProvider {
 /// and asserts each entry has all three required fields.
 #[tokio::test]
 async fn provider_tool_schemas_preserve_name_description_and_input_schema() {
-    let schemas = wzz6_provider_tool_schemas();
+    let schemas = real_worker_tool_schemas();
 
     // Turn 1: model calls `shell` → dispatches through MockToolDispatcher.
     // Turn 2: model calls `submit_work` → session finalizes.
@@ -4537,7 +4543,7 @@ async fn provider_tool_schemas_preserve_name_description_and_input_schema() {
         },
     ]);
     let provider = RecordingProvider::new(inner);
-    let mut h = ReplyLoopHarness::new().await;
+    let mut h = ReplyLoopHarness::new_with_worker_prompt().await;
     let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
 
     // Session must complete successfully.
@@ -4555,6 +4561,8 @@ async fn provider_tool_schemas_preserve_name_description_and_input_schema() {
     );
 
     // Every captured tools array must carry every schema field unchanged.
+    // Real schemas use native format: top-level `name`, `description`,
+    // `inputSchema` (not wrapped in `{"type":"function","function":{…}}`).
     for (turn_idx, captured) in captures.iter().enumerate() {
         assert_eq!(
             captured.len(),
@@ -4562,42 +4570,31 @@ async fn provider_tool_schemas_preserve_name_description_and_input_schema() {
             "turn {turn_idx}: captured tools count must match input"
         );
         for (i, tool) in captured.iter().enumerate() {
-            // Each tool must be an object with "type" and "function".
-            assert_eq!(
-                tool.get("type").and_then(|v| v.as_str()),
-                Some("function"),
-                "turn {turn_idx}, tool {i}: must have type=function"
-            );
-            let function = tool
-                .get("function")
-                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: missing function key"));
-            // `name` must be present and non-empty.
-            let name = function
+            // `name` must be present and non-empty at the top level.
+            let name = tool
                 .get("name")
                 .and_then(|v| v.as_str())
-                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: function.name missing"));
+                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: name missing"));
             assert!(
                 !name.is_empty(),
-                "turn {turn_idx}, tool {i}: function.name must not be empty"
+                "turn {turn_idx}, tool {i}: name must not be empty"
             );
-            // `description` must be present and non-empty.
-            let desc = function
+            // `description` must be present and non-empty at the top level.
+            let desc = tool
                 .get("description")
                 .and_then(|v| v.as_str())
-                .unwrap_or_else(|| {
-                    panic!("turn {turn_idx}, tool {i}: function.description missing")
-                });
+                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: description missing"));
             assert!(
                 !desc.is_empty(),
-                "turn {turn_idx}, tool {i}: function.description must not be empty"
+                "turn {turn_idx}, tool {i}: description must not be empty"
             );
-            // `parameters` (= inputSchema) must be present and be an object.
-            let params = function.get("parameters").unwrap_or_else(|| {
-                panic!("turn {turn_idx}, tool {i}: function.parameters (=inputSchema) missing")
-            });
+            // `inputSchema` must be present and be an object.
+            let input_schema = tool
+                .get("inputSchema")
+                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: inputSchema missing"));
             assert!(
-                params.is_object(),
-                "turn {turn_idx}, tool {i}: function.parameters must be an object"
+                input_schema.is_object(),
+                "turn {turn_idx}, tool {i}: inputSchema must be an object"
             );
         }
     }
@@ -4612,7 +4609,7 @@ async fn provider_tool_schemas_preserve_name_description_and_input_schema() {
 /// dispatch→execute→result round-trip is intact.
 #[tokio::test]
 async fn provider_declared_tool_dispatch_completes_successfully() {
-    let schemas = wzz6_provider_tool_schemas();
+    let schemas = real_worker_tool_schemas();
     let inner = MockProvider::new(vec![
         // Turn 1: model calls `shell` (provider-declared extension tool).
         MockResponse::tool_call_with_input(
@@ -4646,7 +4643,7 @@ async fn provider_declared_tool_dispatch_completes_successfully() {
         },
     ]);
     let provider = RecordingProvider::new(inner);
-    let mut h = ReplyLoopHarness::new().await;
+    let mut h = ReplyLoopHarness::new_with_worker_prompt().await;
     let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
 
     // Session completes — both tool dispatches succeeded.
@@ -4688,23 +4685,22 @@ async fn provider_declared_tool_dispatch_completes_successfully() {
     );
 
     // Schema preservation: captured tools must carry full schemas.
+    // Real schemas use native format: top-level `name`, `description`,
+    // `inputSchema` (not nested under `function`).
     let captures = provider.captured_tools();
     for (turn_idx, captured) in captures.iter().enumerate() {
         for (i, tool) in captured.iter().enumerate() {
-            let function = tool
-                .get("function")
-                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: missing function"));
             assert!(
-                function.get("name").is_some(),
+                tool.get("name").is_some(),
                 "turn {turn_idx}, tool {i}: name preserved"
             );
             assert!(
-                function.get("description").is_some(),
+                tool.get("description").is_some(),
                 "turn {turn_idx}, tool {i}: description preserved"
             );
             assert!(
-                function.get("parameters").is_some(),
-                "turn {turn_idx}, tool {i}: inputSchema/parameters preserved"
+                tool.get("inputSchema").is_some(),
+                "turn {turn_idx}, tool {i}: inputSchema preserved"
             );
         }
     }
@@ -4724,7 +4720,7 @@ async fn provider_declared_tool_dispatch_completes_successfully() {
 ///   replaced with signature-only text).
 #[tokio::test]
 async fn dispatch_semantics_unchanged_after_description_shortening() {
-    let schemas = wzz6_provider_tool_schemas();
+    let schemas = real_worker_tool_schemas();
 
     // Runtime metadata must parse correctly from the provider schemas.
     let metadata = crate::reply_loop::tool_dispatch::tool_runtime_metadata(&schemas);
@@ -4732,12 +4728,12 @@ async fn dispatch_semantics_unchanged_after_description_shortening() {
         metadata["shell"],
         crate::reply_loop::tool_dispatch::ToolRuntimeMetadata {
             read_only: false,
-            destructive: false,
+            destructive: true,
             idempotent: false,
             open_world: false,
             concurrent_safe: false,
         },
-        "shell metadata unchanged"
+        "shell metadata unchanged (real tool_shell uses destructive())"
     );
     assert_eq!(
         metadata["read"],
@@ -4753,16 +4749,17 @@ async fn dispatch_semantics_unchanged_after_description_shortening() {
 
     // Description text is still substantive after shortening — not empty
     // and not replaced with signature-only text.
+    // Real schemas use native format: description at top level (not nested
+    // under "function").
     for schema in &schemas {
-        let function = schema.get("function").expect("function key");
-        let desc = function
+        let desc = schema
             .get("description")
             .and_then(|v| v.as_str())
-            .expect("description present");
-        let name = function
+            .expect("description present at top level");
+        let name = schema
             .get("name")
             .and_then(|v| v.as_str())
-            .expect("name present");
+            .expect("name present at top level");
         assert!(
             desc.len() > 10,
             "description for {name} should be substantive after shortening, got: {desc:?}"
@@ -4800,7 +4797,7 @@ async fn dispatch_semantics_unchanged_after_description_shortening() {
         },
     ]);
     let provider = RecordingProvider::new(inner);
-    let mut h = ReplyLoopHarness::new().await;
+    let mut h = ReplyLoopHarness::new_with_worker_prompt().await;
     let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
     assert!(result.is_ok(), "expected ok, got: {result:?}");
     assert!(output.finalize_payload.is_some());
