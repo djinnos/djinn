@@ -547,3 +547,129 @@ async fn org_policy_blocks_codex_subscription_via_openai_namespaced_models() {
         .await
         .expect("plain openai api-key model stays ungoverned");
 }
+
+// ── Org AI policy: recommended-model override-list validation regressions ──────
+
+fn assert_org_policy_set_error(result: &serde_json::Value, expected_substring: &str) {
+    assert!(
+        !result["ok"].as_bool().unwrap_or(true),
+        "org_policy_set should fail for invalid override input: {result}"
+    );
+    let error = result["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains(expected_substring),
+        "expected error containing `{expected_substring}`, got: `{error}`"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn org_policy_set_rejects_raw_local_recommended_model_override_ids() {
+    let harness = McpTestHarness::new().await;
+    let result = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"additional_recommended_model_ids": ["claude-sonnet-test-override"]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert_org_policy_set_error(&result, "no `/` separator");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn org_policy_set_rejects_malformed_qualified_recommended_model_override_ids() {
+    let harness = McpTestHarness::new().await;
+
+    let empty_provider = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"additional_recommended_model_ids": ["/claude-sonnet-test-override"]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert_org_policy_set_error(&empty_provider, "empty provider prefix");
+
+    let empty_model = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"additional_recommended_model_ids": ["anthropic/"]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert_org_policy_set_error(&empty_model, "empty model id");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn org_policy_set_rejects_duplicate_recommended_model_override_ids_in_one_list() {
+    let harness = McpTestHarness::new().await;
+    let result = harness
+        .call_tool(
+            "org_policy_set",
+            json!({
+                "additional_recommended_model_ids": [
+                    "anthropic/claude-sonnet-test-override",
+                    "anthropic/claude-sonnet-test-override"
+                ]
+            }),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert_org_policy_set_error(&result, "duplicate model id");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn org_policy_set_rejects_recommended_model_override_ids_in_both_lists() {
+    let harness = McpTestHarness::new().await;
+    let result = harness
+        .call_tool(
+            "org_policy_set",
+            json!({
+                "additional_recommended_model_ids": ["openai/gpt-5.5"],
+                "demoted_recommended_model_ids": ["openai/gpt-5.5"]
+            }),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert_org_policy_set_error(&result, "appears in both");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn org_policy_set_rejects_unknown_provider_recommended_model_override_ids() {
+    let harness = McpTestHarness::new().await;
+    let result = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"additional_recommended_model_ids": ["nope/unknown-model"]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert_org_policy_set_error(&result, "not a known provider");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn org_policy_set_accepts_known_but_disconnected_provider_recommended_model_overrides() {
+    let harness = McpTestHarness::new().await;
+
+    // google is a built-in provider; no credential is seeded in the harness so
+    // it is known/configured but not currently connected. Pre-staging policy
+    // must still accept it.
+    let result = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"additional_recommended_model_ids": ["google/gemini-1"]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(
+        result["ok"].as_bool().unwrap_or(false),
+        "org_policy_set should accept a known provider even when disconnected: {result}"
+    );
+    assert!(
+        result["error"].is_null(),
+        "accepted override should carry no error: {result}"
+    );
+    assert_eq!(
+        result["additional_recommended_model_ids"],
+        json!(["google/gemini-1"]),
+        "known disconnected provider override should be persisted"
+    );
+}
