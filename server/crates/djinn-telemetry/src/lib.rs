@@ -88,7 +88,18 @@ const CACHE_CLEANUP_TOTAL: &str = "djinn_cache_cleanup_total";
 const CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL: &str = "djinn_cache_cleanup_reclaimed_bytes_total";
 const CACHE_CLEANUP_CANDIDATES_TOTAL: &str = "djinn_cache_cleanup_candidates_total";
 const CACHE_CLEANUP_COMPONENTS: [&str; 2] = ["sccache", "cargo_target_runs"];
-const CACHE_CLEANUP_OUTCOMES: [&str; 5] = ["deleted", "skipped", "retained", "error", "dry_run"];
+const CACHE_CLEANUP_OUTCOMES: [&str; 10] = [
+    "deleted",
+    "skipped",
+    "retained",
+    "error",
+    "dry_run",
+    "uuid_orphan_deleted",
+    "malformed_dir_deleted",
+    "loose_file_deleted",
+    "retained_fresh_malformed",
+    "retained_non_utf8",
+];
 const CACHE_CLEANUP_MODES: [&str; 2] = ["dry_run", "delete"];
 
 // ─── Arbiter rollout hardening metrics ──────────────────────────────────
@@ -1453,7 +1464,9 @@ pub mod arbiter {
 ///
 /// - `component` — which cache path (`sccache` or `cargo_target_runs`).
 /// - `outcome` — cleanup result (`deleted`, `skipped`, `retained`, `error`,
-///   `dry_run`).
+///   `dry_run`) plus granular cargo-target-runs results such as
+///   `uuid_orphan_deleted`, `malformed_dir_deleted`, `loose_file_deleted`,
+///   `retained_fresh_malformed`, and `retained_non_utf8`.
 /// - `mode` — global cleanup mode (`dry_run` or `delete`).
 ///
 /// High-cardinality dimensions (absolute filesystem paths, project ids,
