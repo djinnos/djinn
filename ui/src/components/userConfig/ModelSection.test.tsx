@@ -6,6 +6,7 @@ import { render, screen } from "@/test/test-utils";
 import { ModelSection } from "./ModelSection";
 import {
   allModelsSorted,
+  formatModelMetadata,
   groupModelsByProvider,
   pickableModels,
   providerDefaultModels,
@@ -276,6 +277,76 @@ describe("multi-segment full id preservation", () => {
     const sorted = sortModels([m1, m2]);
     expect(sorted[0]!.id).toBe("fireworks/accounts/a-model");
     expect(sorted[1]!.id).toBe("fireworks/accounts/z-model");
+  });
+});
+
+describe("formatModelMetadata", () => {
+  it("renders context, pricing, and capability chips", () => {
+    const meta = formatModelMetadata(
+      um("openai/gpt-5", {
+        name: "GPT-5",
+        context_window: 1_000_000,
+        output_limit: 8_000,
+        pricing: {
+          input_per_million: 2.5,
+          output_per_million: 10,
+          cache_read_per_million: 0,
+          cache_write_per_million: 0,
+        },
+        reasoning: true,
+        tool_call: true,
+        attachment: true,
+      }),
+    );
+    expect(meta).toContain("1M ctx");
+    expect(meta).toContain("$2.50/$10.00 per M tok");
+    expect(meta).toContain("reasoning");
+    expect(meta).toContain("tools");
+    expect(meta).toContain("vision");
+  });
+
+  it("renders only input pricing when output is zero", () => {
+    const meta = formatModelMetadata(
+      um("openai/gpt-5", {
+        tool_call: false,
+        pricing: {
+          input_per_million: 1.25,
+          output_per_million: 0,
+          cache_read_per_million: 0,
+          cache_write_per_million: 0,
+        },
+      }),
+    );
+    expect(meta).toContain("$1.25 in");
+    expect(meta).not.toContain("per M tok");
+  });
+
+  it("renders only output pricing when input is zero", () => {
+    const meta = formatModelMetadata(
+      um("openai/gpt-5", {
+        tool_call: false,
+        pricing: {
+          input_per_million: 0,
+          output_per_million: 5,
+          cache_read_per_million: 0,
+          cache_write_per_million: 0,
+        },
+      }),
+    );
+    expect(meta).toContain("$5.00 out");
+    expect(meta).not.toContain("per M tok");
+  });
+
+  it("does not include misleading zeros for missing metadata", () => {
+    const meta = formatModelMetadata(
+      um("openai/gpt-5", { tool_call: false, context_window: 0, pricing: undefined }),
+    );
+    expect(meta).toBe("");
+  });
+
+  it("handles a model with only reasoning", () => {
+    const meta = formatModelMetadata(um("openai/gpt-5", { tool_call: false, reasoning: true }));
+    expect(meta).toBe("reasoning");
   });
 });
 

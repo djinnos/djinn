@@ -746,6 +746,16 @@ pub async fn cmd_qa_run(crate_root: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Run the Phase 2 credentialed dual-pass QA judge orchestration.
+///
+/// This command is intentionally for nightly/manual use only. It enforces the
+/// explicit credentialed model-slot boundary and writes Phase 2 artifacts even
+/// when credentials/providers are unavailable, so workflow `continue-on-error`
+/// can surface the failure without making Phase 2 a required gate.
+pub async fn cmd_qa_judge(crate_root: &std::path::Path) -> Result<()> {
+    crate::qa_judge::execute_qa_judge(crate_root).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

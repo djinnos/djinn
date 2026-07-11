@@ -38,6 +38,7 @@ import { showToast } from "@/lib/toast";
 import { userConfigKeys } from "./userConfigKeys";
 import { formatProvider } from "./providerDisplay";
 import {
+  formatModelMetadata,
   groupModelsByProvider,
   providerDefaultModels,
   stripProviderPrefix,
@@ -653,6 +654,9 @@ export function AddModelButton({
                       Recommended
                     </span>
                   )}
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    {formatModelMetadata(model)}
+                  </span>
                 </ModelSelectorItem>
               ))}
               {!normalizedSearch &&
