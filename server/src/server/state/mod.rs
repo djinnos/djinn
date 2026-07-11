@@ -1721,15 +1721,36 @@ impl AppState {
         }
     }
 
+    /// On startup, reconcile then interrupt stale sessions.
+    ///
+    /// If the reconnectability measurement is zero, we keep the legacy blanket
+    /// `interrupt_all_running()` behavior. If one or more sessions are
+    /// reconnectable, we interrupt running sessions *except* the measured
+    /// reconnectable `task_run_id` set, so reconnectable workers survive
+    /// rolling restart (proposal `phif` AC 8).
+    ///
+    /// The test build uses `pub(crate)` visibility so the same logic can be
+    /// exercised from crate-internal tests without requiring the public API to
+    /// expose the startup interruption seam.
+    #[cfg(not(test))]
     async fn interrupt_stale_sessions_on_startup(&self) {
+        self.interrupt_stale_sessions_on_startup_impl().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn interrupt_stale_sessions_on_startup(&self) {
+        self.interrupt_stale_sessions_on_startup_impl().await
+    }
+
+    /// Shared implementation for [`Self::interrupt_stale_sessions_on_startup`].
+    async fn interrupt_stale_sessions_on_startup_impl(&self) {
         use djinn_db::SessionRepository;
         let repo = SessionRepository::new(self.db().clone(), self.event_bus());
 
         // ── Measurement (proposal phif AC 7/8) ─────────────────────────────
-        // Observe reconnectability *before* the blanket interruption mutation
-        // so the structured event reflects the pre-mutation state.
+        // Observe reconnectability *before* the selective/blanket interruption
+        // mutation so the structured event reflects the pre-mutation state.
         let measurement = self.measure_startup_reconnectability(&repo).await;
-        let _reconnectable_task_run_ids = measurement.reconnectable_task_run_ids();
 
         tracing::info!(
             target: "djinn_startup_running_session_reconnectability",
@@ -1740,8 +1761,19 @@ impl AppState {
             "startup reconnectability measurement"
         );
 
-        // ── Mutation (existing blanket path) ────────────────────────────────
-        match repo.interrupt_all_running().await {
+        // ── Mutation (proposal phif AC 8) ─────────────────────────────────────
+        // Use the exact reconnectable identity set to preserve reconnectable
+        // running sessions while still interrupting stale ones (NULL task_run_id
+        // and disconnected identities are not preserved).
+        let reconnectable_ids = measurement.reconnectable_task_run_ids();
+        let result = if reconnectable_ids.is_empty() {
+            repo.interrupt_all_running().await
+        } else {
+            repo.interrupt_running_except_task_run_ids(reconnectable_ids)
+                .await
+        };
+
+        match result {
             Ok(0) => {}
             Ok(n) => tracing::info!(count = n, "interrupted stale sessions from previous run"),
             Err(e) => tracing::warn!(error = %e, "failed to interrupt stale sessions"),
