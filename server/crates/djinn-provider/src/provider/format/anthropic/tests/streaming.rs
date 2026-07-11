@@ -35,7 +35,7 @@ use futures::TryStreamExt;
 #[test]
 fn test_message_start_extracts_input_tokens() {
     let data = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}"#;
-    let mut acc = None;
+    let mut acc = ContentBlockAcc::default();
     let mut input_tokens = 0u32;
     let mut cache_read = 0u32;
     let mut cache_write = 0u32;
@@ -54,7 +54,7 @@ fn test_message_start_extracts_input_tokens() {
 #[test]
 fn test_message_start_extracts_cache_tokens() {
     let data = r#"{"type":"message_start","message":{"usage":{"input_tokens":25,"cache_read_input_tokens":1000,"cache_creation_input_tokens":40}}}"#;
-    let mut acc = None;
+    let mut acc = ContentBlockAcc::default();
     let mut input_tokens = 0u32;
     let mut cache_read = 0u32;
     let mut cache_write = 0u32;
@@ -75,7 +75,7 @@ fn test_message_start_extracts_cache_tokens() {
 fn test_text_delta_event() {
     let data =
         r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
-    let mut acc = None;
+    let mut acc = ContentBlockAcc::default();
     let mut input_tokens = 0u32;
     let mut cache_read = 0u32;
     let mut cache_write = 0u32;
@@ -96,7 +96,7 @@ fn test_text_delta_event() {
 
 #[test]
 fn test_tool_use_accumulation() {
-    let mut acc = None;
+    let mut acc = ContentBlockAcc::default();
     let mut input_tokens = 0u32;
     let mut cache_read = 0u32;
     let mut cache_write = 0u32;
@@ -111,7 +111,7 @@ fn test_tool_use_accumulation() {
         &mut cache_write,
     );
     assert!(e1.is_empty());
-    assert!(acc.is_some());
+    assert!(!acc.is_empty());
 
     let frag1 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"l"}}"#;
     parse_anthropic_event(
@@ -152,13 +152,13 @@ fn test_tool_use_accumulation() {
         }
         _ => panic!("expected tool use"),
     }
-    assert!(acc.is_none());
+    assert!(acc.is_empty());
 }
 
 #[test]
 fn test_message_delta_emits_usage() {
     let data = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#;
-    let mut acc = None;
+    let mut acc = ContentBlockAcc::default();
     let mut input_tokens = 10u32;
     let mut cache_read = 3u32;
     let mut cache_write = 7u32;
@@ -186,7 +186,7 @@ fn test_message_delta_emits_usage() {
 #[test]
 fn test_message_stop_emits_done() {
     let data = r#"{"type":"message_stop"}"#;
-    let mut acc = None;
+    let mut acc = ContentBlockAcc::default();
     let mut input_tokens = 0u32;
     let mut cache_read = 0u32;
     let mut cache_write = 0u32;
@@ -297,7 +297,7 @@ fn test_build_request_preserves_separate_system_blocks_with_cache_control() {
 fn test_content_block_delta_input_json_without_active_tool_is_ignored() {
     let data =
         r#"{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{}"}}"#;
-    let mut acc = None;
+    let mut acc = ContentBlockAcc::default();
     let mut input_tokens = 0u32;
     let mut cache_read = 0u32;
     let mut cache_write = 0u32;
@@ -310,7 +310,7 @@ fn test_content_block_delta_input_json_without_active_tool_is_ignored() {
         &mut cache_write,
     );
     assert!(events.is_empty());
-    assert!(acc.is_none());
+    assert!(acc.is_empty());
 }
 
 #[tokio::test]
@@ -554,4 +554,77 @@ fn test_build_request_sets_required_tool_choice_when_tools_present() {
 
     let req = provider.build_request(&conv, &tools, Some(ToolChoice::Required));
     assert_eq!(req["tool_choice"]["type"], "any");
+}
+
+#[test]
+fn test_indexed_thinking_redacted_unknown_and_tool_blocks() {
+    let mut acc = ContentBlockAcc::default();
+    let mut input = 0;
+    let mut cache_read = 0;
+    let mut cache_write = 0;
+    macro_rules! parse {
+        ($kind:expr, $data:expr) => {
+            parse_anthropic_event(
+                $kind,
+                $data,
+                &mut acc,
+                &mut input,
+                &mut cache_read,
+                &mut cache_write,
+            )
+        };
+    }
+
+    parse!(
+        "content_block_start",
+        r#"{"index":0,"content_block":{"type":"thinking"}}"#
+    );
+    parse!(
+        "content_block_start",
+        r#"{"index":1,"content_block":{"type":"tool_use","id":"tool_1","name":"shell"}}"#
+    );
+    parse!(
+        "content_block_delta",
+        r#"{"index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"pwd\"}"}}"#
+    );
+    assert!(
+        matches!(&parse!("content_block_delta", r#"{"index":0,"delta":{"type":"thinking_delta","thinking":"reason "}}"#)[..], [StreamEvent::Thinking(text)] if text == "reason ")
+    );
+    parse!(
+        "content_block_delta",
+        r#"{"index":0,"delta":{"type":"thinking_delta","thinking":"complete"}}"#
+    );
+    parse!(
+        "content_block_delta",
+        r#"{"index":0,"delta":{"type":"signature_delta","signature":"sig_123"}}"#
+    );
+    let thinking = parse!("content_block_stop", r#"{"index":0}"#);
+    let tool = parse!("content_block_stop", r#"{"index":1}"#);
+    assert!(
+        matches!(&thinking[..], [StreamEvent::Delta(ContentBlock::Thinking { thinking, signature: Some(signature) })] if thinking == "reason complete" && signature == "sig_123")
+    );
+    assert!(
+        matches!(&tool[..], [StreamEvent::Delta(ContentBlock::ToolUse { id, input, .. })] if id == "tool_1" && input["cmd"] == "pwd")
+    );
+
+    parse!(
+        "content_block_start",
+        r#"{"index":2,"content_block":{"type":"redacted_thinking","data":"opaque"}}"#
+    );
+    parse!(
+        "content_block_start",
+        r#"{"index":3,"content_block":{"type":"vendor_block","vendor_id":"v1"}}"#
+    );
+    parse!(
+        "content_block_delta",
+        r#"{"index":3,"delta":{"type":"vendor_delta","cursor":"next"}}"#
+    );
+    let redacted = parse!("content_block_stop", r#"{"index":2}"#);
+    let unknown = parse!("content_block_stop", r#"{"index":3}"#);
+    assert!(
+        matches!(&redacted[..], [StreamEvent::Delta(ContentBlock::RedactedThinking { data })] if data == "opaque")
+    );
+    assert!(
+        matches!(&unknown[..], [StreamEvent::Delta(ContentBlock::Unknown { content_type, extra })] if content_type == "vendor_block" && extra["vendor_id"] == "v1" && extra["cursor"] == "next")
+    );
 }
