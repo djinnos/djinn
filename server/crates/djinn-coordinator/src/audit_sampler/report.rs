@@ -115,12 +115,12 @@ pub async fn generate_false_negative_report(
         .map_err(|e| format!("failed to list outcomes: {e}"))?;
 
     let unmaterialized = audit_repo
-        .list_unmaterialized_selections()
+        .list_unmaterialized_selections_for_project(project_id)
         .await
         .map_err(|e| format!("failed to list unmaterialized: {e}"))?;
 
     let open_count = audit_repo
-        .count_open_audit_tasks()
+        .count_open_audit_tasks_for_project(project_id)
         .await
         .map_err(|e| format!("failed to count open tasks: {e}"))?;
 
@@ -418,7 +418,7 @@ mod tests {
                 gate_outcome: "pass",
                 gate_provenance: None,
                 release_provenance: None,
-                stratum,
+                stratum: stratum.clone(),
                 excluded: false,
                 exclusion_reason: None,
             })
@@ -445,7 +445,7 @@ mod tests {
             .create_selection(CreateSelectionParams {
                 frame_id: &frame.id,
                 merged_change_id: &change.id,
-                stratum: AuditStratum::UnflaggedMerged,
+                stratum,
                 selected_position: 0,
                 algorithm: "hmac-sha256-counter-v1",
                 seed_commitment: &"aa".repeat(32),
