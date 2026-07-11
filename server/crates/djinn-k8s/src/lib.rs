@@ -24,7 +24,8 @@ pub use env_config::{
 };
 pub use graph_warmer::{
     K8sGraphWarmer, KubeClientDispatcher, KubeClientJobWatcher, KubeClientWarmJobLister,
-    NoopJobWatcher, NoopWarmJobLister, WarmJobDispatcher, WarmJobLister, WarmJobWatcher,
+    NoopJobWatcher, NoopWarmJobLister, WarmCompletionSink, WarmJobDispatcher, WarmJobLister,
+    WarmJobWatcher, WarmTerminalOutcome,
 };
 pub use runtime::KubernetesRuntime;
 pub use token_review::TokenReviewer;
