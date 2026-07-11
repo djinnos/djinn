@@ -374,6 +374,8 @@ pub async fn query_revalidation_ground_truth(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
     use serde_json::json;
 
     use djinn_db::{
@@ -382,6 +384,8 @@ mod tests {
     };
 
     use super::*;
+
+    static AUDIT_REPORT_FIXTURE_REVISION: AtomicI32 = AtomicI32::new(1);
 
     /// Seed a project and return project_id.
     async fn seed_project(db: &djinn_db::Database) -> String {
@@ -398,10 +402,12 @@ mod tests {
         merge_sha: &str,
         task_id: Option<&str>,
     ) -> String {
+        let revision = AUDIT_REPORT_FIXTURE_REVISION.fetch_add(1, Ordering::Relaxed);
+
         let policy = repo
             .create_sample_policy(CreateSamplePolicyParams {
                 project_id,
-                revision: 1,
+                revision,
                 policy_json: &json!({"unflagged_rate": 0.1, "autonomous_rate": 0.5}),
             })
             .await
@@ -431,7 +437,7 @@ mod tests {
                 policy_id: &policy.id,
                 window_start: "2026-06-24T00:00:00Z",
                 window_end: "2026-07-01T00:00:00Z",
-                revision: 1,
+                revision,
                 eligible_change_ids: &json!([&change.id]),
                 content_hash: None,
                 exclusion_counts: &json!({}),
