@@ -57,6 +57,39 @@ const TRIP_RATE_CEILING: usize = 8;
 /// Rolling window over which [`TRIP_RATE_CEILING`] trips force a hard-disable.
 const TRIP_RATE_WINDOW: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// Number of *consecutive* throttle trips (`record_stall(escalate=false)`) with
+/// no intervening success after which a throttle stops being treated as a
+/// clock-resetting quota blip and starts escalating like a genuine failure.
+///
+/// A throttle-classified stall normally applies only the fixed
+/// [`STALL_MIN_COOLDOWN`] floor and does NOT advance `disable_ttl_trips` or the
+/// hard-disable trip-rate window, because a quota that resets in minutes is not
+/// a broken model. But a token *plan / subscription* that has been over-quota
+/// for **days** produces the same 429 every session and flaps forever: disable
+/// 5 min → re-enable → grab a slot → crash in <10s → repeat, with a ~30-minute
+/// task-redispatch cooldown between attempts (one production task lost 5.75h to
+/// 8 consecutive 429 crashes). Because the throttle never escalates, the
+/// 8-trips/6h hard-disable backstop ([`TRIP_RATE_CEILING`]) never catches it.
+///
+/// Once a bucket has throttle-cooldowned this many consecutive times with no
+/// success in between, further throttle trips are escalated — they advance
+/// `disable_ttl_trips` (growing the cooldown past the 5-minute floor) AND count
+/// toward the hard-disable ceiling — so a genuinely-dead subscription is
+/// eventually pinned instead of flapping indefinitely. A single successful
+/// session fully resets the streak (the plan's quota came back), returning the
+/// model to the gentle clock-reset treatment. `6` consecutive trips is well
+/// past what a minutes-long quota window produces (which self-heals after one
+/// or two cooldowns and then succeeds) yet reached within ~30 minutes of a
+/// truly-dead plan flapping.
+const PERSISTENT_THROTTLE_TRIP_THRESHOLD: u32 = 6;
+/// Wall-clock companion to [`PERSISTENT_THROTTLE_TRIP_THRESHOLD`]: if a bucket
+/// has been continuously throttle-cooldowning (no intervening success) for at
+/// least this long, escalate even when the consecutive-trip *count* is still
+/// low. Sparse-but-persistent throttling — e.g. a provider-stated multi-minute
+/// `retry-after` producing few, long cooldowns — is just as dead as rapid
+/// flapping, and the wall-clock bound catches it without waiting for the count.
+const PERSISTENT_THROTTLE_WINDOW: Duration = Duration::from_secs(60 * 60);
+
 /// Identifies a single circuit-breaker bucket.
 ///
 /// Health is tracked **per `(scope, model_id)`**, not globally per model. The
@@ -193,8 +226,28 @@ struct ModelState {
     /// Monotonic timestamps of recent breaker trips, pruned to
     /// [`TRIP_RATE_WINDOW`]. When its length reaches [`TRIP_RATE_CEILING`] the
     /// bucket is hard-disabled. Only genuine (escalating) trips are recorded —
-    /// account-quota throttles do not count toward the ceiling.
+    /// account-quota throttles do not count toward the ceiling *unless* they
+    /// have persisted long enough to be escalated (see `record_stall`).
     trip_times: Vec<Instant>,
+    /// Consecutive throttle trips (`record_stall(escalate=false)`) with no
+    /// intervening success. Drives persistent-throttle escalation: once this
+    /// reaches [`PERSISTENT_THROTTLE_TRIP_THRESHOLD`] (or the streak has lasted
+    /// [`PERSISTENT_THROTTLE_WINDOW`]) further throttle trips escalate like
+    /// genuine trips. Reset to 0 by any success. Runtime-only (not persisted):
+    /// the escalation it *produces* — `disable_ttl_trips` / `trip_times` — is
+    /// what survives a restart; an in-progress streak restarting from zero on a
+    /// leader failover is acceptable.
+    consecutive_throttle_trips: u32,
+    /// Monotonic timestamp of the first throttle trip in the current streak,
+    /// for the [`PERSISTENT_THROTTLE_WINDOW`] wall-clock escalation. `None` when
+    /// there is no active throttle streak. Runtime-only (Instants don't persist).
+    throttle_streak_started_at: Option<Instant>,
+    /// Whether the trip that put this bucket into its current cooldown was a
+    /// throttle (`escalate=false`). Consulted at dispatch time
+    /// (`is_throttle_cooling`) so the candidate order can deprioritize a model
+    /// that is currently throttle-cooling in favor of a healthy lane-mate.
+    /// Cleared on success.
+    last_trip_throttle: bool,
 }
 
 impl ModelState {
@@ -443,6 +496,13 @@ impl HealthTracker {
         // isn't reached by ancient, since-recovered trips.
         state.disable_ttl_trips = 0;
         state.trip_times.clear();
+        // A success proves the plan's quota is back — fully reset the
+        // persistent-throttle escalation state so the next throttle starts a
+        // fresh streak with the gentle clock-reset treatment, and clear the
+        // throttle-cooling deprioritization flag.
+        state.consecutive_throttle_trips = 0;
+        state.throttle_streak_started_at = None;
+        state.last_trip_throttle = false;
         if state.auto_disabled && state.is_available(now) {
             state.auto_disabled = false;
             state.cooldown_until = None;
@@ -523,7 +583,16 @@ impl HealthTracker {
     ///   escalating the cooldown cap is wrong: the model isn't getting "more
     ///   broken", the account is merely over quota until its window resets. We
     ///   still apply the `STALL_MIN_COOLDOWN` floor so failover still happens —
-    ///   we just don't ratchet the cap.
+    ///   we just don't ratchet the cap **until the throttle proves persistent**.
+    ///
+    /// Persistent-throttle escalation (see [`PERSISTENT_THROTTLE_TRIP_THRESHOLD`]):
+    /// a subscription that has been over-quota for *days* keeps 429-ing every
+    /// session and, with `escalate=false`, would flap forever without the
+    /// hard-disable backstop ever catching it. Once a bucket has throttle-tripped
+    /// enough consecutive times (or for long enough on the wall clock) with no
+    /// intervening success, this method escalates the throttle *as if* it were a
+    /// genuine trip — ratcheting the cap and counting toward the hard-disable
+    /// ceiling. A single success fully resets that streak.
     pub fn record_stall(&self, scope: Option<&str>, model_id: &str, escalate: bool) {
         let now = SystemClock::new().now_instant();
         let mut map = self.inner.lock().unwrap();
@@ -544,16 +613,43 @@ impl HealthTracker {
             return;
         }
 
+        // Persistent-throttle escalation. A throttle (`escalate=false`) normally
+        // resets on a clock, not on model health, so it does NOT ratchet the
+        // escalating cooldown cap or count toward the hard-disable ceiling — a
+        // quota-limited account is not a broken model. But a plan/subscription
+        // that has been over-quota for *days* keeps flapping (disable 5min →
+        // re-enable → crash in <10s → repeat) and never escalates, so the
+        // hard-disable backstop never catches it. Track consecutive throttle
+        // trips (no intervening success); once the streak is long enough — by
+        // count OR wall-clock — escalate this and every subsequent throttle
+        // trip like a genuine failure so the 8-trips/6h ladder can eventually
+        // pin a dead subscription. A single success fully resets the streak.
+        let effective_escalate = if escalate {
+            // A genuine failure/stall trip breaks any throttle streak — it is
+            // already escalating on its own ladder.
+            state.consecutive_throttle_trips = 0;
+            state.throttle_streak_started_at = None;
+            true
+        } else {
+            state.consecutive_throttle_trips = state.consecutive_throttle_trips.saturating_add(1);
+            let streak_started_at = *state.throttle_streak_started_at.get_or_insert(now);
+            state.consecutive_throttle_trips >= PERSISTENT_THROTTLE_TRIP_THRESHOLD
+                || now.duration_since(streak_started_at) >= PERSISTENT_THROTTLE_WINDOW
+        };
+
         // Trip immediately, cooldown floored at STALL_MIN_COOLDOWN so it
         // outlasts the task's redispatch cooldown and forces failover.
         let cooldown = state.compute_cooldown().max(STALL_MIN_COOLDOWN);
         state.auto_disabled = true;
         state.cooldown_until = Some(now + cooldown);
-        // A throttle resets on a clock, not on model health — don't ratchet the
-        // escalating cooldown cap for it (idea 6), and don't count it toward the
-        // hard-disable ceiling (a quota-limited account is not a broken model).
-        // Genuine failures/stalls do both.
-        let hard_disabled = if escalate {
+        // Remember whether this cooldown was throttle-induced so dispatch can
+        // deprioritize a currently-cooling model in favor of a healthy lane-mate.
+        state.last_trip_throttle = !escalate;
+        // A non-escalated throttle only floors the cooldown; an escalated trip
+        // (genuine failure, OR a throttle that has persisted past the threshold)
+        // also ratchets `disable_ttl_trips` and counts toward the hard-disable
+        // ceiling.
+        let hard_disabled = if effective_escalate {
             state.disable_ttl_trips += 1;
             state.register_trip(now)
         } else {
@@ -589,6 +685,23 @@ impl HealthTracker {
         let map = self.inner.lock().unwrap();
         map.get(&HealthKey::new(scope, model_id))
             .is_none_or(|s| s.is_available(now))
+    }
+
+    /// Returns `true` when the `(scope, model)` bucket is currently demoted by a
+    /// **throttle** cooldown — the breaker tripped on a `record_stall(escalate=
+    /// false)` quota signal and has not yet been cleared by a success.
+    ///
+    /// Unlike [`is_available`], this stays `true` through the *half-open* window
+    /// (cooldown deadline elapsed but no success has re-proven the model): a
+    /// quota that just flapped 5 minutes ago is likely still dead, so dispatch
+    /// deprioritizes it behind healthy lane-mates rather than re-picking it
+    /// head-of-line and burning a session on another <10s 429 crash. A genuine
+    /// (non-throttle) breaker trip is NOT reported here — those are handled by
+    /// the ordinary `is_available` skip and their own escalation ladder.
+    pub fn is_throttle_cooling(&self, scope: Option<&str>, model_id: &str) -> bool {
+        let map = self.inner.lock().unwrap();
+        map.get(&HealthKey::new(scope, model_id))
+            .is_some_and(|s| s.auto_disabled && s.last_trip_throttle)
     }
 
     /// Return health state for all tracked buckets, sorted by `(scope, model)`.
@@ -718,6 +831,9 @@ impl HealthTracker {
                 // the persist boundary, so anchor them at `now`: they age out
                 // naturally over `TRIP_RATE_WINDOW`.
                 trip_times: vec![now; (health.trips_in_window as usize).min(TRIP_RATE_CEILING)],
+                // Persistent-throttle streak counters are runtime-only; a
+                // restart restarts any in-progress streak from zero.
+                ..Default::default()
             };
 
             if health.hard_disabled {

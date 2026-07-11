@@ -24,7 +24,8 @@
 //! - [`TripwirePolicy::policy_revision`] identifies the org policy revision
 //!   evaluated against the diff. Defaults to `"org-policy:default"`.
 //! - [`TripwirePolicy::allowlist`] carries the boundary allowlist revision
-//!   sourced from `scripts/capability-boundary-allowlist.toml`. If the
+//!   sourced from a project-supplied allowlist file (empty by default — the
+//!   SHIPPED policy assumes no particular repo layout). If the
 //!   allowlist is unavailable the boundary rule enters degraded mode (see
 //!   [`TripwirePolicy::boundary_path`]) and downstream callers must emit a
 //!   warning event.
@@ -56,10 +57,16 @@ pub const DEFAULT_POLICY_REVISION: &str = "org-policy:default";
 /// revision (see [`TripwirePolicy::boundary_path`]).
 pub const MISSING_ALLOWLIST_REVISION: &str = "capability-boundary-allowlist:missing";
 
-/// Source path (relative to repo root) of the boundary allowlist TOML the
-/// boundary-path rule consults at evaluation time. Engine code reads this
-/// file lazily; the policy struct only carries the revision + source.
-pub const DEFAULT_ALLOWLIST_SOURCE: &str = "scripts/capability-boundary-allowlist.toml";
+/// Default boundary-allowlist source path.
+///
+/// Intentionally empty: djinn is a platform that manages arbitrary projects,
+/// so the SHIPPED default MUST NOT assume any particular repo layout. A
+/// project that keeps a capability-boundary allowlist supplies its own source
+/// path via org/project tripwire policy; until then the boundary rule stays in
+/// degraded mode (see [`MISSING_ALLOWLIST_REVISION`]) rather than pointing at a
+/// file that only exists in djinn's own repo. Engine code reads this file
+/// lazily; the policy struct only carries the revision + source.
+pub const DEFAULT_ALLOWLIST_SOURCE: &str = "";
 
 // ─── Policy source label ────────────────────────────────────────────────────
 
@@ -315,9 +322,11 @@ impl Default for UnsafeCodeRuleConfig {
 /// - `match_outside_allowlist`: `true` → any changed file matching the
 ///   boundary category patterns that is NOT in the allowlist trips the rule;
 ///   `false` → only new boundary-category files trip it.
-/// - `category_patterns`: glob patterns identifying boundary-sensitive paths
-///   (e.g. `scripts/capability-boundary-allowlist.toml`, auth/permission
-///   files, secrets, deployment configs).
+/// - `category_patterns`: ecosystem-generic glob patterns identifying
+///   boundary-sensitive paths (auth/permission files, secrets, deployment
+///   configs). Project-specific paths (e.g. a capability-boundary allowlist)
+///   are supplied via org/project policy, never baked into the SHIPPED
+///   default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoundaryPathRuleConfig {
     /// Master switch. `false` → rule is skipped entirely.
@@ -333,7 +342,8 @@ pub struct BoundaryPathRuleConfig {
     /// introduced boundary-category files trigger findings.
     pub match_outside_allowlist: bool,
     /// Glob patterns identifying boundary-sensitive paths (auth, permission,
-    /// secrets, deployment, billing, capability-boundary allowlist).
+    /// secrets, deployment, billing). Ecosystem-generic by default; project
+    /// specific paths are added via org/project policy.
     pub category_patterns: Vec<String>,
 }
 
@@ -345,7 +355,6 @@ impl Default for BoundaryPathRuleConfig {
             adjudication: Adjudication::Arbiter,
             match_outside_allowlist: true,
             category_patterns: vec![
-                "scripts/capability-boundary-allowlist.toml".to_owned(),
                 "**/auth/**".to_owned(),
                 "**/authz/**".to_owned(),
                 "**/permissions/**".to_owned(),
@@ -448,16 +457,20 @@ impl Default for CIWorkflowRuleConfig {
             enabled: true,
             report_only: false,
             adjudication: Adjudication::Arbiter,
+            // Ecosystem-generic CI/workflow paths only. djinn manages
+            // arbitrary projects, so the SHIPPED default MUST NOT encode any
+            // single repo's layout (no `Tiltfile`, `Makefile`, `deploy/**`,
+            // `release/**`, or repo-specific boundary scripts). Projects that
+            // want to gate those add them via org/project tripwire policy.
             path_globs: vec![
                 ".github/workflows/**".to_owned(),
                 ".github/actions/**".to_owned(),
                 ".gitlab-ci.yml".to_owned(),
                 ".circleci/**".to_owned(),
-                "deploy/**".to_owned(),
-                "release/**".to_owned(),
-                "Tiltfile".to_owned(),
-                "Makefile".to_owned(),
-                "scripts/check-*-boundary.sh".to_owned(),
+                "azure-pipelines.yml".to_owned(),
+                "bitbucket-pipelines.yml".to_owned(),
+                ".drone.yml".to_owned(),
+                "Jenkinsfile".to_owned(),
             ],
         }
     }
@@ -822,6 +835,55 @@ mod tests {
             p.reason_code_for(TripwireRuleId::CIWorkflowChange),
             REASON_CI_WORKFLOW_CHANGE
         );
+    }
+
+    /// The SHIPPED defaults must be project-agnostic: djinn is a platform
+    /// managing arbitrary repos, so no default glob may encode djinn's own
+    /// layout (`Tiltfile`, `Makefile`, `deploy/**`, `release/**`, the
+    /// capability-boundary allowlist, or repo-specific boundary scripts).
+    /// A foreign repo touching an ordinary `Makefile` or `deploy/` file must
+    /// NOT trip a merge hold under the fallback policy.
+    #[test]
+    fn default_policy_is_project_agnostic() {
+        let p = TripwirePolicy::default();
+
+        // CI-workflow globs: only ecosystem-generic CI paths.
+        for banned in [
+            "Tiltfile",
+            "Makefile",
+            "deploy/**",
+            "release/**",
+            "scripts/check-*-boundary.sh",
+        ] {
+            assert!(
+                !p.ci_workflow.path_globs.iter().any(|g| g == banned),
+                "ci_workflow default must not encode repo-specific glob {banned:?}"
+            );
+        }
+        // At least the universal GitHub-Actions path is still covered.
+        assert!(
+            p.ci_workflow
+                .path_globs
+                .iter()
+                .any(|g| g == ".github/workflows/**"),
+            "ci_workflow default must still cover .github/workflows/**"
+        );
+
+        // Boundary category patterns: no capability-boundary allowlist path.
+        assert!(
+            !p.boundary_path
+                .category_patterns
+                .iter()
+                .any(|g| g.contains("capability-boundary-allowlist")),
+            "boundary default must not reference the djinn capability-boundary allowlist"
+        );
+
+        // Allowlist source is unset by default (project supplies its own).
+        assert_eq!(
+            p.allowlist.source, "",
+            "default allowlist source must be empty (no repo-specific path)"
+        );
+        assert_eq!(DEFAULT_ALLOWLIST_SOURCE, "");
     }
 
     /// Boundary allowlist degraded-mode flag must distinguish "missing"
