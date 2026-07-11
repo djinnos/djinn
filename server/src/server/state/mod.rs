@@ -66,6 +66,20 @@ pub struct StartupReconnectabilityMeasurement {
     pub grace_window_ms: u64,
     /// Opaque identifier for this startup instance (UUID v7).
     pub startup_instance_id: String,
+    /// Unique `task_run_id`s observed as connected or reconnectable during
+    /// the startup probe.
+    reconnectable_task_run_ids: HashSet<String>,
+}
+
+impl StartupReconnectabilityMeasurement {
+    /// Return the exact measured reconnectable task-run identities.
+    ///
+    /// Kept as a narrow read-only accessor so the startup mutation can consume
+    /// the same identity set in the follow-up selective-interruption slice
+    /// without re-deriving it separately from the count emitted in tracing.
+    pub(crate) fn reconnectable_task_run_ids(&self) -> &HashSet<String> {
+        &self.reconnectable_task_run_ids
+    }
 }
 
 /// Build a `QdrantConfig` from `QDRANT_URL` (and friends), falling back to
@@ -1715,6 +1729,7 @@ impl AppState {
         // Observe reconnectability *before* the blanket interruption mutation
         // so the structured event reflects the pre-mutation state.
         let measurement = self.measure_startup_reconnectability(&repo).await;
+        let _reconnectable_task_run_ids = measurement.reconnectable_task_run_ids();
 
         tracing::info!(
             target: "djinn_startup_running_session_reconnectability",
@@ -1759,6 +1774,7 @@ impl AppState {
                     connected_or_reconnectable_sessions: 0,
                     grace_window_ms: STARTUP_GRACE_WINDOW_MS,
                     startup_instance_id,
+                    reconnectable_task_run_ids: HashSet::new(),
                 };
             }
         };
@@ -1769,19 +1785,22 @@ impl AppState {
                 connected_or_reconnectable_sessions: 0,
                 grace_window_ms: STARTUP_GRACE_WINDOW_MS,
                 startup_instance_id,
+                reconnectable_task_run_ids: HashSet::new(),
             };
         }
 
         let registry = self.inner.rpc_registry.clone();
+        let measured_task_run_ids: HashSet<String> = running_sessions
+            .iter()
+            .filter_map(|session| session.task_run_id.clone())
+            .collect();
 
-        // Immediate connectivity check: count sessions whose worker RPC
-        // identity is already connected.
-        let mut connected_count = 0usize;
-        for session in &running_sessions {
-            if let Some(task_run_id) = &session.task_run_id
-                && registry.is_connected(task_run_id).await
-            {
-                connected_count += 1;
+        // Immediate connectivity check: record unique worker RPC identities
+        // that are already connected.
+        let mut reconnectable_task_run_ids = HashSet::new();
+        for task_run_id in &measured_task_run_ids {
+            if registry.is_connected(task_run_id).await {
+                reconnectable_task_run_ids.insert(task_run_id.clone());
             }
         }
 
@@ -1789,29 +1808,22 @@ impl AppState {
         // might reconnect after a rolling deploy.  The probe is a coarse
         // poll — production would use a watch/notify path, but for the
         // measurement slice a single post-grace re-check suffices.
-        if connected_count < running_sessions.len() {
+        if reconnectable_task_run_ids.len() < measured_task_run_ids.len() {
             tokio::time::sleep(std::time::Duration::from_millis(STARTUP_GRACE_WINDOW_MS)).await;
-            for session in &running_sessions {
-                if let Some(task_run_id) = &session.task_run_id
-                    && registry.is_connected(task_run_id).await
-                {
-                    // Count may double-count the same session on both
-                    // passes; use a set-based check in production.
-                    // For the measurement slice the event only needs
-                    // the final tally.
-                    connected_count += 1;
+            for task_run_id in &measured_task_run_ids {
+                if registry.is_connected(task_run_id).await {
+                    reconnectable_task_run_ids.insert(task_run_id.clone());
                 }
             }
-            // Clamp to denominator: the grace probe cannot discover more
-            // reconnectable sessions than there are running sessions.
-            connected_count = connected_count.min(running_sessions.len());
         }
 
+        let connected_or_reconnectable_sessions = reconnectable_task_run_ids.len();
         StartupReconnectabilityMeasurement {
             running_sessions: running_sessions.len(),
-            connected_or_reconnectable_sessions: connected_count,
+            connected_or_reconnectable_sessions,
             grace_window_ms: STARTUP_GRACE_WINDOW_MS,
             startup_instance_id,
+            reconnectable_task_run_ids,
         }
     }
 

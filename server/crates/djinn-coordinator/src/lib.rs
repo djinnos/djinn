@@ -159,8 +159,8 @@ pub use worker_lifecycle::{
     ModelRotationLifecycleConfig, ModelRotationLifecycleMetadata, ModelRotationReason,
     NoProgressCommandState, NoProgressControlledExitDecision, NoProgressEnforcementMode,
     NoProgressThresholdConfig, PreservationFailurePolicy, PreservationGateResult,
-    PreservationOutcome, ResumeLifecycleConfig, ResumeLifecycleMetadata, ResumeSelectionReason,
-    SlowExtensionConfig, WorkerLifecycleConfig, WorkerLifecycleMetadata,
+    PreservationOutcome, ResumeLifecycleConfig, ResumeLifecycleEnvFlag, ResumeLifecycleMetadata,
+    ResumeSelectionReason, SlowExtensionConfig, WorkerLifecycleConfig, WorkerLifecycleMetadata,
     decide_controlled_exit_preservation_action, evaluate_no_progress_controlled_exit,
 };
 
