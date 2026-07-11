@@ -58,8 +58,48 @@ struct ControlledWatcher {
 
 #[async_trait]
 impl WarmJobWatcher for ControlledWatcher {
-    async fn wait_terminal(&self, _namespace: &str, _job_name: &str) {
+    async fn wait_terminal(&self, _namespace: &str, _job_name: &str) -> WarmTerminalOutcome {
         self.release.notified().await;
+        WarmTerminalOutcome::Succeeded
+    }
+}
+
+/// A watcher that returns a caller-chosen terminal outcome immediately.
+/// Used to exercise the completion-sink hook on both success and failure.
+struct ImmediateWatcher {
+    outcome: WarmTerminalOutcome,
+}
+
+#[async_trait]
+impl WarmJobWatcher for ImmediateWatcher {
+    async fn wait_terminal(&self, _namespace: &str, _job_name: &str) -> WarmTerminalOutcome {
+        self.outcome
+    }
+}
+
+/// Recording [`WarmCompletionSink`] that captures the `project_id`s it was
+/// invoked with, so tests can assert the event-driven invalidation hook fired
+/// exactly on warm-Job success.
+struct RecordingSink {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl RecordingSink {
+    fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+#[async_trait]
+impl WarmCompletionSink for RecordingSink {
+    async fn on_warm_succeeded(&self, project_id: &str) {
+        self.calls.lock().await.push(project_id.to_string());
     }
 }
 
@@ -602,5 +642,69 @@ async fn trigger_consults_lister_before_dispatching_with_empty_cluster() {
     assert!(
         !calls.lock().await.is_empty(),
         "lister must be consulted even when the cluster is empty (to keep the dedupe path exercised)"
+    );
+}
+
+/// Event-driven convergence: when a warm Job completes successfully the
+/// in-process completion sink must fire with the warmed `project_id`, so the
+/// server can invalidate its canonical-graph RAM slot without a restart.
+#[tokio::test]
+async fn trigger_fires_completion_sink_on_warm_success() {
+    let db = Database::open_in_memory().expect("in-memory db");
+    let project_id = seed_project_with_ready_image(&db, "proj-sink-success").await;
+
+    let (dispatcher, _captured, _count) = RecordingDispatcher::new("warm");
+    let (sink, calls) = RecordingSink::new();
+
+    let warmer = K8sGraphWarmer::with_dispatcher(
+        test_config(),
+        db,
+        Arc::new(dispatcher),
+        Arc::new(ImmediateWatcher {
+            outcome: WarmTerminalOutcome::Succeeded,
+        }),
+    )
+    .with_completion_sink(Arc::new(sink));
+
+    warmer.trigger(&project_id).await;
+    // The watcher runs in a spawned task; give it room to fire the sink.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let calls = calls.lock().await;
+    assert_eq!(
+        &*calls,
+        &[project_id],
+        "completion sink must fire exactly once with the warmed project id on success"
+    );
+}
+
+/// The completion sink must NOT fire when the warm Job ends in failure —
+/// no fresh blob was persisted, so there is nothing to converge to.
+#[tokio::test]
+async fn trigger_skips_completion_sink_on_warm_failure() {
+    let db = Database::open_in_memory().expect("in-memory db");
+    let project_id = seed_project_with_ready_image(&db, "proj-sink-failure").await;
+
+    let (dispatcher, _captured, _count) = RecordingDispatcher::new("warm");
+    let (sink, calls) = RecordingSink::new();
+
+    let warmer = K8sGraphWarmer::with_dispatcher(
+        test_config(),
+        db,
+        Arc::new(dispatcher),
+        Arc::new(ImmediateWatcher {
+            outcome: WarmTerminalOutcome::Failed,
+        }),
+    )
+    .with_completion_sink(Arc::new(sink));
+
+    warmer.trigger(&project_id).await;
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert!(
+        calls.lock().await.is_empty(),
+        "completion sink must not fire on warm-Job failure"
     );
 }
