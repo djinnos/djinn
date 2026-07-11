@@ -733,6 +733,26 @@ fn billing_path_change_triggers_boundary_finding() {
 
 #[test]
 fn capability_allowlist_change_triggers_boundary_finding() {
+    // The capability-boundary allowlist path is repo-specific, NOT a SHIPPED
+    // default (djinn manages arbitrary projects). A project that keeps one
+    // adds its path via org/project policy — modelled here.
+    let mut policy = default_policy();
+    policy
+        .boundary_path
+        .category_patterns
+        .push("scripts/capability-boundary-allowlist.toml".to_owned());
+    let files = vec![simple_file(
+        "scripts/capability-boundary-allowlist.toml",
+        ChangedFileStatus::Modified,
+        5,
+        2,
+    )];
+    let findings = evaluate_boundary_path_changes(&policy, &files);
+    assert_eq!(findings.len(), 1);
+}
+
+#[test]
+fn capability_allowlist_path_not_in_default_boundary_patterns() {
     let files = vec![simple_file(
         "scripts/capability-boundary-allowlist.toml",
         ChangedFileStatus::Modified,
@@ -740,7 +760,10 @@ fn capability_allowlist_change_triggers_boundary_finding() {
         2,
     )];
     let findings = evaluate_boundary_path_changes(&default_policy(), &files);
-    assert_eq!(findings.len(), 1);
+    assert!(
+        findings.is_empty(),
+        "repo-specific allowlist path must not be a SHIPPED boundary default"
+    );
 }
 
 #[test]
@@ -827,8 +850,11 @@ fn match_outside_allowlist_false_only_flags_new_files() {
 fn match_outside_allowlist_false_still_flags_allowlist_file() {
     let mut policy = default_policy();
     policy.boundary_path.match_outside_allowlist = false;
+    // A project that keeps a capability-boundary allowlist supplies its path
+    // via org/project policy (empty in the SHIPPED default).
+    policy.allowlist.source = "scripts/capability-boundary-allowlist.toml".to_owned();
 
-    // The allowlist file itself should still trigger even when
+    // The configured allowlist file itself should still trigger even when
     // match_outside_allowlist is false.
     let files = vec![simple_file(
         "scripts/capability-boundary-allowlist.toml",
