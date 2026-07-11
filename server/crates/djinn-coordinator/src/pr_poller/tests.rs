@@ -1423,7 +1423,10 @@ fn ci_failure_sections_keep_cancelled_jobs_when_nothing_hard_failed() {
     let (sections, ci_jobs) = build_ci_failure_sections(Some(&jobs), &refs);
 
     let body = sections.join("\n");
-    assert!(body.contains("**Failed job:** test-shard (2) (cancelled)"), "{body}");
+    assert!(
+        body.contains("**Failed job:** test-shard (2) (cancelled)"),
+        "{body}"
+    );
     assert_eq!(ci_jobs.len(), 1);
 }
 

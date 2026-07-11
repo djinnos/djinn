@@ -89,7 +89,21 @@ pub struct KubernetesConfig {
     /// CPU request on the warm Pod container. The canonical-graph pipeline
     /// spawns SCIP indexer subprocesses (rust-analyzer, scip-go, etc.) that
     /// can spike CPU; without a request the scheduler has no fairness
-    /// signal and the Pod can be evicted under contention. Default `1`.
+    /// signal and the Pod can be evicted under contention.
+    ///
+    /// Default `4` — deliberately equal to `warm_cpu_limit`. Kubernetes
+    /// derives the container's cgroup `cpu.weight` (CFS share) from the
+    /// REQUEST, not the limit. A `1` request left the warm Pod with a tiny
+    /// share under host contention: on the single-node k3s VPS, six task-run
+    /// Pods (each requesting ~2 cores) drove host load ~20, and the warm
+    /// Pod's `rust-analyzer scip` pass — which finishes the `server`
+    /// workspace in ~257s on an idle 16-core box — was throttled to ~2
+    /// effective cores and blew past its 1202s → 1800s adaptive wall-clock
+    /// caps on every run. Graph freshness is user-facing (task-runs adopt
+    /// the warm's canonical graph), so the warm's cgroup weight must reflect
+    /// its actual need: matching the request to the limit gives it a fair
+    /// CFS share proportional to what it will actually use. Tunable via
+    /// `DJINN_K8S_WARM_CPU_REQUEST`.
     pub warm_cpu_request: String,
     /// CPU limit on the warm Pod container. Caps the indexer subprocesses
     /// so they don't starve neighbours on the same node. Default `4`.
@@ -145,7 +159,13 @@ impl KubernetesConfig {
             database_url: None,
             task_run_active_deadline_seconds: 10800,
             task_run_termination_grace_period_seconds: 60,
-            warm_cpu_request: "1".into(),
+            // Request == limit: cgroup cpu.weight derives from the REQUEST, so
+            // a `1` request starved the warm to ~2 effective cores under host
+            // contention even with a `4` limit, timing the Rust SCIP pass out
+            // on every run. Matching request to limit gives the warm a CFS
+            // share proportional to its real need (graph freshness is
+            // user-facing). See the field doc for the full mechanics.
+            warm_cpu_request: "4".into(),
             // Bumped limit 2 → 4 so the cgroup-aware `CARGO_BUILD_JOBS` in the
             // Rust SCIP indexer has real CPU to use; a 2-CPU cap starved the
             // warm and timed the Rust workspace out on every run.
@@ -186,7 +206,7 @@ impl KubernetesConfig {
     /// | `DJINN_DATABASE_URL` | `database_url` | _(unset → warm Pod has no fallback; helm chart projects this via the `djinn-server` ConfigMap)_ |
     /// | `DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS` | `task_run_active_deadline_seconds` | `10800` (parsed as `u64`) |
     /// | `DJINN_K8S_TASK_RUN_TERMINATION_GRACE_PERIOD_SECONDS` | `task_run_termination_grace_period_seconds` | `60` (parsed as `i64`) |
-    /// | `DJINN_K8S_WARM_CPU_REQUEST` | `warm_cpu_request` | `1` |
+    /// | `DJINN_K8S_WARM_CPU_REQUEST` | `warm_cpu_request` | `4` (== limit; cgroup cpu.weight derives from the request) |
     /// | `DJINN_K8S_WARM_CPU_LIMIT` | `warm_cpu_limit` | `4` |
     /// | `DJINN_K8S_WARM_MEMORY_REQUEST` | `warm_memory_request` | `2Gi` |
     /// | `DJINN_K8S_WARM_MEMORY_LIMIT` | `warm_memory_limit` | `6Gi` |
