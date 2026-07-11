@@ -390,11 +390,22 @@ const KNOWLEDGE_NOTE_TYPES: &[&str] = &["pattern", "pitfall", "case"];
 
 /// Load knowledge context from scope-matched notes. Returns None on error/empty.
 ///
-/// Instruments retrieval with a fail-open `RetrievalTraceEntryPoint::LoadKnowledgeContext`
-/// trace: fetches the capped trace candidate universe alongside the production query,
-/// classifies every candidate deterministically, and persists one trace row per call.
-/// Trace persistence errors are logged and swallowed — they never change the returned
-/// knowledge context or fail the prompt assembly.
+/// Instruments retrieval with a fail-open `LoadKnowledgeContext` trace row. The
+/// production query is authoritative for prompt output; the trace-candidate query
+/// provides the full universe for classification.
+///
+/// ## Trace contract (epic 3paf; consumed by sibling `liso` MCP tooling)
+///
+/// - **Entry point:** `LoadKnowledgeContext` → `"load_knowledge_context"`.
+/// - **Trigger:** `{ "shape": "scope_paths", "task_paths": [...] }`.
+/// - **Outcomes** (`TraceCandidate`): `injected` (top-K, survived budget — no
+///   reason), `min_confidence` (<0.3), `not_top_k`, `budget_pruned`,
+///   `dedupe`, `search_error`.
+/// - **Durations:** `candidate_fetch_ms`, `classify_ms`, `prompt_pack_ms`, `persist_ms`.
+/// - **Tokens:** `ceil(injected_chars/4)`. **Cap:** `DEFAULT_CANDIDATE_CAP`;
+///   `exceeded`=`len>=cap`.
+/// - **Fail-open:** trace errors are logged and swallowed; the rendered context
+///   is produced from the production query alone.
 async fn load_knowledge_context(
     task: &Task,
     epic_context: Option<&str>,
