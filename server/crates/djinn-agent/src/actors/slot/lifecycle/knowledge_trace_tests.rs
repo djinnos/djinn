@@ -530,3 +530,85 @@ fn classify_candidates_for_error_marks_all_search_error() {
         assert_eq!(c.skipped_reason, Some(SkippedReason::SearchError));
     }
 }
+
+// ── Fail-open: trace-candidate search failure ──────────────────────────────
+//
+// When `query_by_scope_overlap_trace_candidates` fails but the production
+// query succeeds, `load_knowledge_context` must still return the rendered
+// prompt. We simulate the failure by NULLing a note's `confidence` column:
+// the production query filters on `confidence >= 0.3` so NULLs are excluded,
+// but the trace-candidate query selects `confidence` directly into a
+// non-nullable `f64` field, causing `sqlx::FromRow` to fail.
+
+#[tokio::test]
+async fn trace_candidate_search_failure_does_not_change_prompt_output() {
+    let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task =
+        create_project_epic_task(&db, &events, "TC search fail epic", "TC search fail task").await;
+    let project_id = task.project_id.clone();
+
+    // Seed two notes with high confidence. Both will appear in both queries.
+    let note_a = seed_scoped_note(&db, &project_id, "TC fail A", "[]", 0.85).await;
+    let _note_b = seed_scoped_note(&db, &project_id, "TC fail B", "[]", 0.75).await;
+
+    // NULL note A's confidence. The production query (`confidence >= 0.3`)
+    // excludes NULL rows, so it will only return note B. The trace-candidate
+    // query has no confidence filter and includes the NULL row, causing
+    // `query_as` to fail when mapping NULL → f64.
+    djinn_db::test_support::nullify_note_confidence_for_test(&db, &note_a).await;
+
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+    // Fail-open: the trace-candidate search failure must not change the
+    // returned knowledge context. The production query still succeeds and
+    // returns note B.
+    let result = load_knowledge_context(&task, None, &app_state).await;
+    assert!(result.is_some(), "prompt should still be produced");
+    let prompt = result.unwrap();
+    assert!(
+        prompt.contains("TC fail B"),
+        "non-NULL-confidence note should appear in rendered prompt"
+    );
+    assert!(
+        !prompt.contains("TC fail A"),
+        "NULL-confidence note excluded from production results"
+    );
+}
+
+// ── Fail-open: production search error returns None and persists error trace ──
+//
+// When the production query itself fails, `load_knowledge_context` returns
+// `None` (preserving the original behavior) while still attempting to
+// persist a trace row with `search_error` outcomes from the trace-candidate
+// universe. We simulate the production failure by renaming the `confidence`
+// column after seeding — both production and trace-candidate queries reference
+// that column and will fail, so the function returns None. The key contract:
+// no panic, no error propagation — just None and a debug log.
+
+#[tokio::test]
+async fn production_search_error_returns_none_fail_open() {
+    let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Prod fail epic", "Prod fail task").await;
+    let project_id = task.project_id.clone();
+
+    // Seed a note so we have a known-good state before breaking the schema.
+    seed_scoped_note(&db, &project_id, "Prod fail note", "[]", 0.9).await;
+
+    // Rename the confidence column to force production and trace-candidate
+    // queries to fail without dropping the dependency-heavy notes table. Both
+    // queries reference notes.confidence.
+    djinn_db::test_support::rename_note_confidence_column_for_test(&db).await;
+
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+    // Fail-open: the production search error must not panic or propagate.
+    // The function returns None (the original pre-instrumentation behavior
+    // for search errors), even though the trace-candidate query also fails.
+    let result = load_knowledge_context(&task, None, &app_state).await;
+    assert!(
+        result.is_none(),
+        "production search error must return None (fail-open)"
+    );
+}
