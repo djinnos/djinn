@@ -88,6 +88,22 @@ impl WarmJobDispatcher for KubeClientDispatcher {
     }
 }
 
+/// Terminal outcome reported by a [`WarmJobWatcher`]. Drives the in-process
+/// convergence hook: on [`WarmTerminalOutcome::Succeeded`] the warm Job pod has
+/// already rewritten `repo_graph_cache`, so the server invalidates its RAM slot
+/// (see [`WarmCompletionSink`]); on [`WarmTerminalOutcome::Failed`] the row is
+/// unchanged and no convergence is needed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WarmTerminalOutcome {
+    /// The warm Job reported `.status.succeeded > 0` (or completed and was
+    /// reaped before we observed it — see the 404 branch), meaning a fresh
+    /// blob was persisted.
+    Succeeded,
+    /// The warm Job reported `.status.failed > 0`, or the watcher gave up at
+    /// its deadline without observing success. No fresh blob was persisted.
+    Failed,
+}
+
 /// Optional Job-terminal watcher. Production uses
 /// [`KubeClientJobWatcher`]; tests pass [`NoopJobWatcher`] to keep the
 /// unit tests free of any apiserver dependency.
@@ -95,8 +111,10 @@ impl WarmJobDispatcher for KubeClientDispatcher {
 pub trait WarmJobWatcher: Send + Sync {
     /// Poll the Job `job_name` in `namespace` until it reaches a terminal
     /// state (succeeded OR failed) or the watcher's internal deadline
-    /// elapses. Implementations MUST NOT block forever.
-    async fn wait_terminal(&self, namespace: &str, job_name: &str);
+    /// elapses. Implementations MUST NOT block forever. The returned
+    /// [`WarmTerminalOutcome`] tells the caller whether a fresh graph blob was
+    /// persisted (→ trigger in-process cache convergence).
+    async fn wait_terminal(&self, namespace: &str, job_name: &str) -> WarmTerminalOutcome;
 }
 
 /// Production watcher backed by `kube::Api::<Job>::get`. Polls on
@@ -113,7 +131,7 @@ impl KubeClientJobWatcher {
 
 #[async_trait]
 impl WarmJobWatcher for KubeClientJobWatcher {
-    async fn wait_terminal(&self, namespace: &str, job_name: &str) {
+    async fn wait_terminal(&self, namespace: &str, job_name: &str) -> WarmTerminalOutcome {
         let api: Api<Job> = Api::namespaced(self.client.clone(), namespace);
         let deadline = SystemClock::new().now_instant() + WATCH_DEADLINE;
         loop {
@@ -122,17 +140,24 @@ impl WarmJobWatcher for KubeClientJobWatcher {
                     if let Some(status) = job.status.as_ref() {
                         if status.succeeded.unwrap_or(0) > 0 {
                             debug!(job = %job_name, "K8sGraphWarmer watcher: succeeded");
-                            return;
+                            return WarmTerminalOutcome::Succeeded;
                         }
                         if status.failed.unwrap_or(0) > 0 {
                             warn!(job = %job_name, "K8sGraphWarmer watcher: failed");
-                            return;
+                            return WarmTerminalOutcome::Failed;
                         }
                     }
                 }
                 Err(kube::Error::Api(resp)) if resp.code == 404 => {
-                    debug!(job = %job_name, "K8sGraphWarmer watcher: job gone (treating as done)");
-                    return;
+                    // The Job is gone. `ttlSecondsAfterFinished` only reaps
+                    // *finished* Jobs, and a Job that ran to completion so fast
+                    // it was reaped before our first poll is overwhelmingly a
+                    // success, so we treat "gone" as Succeeded and let the
+                    // server converge its RAM slot. A needless reload on the
+                    // rare reaped-failure is harmless (it re-reads the same
+                    // latest persisted row).
+                    debug!(job = %job_name, "K8sGraphWarmer watcher: job gone (treating as succeeded)");
+                    return WarmTerminalOutcome::Succeeded;
                 }
                 Err(e) => {
                     warn!(
@@ -147,19 +172,45 @@ impl WarmJobWatcher for KubeClientJobWatcher {
                     job = %job_name,
                     "K8sGraphWarmer watcher: deadline exceeded, notifying anyway"
                 );
-                return;
+                // Unknown terminal state → treat as Failed so we don't churn
+                // the cache; the read-path revalidation TTL still converges.
+                return WarmTerminalOutcome::Failed;
             }
             tokio::time::sleep(WATCH_POLL_INTERVAL).await;
         }
     }
 }
 
-/// No-op watcher used by unit tests.
+/// No-op watcher used by unit tests. Reports success so the in-flight slot is
+/// released and the completion hook (if any) fires, matching the common
+/// "warm completed" path the tests exercise.
 pub struct NoopJobWatcher;
 
 #[async_trait]
 impl WarmJobWatcher for NoopJobWatcher {
-    async fn wait_terminal(&self, _namespace: &str, _job_name: &str) {}
+    async fn wait_terminal(&self, _namespace: &str, _job_name: &str) -> WarmTerminalOutcome {
+        WarmTerminalOutcome::Succeeded
+    }
+}
+
+/// In-process convergence hook invoked when a warm Job reaches terminal
+/// success. The canonical-graph warm runs in a *separate* K8s Job pod that
+/// rewrites `repo_graph_cache` but cannot reach the server process's in-memory
+/// graph slot; without this hook every `code_graph` query serves the pre-warm
+/// blob until the server restarts (or the read-path revalidation TTL elapses).
+///
+/// `djinn-k8s` intentionally does not depend on `djinn-graph`, so the concrete
+/// sink that clears `djinn_graph`'s `GRAPH_CACHE` is wired at the composition
+/// root (`AppState`) where both crates are in scope, and injected via
+/// [`K8sGraphWarmer::with_completion_sink`]. Kept as a trait (not a bare
+/// closure) so unit tests can supply a recording mock with the existing
+/// dispatcher/watcher patterns.
+#[async_trait]
+pub trait WarmCompletionSink: Send + Sync {
+    /// Invoked once, in-process, after the warm Job for `project_id` reaches
+    /// terminal success and its fresh blob is persisted. Implementations
+    /// converge process-local caches (e.g. the canonical-graph RAM slot).
+    async fn on_warm_succeeded(&self, project_id: &str);
 }
 
 /// Abstraction used by [`K8sGraphWarmer`] to discover warm Jobs that are
@@ -275,6 +326,11 @@ pub struct K8sGraphWarmer {
     /// parallel pod). `None` only under the test/mock path that injects
     /// a dispatcher without a live apiserver.
     lister: Option<Arc<dyn WarmJobLister>>,
+    /// In-process hook fired after a warm Job succeeds so the server can
+    /// converge its canonical-graph RAM slot to the freshly persisted blob
+    /// without a restart. `None` under the test/mock path and for non-K8s
+    /// wiring; production sets it via [`Self::with_completion_sink`].
+    completion_sink: Option<Arc<dyn WarmCompletionSink>>,
     in_flight: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
     /// Live kube client for Pod/Service/Job ops that the (Job-only) dispatcher
     /// abstraction doesn't cover — e.g. backing-service provisioning. `None`
@@ -324,9 +380,20 @@ impl K8sGraphWarmer {
             dispatcher,
             watcher,
             lister,
+            completion_sink: None,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             client: None,
         }
+    }
+
+    /// Attach the in-process warm-completion sink (builder style). Production
+    /// wires a sink that clears `djinn_graph`'s canonical-graph RAM slot; tests
+    /// inject a recording mock. Returns `self` for chaining off
+    /// [`Self::new`]/[`Self::with_dispatcher`].
+    #[must_use]
+    pub fn with_completion_sink(mut self, sink: Arc<dyn WarmCompletionSink>) -> Self {
+        self.completion_sink = Some(sink);
+        self
     }
 
     /// Resolve the image the warm Job should run in, honouring catalog-image
@@ -614,12 +681,13 @@ impl GraphWarmerService for K8sGraphWarmer {
 
         let watcher = self.watcher.clone();
         let in_flight = self.in_flight.clone();
+        let completion_sink = self.completion_sink.clone();
         let project_id_owned = project_id.to_string();
         let namespace_owned = namespace.clone();
         let job_name_owned = job_name.clone();
         let notify_owned = notify.clone();
         tokio::spawn(async move {
-            watcher
+            let outcome = watcher
                 .wait_terminal(&namespace_owned, &job_name_owned)
                 .await;
             let mut guard = in_flight.lock().await;
@@ -631,8 +699,18 @@ impl GraphWarmerService for K8sGraphWarmer {
             // the map still holds (in case a re-trigger happened mid-flight
             // and reassigned the slot).
             notify_owned.notify_waiters();
+            // Event-driven convergence: on success the warm pod has already
+            // rewritten `repo_graph_cache`, so invalidate the server's RAM slot
+            // now (fast path). The read-path revalidation TTL is the backstop
+            // if this hook is absent or the outcome was ambiguous.
+            if outcome == WarmTerminalOutcome::Succeeded
+                && let Some(sink) = completion_sink.as_ref()
+            {
+                sink.on_warm_succeeded(&project_id_owned).await;
+            }
             debug!(
                 project_id = %project_id_owned,
+                outcome = ?outcome,
                 "K8sGraphWarmer: warm watcher complete, waiters notified"
             );
         });
