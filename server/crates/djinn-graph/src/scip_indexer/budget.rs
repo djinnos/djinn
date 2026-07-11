@@ -40,6 +40,22 @@ const SOURCE_BYTES_STEP_DURATION: Duration = Duration::from_secs(30);
 /// Minimum per-partition budget for partition-capable indexers.
 const MIN_PER_PARTITION: Duration = Duration::from_secs(10);
 
+/// Multiplier applied to a timed-out run's observed elapsed to derive the next
+/// invocation's headroom. A workspace killed at its cap gets ~1.5x the killed
+/// elapsed next time, so it grows toward "enough" instead of retrying at the
+/// identical too-small cap.
+const TIMEOUT_HEADROOM_NUMERATOR: u32 = 3;
+const TIMEOUT_HEADROOM_DENOMINATOR: u32 = 2;
+
+/// Absolute ceiling multiplier for the ADAPTIVE (prior-timing-driven) path,
+/// applied to the per-indexer static `max_cap`. Normal size-scaling and
+/// success/p95 prior scaling stay clamped by `max_cap`; only the timed-out
+/// headroom path is allowed to climb above `max_cap`, and never past
+/// `max_cap * ADAPTIVE_CEILING_MULTIPLIER`. For rust-analyzer (max_cap 1200s)
+/// this is a hard 3600s (1h) ceiling — comfortably enough for a heavy Rust
+/// workspace's first cold warm while still bounding a genuinely hung indexer.
+const ADAPTIVE_CEILING_MULTIPLIER: u32 = 3;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -88,6 +104,13 @@ pub(crate) struct PriorIndexerTiming {
     pub p50_ms: Option<u64>,
     pub p95_ms: Option<u64>,
     pub last_success_ms: Option<u64>,
+    /// High-water elapsed (ms) of the most recent TIMED-OUT run(s) since the
+    /// last success. Distinct from the p95/last-success fields because a
+    /// timeout is evidence the cap itself was too small: it feeds the
+    /// [`ADAPTIVE_CEILING_MULTIPLIER`] headroom path, which may raise the
+    /// budget *above* the static `max_cap` (unlike the success-derived hooks,
+    /// which stay clamped by `max_cap`).
+    pub last_timed_out_ms: Option<u64>,
 }
 
 /// A computed indexer budget with a human-readable reason.
@@ -135,6 +158,15 @@ fn max_cap(indexer: SupportedIndexer) -> Duration {
         | SupportedIndexer::Ruby
         | SupportedIndexer::DotNet => Duration::from_secs(300),
     }
+}
+
+/// Absolute ceiling for the adaptive (timed-out headroom) path.
+///
+/// `max_cap(indexer) * ADAPTIVE_CEILING_MULTIPLIER`. The static size-scaling
+/// and success-prior paths never exceed `max_cap`; only repeated-timeout
+/// headroom growth may climb here, and never past this value.
+fn adaptive_ceiling(indexer: SupportedIndexer) -> Duration {
+    max_cap(indexer).saturating_mul(ADAPTIVE_CEILING_MULTIPLIER)
 }
 
 /// File extensions that count as "source" for each indexer's size estimation
@@ -244,6 +276,22 @@ fn prior_based_budget(prior: &PriorIndexerTiming, cap: Duration) -> Duration {
     prior_max.min(cap)
 }
 
+/// Headroom budget derived from a timed-out run's observed elapsed, clamped by
+/// the adaptive ceiling. Returns `Duration::ZERO` when there is no timeout
+/// evidence. Unlike [`prior_based_budget`], this may exceed the static
+/// `max_cap` (up to [`adaptive_ceiling`]) — a timeout means the cap itself was
+/// too small, so identical retries are pointless.
+fn timeout_headroom_budget(prior: &PriorIndexerTiming, ceiling: Duration) -> Duration {
+    match prior.last_timed_out_ms {
+        Some(ms) if ms > 0 => {
+            Duration::from_millis(ms).saturating_mul(TIMEOUT_HEADROOM_NUMERATOR)
+                / TIMEOUT_HEADROOM_DENOMINATOR
+        }
+        _ => Duration::ZERO,
+    }
+    .min(ceiling)
+}
+
 /// Formula-based budget (baseline + size scaling), capped by the indexer max.
 fn scaled_budget(indexer: SupportedIndexer, size: &WorkspaceSizeHint) -> (Duration, usize, u64) {
     let base = baseline(indexer);
@@ -285,10 +333,25 @@ fn budget_for_indexer_at(
 
     // Step 3: prior-timing scaling.
     if let Some(prior) = prior {
+        // 3a: success/p95 prior scaling — raises within the static `max_cap`.
         let prior_budget = prior_based_budget(prior, cap);
         if prior_budget > total {
             total = prior_budget;
             reason_parts.push(format!("prior timing raised to {:?}", prior_budget));
+        }
+
+        // 3b: timed-out headroom — a run killed at its cap is evidence the cap
+        // was too small, so grow toward "enough" (≈1.5x the killed elapsed)
+        // rather than retrying identically. This is the ONLY path allowed to
+        // climb above `max_cap`, bounded by the adaptive ceiling.
+        let ceiling = adaptive_ceiling(indexer);
+        let headroom = timeout_headroom_budget(prior, ceiling);
+        if headroom > total {
+            total = headroom;
+            reason_parts.push(format!(
+                "timed-out headroom raised to {:?} (ceiling {:?})",
+                headroom, ceiling
+            ));
         }
     }
 
@@ -541,6 +604,147 @@ mod tests {
         let budget = budget_for_indexer(SupportedIndexer::RustAnalyzer, &size, Some(&prior), None);
         assert_eq!(budget.total, Duration::from_secs(420));
         assert!(!budget.reason.contains("prior timing raised"));
+    }
+
+    // --- Timed-out headroom (adaptive ceiling) ----------------------------
+
+    #[test]
+    fn timed_out_headroom_raises_above_static_max_cap() {
+        // The whole point: rust-analyzer keeps timing out at its 1200s cap.
+        // Next warm should get ~1.5x the killed elapsed (1800s), ABOVE the
+        // static 1200s max_cap, so it stops retrying at a too-small cap.
+        let size = WorkspaceSizeHint::default();
+        let prior = PriorIndexerTiming {
+            last_timed_out_ms: Some(1_200_000),
+            ..Default::default()
+        };
+        let budget = budget_for_indexer(SupportedIndexer::RustAnalyzer, &size, Some(&prior), None);
+        assert_eq!(budget.total, Duration::from_secs(1800));
+        assert_eq!(budget.per_invocation, Duration::from_secs(1800));
+        assert!(budget.total > max_cap(SupportedIndexer::RustAnalyzer));
+        assert!(budget.reason.contains("timed-out headroom raised"));
+    }
+
+    #[test]
+    fn timed_out_headroom_bounded_by_adaptive_ceiling() {
+        // Even a huge timed-out elapsed can't exceed max_cap * 3 (Rust 3600s).
+        let size = WorkspaceSizeHint::default();
+        let prior = PriorIndexerTiming {
+            last_timed_out_ms: Some(10_000_000), // 1.5x = 15000s, way over ceiling
+            ..Default::default()
+        };
+        let budget = budget_for_indexer(SupportedIndexer::RustAnalyzer, &size, Some(&prior), None);
+        assert_eq!(budget.total, Duration::from_secs(3600));
+        assert_eq!(
+            budget.total,
+            adaptive_ceiling(SupportedIndexer::RustAnalyzer)
+        );
+    }
+
+    #[test]
+    fn adaptive_ceiling_is_three_times_max_cap() {
+        for indexer in SupportedIndexer::ALL {
+            assert_eq!(
+                adaptive_ceiling(indexer),
+                max_cap(indexer) * 3,
+                "{indexer:?}: adaptive ceiling must be 3x static max_cap"
+            );
+        }
+    }
+
+    #[test]
+    fn timed_out_headroom_grows_across_successive_timeouts() {
+        // Model the intended escalation: 1200s cap -> killed -> 1800s cap ->
+        // killed -> 2700s cap -> killed -> 3600s (ceiling) and then flat.
+        let size = WorkspaceSizeHint::default();
+        let step = |timed_out_ms: u64| {
+            let prior = PriorIndexerTiming {
+                last_timed_out_ms: Some(timed_out_ms),
+                ..Default::default()
+            };
+            budget_for_indexer(SupportedIndexer::RustAnalyzer, &size, Some(&prior), None).total
+        };
+        assert_eq!(step(1_200_000), Duration::from_secs(1800));
+        assert_eq!(step(1_800_000), Duration::from_secs(2700));
+        assert_eq!(step(2_700_000), Duration::from_secs(3600)); // hits ceiling
+        assert_eq!(step(3_600_000), Duration::from_secs(3600)); // stays at ceiling
+    }
+
+    #[test]
+    fn timed_out_headroom_never_lowers_formula_budget() {
+        // A tiny timed-out elapsed must not shrink a larger size-scaled budget.
+        let size = WorkspaceSizeHint {
+            source_file_count: 1000, // 4 steps → 300 + 120 = 420s for Rust
+            source_bytes: 0,
+            partition_count: 1,
+        };
+        let prior = PriorIndexerTiming {
+            last_timed_out_ms: Some(60_000), // 1.5x = 90s < 420s
+            ..Default::default()
+        };
+        let budget = budget_for_indexer(SupportedIndexer::RustAnalyzer, &size, Some(&prior), None);
+        assert_eq!(budget.total, Duration::from_secs(420));
+        assert!(!budget.reason.contains("timed-out headroom raised"));
+    }
+
+    #[test]
+    fn timed_out_headroom_wins_over_success_prior_when_larger() {
+        // Both signals present: success p95 caps at max_cap (1200s) while the
+        // timeout headroom climbs above it. The larger (headroom) wins.
+        let size = WorkspaceSizeHint::default();
+        let prior = PriorIndexerTiming {
+            p95_ms: Some(700_000),              // 2x = 1400 → capped to 1200s
+            last_success_ms: Some(500_000),     // 2x = 1000s
+            last_timed_out_ms: Some(1_400_000), // 1.5x = 2100s
+            ..Default::default()
+        };
+        let budget = budget_for_indexer(SupportedIndexer::RustAnalyzer, &size, Some(&prior), None);
+        assert_eq!(budget.total, Duration::from_secs(2100));
+        assert!(budget.reason.contains("prior timing raised"));
+        assert!(budget.reason.contains("timed-out headroom raised"));
+    }
+
+    #[test]
+    fn timed_out_headroom_still_clamped_by_active_deadline() {
+        // The adaptive headroom raises the budget, but an active deadline still
+        // clamps it — the pod's activeDeadline is the hard ceiling.
+        let (deadline, now) = fresh_deadline(1060, 60); // remaining = 1000s
+        let size = WorkspaceSizeHint::default();
+        let prior = PriorIndexerTiming {
+            last_timed_out_ms: Some(1_200_000), // 1.5x = 1800s
+            ..Default::default()
+        };
+        let budget = budget_for_indexer_at(
+            SupportedIndexer::RustAnalyzer,
+            &size,
+            Some(&prior),
+            Some(&deadline),
+            now,
+        );
+        assert_eq!(budget.total, Duration::from_secs(1000));
+        assert!(budget.reason.contains("timed-out headroom raised"));
+        assert!(budget.reason.contains("clamped"));
+    }
+
+    #[test]
+    fn no_timeout_evidence_is_byte_identical_to_no_prior() {
+        // A prior with only the (default) None timeout field must produce the
+        // same budget as passing no prior at all — no-history behaviour is
+        // preserved exactly.
+        let size = WorkspaceSizeHint {
+            source_file_count: 500,
+            source_bytes: 10 * 1024 * 1024,
+            partition_count: 1,
+        };
+        let empty_prior = PriorIndexerTiming::default();
+        for indexer in SupportedIndexer::ALL {
+            let with_none = budget_for_indexer(indexer, &size, None, None);
+            let with_empty = budget_for_indexer(indexer, &size, Some(&empty_prior), None);
+            assert_eq!(
+                with_none, with_empty,
+                "{indexer:?}: empty prior must equal no prior"
+            );
+        }
     }
 
     // --- Active-deadline clamp --------------------------------------------

@@ -608,6 +608,11 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let stack_filter = resolve_stack_indexer_filter(ctx, project_id).await;
     let declared_workspaces = resolve_declared_workspaces(ctx, project_id).await;
 
+    // Feed persisted per-(workspace, indexer) timings into the budget so heavy
+    // workspaces that timed out on a prior warm get an adapted (larger) cap
+    // this time instead of timing out identically and dropping from the graph.
+    let timing_priors = load_indexer_timing_priors(ctx, project_id).await;
+
     let clock = SystemClock::new();
     let t_indexers = clock.now_instant();
     let run = crate::scip_indexer::run_indexers_already_locked(
@@ -616,10 +621,14 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         Some(&target_dir),
         stack_filter.as_deref(),
         declared_workspaces.as_deref(),
+        Some(&timing_priors),
     )
     .await
     .map_err(|e| format!("run_indexers: {e}"))?;
     let indexers_ms = t_indexers.elapsed().as_millis() as u64;
+
+    // Record this run's elapsed timings for the next warm's adaptive budget.
+    persist_indexer_timings_best_effort(ctx, project_id, &run.timings).await;
 
     let output_dir_for_blocking = output_dir.clone();
     let artifacts = run.artifacts;
@@ -1103,6 +1112,82 @@ async fn ingest_coupling_best_effort<C: WarmContext>(
             project_id = %project_id,
             error = %e,
             "ensure_canonical_graph: coupling ingest failed"
+        );
+    }
+}
+
+/// Load persisted per-(workspace, indexer) timing evidence for this project
+/// into the budget's prior-timing map. Best-effort: a DB error yields an empty
+/// map, so the warm falls back to the static-cap budget (today's behaviour).
+async fn load_indexer_timing_priors<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+) -> crate::scip_indexer::PriorTimingMap {
+    use djinn_db::ScipIndexerTimingRepository;
+
+    let mut map = crate::scip_indexer::PriorTimingMap::new();
+    let repo = ScipIndexerTimingRepository::new(ctx.db().clone());
+    match repo.list_for_project(project_id).await {
+        Ok(rows) => {
+            for row in rows {
+                // Ignore rows for retired / unknown indexer keys.
+                let Some(indexer) =
+                    crate::scip_indexer::SupportedIndexer::from_language_key(&row.indexer)
+                else {
+                    continue;
+                };
+                map.insert(
+                    (row.workspace_slug, indexer),
+                    crate::scip_indexer::IndexerPriorTiming {
+                        last_success_ms: row.success_elapsed_ms.and_then(|v| u64::try_from(v).ok()),
+                        last_timed_out_ms: row
+                            .timed_out_elapsed_ms
+                            .and_then(|v| u64::try_from(v).ok()),
+                    },
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %e,
+                "ensure_canonical_graph: failed to load scip_indexer_timing priors; using static budget"
+            );
+        }
+    }
+    map
+}
+
+/// Persist this run's per-invocation timings so the NEXT warm can adapt its
+/// budget. Best-effort telemetry — a failure never fails the warm.
+async fn persist_indexer_timings_best_effort<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+    timings: &[crate::scip_indexer::IndexerTimingObservation],
+) {
+    if timings.is_empty() {
+        return;
+    }
+    use djinn_db::{ScipIndexerTimingObservation, ScipIndexerTimingRepository};
+
+    let rows: Vec<ScipIndexerTimingObservation<'_>> = timings
+        .iter()
+        .map(|t| ScipIndexerTimingObservation {
+            project_id,
+            workspace_slug: &t.workspace_slug,
+            indexer: t.indexer.language(),
+            status: t.outcome.as_str(),
+            elapsed_ms: i64::try_from(t.elapsed_ms).unwrap_or(i64::MAX),
+        })
+        .collect();
+
+    let repo = ScipIndexerTimingRepository::new(ctx.db().clone());
+    if let Err(e) = repo.record_many(&rows).await {
+        tracing::warn!(
+            project_id = %project_id,
+            row_count = rows.len(),
+            error = %e,
+            "ensure_canonical_graph: failed to persist scip_indexer_timing observations"
         );
     }
 }
@@ -2604,6 +2689,7 @@ edition = "2024"
             None,
             None,
             Some(&declared),
+            None,
         )
         .await;
         // An empty tree with no indexers on PATH plans zero indexers
@@ -2727,6 +2813,7 @@ edition = "2024"
             None,
             None,
             Some(&declared),
+            None,
         )
         .await;
         assert!(

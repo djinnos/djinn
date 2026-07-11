@@ -96,6 +96,16 @@ impl SupportedIndexer {
         }
     }
 
+    /// Parse the stable per-language storage key produced by [`Self::language`]
+    /// back into a [`SupportedIndexer`]. Used to reload persisted timing rows
+    /// (`scip_indexer_timing.indexer`) into the budget's prior-timing map.
+    /// Returns `None` for unknown / retired keys so stale rows are ignored.
+    pub fn from_language_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|indexer| indexer.language() == key)
+    }
+
     /// Wall-clock cap for a single invocation of this indexer.
     ///
     /// `rust-analyzer scip` drives a full `cargo metadata` + analysis pass.
@@ -303,6 +313,54 @@ pub struct WorkspaceWarmStatus {
     pub detail: Option<String>,
 }
 
+/// Outcome class of a single indexer invocation, as recorded for the adaptive
+/// timeout budget. Only actual invocations produce one — cache hits and
+/// deadline-skipped plans never ran, so they yield no observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexerRunOutcome {
+    Success,
+    Failed,
+    TimedOut,
+}
+
+impl IndexerRunOutcome {
+    /// Stable string key persisted in `scip_indexer_timing.last_status`; must
+    /// match the `djinn_db::TIMING_STATUS_*` constants.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+/// One indexer invocation's timing, surfaced on [`IndexingRun`] so the warm
+/// caller can persist it (keyed by workspace slug + indexer) for the next
+/// warm's adaptive budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexerTimingObservation {
+    pub workspace_slug: String,
+    pub indexer: SupportedIndexer,
+    pub outcome: IndexerRunOutcome,
+    pub elapsed_ms: u64,
+}
+
+/// Prior-timing evidence for one (workspace, indexer) key, loaded from
+/// persisted [`IndexerTimingObservation`]s and fed back into the budget model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexerPriorTiming {
+    /// Elapsed (ms) of the last successful run.
+    pub last_success_ms: Option<u64>,
+    /// High-water elapsed (ms) of timed-out runs since the last success.
+    pub last_timed_out_ms: Option<u64>,
+}
+
+/// Map of prior timings keyed by `(workspace_slug, indexer)`, passed into the
+/// warm run so each plan can size its timeout from history.
+pub type PriorTimingMap = std::collections::HashMap<(String, SupportedIndexer), IndexerPriorTiming>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexingRun {
     pub project_root: PathBuf,
@@ -310,4 +368,8 @@ pub struct IndexingRun {
     pub commands: Vec<ExecutedIndexerCommand>,
     pub artifacts: Vec<ScipArtifact>,
     pub workspace_statuses: Vec<WorkspaceWarmStatus>,
+    /// Per-invocation timings from THIS run, for persistence into the adaptive
+    /// budget history. Empty when no indexer actually executed (all cache hits
+    /// / deadline-skipped / no indexers on PATH).
+    pub timings: Vec<IndexerTimingObservation>,
 }
