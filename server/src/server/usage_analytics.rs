@@ -378,6 +378,23 @@ struct ModelEffectivenessDto {
     /// Shared-credit completed-task count (== task_count); surfaced separately
     /// so the UI can label the attribution semantics.
     completed_task_count: i64,
+    /// First-pass rejection rate (0.0–1.0): fraction of this model's worker
+    /// sessions that were superseded by a later worker session on a reopened
+    /// task — the pass did not land and the task was reworked. Discriminates
+    /// first-pass quality that shared-credit success_rate hides. `None` when
+    /// the model ran no worker sessions.
+    first_pass_rejection_rate: Option<f64>,
+    /// Final-pass share (0.0–1.0): fraction of this model's shared-credit
+    /// completed tasks where THIS model ran the last worker session before the
+    /// task closed — i.e. who actually landed the merge. `None` when the model
+    /// has no completed-task credits.
+    final_pass_share: Option<f64>,
+    /// Worker sessions superseded on a reopened task (numerator of
+    /// `first_pass_rejection_rate`).
+    first_pass_rejected_session_count: i64,
+    /// Completed tasks landed by this model's final worker session (numerator of
+    /// `final_pass_share`).
+    final_pass_completed_task_count: i64,
 }
 
 impl From<ModelEffectivenessRow> for ModelEffectivenessDto {
@@ -399,6 +416,10 @@ impl From<ModelEffectivenessRow> for ModelEffectivenessDto {
             tokens_cached: r.cache_read_tokens,
             session_count: r.sessions,
             completed_task_count: r.shared_credit_completed_task_count,
+            first_pass_rejection_rate: r.first_pass_rejection_rate,
+            final_pass_share: r.final_pass_share,
+            first_pass_rejected_session_count: r.first_pass_rejected_session_count,
+            final_pass_completed_task_count: r.final_pass_completed_task_count,
         }
     }
 }

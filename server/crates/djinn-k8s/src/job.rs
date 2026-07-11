@@ -649,6 +649,36 @@ fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
         // trying — and failing — to connect. Local dev keeps online validation
         // because it never sources cache_env_vars.
         env_var("SQLX_OFFLINE", "true"),
+        // Fast-linker default for every build-in-pod cargo invocation. The
+        // per-project devcontainer image already installs mold (see
+        // image-builder scripts/install-rust.sh, which apt-installs
+        // `clang lld mold` whenever a Rust toolchain is requested), but nothing
+        // WIRED it in — so warm/task-run pods linked djinn-server + every test
+        // binary with the default `ld` and paid full link time on every
+        // iterative edit→clippy/test loop (measured 6-22min/invocation).
+        //
+        // `CARGO_BUILD_RUSTFLAGS` (the env form of `build.rustflags`) is the
+        // LOWEST-priority rustflags source: a repo that pins its own
+        // `[build]`/`[target.*] rustflags` in `.cargo/config.toml` keeps its
+        // flags untouched, and a project on a custom base image without mold is
+        // unaffected on the (rare) crates that override. It degrades gracefully
+        // rather than clobbering, unlike `RUSTFLAGS`.
+        //
+        // Set HERE, in the shared helper both warm_cache_env_vars and
+        // task_run_cache_env_vars flow through, ON PURPOSE: cargo folds
+        // rustflags into its compile fingerprint (and the warm base is seeded
+        // into task-run target dirs), so warm and worker MUST resolve the
+        // identical flag or the warm seed fingerprint-mismatches and every
+        // task-run cold-rebuilds. Single-sourcing it here makes that drift
+        // impossible — the same class of guarantee the SCCACHE_DIR/CARGO_HOME
+        // routing above relies on. Mirrors the local-docker path, where
+        // djinn-agent-runtime-base.Dockerfile bakes the identical
+        // `CARGO_BUILD_RUSTFLAGS=-Clink-arg=-fuse-ld=mold` as an image ENV.
+        //
+        // Shipping this is a ONE-TIME warm-base invalidation (the effective
+        // rustflags change → fingerprints change → the first warm after deploy
+        // rebuilds the per-project base); steady state is fast links thereafter.
+        env_var("CARGO_BUILD_RUSTFLAGS", "-Clink-arg=-fuse-ld=mold"),
     ]
 }
 
@@ -1242,6 +1272,11 @@ mod tests {
             Some(""),
             "task-runs disable the sccache wrapper (sccache forbids incremental)"
         );
+        assert_eq!(
+            envs.get("CARGO_BUILD_RUSTFLAGS").copied(),
+            Some("-Clink-arg=-fuse-ld=mold"),
+            "task-runs default to the mold fast linker (installed in the devcontainer image)"
+        );
     }
 
     /// Regression guard: warm and task-run must resolve the same shared cache
@@ -1360,6 +1395,19 @@ mod tests {
             worker_env.get("RUSTC_WRAPPER").copied(),
             Some(""),
             "worker must clear RUSTC_WRAPPER so incremental works"
+        );
+
+        // The fast-linker rustflag is part of the compile fingerprint, so it
+        // MUST match between warm and worker or the warm seed is wasted (every
+        // task-run cold-rebuilds against a fingerprint-mismatched base).
+        assert_eq!(
+            warm_env.get("CARGO_BUILD_RUSTFLAGS"),
+            worker_env.get("CARGO_BUILD_RUSTFLAGS"),
+            "warm and worker CARGO_BUILD_RUSTFLAGS must match (fingerprint parity)"
+        );
+        assert_eq!(
+            warm_env.get("CARGO_BUILD_RUSTFLAGS").copied(),
+            Some("-Clink-arg=-fuse-ld=mold"),
         );
     }
 

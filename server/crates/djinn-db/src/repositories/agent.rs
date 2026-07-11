@@ -446,6 +446,12 @@ impl AgentRepository {
         self.db.ensure_initialized().await?;
 
         // Task-level metrics: closed tasks that had at least one session of this agent_type.
+        //
+        // NOTE: errors are propagated (via `?`) rather than swallowed. The
+        // previous implementation ended both queries with `.await.ok()`, which
+        // turned ANY SQL error into a silent all-zero metric row — in
+        // production this made 4 of 5 agents report zero session metrics while
+        // clearly having sessions, with nothing surfaced to the operator.
         let task_row = sqlx::query!(
             r#"SELECT
                 CAST(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END) AS DOUBLE PRECISION)
@@ -463,27 +469,45 @@ impl AgentRepository {
             agent_type
         )
         .fetch_one(self.db.pool())
-        .await
-        .ok();
+        .await?;
 
         // Session-level metrics: completed sessions within the lookback window.
+        //
+        // Robustness notes:
+        //   * `avg_time_seconds` — `EXTRACT(EPOCH FROM …)` yields Postgres
+        //     NUMERIC, and `AVG(NUMERIC)` stays NUMERIC. Decoding NUMERIC bytes
+        //     as `f64` produced denormal garbage (e.g. 6.95e-309). The AVG is
+        //     therefore cast explicitly to DOUBLE PRECISION so sqlx decodes it
+        //     correctly.
+        //   * extraction-quality counters — the raw JSON text was cast straight
+        //     to `::bigint`, which throws `invalid input syntax for type
+        //     bigint` on empty strings or non-numeric values. Each value is now
+        //     guarded by an integer regex so malformed entries contribute NULL
+        //     (ignored by SUM) instead of erroring the whole query.
         let session_row = sqlx::query!(
             r#"SELECT
                 COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS DOUBLE PRECISION)), 0.0) AS "avg_tokens!: f64",
                 COALESCE(AVG(CAST(s.tokens_in AS DOUBLE PRECISION)), 0.0) AS "avg_tokens_in!: f64",
                 COALESCE(AVG(CAST(s.tokens_out AS DOUBLE PRECISION)), 0.0) AS "avg_tokens_out!: f64",
-                COALESCE(AVG(
+                COALESCE(CAST(AVG(
                     CASE WHEN s.ended_at IS NOT NULL
                         THEN EXTRACT(EPOCH FROM (s.ended_at::timestamp - s.started_at::timestamp))
                         ELSE NULL END
-                ), 0.0) AS "avg_time_seconds!: f64",
-                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'extracted')::bigint), 0) AS "extracted!: i64",
-                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'dedup_skipped')::bigint), 0) AS "dedup_skipped!: i64",
-                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'novelty_skipped')::bigint), 0) AS "novelty_skipped!: i64",
-                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'written')::bigint), 0) AS "written!: i64",
-                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'merged')::bigint), 0) AS "merged!: i64",
-                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'downgraded')::bigint), 0) AS "downgraded!: i64",
-                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'discarded')::bigint), 0) AS "discarded!: i64"
+                ) AS DOUBLE PRECISION), 0.0) AS "avg_time_seconds!: f64",
+                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'extracted') ~ '^-?[0-9]+$'
+                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'extracted')::bigint END), 0) AS BIGINT) AS "extracted!: i64",
+                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'dedup_skipped') ~ '^-?[0-9]+$'
+                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'dedup_skipped')::bigint END), 0) AS BIGINT) AS "dedup_skipped!: i64",
+                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'novelty_skipped') ~ '^-?[0-9]+$'
+                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'novelty_skipped')::bigint END), 0) AS BIGINT) AS "novelty_skipped!: i64",
+                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'written') ~ '^-?[0-9]+$'
+                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'written')::bigint END), 0) AS BIGINT) AS "written!: i64",
+                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'merged') ~ '^-?[0-9]+$'
+                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'merged')::bigint END), 0) AS BIGINT) AS "merged!: i64",
+                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'downgraded') ~ '^-?[0-9]+$'
+                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'downgraded')::bigint END), 0) AS BIGINT) AS "downgraded!: i64",
+                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'discarded') ~ '^-?[0-9]+$'
+                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'discarded')::bigint END), 0) AS BIGINT) AS "discarded!: i64"
              FROM sessions s
              JOIN tasks t ON t.id = s.task_id
              WHERE t.project_id = $1
@@ -495,37 +519,24 @@ impl AgentRepository {
             window_days as f64
         )
         .fetch_one(self.db.pool())
-        .await
-        .ok();
+        .await?;
 
         Ok(AgentMetrics {
-            success_rate: task_row
-                .as_ref()
-                .and_then(|r| r.success_rate)
-                .unwrap_or(0.0),
-            avg_reopens: task_row.as_ref().map(|r| r.avg_reopens).unwrap_or(0.0),
-            completed_task_count: task_row
-                .as_ref()
-                .map(|r| r.completed_task_count)
-                .unwrap_or(0),
-            avg_tokens: session_row.as_ref().map(|r| r.avg_tokens).unwrap_or(0.0),
-            avg_tokens_in: session_row.as_ref().map(|r| r.avg_tokens_in).unwrap_or(0.0),
-            avg_tokens_out: session_row
-                .as_ref()
-                .map(|r| r.avg_tokens_out)
-                .unwrap_or(0.0),
-            avg_time_seconds: session_row
-                .as_ref()
-                .map(|r| r.avg_time_seconds)
-                .unwrap_or(0.0),
+            success_rate: task_row.success_rate.unwrap_or(0.0),
+            avg_reopens: task_row.avg_reopens,
+            completed_task_count: task_row.completed_task_count,
+            avg_tokens: session_row.avg_tokens,
+            avg_tokens_in: session_row.avg_tokens_in,
+            avg_tokens_out: session_row.avg_tokens_out,
+            avg_time_seconds: session_row.avg_time_seconds,
             extraction_quality: ExtractionQualityMetrics {
-                extracted: session_row.as_ref().map(|r| r.extracted).unwrap_or(0),
-                dedup_skipped: session_row.as_ref().map(|r| r.dedup_skipped).unwrap_or(0),
-                novelty_skipped: session_row.as_ref().map(|r| r.novelty_skipped).unwrap_or(0),
-                written: session_row.as_ref().map(|r| r.written).unwrap_or(0),
-                merged: session_row.as_ref().map(|r| r.merged).unwrap_or(0),
-                downgraded: session_row.as_ref().map(|r| r.downgraded).unwrap_or(0),
-                discarded: session_row.as_ref().map(|r| r.discarded).unwrap_or(0),
+                extracted: session_row.extracted,
+                dedup_skipped: session_row.dedup_skipped,
+                novelty_skipped: session_row.novelty_skipped,
+                written: session_row.written,
+                merged: session_row.merged,
+                downgraded: session_row.downgraded,
+                discarded: session_row.discarded,
             },
         })
     }
@@ -889,5 +900,154 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].entity_type, "agent");
         assert_eq!(events[0].action, "created");
+    }
+
+    // ── get_metrics robustness (defect: silent all-zero metrics) ─────────────
+
+    /// Insert a closed+completed task plus one completed worker session on it,
+    /// with a caller-controlled duration and (optionally malformed)
+    /// `event_taxonomy`. `started_at`/`ended_at` are set to a recent instant so
+    /// the session falls inside any reasonable lookback window.
+    async fn insert_completed_worker_session(
+        db: &Database,
+        project_id: &str,
+        duration_seconds: i64,
+        event_taxonomy: Option<&str>,
+    ) {
+        let task_id = uuid::Uuid::now_v7().to_string();
+        // UUIDv7 shares a time-ordered prefix, so use the random tail for a
+        // collision-free short_id (project_id + short_id is UNIQUE).
+        let short = format!("t{}", &task_id[task_id.len() - 12..]);
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, project_id, short_id, title, description, design, \
+              status, close_reason, total_reopen_count, \
+              labels, acceptance_criteria, memory_refs) \
+             VALUES ($1, $2, $3, 'metrics-task', '', '', \
+                     'closed', 'completed', 0, \
+                     '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+        )
+        .bind(&task_id)
+        .bind(project_id)
+        .bind(&short)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let session_id = uuid::Uuid::now_v7().to_string();
+        // `duration_seconds` is a repository-controlled integer literal (never
+        // user input); inlining it keeps the timestamp arithmetic in SQL.
+        let sql = format!(
+            "INSERT INTO sessions \
+             (id, project_id, task_id, model_id, agent_type, status, \
+              started_at, ended_at, tokens_in, tokens_out, event_taxonomy) \
+             VALUES ($1, $2, $3, 'model-x', 'worker', 'completed', \
+                 to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
+                 to_char((now() at time zone 'utc') + (interval '1 second' * {duration_seconds}), \
+                         'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
+                 100, 50, $4::jsonb)"
+        );
+        sqlx::query(&sql)
+            .bind(&session_id)
+            .bind(project_id)
+            .bind(&task_id)
+            .bind(event_taxonomy)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    /// The session query must survive rows whose `event_taxonomy` is NULL,
+    /// lacks `extraction_quality`, or carries empty / non-numeric counter
+    /// values — previously any such row made the whole `::bigint` cast throw,
+    /// and `.await.ok()` silently zeroed every metric. It must now succeed and
+    /// sum only the well-formed numeric values.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metrics_robust_to_missing_and_nonnumeric_extraction_quality() {
+        let db = test_db();
+        let project_id = create_project(&db).await;
+
+        // Valid numeric counters (string-encoded).
+        insert_completed_worker_session(
+            &db,
+            &project_id,
+            10,
+            Some(r#"{"extraction_quality":{"extracted":"3","written":"1"}}"#),
+        )
+        .await;
+        // Valid numeric counters (JSON numbers, not strings).
+        insert_completed_worker_session(
+            &db,
+            &project_id,
+            10,
+            Some(r#"{"extraction_quality":{"extracted":2,"merged":5}}"#),
+        )
+        .await;
+        // Non-numeric value — would have thrown `invalid input syntax for
+        // type bigint: "abc"`.
+        insert_completed_worker_session(
+            &db,
+            &project_id,
+            10,
+            Some(r#"{"extraction_quality":{"extracted":"abc"}}"#),
+        )
+        .await;
+        // Empty-string value — would have thrown `invalid input syntax for
+        // type bigint: ""`.
+        insert_completed_worker_session(
+            &db,
+            &project_id,
+            10,
+            Some(r#"{"extraction_quality":{"extracted":""}}"#),
+        )
+        .await;
+        // No extraction_quality key at all.
+        insert_completed_worker_session(&db, &project_id, 10, Some(r#"{"foo":"bar"}"#)).await;
+        // NULL event_taxonomy.
+        insert_completed_worker_session(&db, &project_id, 10, None).await;
+
+        let repo = AgentRepository::new(db, EventBus::noop());
+        let metrics = repo
+            .get_metrics(&project_id, "worker", 3650)
+            .await
+            .expect("get_metrics must not error on malformed event_taxonomy");
+
+        // Only the two well-formed rows contribute.
+        assert_eq!(metrics.extraction_quality.extracted, 5, "3 + 2");
+        assert_eq!(metrics.extraction_quality.written, 1);
+        assert_eq!(metrics.extraction_quality.merged, 5);
+        assert_eq!(metrics.extraction_quality.discarded, 0);
+        // All six sessions are counted for token/duration averages.
+        assert!((metrics.avg_tokens - 150.0).abs() < 1e-6);
+        assert_eq!(metrics.completed_task_count, 6);
+    }
+
+    /// `avg_time_seconds` must decode as a real number. `EXTRACT(EPOCH …)`
+    /// returns NUMERIC and `AVG(NUMERIC)` stays NUMERIC; decoding those bytes
+    /// as `f64` previously yielded denormal garbage (~6.95e-309). The explicit
+    /// DOUBLE PRECISION cast makes it sane.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metrics_avg_time_seconds_is_sane() {
+        let db = test_db();
+        let project_id = create_project(&db).await;
+
+        insert_completed_worker_session(&db, &project_id, 30, None).await;
+        insert_completed_worker_session(&db, &project_id, 50, None).await;
+
+        let repo = AgentRepository::new(db, EventBus::noop());
+        let metrics = repo.get_metrics(&project_id, "worker", 3650).await.unwrap();
+
+        // Mean of 30s and 50s = 40s. Assert it is a normal, plausible value
+        // (the denormal-garbage bug produced values near zero, ~1e-309).
+        assert!(
+            (metrics.avg_time_seconds - 40.0).abs() < 1.0,
+            "avg_time_seconds should be ~40, got {}",
+            metrics.avg_time_seconds
+        );
+        assert!(
+            metrics.avg_time_seconds > 1.0,
+            "avg_time_seconds must not be a denormal near-zero value, got {}",
+            metrics.avg_time_seconds
+        );
     }
 }
