@@ -20,7 +20,7 @@ Key files:
 |------|---------|
 | `server/crates/djinn-memory-eval/src/qa.rs` | QA pair extraction from pitfall/case notes |
 | `server/crates/djinn-memory-eval/src/qa_run.rs` | Deterministic retrieval + 2000-char injection capture |
-| `server/crates/djinn-memory-eval/src/qa_judge.rs` | Dual-pass LLM judge execution (when implemented) |
+| `server/crates/djinn-memory-eval/src/qa_judge.rs` | Credential-enforced Phase 2 judge orchestration and failure artifacts |
 | `target/memory-eval/phase2-qa-report.json` | Machine-readable Phase 2 report |
 | `target/memory-eval/phase2-qa-summary.md` | Human-readable summary for the job summary |
 | `.github/workflows/memory-qa-nightly.yml` | Nightly/manual workflow |
