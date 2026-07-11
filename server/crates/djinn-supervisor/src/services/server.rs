@@ -1245,9 +1245,10 @@ async fn dispatch(
             let result = services.transition_task(task_id, action, reason).await;
             ServiceRpcResponse::TransitionTask(result)
         }
-        ServiceRpcRequest::RunArbiterPreapprovalGate { task } => {
-            let result = services.run_arbiter_preapproval_gate(&task).await;
-            ServiceRpcResponse::RunArbiterPreapprovalGate(result)
+        ServiceRpcRequest::ReservedRemovedArbiterGate => {
+            ServiceRpcResponse::ReservedRemovedArbiterGate(Err(
+                "arbiter preapproval gate was removed".to_string(),
+            ))
         }
         ServiceRpcRequest::RecordArbiterDecision {
             task_id,
@@ -1307,9 +1308,7 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpStream;
 
-    use crate::{
-        ArbiterGateResult, RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec,
-    };
+    use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
 
     /// Minimal fake that returns a canned task on `load_task` and panics on
     /// the other trait methods (the launcher-side tests only exercise the
@@ -1467,13 +1466,6 @@ mod tests {
             _action: String,
             _reason: Option<String>,
         ) -> Result<(), String> {
-            unimplemented!("not exercised in server tests")
-        }
-
-        async fn run_arbiter_preapproval_gate(
-            &self,
-            _task: &Task,
-        ) -> Result<ArbiterGateResult, String> {
             unimplemented!("not exercised in server tests")
         }
 

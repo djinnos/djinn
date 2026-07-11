@@ -77,6 +77,62 @@ impl ProjectWorkspaceGraphRepository {
         Ok(())
     }
 
+    /// Persist a warm run's freshness rows as a *replace-set*: upsert every
+    /// row in `rows` and, in the same transaction, delete any existing row for
+    /// `project_id` whose `workspace_slug` is not among them.
+    ///
+    /// Plain [`Self::upsert_many`] only ever writes — it can never retire a
+    /// workspace that no longer exists. When workspace discovery stops emitting
+    /// a slug (e.g. a `root` row from before per-workspace discovery, or a
+    /// folder that was deleted/renamed), that slug's last stamp survives forever
+    /// and the `code_graph workspaces` op keeps returning a ghost row. Warm runs
+    /// call this so each run's persisted set exactly mirrors the workspaces it
+    /// actually indexed (ready) plus the ones it explicitly marked
+    /// failed/timed_out — a timed-out workspace is in `rows`, so it keeps its
+    /// row; only truly-vanished slugs are pruned.
+    ///
+    /// Upsert and delete run in one transaction so a crash can never leave a
+    /// half-applied set (some new rows written, stale rows not yet pruned).
+    ///
+    /// All `rows` must share the same `project_id` as the `project_id`
+    /// argument; the delete is scoped to that project.
+    pub async fn replace_for_project(
+        &self,
+        project_id: &str,
+        rows: &[ProjectWorkspaceGraphUpsert<'_>],
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let keep: Vec<&str> = rows.iter().map(|row| row.workspace_slug).collect();
+
+        let mut tx = self.db.pool().begin().await?;
+        for row in rows {
+            sqlx::query(r#"INSERT INTO project_workspace_graph
+                       (project_id, workspace_slug, commit_sha, warmed_at, status)
+                   VALUES
+                       ($1, $2, $3, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), $4)
+                   ON CONFLICT (project_id, workspace_slug) DO UPDATE SET
+                       commit_sha = EXCLUDED.commit_sha,
+                       warmed_at = EXCLUDED.warmed_at,
+                       status = EXCLUDED.status"#)
+            .bind(row.project_id)
+            .bind(row.workspace_slug)
+            .bind(row.commit_sha)
+            .bind(row.status)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "DELETE FROM project_workspace_graph
+              WHERE project_id = $1 AND workspace_slug <> ALL($2)",
+        )
+        .bind(project_id)
+        .bind(&keep)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Remove a single workspace freshness row. Used to retire the
     /// [`CODELESS_WORKSPACE_SLUG`] sentinel once a real warm succeeds — a
     /// project can't simultaneously be "code-less" and have indexed
@@ -395,6 +451,185 @@ mod tests {
             .expect("state");
         assert_eq!(state.warmed_at, latest.warmed_at);
         assert_eq!(state.status, "ready");
+    }
+
+    #[tokio::test]
+    async fn replace_for_project_prunes_vanished_slugs_and_keeps_timed_out() {
+        // Pins the live djinnos/djinn scenario: prior rows {root, server, ui,
+        // website}; a new warm emits ready {ui, website} and marks {server}
+        // timed_out. The `root` slug no longer exists, so its stale row must be
+        // deleted; `server` is in the replace-set (timed_out), so it must keep
+        // its row; `ui`/`website` are re-stamped ready at the new commit.
+        let repo = fresh().await;
+        seed_project(&repo, "p1").await;
+
+        repo.upsert_many(&[
+            ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: "root",
+                commit_sha: "old",
+                status: "ready",
+            },
+            ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: "server",
+                commit_sha: "old",
+                status: "ready",
+            },
+            ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: "ui",
+                commit_sha: "old",
+                status: "ready",
+            },
+            ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: "website",
+                commit_sha: "old",
+                status: "ready",
+            },
+        ])
+        .await
+        .expect("seed prior rows");
+
+        repo.replace_for_project(
+            "p1",
+            &[
+                ProjectWorkspaceGraphUpsert {
+                    project_id: "p1",
+                    workspace_slug: "ui",
+                    commit_sha: "new",
+                    status: "ready",
+                },
+                ProjectWorkspaceGraphUpsert {
+                    project_id: "p1",
+                    workspace_slug: "website",
+                    commit_sha: "new",
+                    status: "ready",
+                },
+                ProjectWorkspaceGraphUpsert {
+                    project_id: "p1",
+                    workspace_slug: "server",
+                    commit_sha: "new",
+                    status: "timed_out",
+                },
+            ],
+        )
+        .await
+        .expect("replace");
+
+        // `root` vanished → pruned.
+        assert!(repo.get("p1", "root").await.expect("get root").is_none());
+
+        // `server` timed out but is in the set → kept, re-stamped.
+        let server = repo
+            .get("p1", "server")
+            .await
+            .expect("get server")
+            .expect("server row kept");
+        assert_eq!(server.status, "timed_out");
+        assert_eq!(server.commit_sha, "new");
+
+        // `ui`/`website` re-stamped ready at the new commit.
+        for slug in ["ui", "website"] {
+            let row = repo
+                .get("p1", slug)
+                .await
+                .expect("get")
+                .unwrap_or_else(|| panic!("{slug} row"));
+            assert_eq!(row.status, "ready");
+            assert_eq!(row.commit_sha, "new");
+        }
+
+        let slugs: Vec<_> = repo
+            .list_for_project("p1")
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|r| r.workspace_slug)
+            .collect();
+        assert_eq!(slugs, vec!["server", "ui", "website"]);
+    }
+
+    #[tokio::test]
+    async fn replace_for_project_is_scoped_to_the_project() {
+        // Pruning must never touch another project's rows even though the new
+        // set omits that project's slugs.
+        let repo = fresh().await;
+        seed_project(&repo, "p1").await;
+        seed_project(&repo, "p2").await;
+
+        repo.upsert(ProjectWorkspaceGraphUpsert {
+            project_id: "p2",
+            workspace_slug: "root",
+            commit_sha: "abc",
+            status: "ready",
+        })
+        .await
+        .expect("seed p2");
+        repo.upsert(ProjectWorkspaceGraphUpsert {
+            project_id: "p1",
+            workspace_slug: "old",
+            commit_sha: "abc",
+            status: "ready",
+        })
+        .await
+        .expect("seed p1");
+
+        repo.replace_for_project(
+            "p1",
+            &[ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: "server",
+                commit_sha: "new",
+                status: "ready",
+            }],
+        )
+        .await
+        .expect("replace p1");
+
+        // p1's stale `old` pruned, `server` present.
+        assert!(repo.get("p1", "old").await.expect("get").is_none());
+        assert!(repo.get("p1", "server").await.expect("get").is_some());
+        // p2 untouched.
+        assert!(repo.get("p2", "root").await.expect("get").is_some());
+    }
+
+    #[tokio::test]
+    async fn replace_for_project_retires_codeless_sentinel() {
+        // A prior code-less sentinel row is not in a real warm's replace-set, so
+        // it is pruned automatically — no separate delete call needed.
+        let repo = fresh().await;
+        seed_project(&repo, "p1").await;
+
+        repo.upsert(ProjectWorkspaceGraphUpsert {
+            project_id: "p1",
+            workspace_slug: CODELESS_WORKSPACE_SLUG,
+            commit_sha: "abc",
+            status: "ready",
+        })
+        .await
+        .expect("seed sentinel");
+
+        repo.replace_for_project(
+            "p1",
+            &[ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: "server",
+                commit_sha: "new",
+                status: "ready",
+            }],
+        )
+        .await
+        .expect("replace");
+
+        assert!(
+            repo.get("p1", CODELESS_WORKSPACE_SLUG)
+                .await
+                .expect("get sentinel")
+                .is_none()
+        );
+        assert!(repo.get("p1", "server").await.expect("get").is_some());
     }
 
     #[tokio::test]

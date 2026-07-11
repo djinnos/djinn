@@ -96,6 +96,16 @@ impl SupportedIndexer {
         }
     }
 
+    /// Parse the stable per-language storage key produced by [`Self::language`]
+    /// back into a [`SupportedIndexer`]. Used to reload persisted timing rows
+    /// (`scip_indexer_timing.indexer`) into the budget's prior-timing map.
+    /// Returns `None` for unknown / retired keys so stale rows are ignored.
+    pub fn from_language_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|indexer| indexer.language() == key)
+    }
+
     /// Wall-clock cap for a single invocation of this indexer.
     ///
     /// `rust-analyzer scip` drives a full `cargo metadata` + analysis pass.
@@ -246,19 +256,49 @@ pub struct PlannedIndexerCommand {
     pub output_path: PathBuf,
 }
 
+/// Ceiling on `CARGO_BUILD_JOBS` for a SCIP indexer subprocess. Preserves the
+/// historical ADR-050 §3 cap of 4 so a large host can never fan `cargo check`
+/// out past what the warm pipeline was tuned for.
+const MAX_CARGO_BUILD_JOBS: usize = 4;
+
+/// Derive the `CARGO_BUILD_JOBS` value for a SCIP indexer subprocess.
+///
+/// SCIP indexers (notably `rust-analyzer scip`) invoke `cargo check`, which
+/// fans out into a parallel `cc` build for native deps (openssl-sys et al).
+/// The warm Pod is CPU-capped (`warm_cpu_limit`), runs its indexers at
+/// `nice 10`, and runs the Rust indexer concurrently with the scip-typescript
+/// indexers, so hardcoding 4 build jobs on a 2-CPU pod *oversubscribed* the
+/// budget: 4 jobs fighting over 2 throttled CPUs is slower than 2 jobs, and
+/// that contention is one of the causes of the Rust workspace hitting its
+/// wall-clock cap on every warm.
+///
+/// `std::thread::available_parallelism()` reads the process's cgroup CPU quota
+/// on Linux (stable since Rust 1.64; the pinned toolchain is `stable`), so
+/// inside the warm Pod it reflects the container's `warm_cpu_limit` rather than
+/// the node's core count. We cap the result at [`MAX_CARGO_BUILD_JOBS`] to keep
+/// the historical ceiling and fall back to it when detection fails, and floor
+/// at 1 so a mis-detected 0 can never disable parallelism entirely.
+fn cargo_build_jobs() -> String {
+    let jobs = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(MAX_CARGO_BUILD_JOBS)
+        .clamp(1, MAX_CARGO_BUILD_JOBS);
+    jobs.to_string()
+}
+
 impl PlannedIndexerCommand {
     fn build_command(&self) -> Command {
         let mut command = Command::new(&self.binary_path);
         command.current_dir(&self.working_directory);
         command.args(&self.args);
-        // ADR-050 §3 non-negotiable cap: SCIP indexers commonly invoke
-        // `cargo check` which fans out into a parallel `cc` build for
-        // native deps (openssl-sys et al).  Two simultaneous indexer
-        // runs are already serialized by `IndexerLock`, but a single
-        // run can still saturate the host without this cap.  4 jobs is
-        // empirically sufficient to keep `rust-analyzer scip` warm
-        // without melting the box.
-        command.env("CARGO_BUILD_JOBS", "4");
+        // ADR-050 §3 cap: SCIP indexers commonly invoke `cargo check` which
+        // fans out into a parallel `cc` build for native deps (openssl-sys
+        // et al). Two simultaneous indexer runs are already serialized by
+        // `IndexerLock`, but a single run can still saturate the host without
+        // a cap. Derive the job count from the CPU actually available to this
+        // process (cgroup-aware) rather than hardcoding 4 — on the CPU-capped
+        // warm Pod, 4 jobs oversubscribed the quota and made warms slower.
+        command.env("CARGO_BUILD_JOBS", cargo_build_jobs());
         // NOTE: do NOT force `RUSTUP_TOOLCHAIN=stable` here. The image's
         // install-rust.sh installs the `rust-analyzer` component into the
         // project's *pinned* toolchain (derived from rust-toolchain.toml
@@ -303,6 +343,54 @@ pub struct WorkspaceWarmStatus {
     pub detail: Option<String>,
 }
 
+/// Outcome class of a single indexer invocation, as recorded for the adaptive
+/// timeout budget. Only actual invocations produce one — cache hits and
+/// deadline-skipped plans never ran, so they yield no observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexerRunOutcome {
+    Success,
+    Failed,
+    TimedOut,
+}
+
+impl IndexerRunOutcome {
+    /// Stable string key persisted in `scip_indexer_timing.last_status`; must
+    /// match the `djinn_db::TIMING_STATUS_*` constants.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+/// One indexer invocation's timing, surfaced on [`IndexingRun`] so the warm
+/// caller can persist it (keyed by workspace slug + indexer) for the next
+/// warm's adaptive budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexerTimingObservation {
+    pub workspace_slug: String,
+    pub indexer: SupportedIndexer,
+    pub outcome: IndexerRunOutcome,
+    pub elapsed_ms: u64,
+}
+
+/// Prior-timing evidence for one (workspace, indexer) key, loaded from
+/// persisted [`IndexerTimingObservation`]s and fed back into the budget model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexerPriorTiming {
+    /// Elapsed (ms) of the last successful run.
+    pub last_success_ms: Option<u64>,
+    /// High-water elapsed (ms) of timed-out runs since the last success.
+    pub last_timed_out_ms: Option<u64>,
+}
+
+/// Map of prior timings keyed by `(workspace_slug, indexer)`, passed into the
+/// warm run so each plan can size its timeout from history.
+pub type PriorTimingMap = std::collections::HashMap<(String, SupportedIndexer), IndexerPriorTiming>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexingRun {
     pub project_root: PathBuf,
@@ -310,4 +398,58 @@ pub struct IndexingRun {
     pub commands: Vec<ExecutedIndexerCommand>,
     pub artifacts: Vec<ScipArtifact>,
     pub workspace_statuses: Vec<WorkspaceWarmStatus>,
+    /// Per-invocation timings from THIS run, for persistence into the adaptive
+    /// budget history. Empty when no indexer actually executed (all cache hits
+    /// / deadline-skipped / no indexers on PATH).
+    pub timings: Vec<IndexerTimingObservation>,
+}
+
+#[cfg(test)]
+mod build_command_tests {
+    use super::*;
+
+    /// `CARGO_BUILD_JOBS` is derived from available parallelism, floored at 1
+    /// and capped at the historical ADR-050 §3 ceiling of 4. It must always be
+    /// a parseable positive integer within that band so the value passed to
+    /// cargo is never `0`, negative, or over the cap regardless of host CPU.
+    #[test]
+    fn cargo_build_jobs_is_bounded_and_parseable() {
+        let jobs: usize = cargo_build_jobs()
+            .parse()
+            .expect("CARGO_BUILD_JOBS must be a positive integer");
+        assert!(
+            (1..=MAX_CARGO_BUILD_JOBS).contains(&jobs),
+            "expected 1..={MAX_CARGO_BUILD_JOBS} build jobs, got {jobs}"
+        );
+        // It should also match the cgroup-aware detection clamped to the band,
+        // so on the CPU-capped warm Pod it tracks the CPU limit rather than the
+        // node core count.
+        let expected = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(MAX_CARGO_BUILD_JOBS)
+            .clamp(1, MAX_CARGO_BUILD_JOBS);
+        assert_eq!(jobs, expected);
+    }
+
+    /// The built command carries the derived `CARGO_BUILD_JOBS` env override.
+    #[test]
+    fn build_command_sets_cargo_build_jobs_env() {
+        let plan = PlannedIndexerCommand {
+            indexer: SupportedIndexer::RustAnalyzer,
+            binary_path: PathBuf::from("rust-analyzer"),
+            args: vec!["scip".into()],
+            working_directory: PathBuf::from("/tmp"),
+            workspace_root: PathBuf::from("/tmp"),
+            workspace_rel_root: PathBuf::new(),
+            workspace_slug: "root".into(),
+            output_path: PathBuf::from("/tmp/out.scip"),
+        };
+        let command = plan.build_command();
+        let jobs = command
+            .get_envs()
+            .find(|(k, _)| *k == OsStr::new("CARGO_BUILD_JOBS"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(jobs.as_deref(), Some(cargo_build_jobs().as_str()));
+    }
 }
