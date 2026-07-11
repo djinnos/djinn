@@ -102,23 +102,68 @@ fn killed_by_signal(status: &std::process::ExitStatus) -> Option<i32> {
     status.signal()
 }
 
+/// Resolve the nice level applied to subprocesses spawned through the
+/// timeout/kill path (in practice: the SCIP indexer fan-out).
+///
+/// `explicit` is the parsed `DJINN_INDEXER_NICE` override, if any operator
+/// set one; `pod_workspace` is whether we're running inside a dedicated warm
+/// Pod (signalled by `DJINN_PROJECT_ROOT`, the same signal `index_tree.rs`
+/// keys off).
+///
+/// - **In-process warmer** (djinn-server on a dev box, `pod_workspace = false`):
+///   the indexers share the server's cgroup and fan out into `cargo check` /
+///   `cc`, so a nice of 10 keeps them from starving interactive request
+///   handling. This is the context the original nice was written for.
+/// - **Dedicated warm Pod** (`pod_workspace = true`): the indexer is the ONLY
+///   workload in the Pod's cgroup — there is nothing intra-pod to yield to, so
+///   the nice buys nothing, and with kernel autogrouping edge cases it can only
+///   cost the throughput graph freshness depends on. Run at normal priority.
+///
+/// An explicit `DJINN_INDEXER_NICE` always wins, for hand-tuning.
+#[cfg(unix)]
+fn resolve_nice_level(explicit: Option<&str>, pod_workspace: bool) -> i32 {
+    if let Some(raw) = explicit
+        && let Ok(n) = raw.trim().parse::<i32>()
+    {
+        return n;
+    }
+    if pod_workspace { 0 } else { 10 }
+}
+
+/// Env-reading wrapper around [`resolve_nice_level`]. Called in the PARENT
+/// (before fork) so the `pre_exec` closure — which must stay
+/// async-signal-safe — never reads the environment itself.
+#[cfg(unix)]
+fn indexer_nice_level() -> i32 {
+    let explicit = std::env::var("DJINN_INDEXER_NICE").ok();
+    let pod_workspace = std::env::var("DJINN_PROJECT_ROOT").is_ok();
+    resolve_nice_level(explicit.as_deref(), pod_workspace)
+}
+
 #[cfg(unix)]
 fn isolate_process_group(cmd: &mut Command) {
+    // Resolve the nice level HERE, in the parent thread before fork, so the
+    // pre_exec closure below stays async-signal-safe (no env reads after fork).
+    let nice = indexer_nice_level();
     // SAFETY: pre_exec runs in the child process right before exec.
     // setpgid(0, 0) places that child in a new process group so the whole
     // group (the indexer/git child plus anything it forks) can be signalled
     // with a single `kill(-pgid, …)`.
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             let rc = libc::setpgid(0, 0);
             if rc != 0 {
                 return Err(io::Error::last_os_error());
             }
 
-            // Nice level 10 — well below default 0, but not starved. SCIP
-            // indexers fan out into `cargo check`/`cc`; keep them from
-            // starving interactive applications.  Best-effort.
-            let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+            // Best-effort renice. `nice == 0` is normal priority (the kernel
+            // default), so skip the syscall entirely there — in a dedicated
+            // warm Pod the indexer owns the whole cgroup and must not yield.
+            // In-process (dev box) `nice == 10` keeps the indexer fan-out from
+            // starving interactive server request handling.
+            if nice != 0 {
+                let _ = libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+            }
 
             Ok(())
         });
@@ -348,6 +393,39 @@ mod tests {
             err.to_string().contains("signal"),
             "expected a distinct signal-death message, got: {err}"
         );
+    }
+
+    /// The in-process warmer (no `DJINN_PROJECT_ROOT`) keeps nice 10 so the
+    /// indexer fan-out can't starve the interactive server it shares a cgroup
+    /// with.
+    #[test]
+    fn nice_level_defaults_to_10_in_process() {
+        assert_eq!(resolve_nice_level(None, false), 10);
+    }
+
+    /// In a dedicated warm Pod the indexer owns the whole cgroup — nothing to
+    /// yield to — so it must run at normal priority (0), not niced. This is the
+    /// core of the starvation fix: niceing a sole-tenant cgroup only costs the
+    /// throughput graph freshness depends on.
+    #[test]
+    fn nice_level_is_zero_in_pod_workspace() {
+        assert_eq!(resolve_nice_level(None, true), 0);
+    }
+
+    /// An explicit `DJINN_INDEXER_NICE` override wins in either context.
+    #[test]
+    fn explicit_nice_override_wins() {
+        assert_eq!(resolve_nice_level(Some("5"), true), 5);
+        assert_eq!(resolve_nice_level(Some("15"), false), 15);
+        assert_eq!(resolve_nice_level(Some(" 3 "), true), 3);
+    }
+
+    /// A malformed override falls back to the context default rather than
+    /// crashing the spawn path.
+    #[test]
+    fn malformed_nice_override_falls_back() {
+        assert_eq!(resolve_nice_level(Some("not-a-number"), true), 0);
+        assert_eq!(resolve_nice_level(Some(""), false), 10);
     }
 
     /// A fast command still returns its real output and a success status.
