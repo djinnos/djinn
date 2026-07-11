@@ -865,4 +865,6 @@ pub(super) fn sort_to_sql(sort: &str) -> &'static str {
 }
 
 #[cfg(test)]
+mod merged_classification_tests;
+#[cfg(test)]
 mod ready_projection_tests;
