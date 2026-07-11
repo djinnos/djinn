@@ -196,6 +196,121 @@ async fn required_check_reproduction_context_extracts_command_and_setup() {
     assert!(context.log_tail.contains("assertion failed"));
 }
 
+// Fail-fast run cancellation: the required aggregate gate job is `cancelled`
+// with no steps (it never started — a watchdog cancelled the run when a
+// sibling job failed). The reproduction context must come from the sibling
+// job that hard-failed, not from the step-less gate job (which would make
+// every bundle Unreproducible/FailingStepNotFound and eventually park the
+// task).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn required_check_reproduction_context_prefers_hard_failed_job_over_cancelled_gate() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("GET"))
+        .and(path("/repos/djinnos/server/commits/head-sha/check-runs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total_count": 1,
+            "check_runs": [{
+                "id": 9002,
+                "name": "CI / aggregate-gate",
+                "status": "completed",
+                "conclusion": "cancelled",
+                "html_url": "https://github.com/checks/9002"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/djinnos/server/actions/runs"))
+        .and(query_param("event", "pull_request"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "workflow_runs": [{
+                "id": 5678,
+                "name": "CI",
+                "head_branch": "feature-branch",
+                "head_sha": "head-sha",
+                "status": "completed",
+                "conclusion": "cancelled"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/djinnos/server/actions/runs/5678/jobs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jobs": [
+                {
+                    "id": 90,
+                    "name": "aggregate-gate",
+                    "status": "completed",
+                    "conclusion": "cancelled",
+                    "html_url": "https://github.com/jobs/90",
+                    "workflow_name": "quality-gate.yml",
+                    "steps": []
+                },
+                {
+                    "id": 91,
+                    "name": "boundary-guard",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "html_url": "https://github.com/jobs/91",
+                    "workflow_name": "quality-gate.yml",
+                    "steps": [
+                        {
+                            "name": "Check boundary",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "number": 1
+                        }
+                    ]
+                },
+                {
+                    "id": 92,
+                    "name": "test-shard (1)",
+                    "status": "completed",
+                    "conclusion": "cancelled",
+                    "html_url": "https://github.com/jobs/92",
+                    "workflow_name": "quality-gate.yml",
+                    "steps": [{
+                        "name": "Tests",
+                        "status": "completed",
+                        "conclusion": "cancelled",
+                        "number": 1
+                    }]
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/djinnos/server/actions/jobs/91/logs"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "2026-01-01T00:00:00.000Z ##[group]Run ./scripts/check-boundary.sh\n\
+             2026-01-01T00:00:01.000Z boundary violation in crate-a\n",
+        ))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let result = client
+        .required_check_reproduction_context("djinnos", "server", "head-sha", "CI / aggregate-gate")
+        .await
+        .unwrap();
+
+    let RequiredCheckReproduction::Reproducible(context) = result else {
+        panic!("expected reproducible context from the hard-failed sibling job, got {result:?}");
+    };
+    assert_eq!(context.job.id, 91);
+    assert_eq!(context.job.name, "boundary-guard");
+    assert_eq!(context.failing_step.name, "Check boundary");
+    assert_eq!(context.command, "./scripts/check-boundary.sh");
+    assert!(context.log_tail.contains("boundary violation"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn required_check_reproduction_context_returns_unreproducible_for_unmappable_check() {
     let server = MockServer::start().await;

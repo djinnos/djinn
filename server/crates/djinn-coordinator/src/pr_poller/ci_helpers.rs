@@ -987,6 +987,26 @@ pub(crate) fn is_failing_conclusion(conclusion: Option<&str>) -> bool {
     )
 }
 
+/// True when a conclusion is a *hard* failure — the work itself broke, as
+/// opposed to `cancelled`, which under fail-fast semantics (GitHub's native
+/// `fail-fast: true` matrices, or jobs that cancel the run on first failure)
+/// usually just means a sibling job failed first.
+pub(crate) fn is_hard_failure_conclusion(conclusion: Option<&str>) -> bool {
+    matches!(conclusion, Some("failure") | Some("timed_out"))
+}
+
+/// True when the job — or any of its steps — hard-failed. Step-level
+/// detection matters under fail-fast: a job that cancels its own run after a
+/// step fails can end up `cancelled` at the job level (the cancel signal
+/// races its post steps), while the failed step's conclusion is sealed first.
+pub(crate) fn job_hard_failed(job: &ActionsJob) -> bool {
+    is_hard_failure_conclusion(job.conclusion.as_deref())
+        || job
+            .steps
+            .iter()
+            .any(|step| is_hard_failure_conclusion(step.conclusion.as_deref()))
+}
+
 /// Build the human-readable `sections` and the structured `ci_jobs` payload for
 /// a CI-failure rework comment from the *union* of failing jobs across one or
 /// more workflow runs.
@@ -1018,10 +1038,21 @@ pub(crate) fn build_ci_failure_sections(
                 }
             }
 
-            for job in jobs
-                .iter()
-                .filter(|j| is_failing_conclusion(j.conclusion.as_deref()))
-            {
+            // Fail-fast cancellation (GitHub's `fail-fast: true` matrices, or
+            // jobs cancelling the run on first failure) marks every sibling
+            // job `cancelled` alongside the one real failure. Those cancelled
+            // jobs are fallout, not signal — listing them sends the worker
+            // chasing logs of jobs that never finished. Only surface
+            // cancelled jobs when nothing hard-failed.
+            let has_hard_failure = jobs.iter().any(job_hard_failed);
+
+            for job in jobs.iter().filter(|j| {
+                if has_hard_failure {
+                    job_hard_failed(j)
+                } else {
+                    is_failing_conclusion(j.conclusion.as_deref())
+                }
+            }) {
                 let conclusion = job.conclusion.as_deref().unwrap_or("unknown");
                 sections.push(format!("**Failed job:** {} ({})", job.name, conclusion));
 
