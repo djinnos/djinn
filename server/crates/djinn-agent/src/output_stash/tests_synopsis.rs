@@ -46,17 +46,11 @@ fn golden_oversized_json_stub_preserves_first_line_notice_and_structure() {
     let tool_use_id = "golden-json-1";
     let text = render_tool_result(&stash, tool_use_id, "task_list", &value);
 
-    // The first line is the truncation/stash notice from `smart_truncate`
-    // (the head excerpt). It must NOT be the synopsis header or the
-    // navigation hint — the synopsis always follows the excerpt.
+    // The canonical stash header precedes the preview and synopsis.
     let first_line = text.lines().next().unwrap_or("");
     assert!(
-        !first_line.contains("Tool result synopsis:"),
-        "first line must be the truncated excerpt, not the synopsis: {first_line:?}"
-    );
-    assert!(
-        !first_line.starts_with("[Full output stashed"),
-        "first line must not be the navigation hint: {first_line:?}"
+        first_line.starts_with("[djinn-output-stash tool_use_id=\"golden-json-1\" tool_name=\"task_list\" reason=\"single_threshold\""),
+        "first line must be the canonical stash header: {first_line:?}"
     );
 
     // `Tool result synopsis:` header is present.
@@ -364,7 +358,14 @@ fn golden_binary_repeated_char_no_synopsis_preserves_byte_surface() {
     // Byte-for-byte equivalence with the legacy no-synopsis surface.
     let expected_truncated = crate::truncate::smart_truncate(&big, MAX_TOOL_RESULT_CHARS);
     let expected = format!(
-        "{expected_truncated}\n\n{}",
+        "{}\n{expected_truncated}\n\n{}",
+        format_output_stash_header(
+            tool_use_id,
+            "shell",
+            "single_threshold",
+            big.chars().count(),
+            expected_truncated.chars().count(),
+        ),
         nav_hint(tool_use_id, big.len())
     );
     assert_eq!(

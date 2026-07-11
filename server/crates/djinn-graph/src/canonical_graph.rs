@@ -1,6 +1,7 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::RwLock;
 
@@ -160,6 +161,89 @@ pub fn git_head_is_strictly_stale(caller_head: &str, git_head: &str) -> bool {
 
 pub static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
     std::sync::LazyLock::new(|| RwLock::new(None));
+
+/// Instant at which the in-memory [`GRAPH_CACHE`] slot was last confirmed to
+/// still match the latest persisted `repo_graph_cache` row. `None` means the
+/// slot has never been validated (or was explicitly invalidated) and the next
+/// read MUST revalidate before trusting it.
+///
+/// This is the state behind the commit-aware revalidation backstop in
+/// [`load_canonical_graph`]: the process-global RAM slot is kept fresh by this
+/// process's own warm path (`install_as_canonical`), but an *out-of-band*
+/// writer — the K8s graph-warm Job pod — rewrites `repo_graph_cache` without
+/// touching our RAM slot. Left unchecked, every `code_graph` query serves the
+/// pre-warm blob until the server restarts. Re-probing the persisted commit on
+/// every query would negate the cache; instead we re-check at most once per
+/// [`CACHE_REVALIDATION_TTL`] window, bounding staleness for ANY out-of-band
+/// writer while keeping steady-state per-query overhead at zero DB round-trips.
+static CACHE_LAST_VALIDATED: std::sync::LazyLock<RwLock<Option<std::time::Instant>>> =
+    std::sync::LazyLock::new(|| RwLock::new(None));
+
+/// Maximum time the in-memory canonical-graph slot may be served without
+/// re-confirming its pinned commit against the persisted `repo_graph_cache`
+/// row. Bounds worst-case read-path staleness from an out-of-band warm writer
+/// to this window (the event-driven [`invalidate_canonical_graph_cache`] hook
+/// converges within seconds; this TTL is the safety net if that hook is absent
+/// or missed).
+const CACHE_REVALIDATION_TTL: Duration = Duration::from_secs(20);
+
+/// True when the in-memory slot is due for a commit revalidation against the
+/// DB — i.e. it has never been validated, or the TTL window has elapsed.
+async fn revalidation_due() -> bool {
+    let guard = CACHE_LAST_VALIDATED.read().await;
+    match *guard {
+        None => true,
+        // `Instant::elapsed` is the monotonic-clock read our clippy config
+        // steers away from at the `Instant::now` call site; go through the
+        // injected `SystemClock` so this stays the single sanctioned monotonic
+        // read and remains consistent with the timestamps written below.
+        Some(stamped) => {
+            SystemClock::new()
+                .now_instant()
+                .saturating_duration_since(stamped)
+                >= CACHE_REVALIDATION_TTL
+        }
+    }
+}
+
+/// Stamp the in-memory slot as validated "now", opening a fresh
+/// [`CACHE_REVALIDATION_TTL`] window before the next DB revalidation probe.
+async fn mark_cache_validated() {
+    let mut guard = CACHE_LAST_VALIDATED.write().await;
+    *guard = Some(SystemClock::new().now_instant());
+}
+
+/// Clear the in-memory canonical-graph slot and its revalidation stamp so the
+/// very next [`load_canonical_graph`] call reloads the latest persisted blob.
+///
+/// This is the event-driven convergence seam for the *out-of-pod* warm path:
+/// the canonical-graph warm runs in a separate K8s Job pod that rewrites
+/// `repo_graph_cache` but cannot reach this process's RAM slot. The server's
+/// in-process warm watcher (`djinn_k8s::K8sGraphWarmer`) calls this on warm-Job
+/// success, so `code_graph` queries converge to the fresh graph within seconds
+/// instead of serving the stale slot until a restart. The
+/// [`CACHE_REVALIDATION_TTL`] backstop covers the case where this hook is never
+/// invoked (e.g. non-K8s runtime, or a missed terminal observation).
+///
+/// The slot is single-tenant (one project at a time), so clearing it may cost
+/// an unrelated project one reload from the persisted blob — cheap and correct.
+pub async fn invalidate_canonical_graph_cache() {
+    {
+        let mut cache = GRAPH_CACHE.write().await;
+        *cache = None;
+    }
+    let mut validated = CACHE_LAST_VALIDATED.write().await;
+    *validated = None;
+}
+
+/// Test-only: force the next read to treat the slot as revalidation-due
+/// without disturbing the cached graph itself, so tests can exercise the
+/// out-of-band-staleness reload path deterministically (no wall-clock wait).
+#[cfg(test)]
+pub(crate) async fn force_revalidation_due_for_test() {
+    let mut guard = CACHE_LAST_VALIDATED.write().await;
+    *guard = None;
+}
 
 pub fn derive_graph_caches(
     graph: &crate::repo_graph::RepoDependencyGraph,
@@ -1327,16 +1411,24 @@ async fn install_as_canonical(
     layout_positions: Arc<std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>>,
     crate_map: Arc<std::collections::BTreeMap<PathBuf, String>>,
 ) {
-    let mut cache = GRAPH_CACHE.write().await;
-    *cache = Some(CachedGraph {
-        graph,
-        project_path,
-        git_head,
-        pagerank,
-        sccs,
-        layout_positions,
-        crate_map,
-    });
+    {
+        let mut cache = GRAPH_CACHE.write().await;
+        *cache = Some(CachedGraph {
+            graph,
+            project_path,
+            git_head,
+            pagerank,
+            sccs,
+            layout_positions,
+            crate_map,
+        });
+    }
+    // Whenever we (re)install the slot it reflects the freshest graph this
+    // process knows — from the in-process warm path or a DB reload — so open a
+    // fresh revalidation window. This keeps the in-process warm path's
+    // behaviour unchanged (its just-warmed slot is trusted for the full TTL)
+    // while the read-path backstop bounds staleness from out-of-band writers.
+    mark_cache_validated().await;
 }
 
 async fn load_cached_artifact(
@@ -1389,18 +1481,67 @@ pub async fn load_canonical_graph<C: WarmContext>(
 
     let (_project_root, index_tree_path) = normalize_graph_query_paths(project_path);
 
-    {
+    // Fast path: serve the in-memory slot — but only after a commit-aware
+    // revalidation backstop confirms it hasn't been superseded out-of-band.
+    // The K8s warm Job pod rewrites `repo_graph_cache` without touching this
+    // process's RAM slot; without this check every query serves the pre-warm
+    // blob until the server restarts. We re-probe the persisted commit at most
+    // once per `CACHE_REVALIDATION_TTL` window (see `revalidation_due`), so the
+    // steady-state cost stays at zero DB round-trips.
+    let cached_head = {
         let cache = GRAPH_CACHE.read().await;
-        if let Some(cached) = cache.as_ref().filter(|c| c.project_path == index_tree_path) {
-            return Ok((
-                cached.graph.clone(),
-                cached.pagerank.clone(),
-                cached.sccs.clone(),
-            ));
+        cache
+            .as_ref()
+            .filter(|c| c.project_path == index_tree_path)
+            .map(|c| c.git_head.clone())
+    };
+
+    let cache_repo = RepoGraphCacheRepository::new(ctx.db().clone());
+
+    if let Some(cached_head) = cached_head {
+        let serve_from_ram = if !revalidation_due().await {
+            // Within the TTL window: trust the slot without a DB round-trip.
+            true
+        } else {
+            // TTL elapsed: cheap commit-only probe (no blob fetch).
+            match cache_repo.latest_commit_for_project(project_id).await {
+                Ok(Some(latest)) => {
+                    // `git_head_is_strictly_stale(caller, cached)` is true when
+                    // `cached` is blank or differs from `caller`; the slot is
+                    // still current exactly when that is false. (Both args are
+                    // trimmed inside the helper.)
+                    let still_current = !git_head_is_strictly_stale(&latest, &cached_head);
+                    if still_current {
+                        // Slot matches the latest persisted commit → reopen the
+                        // TTL window and keep serving from RAM.
+                        mark_cache_validated().await;
+                    }
+                    // Commit advanced out-of-band (still_current == false) → do
+                    // NOT stamp; fall through to the reload path below.
+                    still_current
+                }
+                // No persisted row (unexpected while a slot is populated) or a
+                // transient DB error: keep serving the RAM slot rather than
+                // failing an otherwise-answerable query. We deliberately do NOT
+                // stamp validation, so the next query re-probes.
+                Ok(None) | Err(_) => true,
+            }
+        };
+
+        if serve_from_ram {
+            let cache = GRAPH_CACHE.read().await;
+            if let Some(cached) = cache.as_ref().filter(|c| c.project_path == index_tree_path) {
+                return Ok((
+                    cached.graph.clone(),
+                    cached.pagerank.clone(),
+                    cached.sccs.clone(),
+                ));
+            }
+            // Slot was cleared/replaced between our peek and here → fall
+            // through to the DB load path below.
         }
     }
 
-    let cache_repo = RepoGraphCacheRepository::new(ctx.db().clone());
     let row = cache_repo
         .latest_for_project(project_id)
         .await
@@ -1432,6 +1573,8 @@ pub async fn load_canonical_graph<C: WarmContext>(
         crate_map.clone(),
     )
     .await;
+    // `install_as_canonical` stamps the revalidation window, so subsequent
+    // reads within the TTL serve this freshly loaded blob without a DB probe.
     Ok((graph, pagerank, sccs))
 }
 
@@ -1705,8 +1848,16 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::{ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository};
 
-    static OUT_OF_CORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    static CACHE_REUSE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // All four env-mutating pipeline tests below (out-of-core parity,
+    // out-of-core warm, cache-reuse warm) share ONE process-global lock.
+    // They each mutate overlapping process-wide env vars — the two warm
+    // tests both rewrite `PATH` + `DJINN_TEST_SCIP_FIXTURE` to point at the
+    // fake `rust-analyzer`, and the out-of-core tests share
+    // `DJINN_GRAPH_OUT_OF_CORE*`. Separate per-family locks let them run
+    // concurrently on Cargo's test threads and clobber each other's env,
+    // which is the root cause of the intermittent "no index produced"
+    // flake. Route every one through `test_helpers::lock_pipeline_env`.
+    use crate::test_helpers::lock_pipeline_env;
 
     struct EnvVarGuard {
         key: &'static str,
@@ -2018,7 +2169,7 @@ edition = "2024"
 
     #[test]
     fn test_out_of_core_graph_parity_with_in_memory() {
-        let _guard = OUT_OF_CORE_ENV_LOCK.lock().unwrap();
+        let _env_lock = lock_pipeline_env();
         let tmp = workspace_tempdir("ooc-graph-parity-");
         let store_path = tmp.path().join("store");
 
@@ -2051,7 +2202,7 @@ edition = "2024"
 
     #[test]
     fn test_out_of_core_graph_diverges_on_file_change() {
-        let _guard = OUT_OF_CORE_ENV_LOCK.lock().unwrap();
+        let _env_lock = lock_pipeline_env();
         let tmp = workspace_tempdir("ooc-graph-diverge-");
         let store_path = tmp.path().join("store");
 
@@ -2394,6 +2545,10 @@ edition = "2024"
 
     #[tokio::test]
     async fn ensure_canonical_graph_serves_cache_hit_without_running_indexer() {
+        // Mutates the process-global GRAPH_CACHE; serialize with the other
+        // slot-touching tests (incl. the revalidation-backstop tests) so
+        // concurrent installs/clears can't clobber the single shared slot.
+        let _env_lock = lock_pipeline_env();
         let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -2435,6 +2590,7 @@ edition = "2024"
 
     #[tokio::test]
     async fn ensure_canonical_graph_treats_stale_blob_as_cache_miss() {
+        let _env_lock = lock_pipeline_env();
         let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -2477,6 +2633,7 @@ edition = "2024"
 
     #[tokio::test]
     async fn cache_only_readers_serve_cached_graph_and_caches() {
+        let _env_lock = lock_pipeline_env();
         let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -2526,6 +2683,160 @@ edition = "2024"
         assert_eq!(graph_only.node_count(), expected_node_count);
         assert_eq!(graph_with_caches.node_count(), expected_node_count);
         assert_eq!(pagerank.nodes.len(), expected_node_count);
+    }
+
+    /// Commit-aware revalidation backstop (out-of-pod staleness fix): when the
+    /// in-memory slot is pinned to a commit that no longer matches the latest
+    /// persisted `repo_graph_cache` row — the exact situation the K8s warm Job
+    /// pod creates by rewriting the row without touching this process's RAM
+    /// slot — a read after the TTL window must reload the fresh blob instead of
+    /// serving the stale one.
+    #[tokio::test]
+    async fn load_canonical_graph_reloads_when_slot_commit_is_stale() {
+        // Serialize against every other test that mutates the process-global
+        // GRAPH_CACHE / revalidation stamp (see `lock_pipeline_env` note).
+        let _env_lock = lock_pipeline_env();
+        let tmp = workspace_tempdir("canonical-graph-reval-stale-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("reval-stale", "test", "reval-stale")
+            .await
+            .expect("create project");
+        let project_root_str = project_root.to_string_lossy().into_owned();
+        let (_pr, index_tree_path) = normalize_graph_query_paths(&project_root_str);
+
+        // DB holds the FRESH graph, pinned at a NEW commit (out-of-band warm).
+        let fresh_graph = build_test_graph_fixture();
+        let fresh_count = fresh_graph.node_count();
+        let fresh_blob = bincode::serialize(&fresh_graph.to_artifact()).expect("serialize fresh");
+        RepoGraphCacheRepository::new(db.clone())
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "fresh-sha",
+                graph_blob: &fresh_blob,
+            })
+            .await
+            .expect("seed fresh row");
+
+        // RAM slot holds a DIFFERENT (stale) graph, pinned at an OLD commit.
+        let stale_graph = crate::repo_graph::RepoDependencyGraph::build(&[]);
+        assert_ne!(
+            stale_graph.node_count(),
+            fresh_count,
+            "stale and fresh fixtures must differ to distinguish a reload"
+        );
+        let (pagerank, sccs, layout_positions, crate_map) =
+            derive_graph_caches(&stale_graph, &project_root);
+        install_as_canonical(
+            index_tree_path.clone(),
+            "stale-sha".to_string(),
+            stale_graph,
+            pagerank,
+            sccs,
+            layout_positions,
+            crate_map,
+        )
+        .await;
+
+        // Simulate the TTL window elapsing so the read path revalidates.
+        force_revalidation_due_for_test().await;
+
+        let (graph, _pr, _sccs) = load_canonical_graph(&ctx, &project.id, &project_root_str)
+            .await
+            .expect("load must succeed");
+        assert_eq!(
+            graph.node_count(),
+            fresh_count,
+            "a stale-commit slot must reload the fresh persisted blob after the TTL window"
+        );
+        // The slot is now re-pinned to the fresh commit.
+        assert_eq!(
+            canonical_graph_cache_pinned_commit_for(&index_tree_path)
+                .await
+                .as_deref(),
+            Some("fresh-sha"),
+            "reload must re-pin the in-memory slot to the fresh commit"
+        );
+        clear_test_caches().await;
+    }
+
+    /// Within the revalidation TTL window the in-memory slot is served without
+    /// any DB round-trip — proving steady-state per-query overhead stays at
+    /// zero — even when a newer row exists; once the window elapses the newer
+    /// blob is picked up. This pins the "cheap staleness check" contract.
+    #[tokio::test]
+    async fn load_canonical_graph_serves_slot_within_ttl_then_reloads_after_expiry() {
+        let _env_lock = lock_pipeline_env();
+        let tmp = workspace_tempdir("canonical-graph-reval-ttl-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("reval-ttl", "test", "reval-ttl")
+            .await
+            .expect("create project");
+        let project_root_str = project_root.to_string_lossy().into_owned();
+        let (_pr, index_tree_path) = normalize_graph_query_paths(&project_root_str);
+
+        // RAM slot: the fixture graph pinned at "slot-sha". `install_as_canonical`
+        // stamps the revalidation window, so the slot starts inside the TTL.
+        let ram_graph = build_test_graph_fixture();
+        let ram_count = ram_graph.node_count();
+        let (pagerank, sccs, layout_positions, crate_map) =
+            derive_graph_caches(&ram_graph, &project_root);
+        install_as_canonical(
+            index_tree_path.clone(),
+            "slot-sha".to_string(),
+            ram_graph,
+            pagerank,
+            sccs,
+            layout_positions,
+            crate_map,
+        )
+        .await;
+
+        // DB holds a DIFFERENT graph at a NEWER commit — the out-of-band warm.
+        let db_graph = crate::repo_graph::RepoDependencyGraph::build(&[]);
+        let db_count = db_graph.node_count();
+        assert_ne!(
+            db_count, ram_count,
+            "RAM and DB fixtures must differ to distinguish serve-from-RAM vs reload"
+        );
+        let db_blob = bincode::serialize(&db_graph.to_artifact()).expect("serialize db graph");
+        RepoGraphCacheRepository::new(db.clone())
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "newer-sha",
+                graph_blob: &db_blob,
+            })
+            .await
+            .expect("seed newer row");
+
+        // Within the TTL window: served from RAM without revalidating. If the
+        // read path had queried the DB it would see "newer-sha" != "slot-sha"
+        // and reload `db_count`; asserting `ram_count` proves it did NOT.
+        let (within, _p, _s) = load_canonical_graph(&ctx, &project.id, &project_root_str)
+            .await
+            .expect("load within ttl");
+        assert_eq!(
+            within.node_count(),
+            ram_count,
+            "within the TTL window the RAM slot must be served, ignoring the newer DB row"
+        );
+
+        // Now the window elapses: revalidate, observe the newer commit, reload.
+        force_revalidation_due_for_test().await;
+        let (after, _p, _s) = load_canonical_graph(&ctx, &project.id, &project_root_str)
+            .await
+            .expect("load after ttl");
+        assert_eq!(
+            after.node_count(),
+            db_count,
+            "after the TTL window the newer persisted blob must be reloaded"
+        );
+        clear_test_caches().await;
     }
 
     #[tokio::test]
@@ -2844,6 +3155,7 @@ edition = "2024"
     /// for the same commit must pass `assert_graph_artifact_blob_parity`.
     #[tokio::test]
     async fn incremental_full_equivalence_same_commit() {
+        let _env_lock = lock_pipeline_env();
         let tmp = workspace_tempdir("incremental-equiv-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -2988,7 +3300,7 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn out_of_core_warm_produces_identical_graph_blob() {
-        let _env_lock = OUT_OF_CORE_ENV_LOCK.lock().unwrap();
+        let _env_lock = lock_pipeline_env();
         let _ooc_flag = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE");
         let _ooc_min_nodes = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
         let _ooc_path = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE_PATH");
@@ -3127,7 +3439,7 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn cache_reuse_produces_identical_graph_blob() {
-        let _env_lock = CACHE_REUSE_ENV_LOCK.lock().unwrap();
+        let _env_lock = lock_pipeline_env();
 
         // Remove any pre-existing cache-reuse env var.
         unsafe {

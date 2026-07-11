@@ -914,6 +914,10 @@ mod tests {
     ///    real SCIP binaries, no network, no credentials).
     #[test]
     fn canonical_warm_cache_reuse_toggle_reaches_parity_seam() {
+        // Serialize against the canonical-graph cache-reuse warm test, which
+        // mutates the same `*CACHE_REUSE_ENABLED` toggles and
+        // `DJINN_SCIP_CACHE_DIR` on Cargo's shared test threads.
+        let _env_lock = crate::test_helpers::lock_pipeline_env();
         // SAFETY: this test manipulates env vars for the duration of the
         // test. `std::env::set_var` / `remove_var` are marked unsafe in
         // Rust 2024 because they race with concurrent getenv readers. This
