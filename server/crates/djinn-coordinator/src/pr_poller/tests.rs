@@ -1363,6 +1363,71 @@ fn ci_failure_run_cap_bounds_aggregation() {
 }
 
 #[test]
+fn ci_failure_sections_drop_cancelled_jobs_when_a_hard_failure_exists() {
+    // Fail-fast cancellation (native fail-fast matrices or a watchdog job
+    // cancelling the run on first failure) leaves one real `failure` job in a
+    // sea of `cancelled` siblings. Only the real failure is signal.
+    let mut gate = failed_job(30, "aggregate-gate", "CI", vec![]);
+    gate.conclusion = Some("cancelled".to_string());
+    let mut shard = failed_job(31, "test-shard (1)", "CI", vec![]);
+    shard.conclusion = Some("cancelled".to_string());
+    let jobs = vec![
+        failed_job(10, "lint", "CI", vec![failed_step("run lint", 1)]),
+        gate,
+        shard,
+    ];
+    let checks = [check_run("CI / aggregate-gate", 100)];
+    let refs: Vec<&CheckRun> = checks.iter().collect();
+    let (sections, ci_jobs) = build_ci_failure_sections(Some(&jobs), &refs);
+
+    let body = sections.join("\n");
+    assert!(body.contains("**Failed job:** lint"), "{body}");
+    assert!(!body.contains("aggregate-gate (cancelled)"), "{body}");
+    assert!(!body.contains("test-shard (1)"), "{body}");
+    assert_eq!(ci_jobs.len(), 1);
+    assert_eq!(ci_jobs[0]["job_id"].as_u64(), Some(10));
+}
+
+#[test]
+fn ci_failure_sections_treat_cancelled_job_with_failed_step_as_signal() {
+    // A job that cancels its own run after a step fails can race the cancel
+    // signal and end up `cancelled` at the job level while its failed step is
+    // already sealed. That job is the signal; the step-less cancelled sibling
+    // is fallout.
+    let mut source = failed_job(50, "lint", "CI", vec![failed_step("run lint", 1)]);
+    source.conclusion = Some("cancelled".to_string());
+    let mut sibling = failed_job(51, "aggregate-gate", "CI", vec![]);
+    sibling.conclusion = Some("cancelled".to_string());
+    let jobs = vec![source, sibling];
+    let checks = [check_run("CI / aggregate-gate", 100)];
+    let refs: Vec<&CheckRun> = checks.iter().collect();
+    let (sections, ci_jobs) = build_ci_failure_sections(Some(&jobs), &refs);
+
+    let body = sections.join("\n");
+    assert!(body.contains("**Failed job:** lint"), "{body}");
+    assert!(!body.contains("aggregate-gate (cancelled)"), "{body}");
+    assert_eq!(ci_jobs.len(), 1);
+    assert_eq!(ci_jobs[0]["job_id"].as_u64(), Some(50));
+}
+
+#[test]
+fn ci_failure_sections_keep_cancelled_jobs_when_nothing_hard_failed() {
+    // A run where the only red conclusions are cancellations (e.g. a timeout
+    // watchdog never fired and the run was cancelled externally) must still
+    // surface those jobs rather than produce an empty report.
+    let mut job = failed_job(40, "test-shard (2)", "CI", vec![]);
+    job.conclusion = Some("cancelled".to_string());
+    let jobs = vec![job];
+    let checks = [check_run("CI / aggregate-gate", 100)];
+    let refs: Vec<&CheckRun> = checks.iter().collect();
+    let (sections, ci_jobs) = build_ci_failure_sections(Some(&jobs), &refs);
+
+    let body = sections.join("\n");
+    assert!(body.contains("**Failed job:** test-shard (2) (cancelled)"), "{body}");
+    assert_eq!(ci_jobs.len(), 1);
+}
+
+#[test]
 fn ci_failure_sections_fallback_when_no_jobs() {
     // No Actions job data → fall back to listing raw check-run names.
     let checks = [check_run("lint", 100)];
