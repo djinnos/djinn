@@ -40,8 +40,10 @@ pub struct UsageTestTaskSeed<'a> {
 /// contract tests. Returns the generated task id.
 pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String {
     db.ensure_initialized().await.unwrap();
-    let id = uuid::Uuid::now_v7().to_string();
-    let short_id = format!("task-{}", &id[..8]);
+    let task_uuid = uuid::Uuid::now_v7();
+    let id = task_uuid.to_string();
+    let compact_id = task_uuid.simple().to_string();
+    let short_id = format!("task-{}-{}", &compact_id[..8], &compact_id[20..32]);
     sqlx::query(
         "INSERT INTO tasks \
          (id, project_id, short_id, epic_id, title, description, design, \

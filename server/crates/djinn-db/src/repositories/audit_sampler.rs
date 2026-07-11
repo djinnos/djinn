@@ -185,6 +185,39 @@ pub struct AuditOutcomeReportRow {
     pub project_id: String,
 }
 
+/// An unmaterialized selection joined with its source merged-change and frame data.
+///
+/// Used by the scheduler to build provenance-rich audit task descriptions
+/// without additional round-trips.
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UnmaterializedSelection {
+    // Selection fields
+    pub selection_id: String,
+    pub frame_id: String,
+    pub merged_change_id: String,
+    pub stratum: String,
+    pub selected_position: i32,
+    pub algorithm: String,
+    pub seed_commitment: String,
+    pub seed_reveal: Option<String>,
+    pub replay_data: serde_json::Value,
+    pub selection_created_at: String,
+    // Merged-change provenance
+    pub project_id: String,
+    pub task_id: Option<String>,
+    pub pr_number: Option<i64>,
+    pub head_sha: Option<String>,
+    pub merge_commit_sha: String,
+    pub gate_outcome: String,
+    pub gate_provenance: Option<serde_json::Value>,
+    pub release_provenance: Option<serde_json::Value>,
+    // Frame provenance
+    pub window_start: String,
+    pub window_end: String,
+    pub frame_revision: i32,
+    pub frame_policy_id: String,
+}
+
 // ── Input types ───────────────────────────────────────────────────────────────
 
 /// Parameters for upserting a merged-change fact.
@@ -235,6 +268,10 @@ pub struct CreateSelectionParams<'a> {
     pub seed_reveal: Option<&'a str>,
     pub replay_data: &'a serde_json::Value,
     pub audit_task_id: Option<&'a str>,
+    /// Override the DB-default `created_at` timestamp. When `None`, the
+    /// database generates the timestamp (via its column default). Test helpers
+    /// use this to backdate selections for SLO-age testing.
+    pub created_at: Option<&'a str>,
 }
 
 /// Parameters for recording an audit outcome.
@@ -489,26 +526,50 @@ impl AuditSamplerRepository {
     ) -> Result<SelectionRow> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            r#"INSERT INTO audit_selections (
-                    id, frame_id, merged_change_id, stratum,
-                    selected_position, algorithm,
-                    seed_commitment, seed_reveal, replay_data,
-                    audit_task_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
-        )
-        .bind(&id)
-        .bind(params.frame_id)
-        .bind(params.merged_change_id)
-        .bind(params.stratum.as_str())
-        .bind(params.selected_position)
-        .bind(params.algorithm)
-        .bind(params.seed_commitment)
-        .bind(params.seed_reveal)
-        .bind(params.replay_data)
-        .bind(params.audit_task_id)
-        .execute(self.db.pool())
-        .await?;
+        if let Some(created_at) = params.created_at {
+            sqlx::query(
+                r#"INSERT INTO audit_selections (
+                        id, frame_id, merged_change_id, stratum,
+                        selected_position, algorithm,
+                        seed_commitment, seed_reveal, replay_data,
+                        audit_task_id, created_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+            )
+            .bind(&id)
+            .bind(params.frame_id)
+            .bind(params.merged_change_id)
+            .bind(params.stratum.as_str())
+            .bind(params.selected_position)
+            .bind(params.algorithm)
+            .bind(params.seed_commitment)
+            .bind(params.seed_reveal)
+            .bind(params.replay_data)
+            .bind(params.audit_task_id)
+            .bind(created_at)
+            .execute(self.db.pool())
+            .await?;
+        } else {
+            sqlx::query(
+                r#"INSERT INTO audit_selections (
+                        id, frame_id, merged_change_id, stratum,
+                        selected_position, algorithm,
+                        seed_commitment, seed_reveal, replay_data,
+                        audit_task_id
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
+            )
+            .bind(&id)
+            .bind(params.frame_id)
+            .bind(params.merged_change_id)
+            .bind(params.stratum.as_str())
+            .bind(params.selected_position)
+            .bind(params.algorithm)
+            .bind(params.seed_commitment)
+            .bind(params.seed_reveal)
+            .bind(params.replay_data)
+            .bind(params.audit_task_id)
+            .execute(self.db.pool())
+            .await?;
+        }
 
         Ok(self
             .get_selection_by_id(&id)
@@ -549,7 +610,123 @@ impl AuditSamplerRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    // ── Audit outcomes ───────────────────────────────────────────────────
+    /// Create an audit review task and link it to a selection atomically in a
+    /// single database transaction.
+    ///
+    /// This guarantees restart-idempotency: the task INSERT and the selection
+    /// UPDATE happen in the same Postgres transaction. If the coordinator
+    /// process crashes at any point, the transaction either committed (both the
+    /// task row and the `audit_task_id` link are durable) or rolled back
+    /// (neither exists and the selection stays `audit_task_id IS NULL`). The
+    /// next leader tick retries cleanly — no duplicate tasks are ever created.
+    ///
+    /// The method generates a UUIDv7 task ID and a base-36 short_id. If the
+    /// short_id collides with an existing task in the same project (the
+    /// `(project_id, short_id)` UNIQUE constraint), the insert is retried with
+    /// a fresh ID (up to 16 attempts, mirroring `TaskRepository`).
+    ///
+    /// Returns the task ID on success.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn materialize_audit_task_atomic(
+        &self,
+        selection_id: &str,
+        project_id: &str,
+        epic_id: Option<&str>,
+        title: &str,
+        description: &str,
+    ) -> Result<String> {
+        self.db.ensure_initialized().await?;
+
+        for _attempt in 0..16u32 {
+            let task_id = uuid::Uuid::now_v7().to_string();
+            let short_id = compute_audit_short_id(&task_id);
+
+            let mut tx = self.db.pool().begin().await?;
+
+            let insert_result = sqlx::query(MATERIALIZED_TASK_INSERT)
+                .bind(&task_id)
+                .bind(project_id)
+                .bind(&short_id)
+                .bind(epic_id)
+                .bind(title)
+                .bind(description)
+                .execute(&mut *tx)
+                .await;
+
+            match insert_result {
+                Ok(_) => {
+                    // Link the selection in the same transaction.
+                    sqlx::query(MATERIALIZED_LINK_SELECTION)
+                        .bind(&task_id)
+                        .bind(selection_id)
+                        .execute(&mut *tx)
+                        .await?;
+
+                    tx.commit().await?;
+                    return Ok(task_id);
+                }
+                Err(e) => {
+                    // Roll back and check if this was a short_id collision.
+                    // If so, retry with a new task_id/short_id pair.
+                    let is_short_id_collision = e
+                        .as_database_error()
+                        .is_some_and(|e| e.is_unique_violation());
+                    drop(tx);
+
+                    if is_short_id_collision {
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+
+        Err(crate::Error::Internal(
+            "audit task short_id collision after 16 retries".into(),
+        ))
+    }
+
+    /// List selections from non-superseded frames that have not yet been
+    /// materialized (i.e., `audit_task_id IS NULL`), ordered by
+    /// `created_at ASC` for FIFO materialization.
+    ///
+    /// Each returned selection is joined with the source merged-change row
+    /// and the frame row so the caller has provenance data for task
+    /// description construction.
+    pub async fn list_unmaterialized_selections(&self) -> Result<Vec<UnmaterializedSelection>> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as::<_, UnmaterializedSelection>(UNMATERIALIZED_SELECTIONS)
+                .fetch_all(self.db.pool())
+                .await?,
+        )
+    }
+
+    /// Count the number of selections that have been materialized into audit
+    /// tasks whose associated task row is still open (not closed).
+    ///
+    /// The join with `tasks` is a LEFT JOIN because the audit task may have
+    /// been deleted (no FK from `audit_selections.audit_task_id`). In that
+    /// case the selection is NOT counted as open.
+    pub async fn count_open_audit_tasks(&self) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        let count: i64 = sqlx::query_scalar(COUNT_OPEN_AUDIT_TASKS)
+            .fetch_one(self.db.pool())
+            .await?;
+        Ok(count)
+    }
+
+    /// Return the creation timestamp for the most recently materialized audit
+    /// task, based only on persisted selection/task state.
+    ///
+    /// The scheduler uses this as its cadence anchor so a frequent coordinator
+    /// leader tick cannot drain persisted selections faster than policy allows.
+    pub async fn latest_audit_materialized_at(&self) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar(LATEST_AUDIT_MATERIALIZED_AT)
+            .fetch_one(self.db.pool())
+            .await?)
+    }
 
     /// Record an audit outcome for a selection. Each selection can have at
     /// most one outcome (unique constraint on selection_id).
@@ -717,6 +894,92 @@ const SET_SELECTION_AUDIT_TASK: &str = r#"
     WHERE id = $2
 "#;
 
+const UNMATERIALIZED_SELECTIONS: &str = r#"
+    SELECT
+        asel.id AS selection_id,
+        asel.frame_id,
+        asel.merged_change_id,
+        asel.stratum,
+        asel.selected_position,
+        asel.algorithm,
+        asel.seed_commitment,
+        asel.seed_reveal,
+        asel.replay_data,
+        asel.created_at AS selection_created_at,
+        amc.project_id,
+        amc.task_id,
+        amc.pr_number,
+        amc.head_sha,
+        amc.merge_commit_sha,
+        amc.gate_outcome,
+        amc.gate_provenance,
+        amc.release_provenance,
+        sf.window_start,
+        sf.window_end,
+        sf.revision AS frame_revision,
+        sf.policy_id AS frame_policy_id
+    FROM audit_selections asel
+    JOIN audit_merged_changes amc ON amc.id = asel.merged_change_id
+    JOIN audit_sample_frames sf ON sf.id = asel.frame_id
+    WHERE asel.audit_task_id IS NULL
+      AND sf.superseded_by_id IS NULL
+    ORDER BY asel.created_at ASC
+"#;
+
+const COUNT_OPEN_AUDIT_TASKS: &str = r#"
+    SELECT COUNT(*)::bigint
+    FROM audit_selections asel
+    JOIN tasks t ON t.id = asel.audit_task_id
+    WHERE asel.audit_task_id IS NOT NULL
+      AND t.closed_at IS NULL
+"#;
+
+const LATEST_AUDIT_MATERIALIZED_AT: &str = r#"
+    SELECT MAX(t.created_at)
+    FROM audit_selections asel
+    JOIN tasks t ON t.id = asel.audit_task_id
+    WHERE asel.audit_task_id IS NOT NULL
+"#;
+
+const MATERIALIZED_TASK_INSERT: &str = r#"
+    INSERT INTO tasks (
+        id, project_id, short_id, epic_id, title, description, design,
+        issue_type, priority, owner, status,
+        labels, acceptance_criteria, memory_refs
+    ) VALUES (
+        $1, $2, $3, $4, $5, $6, '',
+        'task', 2, '', 'open',
+        '[]'::jsonb, '[]'::jsonb, '[]'::jsonb
+    )
+"#;
+
+const MATERIALIZED_LINK_SELECTION: &str = r#"
+    UPDATE audit_selections
+    SET audit_task_id = $1
+    WHERE id = $2
+      AND audit_task_id IS NULL
+"#;
+
+/// Compute a 4-character base-36 short_id from a UUID.
+///
+/// Mirrors `short_id_from_uuid` in the task repository: takes the last 4 bytes
+/// of the UUID as a big-endian u32, reduces modulo 36^4, and encodes as
+/// base-36.
+fn compute_audit_short_id(seed_id: &str) -> String {
+    let Ok(seed) = uuid::Uuid::parse_str(seed_id) else {
+        return "0000".to_string();
+    };
+    let bytes = seed.as_bytes();
+    let n = u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) % 1_679_616;
+    const CHARS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut n = n;
+    let mut buf = [b'0'; 4];
+    for i in (0..4).rev() {
+        buf[i] = CHARS[(n % 36) as usize];
+        n /= 36;
+    }
+    String::from_utf8(buf.to_vec()).unwrap()
+}
 const OUTCOME_BY_ID: &str = r#"
     SELECT id, selection_id, outcome,
            miss_category, miss_severity, requires_rule_update,
@@ -1149,6 +1412,7 @@ mod tests {
                 seed_reveal: None,
                 replay_data: &json!({"counter_seq": [0]}),
                 audit_task_id: None,
+                created_at: None,
             })
             .await
             .unwrap();
@@ -1228,6 +1492,7 @@ mod tests {
                 seed_reveal: Some(&"cc".repeat(32)),
                 replay_data: &json!({}),
                 audit_task_id: None,
+                created_at: None,
             })
             .await
             .unwrap();
