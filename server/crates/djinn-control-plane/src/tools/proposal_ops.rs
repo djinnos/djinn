@@ -41,6 +41,18 @@ pub mod revision_change_kind {
     pub const BODY_REWRITE: &str = "body_rewrite";
 }
 
+/// Auditable aggregate of the shared parent-terminal disposition matrix.
+/// Both proposal abort and obsolete-epic reconciliation return this in preview
+/// and mutation modes so callers can distinguish disposal from safe retention.
+#[derive(Serialize, Deserialize, Clone, Default, schemars::JsonSchema)]
+pub struct ProposalDispositionSummary {
+    pub disposed: i64,
+    pub parked: i64,
+    pub retained_other_parent: i64,
+    pub retained_external_dependent: i64,
+    pub retained_already_terminal: i64,
+}
+
 /// One targeted block-patch attribution payload. Serialized into
 /// `proposal_revisions.event_metadata` so the planner refinement loop and
 /// downstream UI can render a per-revision provenance badge linking the
@@ -542,10 +554,15 @@ pub struct ProposalReconcileObsoleteEpicResponse {
     pub merged_tasks: Vec<String>,
     /// Target epic closed, or that would be closed in preview.
     pub epics_closed: i64,
-    /// Target-epic tasks force-closed, or open target-epic tasks in preview.
+    /// Target-epic tasks disposed (closed), or that would be disposed in preview.
     pub tasks_closed: i64,
-    /// Running target-epic worker sessions killed, or live sessions in preview.
+    /// Retained for wire compatibility. Proposal disposition never kills sessions
+    /// directly; normal task status-change handling reconciles worker state.
     pub sessions_killed: i64,
+    /// Child-disposition outcomes for the selected epic. Retained findings do
+    /// not make the reconciliation fail.
+    #[serde(default)]
+    pub disposition: ProposalDispositionSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

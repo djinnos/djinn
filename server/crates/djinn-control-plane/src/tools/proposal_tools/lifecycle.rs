@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user::acting_caps;
 use crate::tools::proposal_ops::{
-    ProposalModel, ProposalReconcileObsoleteEpicResponse, ProposalSingleResponse,
+    ProposalDispositionSummary, ProposalModel, ProposalReconcileObsoleteEpicResponse,
+    ProposalSingleResponse,
 };
 use djinn_db::{EpicRepository, ProjectRepository, ProposalRepository, TaskRepository};
 
@@ -47,11 +48,11 @@ pub struct ProposalStopBuildParams {
     /// the build's tasks out of dispatch, leaving epics/tasks/branches in
     /// place), or `unfreeze` (resume a frozen build).
     pub mode: String,
-    /// Why the build is being stopped. Recorded as the force-close reason on
-    /// each torn-down task. Required for `abort`.
+    /// Why the build is being stopped. Recorded with proposal terminal
+    /// disposition activity. Required for `abort`.
     pub reason: Option<String>,
-    /// When true on `abort`, compute and return the blast radius (epics, open
-    /// tasks, running sessions) WITHOUT mutating anything.
+    /// When true on `abort`, classify linked epic children and return their
+    /// disposition outcomes WITHOUT mutating anything.
     pub preview: Option<bool>,
 }
 
@@ -63,9 +64,9 @@ pub struct ProposalReconcileObsoleteEpicParams {
     pub proposal_id: Option<String>,
     /// Epic UUID or short_id to retire from this proposal's graduated epics.
     pub epic_id: String,
-    /// Why obsolete work is being force-closed. Defaults to a reconcile teardown reason.
+    /// Why obsolete work is being reconciled. Defaults to a reconcile reason.
     pub reason: Option<String>,
-    /// When true, compute blast radius without closing tasks, closing/unlinking the epic, or killing sessions.
+    /// When true, classify disposition without closing/unlinking the epic.
     pub preview: Option<bool>,
 }
 
@@ -81,10 +82,15 @@ pub struct ProposalStopBuildResponse {
     pub preview: bool,
     /// Epics torn down (abort) or that would be (preview).
     pub epics_closed: i64,
-    /// Worker tasks force-closed (abort) or open right now (preview).
+    /// Worker tasks disposed (closed) by the parent-disposition matrix.
     pub tasks_closed: i64,
-    /// Running worker sessions killed (abort) or live now (preview).
+    /// Retained for wire compatibility. Proposal disposition never kills
+    /// sessions directly; normal status-change handling reconciles them.
     pub sessions_killed: i64,
+    /// Child-disposition outcomes for all linked epics. Retention findings do
+    /// not cause abort to fail.
+    #[serde(default)]
+    pub disposition: ProposalDispositionSummary,
     pub error: Option<String>,
 }
 
@@ -253,7 +259,7 @@ impl DjinnMcpServer {
 
     /// Stop an in-flight proposal build — the inverse of `proposal_graduate`.
     #[tool(
-        description = "Stop an in-flight proposal build (mode: abort | freeze | unfreeze). `freeze` holds the build's tasks out of dispatch while leaving epics/tasks/branches in place; `unfreeze` resumes. `abort` tears the build down — kills running workers, force-closes every task (deleting branches so GitHub auto-closes their PRs), closes the epics, unlinks them, and reverts the proposal to `approved` so it can be edited and re-graduated. Pass preview=true with mode=abort for a read-only blast-radius (epics, open tasks, running sessions) without mutating. Requires the proposal to be `building` and the engineer role (or admin)."
+        description = "Stop an in-flight proposal build (mode: abort | freeze | unfreeze). Freeze and unfreeze only control dispatch. Abort uses the shared parent-disposition matrix across every linked epic: children are disposed (closed), parked for lead intervention, or retained when another open proposal parent or an external dependent requires it; it closes and unlinks linked epics and reverts the proposal to approved. Preview is read-only and reports the same disposition outcomes. Task status-change machinery reconciles workers, branches, and PRs."
     )]
     pub async fn proposal_stop_build(
         &self,
@@ -269,6 +275,7 @@ impl DjinnMcpServer {
                 epics_closed: 0,
                 tasks_closed: 0,
                 sessions_killed: 0,
+                disposition: ProposalDispositionSummary::default(),
                 error: Some(msg),
             })
         };
@@ -307,6 +314,7 @@ impl DjinnMcpServer {
                         epics_closed: 0,
                         tasks_closed: 0,
                         sessions_killed: 0,
+                        disposition: ProposalDispositionSummary::default(),
                         error: None,
                     }),
                     Err(e) => err(e.to_string()),
@@ -351,6 +359,7 @@ impl DjinnMcpServer {
                 epics_closed: 0,
                 tasks_closed: 0,
                 sessions_killed: 0,
+                disposition: ProposalDispositionSummary::default(),
                 error: Some(msg),
             })
         };
@@ -429,6 +438,7 @@ impl DjinnMcpServer {
                 epics_closed: 0,
                 tasks_closed: 0,
                 sessions_killed: 0,
+                disposition: ProposalDispositionSummary::default(),
                 error: Some(msg),
             })
         };
@@ -477,6 +487,7 @@ impl DjinnMcpServer {
                 epics_closed: graduated.len() as i64,
                 tasks_closed: open_tasks.len() as i64,
                 sessions_killed: live_sessions,
+                disposition: ProposalDispositionSummary::default(),
                 error: None,
             });
         }
@@ -532,6 +543,7 @@ impl DjinnMcpServer {
             epics_closed,
             tasks_closed,
             sessions_killed,
+            disposition: ProposalDispositionSummary::default(),
             error: None,
         })
     }
@@ -565,6 +577,7 @@ impl DjinnMcpServer {
                 epics_closed: 0,
                 tasks_closed: 0,
                 sessions_killed: 0,
+                disposition: ProposalDispositionSummary::default(),
                 error: Some(msg),
             })
         };
@@ -637,6 +650,7 @@ impl DjinnMcpServer {
                 epics_closed: 0,
                 tasks_closed: 0,
                 sessions_killed: 0,
+                disposition: ProposalDispositionSummary::default(),
                 error: Some(format!(
                     "obsolete epic teardown blocked by merged work in {} task(s)",
                     merged_tasks.len()
@@ -671,6 +685,7 @@ impl DjinnMcpServer {
                 epics_closed: 1,
                 tasks_closed: open_tasks.len() as i64,
                 sessions_killed: live_sessions,
+                disposition: ProposalDispositionSummary::default(),
                 error: None,
             });
         }
@@ -722,6 +737,7 @@ impl DjinnMcpServer {
             epics_closed,
             tasks_closed,
             sessions_killed,
+            disposition: ProposalDispositionSummary::default(),
             error: None,
         })
     }
