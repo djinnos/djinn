@@ -246,19 +246,49 @@ pub struct PlannedIndexerCommand {
     pub output_path: PathBuf,
 }
 
+/// Ceiling on `CARGO_BUILD_JOBS` for a SCIP indexer subprocess. Preserves the
+/// historical ADR-050 §3 cap of 4 so a large host can never fan `cargo check`
+/// out past what the warm pipeline was tuned for.
+const MAX_CARGO_BUILD_JOBS: usize = 4;
+
+/// Derive the `CARGO_BUILD_JOBS` value for a SCIP indexer subprocess.
+///
+/// SCIP indexers (notably `rust-analyzer scip`) invoke `cargo check`, which
+/// fans out into a parallel `cc` build for native deps (openssl-sys et al).
+/// The warm Pod is CPU-capped (`warm_cpu_limit`), runs its indexers at
+/// `nice 10`, and runs the Rust indexer concurrently with the scip-typescript
+/// indexers, so hardcoding 4 build jobs on a 2-CPU pod *oversubscribed* the
+/// budget: 4 jobs fighting over 2 throttled CPUs is slower than 2 jobs, and
+/// that contention is one of the causes of the Rust workspace hitting its
+/// wall-clock cap on every warm.
+///
+/// `std::thread::available_parallelism()` reads the process's cgroup CPU quota
+/// on Linux (stable since Rust 1.64; the pinned toolchain is `stable`), so
+/// inside the warm Pod it reflects the container's `warm_cpu_limit` rather than
+/// the node's core count. We cap the result at [`MAX_CARGO_BUILD_JOBS`] to keep
+/// the historical ceiling and fall back to it when detection fails, and floor
+/// at 1 so a mis-detected 0 can never disable parallelism entirely.
+fn cargo_build_jobs() -> String {
+    let jobs = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(MAX_CARGO_BUILD_JOBS)
+        .clamp(1, MAX_CARGO_BUILD_JOBS);
+    jobs.to_string()
+}
+
 impl PlannedIndexerCommand {
     fn build_command(&self) -> Command {
         let mut command = Command::new(&self.binary_path);
         command.current_dir(&self.working_directory);
         command.args(&self.args);
-        // ADR-050 §3 non-negotiable cap: SCIP indexers commonly invoke
-        // `cargo check` which fans out into a parallel `cc` build for
-        // native deps (openssl-sys et al).  Two simultaneous indexer
-        // runs are already serialized by `IndexerLock`, but a single
-        // run can still saturate the host without this cap.  4 jobs is
-        // empirically sufficient to keep `rust-analyzer scip` warm
-        // without melting the box.
-        command.env("CARGO_BUILD_JOBS", "4");
+        // ADR-050 §3 cap: SCIP indexers commonly invoke `cargo check` which
+        // fans out into a parallel `cc` build for native deps (openssl-sys
+        // et al). Two simultaneous indexer runs are already serialized by
+        // `IndexerLock`, but a single run can still saturate the host without
+        // a cap. Derive the job count from the CPU actually available to this
+        // process (cgroup-aware) rather than hardcoding 4 — on the CPU-capped
+        // warm Pod, 4 jobs oversubscribed the quota and made warms slower.
+        command.env("CARGO_BUILD_JOBS", cargo_build_jobs());
         // NOTE: do NOT force `RUSTUP_TOOLCHAIN=stable` here. The image's
         // install-rust.sh installs the `rust-analyzer` component into the
         // project's *pinned* toolchain (derived from rust-toolchain.toml
@@ -310,4 +340,54 @@ pub struct IndexingRun {
     pub commands: Vec<ExecutedIndexerCommand>,
     pub artifacts: Vec<ScipArtifact>,
     pub workspace_statuses: Vec<WorkspaceWarmStatus>,
+}
+
+#[cfg(test)]
+mod build_command_tests {
+    use super::*;
+
+    /// `CARGO_BUILD_JOBS` is derived from available parallelism, floored at 1
+    /// and capped at the historical ADR-050 §3 ceiling of 4. It must always be
+    /// a parseable positive integer within that band so the value passed to
+    /// cargo is never `0`, negative, or over the cap regardless of host CPU.
+    #[test]
+    fn cargo_build_jobs_is_bounded_and_parseable() {
+        let jobs: usize = cargo_build_jobs()
+            .parse()
+            .expect("CARGO_BUILD_JOBS must be a positive integer");
+        assert!(
+            (1..=MAX_CARGO_BUILD_JOBS).contains(&jobs),
+            "expected 1..={MAX_CARGO_BUILD_JOBS} build jobs, got {jobs}"
+        );
+        // It should also match the cgroup-aware detection clamped to the band,
+        // so on the CPU-capped warm Pod it tracks the CPU limit rather than the
+        // node core count.
+        let expected = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(MAX_CARGO_BUILD_JOBS)
+            .clamp(1, MAX_CARGO_BUILD_JOBS);
+        assert_eq!(jobs, expected);
+    }
+
+    /// The built command carries the derived `CARGO_BUILD_JOBS` env override.
+    #[test]
+    fn build_command_sets_cargo_build_jobs_env() {
+        let plan = PlannedIndexerCommand {
+            indexer: SupportedIndexer::RustAnalyzer,
+            binary_path: PathBuf::from("rust-analyzer"),
+            args: vec!["scip".into()],
+            working_directory: PathBuf::from("/tmp"),
+            workspace_root: PathBuf::from("/tmp"),
+            workspace_rel_root: PathBuf::new(),
+            workspace_slug: "root".into(),
+            output_path: PathBuf::from("/tmp/out.scip"),
+        };
+        let command = plan.build_command();
+        let jobs = command
+            .get_envs()
+            .find(|(k, _)| *k == OsStr::new("CARGO_BUILD_JOBS"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(jobs.as_deref(), Some(cargo_build_jobs().as_str()));
+    }
 }
