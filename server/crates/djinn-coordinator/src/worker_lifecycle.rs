@@ -1232,4 +1232,151 @@ mod tests {
         );
         Ok(())
     }
+
+    // ── ResumeLifecycleConfig::resolve tests ──────────────────────
+    // These tests cover proposal `phif` AC 1/3: default-off config,
+    // DB-scoped enablement, and env rollback gate.
+
+    #[test]
+    fn resolve_default_off_when_env_unset_and_db_absent() {
+        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::Unset, None);
+        assert!(
+            !config.enabled,
+            "default-off: env Unset + DB absent must produce disabled resume"
+        );
+        assert!(
+            !config.prefer_checkpoint,
+            "default-off: prefer_checkpoint must be false"
+        );
+        assert_eq!(
+            config.max_checkpoint_age_secs, None,
+            "default-off: max_checkpoint_age_secs must be None"
+        );
+    }
+
+    #[test]
+    fn resolve_default_off_when_env_unset_and_db_disabled() {
+        let db = ResumeLifecycleConfig {
+            enabled: false,
+            prefer_checkpoint: true,
+            max_checkpoint_age_secs: Some(600),
+        };
+        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::Unset, Some(&db));
+        assert!(
+            !config.enabled,
+            "env Unset + DB disabled must stay disabled"
+        );
+    }
+
+    #[test]
+    fn resolve_db_scoped_enablement_when_env_unset() {
+        let db = ResumeLifecycleConfig {
+            enabled: true,
+            prefer_checkpoint: true,
+            max_checkpoint_age_secs: Some(300),
+        };
+        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::Unset, Some(&db));
+        assert!(
+            config.enabled,
+            "env Unset + DB enabled must produce enabled resume"
+        );
+        assert!(
+            config.prefer_checkpoint,
+            "DB prefer_checkpoint must pass through"
+        );
+        assert_eq!(
+            config.max_checkpoint_age_secs,
+            Some(300),
+            "DB max_checkpoint_age_secs must pass through"
+        );
+    }
+
+    #[test]
+    fn resolve_db_scoped_enablement_when_env_true() {
+        let db = ResumeLifecycleConfig {
+            enabled: true,
+            prefer_checkpoint: true,
+            max_checkpoint_age_secs: Some(120),
+        };
+        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::True, Some(&db));
+        assert!(
+            config.enabled,
+            "env True + DB enabled must produce enabled resume"
+        );
+        assert!(config.prefer_checkpoint);
+        assert_eq!(config.max_checkpoint_age_secs, Some(120));
+    }
+
+    #[test]
+    fn resolve_env_true_without_db_defaults_to_enabled() {
+        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::True, None);
+        assert!(
+            config.enabled,
+            "env True + DB absent must enable resume with default fields"
+        );
+        assert!(
+            !config.prefer_checkpoint,
+            "env True without DB: prefer_checkpoint defaults to false"
+        );
+        assert_eq!(config.max_checkpoint_age_secs, None);
+    }
+
+    #[test]
+    fn resolve_env_rollback_suppresses_db_enabled() {
+        // Proposal phif AC 3: explicit env false is a global rollback gate.
+        let db = ResumeLifecycleConfig {
+            enabled: true,
+            prefer_checkpoint: true,
+            max_checkpoint_age_secs: Some(300),
+        };
+        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::False, Some(&db));
+        assert!(
+            !config.enabled,
+            "env False must suppress DB-enabled resume (global rollback gate)"
+        );
+        assert!(
+            !config.prefer_checkpoint,
+            "env False: prefer_checkpoint must be reset to default"
+        );
+        assert_eq!(
+            config.max_checkpoint_age_secs, None,
+            "env False: max_checkpoint_age_secs must be reset to default"
+        );
+    }
+
+    #[test]
+    fn resolve_env_rollback_suppresses_even_db_true_fields() {
+        // Regression: env False returns default(), ignoring all DB fields.
+        let db = ResumeLifecycleConfig {
+            enabled: true,
+            prefer_checkpoint: true,
+            max_checkpoint_age_secs: Some(999),
+        };
+        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::False, Some(&db));
+        assert_eq!(config, ResumeLifecycleConfig::default());
+    }
+
+    // ── ResumeLifecycleEnvFlag::from_value tests ──────────────────
+
+    #[test]
+    fn env_flag_from_value_truthy_variants() {
+        for val in &["1", "true", "True", "TRUE", "yes", "Yes", "YES"] {
+            assert_eq!(
+                ResumeLifecycleEnvFlag::from_value(val),
+                ResumeLifecycleEnvFlag::True,
+                "expected True for value: {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_flag_from_value_falsy_variants() {
+        for val in &["0", "false", "no", "off", "", "garbage", "2"] {
+            assert_eq!(
+                ResumeLifecycleEnvFlag::from_value(val),
+                ResumeLifecycleEnvFlag::False,
+                "expected False for value: {val}"
+            );
+        }
+    }
 }
