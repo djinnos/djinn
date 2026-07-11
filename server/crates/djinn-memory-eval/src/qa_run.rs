@@ -61,6 +61,10 @@ pub struct QaRunRecord {
     pub result_permalinks: Vec<String>,
     /// SHA-256 hex digest of the rendered injected payload.
     pub injected_payload_hash: String,
+    /// Full 2000-character session-start memory payload rendered by
+    /// `format_knowledge_notes`. Phase 2 LLM judge passes consume this exact
+    /// payload; Phase 1 reports/baselines remain separate and deterministic.
+    pub injected_payload: String,
     /// Preview of the first 200 characters of the rendered injected payload.
     pub injected_payload_preview: String,
     /// Whether the gold answer text appears in the rendered 2000-char payload.
@@ -271,6 +275,7 @@ async fn execute_qa_pair(
         gold_rank,
         result_permalinks,
         injected_payload_hash: payload_hash,
+        injected_payload: rendered,
         injected_payload_preview: payload_preview,
         context_recall,
         age_bucket,
@@ -737,6 +742,7 @@ Restart with --reset-sessions.\n\n\
             gold_rank: Some(3),
             result_permalinks: vec!["a".to_string(), "b".to_string(), "c".to_string()],
             injected_payload_hash: "deadbeef".to_string(),
+            injected_payload: "full payload text".to_string(),
             injected_payload_preview: "preview text".to_string(),
             context_recall: false,
             age_bucket: AgeBucket::Days7to30,
