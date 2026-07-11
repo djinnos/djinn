@@ -3,6 +3,7 @@ use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Epic;
 
 use crate::database::Database;
+use crate::repositories::task::{DispositionScope, TaskRepository};
 use crate::{Error, Result};
 
 // Inlined EPIC_COLS projection for each `query_as!(Epic, ...)` call site.
@@ -298,26 +299,199 @@ impl EpicRepository {
 
     pub async fn close(&self, id: &str) -> Result<Epic> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
+
+        // ── Step 1: Classify children (read-only, outside transaction) ──────
+        let scope = DispositionScope::for_epic_close(id);
+        let task_repo = TaskRepository::new(self.db.clone(), self.events.clone());
+        let plan = task_repo.classify_parent_disposition(&scope).await?;
+
+        // ── Step 2: Transactional child mutation + epic close ───────────────
+        let mut tx = self.db.pool().begin().await?;
+
+        // Track post-commit work: (task_id, from_status, disposition_kind)
+        let mut child_mutations: Vec<(String, String, String)> = Vec::new();
+
+        for finding in &plan.findings {
+            if !finding.disposition.applies_change() {
+                continue;
+            }
+
+            // Lock the child row and re-check status hasn't changed.
+            let current_status: Option<String> =
+                sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1 FOR UPDATE")
+                    .bind(&finding.task_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+
+            let current_status = match current_status {
+                Some(s) => s,
+                None => continue,
+            };
+
+            if current_status != finding.status {
+                continue;
+            }
+
+            if finding.disposition.closes() {
+                // Close-ready child: close with close_reason = parent_closed.
+                sqlx::query(
+                    r#"UPDATE tasks SET
+                        status = 'closed',
+                        closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                        close_reason = 'parent_closed',
+                        updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                     WHERE id = $1"#,
+                )
+                .bind(&finding.task_id)
+                .execute(&mut *tx)
+                .await?;
+
+                // Standard status_changed activity row (normal transition evidence).
+                let status_payload = serde_json::json!({
+                    "from_status": finding.status,
+                    "to_status": "closed",
+                    "reason": "parent_closed",
+                });
+                let sc_id = uuid::Uuid::now_v7().to_string();
+                sqlx::query(
+                    "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(&sc_id)
+                .bind(&finding.task_id)
+                .bind("system")
+                .bind("system")
+                .bind("status_changed")
+                .bind(&status_payload)
+                .execute(&mut *tx)
+                .await?;
+
+                // Parent-disposition-specific activity row.
+                let activity_payload = serde_json::json!({
+                    "parent_kind": "epic",
+                    "parent_id": id,
+                    "entry_point": "epic_close",
+                    "from_status": finding.status,
+                    "to_status": "closed",
+                });
+                let activity_id = uuid::Uuid::now_v7().to_string();
+                sqlx::query(
+                    "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(&activity_id)
+                .bind(&finding.task_id)
+                .bind("system")
+                .bind("system")
+                .bind("parent_child_disposed")
+                .bind(&activity_payload)
+                .execute(&mut *tx)
+                .await?;
+
+                child_mutations.push((
+                    finding.task_id.clone(),
+                    finding.status.clone(),
+                    "close".to_owned(),
+                ));
+            } else if finding.disposition.parks() {
+                // In-flight/PR-active child: park to needs_lead_intervention.
+                let park_reason = park_reason_for_status(&finding.status);
+
+                sqlx::query(
+                    r#"UPDATE tasks SET
+                        status = 'needs_lead_intervention',
+                        intervention_count = intervention_count + 1,
+                        last_intervention_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                        close_reason = NULL,
+                        updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                     WHERE id = $1"#,
+                )
+                .bind(&finding.task_id)
+                .execute(&mut *tx)
+                .await?;
+
+                // Standard status_changed activity row (normal transition evidence).
+                let status_payload = serde_json::json!({
+                    "from_status": finding.status,
+                    "to_status": "needs_lead_intervention",
+                    "reason": park_reason,
+                });
+                let sc_id = uuid::Uuid::now_v7().to_string();
+                sqlx::query(
+                    "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(&sc_id)
+                .bind(&finding.task_id)
+                .bind("system")
+                .bind("system")
+                .bind("status_changed")
+                .bind(&status_payload)
+                .execute(&mut *tx)
+                .await?;
+
+                // Parent-disposition-specific activity row.
+                let activity_payload = serde_json::json!({
+                    "parent_kind": "epic",
+                    "parent_id": id,
+                    "entry_point": "epic_close",
+                    "from_status": finding.status,
+                    "to_status": "needs_lead_intervention",
+                    "park_reason": park_reason,
+                });
+                let activity_id = uuid::Uuid::now_v7().to_string();
+                sqlx::query(
+                    "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(&activity_id)
+                .bind(&finding.task_id)
+                .bind("system")
+                .bind("system")
+                .bind("parent_child_parked")
+                .bind(&activity_payload)
+                .execute(&mut *tx)
+                .await?;
+
+                child_mutations.push((
+                    finding.task_id.clone(),
+                    finding.status.clone(),
+                    "park".to_owned(),
+                ));
+            }
+        }
+
+        // Close the epic itself within the same transaction.
+        sqlx::query(
             r#"UPDATE epics SET status = 'closed',
                     closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $1"#,
-            id
         )
-        .execute(self.db.pool())
+        .bind(id)
+        .execute(&mut *tx)
         .await?;
-        let epic: Epic = sqlx::query_as!(
-            Epic,
+
+        let epic: Epic = sqlx::query_as::<_, Epic>(
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
-                    status AS "status!", owner, created_at, updated_at, closed_at,
-                    memory_refs::text AS "memory_refs!", auto_breakdown AS "auto_breakdown!: bool",
+                    status, owner, created_at, updated_at, closed_at,
+                    memory_refs::text, auto_breakdown,
                     originating_adr_id, created_by_user_id
              FROM epics WHERE id = $1"#,
-            id
         )
-        .fetch_one(self.db.pool())
+        .bind(id)
+        .fetch_one(&mut *tx)
         .await?;
+
+        tx.commit().await?;
+
+        // ── Step 3: Post-commit events ─────────────────────────────────────
+        for (task_id, _from_status, _kind) in &child_mutations {
+            if let Some(task) = task_repo.get(task_id).await? {
+                self.events
+                    .send(DjinnEventEnvelope::task_updated(&task, false));
+            }
+        }
 
         self.events.send(DjinnEventEnvelope::epic_updated(&epic));
         // Re-drive wave-1 for any epics that were blocked by this one and are
@@ -1063,6 +1237,17 @@ async fn short_id_exists(pool: &sqlx::PgPool, table: &str, short_id: &str) -> Re
     .bind(short_id)
     .fetch_one(pool)
     .await?)
+}
+
+/// Map a park-eligible child status to its park-reason string.
+///
+/// PR-active statuses (`pr_draft`, `pr_review`) get `parent_closed_pr_active`;
+/// all other park-eligible statuses get `parent_closed_in_flight`.
+fn park_reason_for_status(status: &str) -> &'static str {
+    match status {
+        "pr_draft" | "pr_review" => "parent_closed_pr_active",
+        _ => "parent_closed_in_flight",
+    }
 }
 
 #[cfg(test)]

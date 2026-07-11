@@ -19,6 +19,12 @@ mod reads;
 mod status;
 mod writes;
 
+// Re-export parent-disposition types so `EpicRepository::close` can
+// construct the scope and inspect the classification plan.
+pub use parent_disposition::{
+    ChildDisposition, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
+};
+
 // ── Query / result types ──────────────────────────────────────────────────────
 
 /// Filters and pagination for [`TaskRepository::list_filtered`].
