@@ -1,6 +1,7 @@
 use async_stream::stream;
 use futures::StreamExt;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
@@ -14,20 +15,47 @@ use super::request::AnthropicProvider;
 
 // ─── SSE parsing helpers ──────────────────────────────────────────────────────
 
-/// State machine for accumulating a streaming tool use block.
+/// State for content blocks that complete at a later `content_block_stop`.
+///
+/// Anthropic may interleave deltas for different content indices, so all
+/// pending blocks are keyed by their wire index rather than by "last block".
 #[derive(Default)]
-pub(crate) struct ToolAcc {
-    id: String,
-    name: String,
-    input_json: String,
+pub(crate) struct ContentBlockAcc {
+    blocks: BTreeMap<u64, PendingContentBlock>,
+}
+
+#[cfg(test)]
+impl ContentBlockAcc {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+}
+
+enum PendingContentBlock {
+    ToolUse {
+        id: String,
+        name: String,
+        input_json: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+    },
+    RedactedThinking {
+        data: String,
+    },
+    Unknown {
+        content_type: String,
+        extra: serde_json::Map<String, Value>,
+    },
 }
 
 /// Parse a single Anthropic SSE event (event_type + data JSON).
-/// Mutates `tool_acc` in place; caller owns it across calls.
+/// Mutates `block_acc` in place; caller owns it across calls.
 pub(crate) fn parse_anthropic_event(
     event_type: &str,
     data: &str,
-    tool_acc: &mut Option<ToolAcc>,
+    block_acc: &mut ContentBlockAcc,
     input_tokens: &mut u32,
     cache_read: &mut u32,
     cache_write: &mut u32,
@@ -63,38 +91,64 @@ pub(crate) fn parse_anthropic_event(
         "content_block_start" => {
             // {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"...","name":"..."}}
             if let Ok(v) = serde_json::from_str::<Value>(data) {
-                let block_type = v
-                    .pointer("/content_block/type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-                match block_type {
-                    "tool_use" => {
-                        let id = v
-                            .pointer("/content_block/id")
-                            .and_then(|x| x.as_str())
+                let (Some(index), Some(content_block)) = (
+                    v.get("index").and_then(Value::as_u64),
+                    v.get("content_block").and_then(Value::as_object),
+                ) else {
+                    return events;
+                };
+                let pending = match content_block
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                {
+                    "tool_use" => PendingContentBlock::ToolUse {
+                        id: content_block
+                            .get("id")
+                            .and_then(Value::as_str)
                             .unwrap_or("")
-                            .to_string();
-                        let name = v
-                            .pointer("/content_block/name")
-                            .and_then(|x| x.as_str())
+                            .to_string(),
+                        name: content_block
+                            .get("name")
+                            .and_then(Value::as_str)
                             .unwrap_or("")
-                            .to_string();
-                        *tool_acc = Some(ToolAcc {
-                            id,
-                            name,
-                            input_json: String::new(),
-                        });
-                    }
-                    "thinking" => {
-                        // Extended thinking block — nothing to accumulate at start.
-                    }
-                    _ => {}
-                }
+                            .to_string(),
+                        input_json: String::new(),
+                    },
+                    "thinking" => PendingContentBlock::Thinking {
+                        thinking: content_block
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        signature: content_block
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    },
+                    "redacted_thinking" => PendingContentBlock::RedactedThinking {
+                        data: content_block
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    },
+                    content_type => PendingContentBlock::Unknown {
+                        content_type: content_type.to_string(),
+                        extra: content_block
+                            .iter()
+                            .filter(|(key, _)| key.as_str() != "type")
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect(),
+                    },
+                };
+                block_acc.blocks.insert(index, pending);
             }
         }
 
         "content_block_delta" => {
             if let Ok(v) = serde_json::from_str::<Value>(data) {
+                let index = v.get("index").and_then(Value::as_u64).unwrap_or(u64::MAX);
                 let delta_type = v
                     .pointer("/delta/type")
                     .and_then(|t| t.as_str())
@@ -118,32 +172,87 @@ pub(crate) fn parse_anthropic_event(
                             .unwrap_or("")
                             .to_string();
                         if !thinking.is_empty() {
-                            events.push(StreamEvent::Thinking(thinking));
+                            events.push(StreamEvent::Thinking(thinking.clone()));
+                        }
+                        if let Some(PendingContentBlock::Thinking {
+                            thinking: accumulated,
+                            ..
+                        }) = block_acc.blocks.get_mut(&index)
+                        {
+                            accumulated.push_str(&thinking);
+                        }
+                    }
+                    "signature_delta" => {
+                        if let Some(PendingContentBlock::Thinking { signature, .. }) =
+                            block_acc.blocks.get_mut(&index)
+                            && let Some(delta) =
+                                v.pointer("/delta/signature").and_then(Value::as_str)
+                        {
+                            signature.get_or_insert_with(String::new).push_str(delta);
                         }
                     }
                     "input_json_delta" => {
-                        if let Some(acc) = tool_acc.as_mut()
+                        if let Some(PendingContentBlock::ToolUse { input_json, .. }) =
+                            block_acc.blocks.get_mut(&index)
                             && let Some(frag) =
                                 v.pointer("/delta/partial_json").and_then(|x| x.as_str())
                         {
-                            acc.input_json.push_str(frag);
+                            input_json.push_str(frag);
                         }
                     }
-                    _ => {}
+                    _ => {
+                        // Unknown block schemas have no typed delta representation.
+                        // Keep provider-owned fields without overwriting start data.
+                        if let Some(PendingContentBlock::Unknown { extra, .. }) =
+                            block_acc.blocks.get_mut(&index)
+                            && let Some(delta) = v.get("delta").and_then(Value::as_object)
+                        {
+                            for (key, value) in delta {
+                                if key != "type" {
+                                    extra.entry(key.clone()).or_insert_with(|| value.clone());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
         "content_block_stop" => {
-            // If we were accumulating a tool use, emit it now
-            if let Some(acc) = tool_acc.take() {
-                let input = serde_json::from_str(&acc.input_json)
-                    .unwrap_or(Value::Object(Default::default()));
-                events.push(StreamEvent::Delta(ContentBlock::ToolUse {
-                    id: acc.id,
-                    name: acc.name,
-                    input,
-                }));
+            if let Ok(v) = serde_json::from_str::<Value>(data)
+                && let Some(index) = v.get("index").and_then(Value::as_u64)
+                && let Some(pending) = block_acc.blocks.remove(&index)
+            {
+                let block = match pending {
+                    PendingContentBlock::ToolUse {
+                        id,
+                        name,
+                        input_json,
+                    } => ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input: serde_json::from_str(&input_json)
+                            .unwrap_or(Value::Object(Default::default())),
+                    },
+                    PendingContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } => ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    },
+                    PendingContentBlock::RedactedThinking { data } => {
+                        ContentBlock::RedactedThinking { data }
+                    }
+                    PendingContentBlock::Unknown {
+                        content_type,
+                        extra,
+                    } => ContentBlock::Unknown {
+                        content_type,
+                        extra,
+                    },
+                };
+                events.push(StreamEvent::Delta(block));
             }
         }
 
@@ -288,7 +397,7 @@ impl LlmProvider for AnthropicProvider {
 
             let out: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>> =
                 Box::pin(stream! {
-                    let mut tool_acc: Option<ToolAcc> = None;
+                    let mut block_acc = ContentBlockAcc::default();
                     let mut input_tokens: u32 = 0;
                     let mut cache_read: u32 = 0;
                     let mut cache_write: u32 = 0;
@@ -323,7 +432,7 @@ impl LlmProvider for AnthropicProvider {
                                         yield Err(anyhow::Error::new(class).context(msg));
                                         return;
                                     }
-                                    for event in parse_anthropic_event(&event_type, &line, &mut tool_acc, &mut input_tokens, &mut cache_read, &mut cache_write) {
+                                    for event in parse_anthropic_event(&event_type, &line, &mut block_acc, &mut input_tokens, &mut cache_read, &mut cache_write) {
                                         if matches!(event, StreamEvent::Done) {
                                             seen_message_stop = true;
                                         }
