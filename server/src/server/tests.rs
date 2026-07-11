@@ -14,6 +14,8 @@ mod misc;
 mod oauth;
 #[path = "tests/router.rs"]
 mod router;
+#[path = "tests/startup_reconnectability.rs"]
+mod startup_reconnectability;
 #[path = "tests/tool_schemas.rs"]
 mod tool_schemas;
 #[path = "tests/usage_analytics.rs"]
