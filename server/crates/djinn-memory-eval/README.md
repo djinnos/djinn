@@ -276,12 +276,31 @@ cargo test -p djinn-memory-eval
 | Fixture snapshot & baseline  | 77sm  | ✅ done        |
 | CI gate wiring & final docs  | 1tk3  | ✅ done        |
 
-## Phase 2 (out of scope)
+## Phase 2 (nightly non-gating QA judge)
 
-Phase 2 will introduce a **nightly non-gating LLM judge** with cost
-attribution and agreement metrics.  That work lives in epic `ayr9` and
-is explicitly excluded from Phase 1 deliverables.  Phase 1 is the first
-shippable unit and must stand alone.
+Phase 2 adds a **nightly non-gating LLM judge** with cost attribution and dual-judge agreement metrics. It lives in epic `ayr9` and is now wired alongside Phase 1 as a separate, non-required workflow. Phase 1 remains the first shippable unit and must stand alone; Phase 2 may only use LLM calls in nightly or manual contexts.
+
+Phase 2 docs are maintained in the [Phase 2 runbook](docs/phase2-runbook.md). Key points:
+
+- **Non-gating only**: the workflow is triggered by `schedule` or `workflow_dispatch` and is never a `pull_request` or `merge_queue` required check.
+- **Credentialed model slot**: every judge LLM call must use a credentialed model slot; there is no anonymous or default-owner fallback (ojrx lesson).
+- **Dual judge passes**: every QA pair is graded twice, doubling the attributable cost.
+- **Inter-judge agreement**: the agreement rate is a rubric-quality/variance signal; Phase 2 remains non-gating until a documented threshold is sustained.
+- **Adjacent artifacts**: `target/memory-eval/phase2-qa-report.json` and `target/memory-eval/phase2-qa-summary.md` are produced separately from Phase 1 reports and baselines.
+
+### Phase 2 CLI commands
+
+```bash
+# Deterministic QA retrieval/injection capture (no LLM, no network)
+cargo run -p djinn-memory-eval -- qa-run
+
+# Dual-pass LLM judge (requires credentialed model slot; nightly/manual only)
+export DJINN_MEMORY_QA_JUDGE_MODEL="<provider>/<model>"
+export DJINN_TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5433/postgres"
+cargo run -p djinn-memory-eval -- qa-judge
+```
+
+See [docs/phase2-runbook.md](docs/phase2-runbook.md) for full details on cost attribution, failure handling, and separation from Phase 1 baselines.
 
 ## Fixture mining and regeneration
 

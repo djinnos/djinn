@@ -1,0 +1,164 @@
+name: Memory QA Nightly
+
+# Nightly, non-gating Phase 2 memory QA judge.
+#
+# This workflow is intentionally NOT part of the required PR/merge-queue
+# quality gate. It runs on a schedule and on manual dispatch only. It may fail
+# because of missing provider credentials or model availability; that failure
+# is surfaced in artifacts and the job summary, but it never blocks merges.
+#
+# The job uses the real Postgres :5433 test fixture path and the same DB setup
+# as the Phase 1 memory-eval gate, but it only runs the Phase 2 QA judge path
+# (dual-pass LLM judge) which is gating-incompatible by design.
+
+on:
+  schedule:
+    # 06:17 UTC every day — off-peak, avoids the top of the hour.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      judge_model:
+        description: "Optional model slot for the dual judge passes (env override)"
+        required: false
+        default: ""
+      qa_run_only:
+        description: "If 'true', run the deterministic QA retrieval/injection capture only and skip the LLM judge"
+        required: false
+        default: "false"
+
+concurrency:
+  group: memory-qa-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_BUILD_DIR: target
+  RUSTC_WRAPPER: ""
+  RUSTFLAGS: "-D warnings"
+  SQLX_OFFLINE: "true"
+
+jobs:
+  memory-qa-phase2:
+    name: Phase 2 Memory QA Judge
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    # This job is NEVER a required check. It is skipped on PR/merge-queue
+    # events; it only runs on schedule or manual dispatch.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    env:
+      # Optional model override from manual dispatch. When empty, the judge
+      # command uses the default configured memory QA judge model slot.
+      DJINN_MEMORY_QA_JUDGE_MODEL: ${{ github.event.inputs.judge_model || '' }}
+      DJINN_MEMORY_QA_SKIP_JUDGE: ${{ github.event.inputs.qa_run_only == 'true' && '1' || '' }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: djinn
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup toolchain install
+        working-directory: server
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-quality
+          cache-on-failure: true
+          cache-all-crates: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+
+      - name: Apply djinn-db migrations
+        working-directory: server/crates/djinn-db
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
+        run: sqlx migrate run --source migrations_postgres
+
+      - name: Build Postgres test template
+        env:
+          PGPASSWORD: postgres
+        run: |
+          until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
+          cd crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+
+      - name: Create test vault key
+        run: |
+          mkdir -p /var/tmp/djinn-test-vault
+          openssl rand -out /var/tmp/djinn-test-vault/vault.key 32
+          chmod 600 /var/tmp/djinn-test-vault/vault.key
+
+      - name: Validate fixtures
+        run: cargo run -p djinn-memory-eval -- validate-fixtures
+
+      # Run the deterministic retrieval/injection capture (no LLM, no network).
+      # This produces target/memory-eval/phase2-qa-report.json without judge data.
+      - name: Run Phase 2 QA retrieval/injection capture
+        id: qa_run
+        env:
+          DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
+        run: cargo run -p djinn-memory-eval -- qa-run
+
+      # Run the dual-pass LLM judge when not explicitly skipped. This is the
+      # only credentialed, provider-dependent step. Missing credentials or a
+      # provider error are surfaced as non-gating nightly results.
+      - name: Run Phase 2 dual-pass LLM judge
+        id: qa_judge
+        if: env.DJINN_MEMORY_QA_SKIP_JUDGE != '1'
+        env:
+          DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
+          # The judge command must use a credentialed model slot. Do NOT
+          # provide a default API key here; if the slot is not configured,
+          # the judge will fail with a clear error and the workflow will
+          # publish the failure as a non-gating nightly result.
+        run: cargo run -p djinn-memory-eval -- qa-judge
+        # Continue on failure so the run remains non-gating and artifacts are
+        # still uploaded even when the judge is unavailable.
+        continue-on-error: true
+
+      - name: Upload Phase 2 QA artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-qa-phase2-report
+          path: |
+            server/target/memory-eval/phase2-qa-report.json
+            server/target/memory-eval/phase2-qa-summary.md
+          # The judge may not have produced these files if it was skipped or
+          # the QA run produced no pairs. Treat absent files as a warning, not
+          # an error, because the job is non-gating and informational.
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Write Phase 2 job summary
+        if: always()
+        run: |
+          SUMMARY="target/memory-eval/phase2-qa-summary.md"
+          if [[ -f "$SUMMARY" ]]; then
+            cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No Phase 2 QA summary was generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ "${{ steps.qa_judge.outcome }}" == "skipped" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Judge step was skipped (qa_run_only=true)." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.qa_judge.outcome }}" == "failure" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "⚠️ Judge step failed; this is a non-gating nightly result. Review the uploaded artifacts and logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
