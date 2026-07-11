@@ -57,8 +57,6 @@ pub mod events;
 pub mod file_time;
 pub mod github_error_render;
 pub mod output_stash;
-pub(crate) mod preapproval_gate;
-pub use preapproval_gate::run_arbiter_preapproval_gate;
 
 /// Terminalize the worker's in-flight attempt (and record a durable `reopened`
 /// marker) for a supervisor-driven rework reopen that the PR poller's

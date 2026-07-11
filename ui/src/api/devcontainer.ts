@@ -59,11 +59,37 @@ export interface DevcontainerStatus {
    * Derived warm-pipeline status for the banner row:
    * - `pending`: no warm has run (image not yet ready).
    * - `running`: image is ready; warm Job should be in flight or imminent.
-   * - `ready`: warm completed at least once (`graph_warmed_at` is set).
-   * - `failed`: image build failed, warm cannot run.
+   * - `ready`: warm completed cleanly for every workspace.
+   * - `warning`: a non-fatal graph-cache shrink backstop fired; cache is
+   *   still fresh but operators should inspect `workspace_warm_statuses`.
+   * - `degraded`: the overall graph warmed but at least one workspace is
+   *   `failed`/`timed_out` (partial success — usable but incomplete). The
+   *   failing workspaces are listed in `workspace_warm_statuses`.
+   * - `failed`: image build failed (no warm possible), or a workspace
+   *   failed/timed out with no successful warm at all.
    */
-  graph_warm_status: "pending" | "running" | "ready" | "failed" | string;
+  graph_warm_status:
+    | "pending"
+    | "running"
+    | "ready"
+    | "warning"
+    | "degraded"
+    | "failed"
+    | string;
+  /**
+   * Per-workspace warm results, sourced from the durable
+   * `project_workspace_graph` rows. Entries with `failed`/`timed_out`
+   * explain which workspace did not produce a SCIP artifact.
+   */
+  workspace_warm_statuses?: WorkspaceWarmStatusEntry[];
   error?: string | null;
+}
+
+export interface WorkspaceWarmStatusEntry {
+  workspace_slug: string;
+  status: "ready" | "warming" | "failed" | "timed_out" | string;
+  commit_sha?: string | null;
+  warmed_at?: string | null;
 }
 
 export interface RetriggerImageBuildResponse {
