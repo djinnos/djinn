@@ -8,9 +8,9 @@ use djinn_core::models::task_attempt::TaskAttemptPromptSummary;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
-    COMBINED_BRIEF_TOTAL_CHARS, build_reviewer_diff_context, build_role_code_graph_context,
-    derive_task_scope_paths, extract_worker_context, format_attempt_history,
-    format_knowledge_notes, recent_feedback,
+    COMBINED_BRIEF_TOTAL_CHARS, NotePackDisposition, build_reviewer_diff_context,
+    build_role_code_graph_context, derive_task_scope_paths, extract_worker_context,
+    format_attempt_history, pack_knowledge_notes, recent_feedback,
 };
 use crate::actors::slot::lifecycle::attempt_context;
 use crate::context::AgentContext;
@@ -376,7 +376,25 @@ async fn load_epic_context(
     Some(ctx_lines.join("\n"))
 }
 
+/// Production confidence threshold for knowledge-note injection.
+const KNOWLEDGE_MIN_CONFIDENCE: f64 = 0.3;
+
+/// Production injection limit (top-K) for knowledge notes.
+const KNOWLEDGE_INJECTION_LIMIT: usize = 10;
+
+/// Character budget for the rendered knowledge-notes prompt section.
+const KNOWLEDGE_BUDGET_CHARS: usize = 2000;
+
+/// Note types queried for knowledge-context injection.
+const KNOWLEDGE_NOTE_TYPES: &[&str] = &["pattern", "pitfall", "case"];
+
 /// Load knowledge context from scope-matched notes. Returns None on error/empty.
+///
+/// Instruments retrieval with a fail-open `RetrievalTraceEntryPoint::LoadKnowledgeContext`
+/// trace: fetches the capped trace candidate universe alongside the production query,
+/// classifies every candidate deterministically, and persists one trace row per call.
+/// Trace persistence errors are logged and swallowed — they never change the returned
+/// knowledge context or fail the prompt assembly.
 async fn load_knowledge_context(
     task: &Task,
     epic_context: Option<&str>,
@@ -384,26 +402,338 @@ async fn load_knowledge_context(
 ) -> Option<String> {
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_paths = derive_task_scope_paths(task, epic_context);
-    match note_repo
-        .query_by_scope_overlap(
+
+    let fetch_start = tokio::time::Instant::now();
+
+    // Fetch the production result set (unchanged semantics) and the capped trace
+    // candidate universe concurrently. The production query is authoritative for
+    // prompt output; the trace candidate query provides the full universe for
+    // classification.
+    let (production_result, trace_candidates_result) = tokio::join!(
+        note_repo.query_by_scope_overlap(
             &task.project_id,
             &task_paths,
-            &["pattern", "pitfall", "case"],
-            0.3,
-            10,
-        )
-        .await
-    {
-        Ok(notes) if !notes.is_empty() => Some(format_knowledge_notes(&notes, 2000)),
-        Ok(_) => None,
+            KNOWLEDGE_NOTE_TYPES,
+            KNOWLEDGE_MIN_CONFIDENCE,
+            KNOWLEDGE_INJECTION_LIMIT,
+        ),
+        note_repo.query_by_scope_overlap_trace_candidates(
+            &task.project_id,
+            &task_paths,
+            KNOWLEDGE_NOTE_TYPES,
+            djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize,
+        ),
+    );
+    let candidate_fetch_ms = fetch_start.elapsed().as_millis() as i64;
+
+    let notes = match production_result {
+        Ok(notes) => notes,
         Err(e) => {
             tracing::debug!(
                 task_id = %task.short_id,
                 error = %e,
                 "Lifecycle: failed to query knowledge context"
             );
-            None
+            // Even on production-query error, attempt to persist a trace with the
+            // candidates we have (if any) classifying them as search_error.
+            if let Ok(ref candidates) = trace_candidates_result {
+                let error_candidates = classify_knowledge_candidates_for_error(candidates);
+                let cap_exceeded = candidates.len()
+                    >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
+                persist_knowledge_trace(
+                    task,
+                    &task_paths,
+                    &error_candidates,
+                    0,
+                    KnowledgeTraceDurations {
+                        candidate_fetch_ms,
+                        classify_ms: 0,
+                        prompt_pack_ms: 0,
+                        persist_ms: 0,
+                    },
+                    cap_exceeded,
+                    &app_state.db,
+                )
+                .await;
+            }
+            return None;
         }
+    };
+
+    let classification_start = tokio::time::Instant::now();
+    let trace_candidates = trace_candidates_result.unwrap_or_default();
+    let candidate_cap_exceeded = trace_candidates.len()
+        >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
+
+    // Build the set of production note IDs (those that passed confidence + top-K)
+    // for fast membership lookup during classification.
+    let production_ids: std::collections::HashSet<&str> =
+        notes.iter().map(|n| n.id.as_str()).collect();
+
+    // Classify each trace candidate deterministically.
+    let classified = classify_knowledge_candidates(&trace_candidates, &production_ids);
+    let classification_ms = classification_start.elapsed().as_millis() as i64;
+
+    // Render the prompt using the packed API (byte-identical to format_knowledge_notes).
+    let pack_start = tokio::time::Instant::now();
+    let packed = pack_knowledge_notes(&notes, KNOWLEDGE_BUDGET_CHARS);
+    let pack_ms = pack_start.elapsed().as_millis() as i64;
+
+    // Apply budget-pruned classification from packing outcomes.
+    let trace_candidates_final = apply_budget_outcomes(classified, &packed, &notes);
+    let estimated_injected_tokens = packed.total_injected_tokens as i32;
+
+    let rendered = if notes.is_empty() {
+        None
+    } else {
+        Some(packed.rendered)
+    };
+
+    // Persist the trace (fail-open). Measure the persist phase separately.
+    let persist_start = tokio::time::Instant::now();
+    persist_knowledge_trace(
+        task,
+        &task_paths,
+        &trace_candidates_final,
+        estimated_injected_tokens,
+        KnowledgeTraceDurations {
+            candidate_fetch_ms,
+            classify_ms: classification_ms,
+            prompt_pack_ms: pack_ms,
+            persist_ms: persist_start.elapsed().as_millis() as i64,
+        },
+        candidate_cap_exceeded,
+        &app_state.db,
+    )
+    .await;
+
+    rendered
+}
+
+/// Classify trace candidates into `TraceCandidate` DTOs with deterministic outcomes.
+///
+/// Classification rules (applied in priority order):
+/// 1. Confidence below `KNOWLEDGE_MIN_CONFIDENCE` → `min_confidence`.
+/// 2. Passed confidence but outside production top-K → `not_top_k`.
+/// 3. In the production set → `Injected` (pending budget classification).
+///
+/// Budget pruning and dedupe are applied later by [`apply_budget_outcomes`] once
+/// the packed-note outcomes are available.
+fn classify_knowledge_candidates(
+    candidates: &[djinn_db::repositories::note::ScopeOverlapTraceCandidate],
+    production_ids: &std::collections::HashSet<&str>,
+) -> Vec<djinn_db::repositories::retrieval_trace::TraceCandidate> {
+    use djinn_db::repositories::retrieval_trace::{
+        CandidateOutcome, SkippedReason, TraceCandidate,
+    };
+
+    candidates
+        .iter()
+        .map(|c| {
+            let (outcome, skipped_reason) = if c.confidence < KNOWLEDGE_MIN_CONFIDENCE {
+                (
+                    CandidateOutcome::Skipped,
+                    Some(SkippedReason::MinConfidence),
+                )
+            } else if !production_ids.contains(c.id.as_str()) {
+                (CandidateOutcome::Skipped, Some(SkippedReason::NotTopK))
+            } else {
+                (CandidateOutcome::Injected, None)
+            };
+            TraceCandidate {
+                note_id: c.id.clone(),
+                permalink: Some(c.permalink.clone()),
+                title: Some(c.title.clone()),
+                outcome,
+                rank: Some(c.rank as i32),
+                confidence: Some(c.confidence),
+                skipped_reason,
+                source: Some("scope_overlap".to_string()),
+                scope: Some(serde_json::json!({
+                    "folder": c.folder,
+                    "note_type": c.note_type,
+                    "scope_paths": c.scope_paths,
+                })),
+            }
+        })
+        .collect()
+}
+
+/// Classify all candidates as `search_error` — used when the production query fails
+/// but the trace candidate fetch succeeded.
+fn classify_knowledge_candidates_for_error(
+    candidates: &[djinn_db::repositories::note::ScopeOverlapTraceCandidate],
+) -> Vec<djinn_db::repositories::retrieval_trace::TraceCandidate> {
+    use djinn_db::repositories::retrieval_trace::{
+        CandidateOutcome, SkippedReason, TraceCandidate,
+    };
+
+    candidates
+        .iter()
+        .map(|c| TraceCandidate {
+            note_id: c.id.clone(),
+            permalink: Some(c.permalink.clone()),
+            title: Some(c.title.clone()),
+            outcome: CandidateOutcome::Skipped,
+            rank: Some(c.rank as i32),
+            confidence: Some(c.confidence),
+            skipped_reason: Some(SkippedReason::SearchError),
+            source: Some("scope_overlap".to_string()),
+            scope: Some(serde_json::json!({
+                "folder": c.folder,
+                "note_type": c.note_type,
+                "scope_paths": c.scope_paths,
+            })),
+        })
+        .collect()
+}
+
+/// Apply budget-pruned outcomes from the packed notes to the classified candidates.
+///
+/// Candidates initially classified as `Injected` are reclassified to `BudgetPruned`
+/// if the packing outcome for the corresponding note is `BudgetPruned`.
+/// Deduplication: if multiple injected candidates resolve to the same permalink
+/// (shouldn't happen in practice but handled defensively), the first wins and
+/// subsequent ones become `Dedupe`.
+fn apply_budget_outcomes(
+    mut candidates: Vec<djinn_db::repositories::retrieval_trace::TraceCandidate>,
+    packed: &crate::actors::slot::helpers::PackedKnowledgeNotes,
+    notes: &[djinn_memory::Note],
+) -> Vec<djinn_db::repositories::retrieval_trace::TraceCandidate> {
+    use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
+
+    // Build a lookup from note permalink → pack disposition.
+    let mut disposition_by_permalink: std::collections::HashMap<&str, NotePackDisposition> =
+        std::collections::HashMap::new();
+    for outcome in &packed.outcomes {
+        disposition_by_permalink
+            .entry(&outcome.permalink)
+            .or_insert(outcome.disposition.clone());
+    }
+
+    // Build a set of note IDs → permalink for lookup.
+    let id_to_permalink: std::collections::HashMap<&str, &str> = notes
+        .iter()
+        .map(|n| (n.id.as_str(), n.permalink.as_str()))
+        .collect();
+
+    // Track seen permalinks among injected candidates for dedupe.
+    let mut seen_injected: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for candidate in &mut candidates {
+        if candidate.outcome != CandidateOutcome::Injected {
+            continue;
+        }
+        // Look up the permalink for this note ID.
+        let permalink = candidate.permalink.as_deref().unwrap_or_else(|| {
+            id_to_permalink
+                .get(candidate.note_id.as_str())
+                .copied()
+                .unwrap_or("")
+        });
+
+        // Check dedupe first.
+        if !permalink.is_empty() && !seen_injected.insert(permalink.to_string()) {
+            candidate.outcome = CandidateOutcome::Skipped;
+            candidate.skipped_reason = Some(SkippedReason::Dedupe);
+            continue;
+        }
+
+        // Check budget pruning.
+        if let Some(&NotePackDisposition::BudgetPruned) = disposition_by_permalink.get(permalink) {
+            candidate.outcome = CandidateOutcome::Skipped;
+            candidate.skipped_reason = Some(SkippedReason::BudgetPruned);
+        }
+    }
+
+    candidates
+}
+
+/// Per-phase durations (milliseconds) for the knowledge-context retrieval trace.
+struct KnowledgeTraceDurations {
+    candidate_fetch_ms: i64,
+    classify_ms: i64,
+    prompt_pack_ms: i64,
+    persist_ms: i64,
+}
+
+/// Persist a `LoadKnowledgeContext` retrieval trace row. Fail-open: logs and
+/// swallows all errors, never propagating them to the caller.
+async fn persist_knowledge_trace(
+    task: &Task,
+    task_paths: &[String],
+    candidates: &[djinn_db::repositories::retrieval_trace::TraceCandidate],
+    estimated_injected_tokens: i32,
+    durations: KnowledgeTraceDurations,
+    candidate_cap_exceeded: bool,
+    db: &djinn_db::Database,
+) {
+    use djinn_db::repositories::retrieval_trace::{
+        CreateRetrievalTraceParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
+        validate_candidates,
+    };
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    // Validate candidate invariants before serialization.
+    if let Err(e) = validate_candidates(candidates) {
+        tracing::debug!(
+            task_id = %task.short_id,
+            error = %e,
+            "Lifecycle: retrieval trace candidate validation failed; skipping trace persistence"
+        );
+        return;
+    }
+
+    let candidates_json = match serde_json::to_value(candidates) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(
+                task_id = %task.short_id,
+                error = %e,
+                "Lifecycle: failed to serialize retrieval trace candidates; skipping trace persistence"
+            );
+            return;
+        }
+    };
+
+    let trigger = serde_json::json!({
+        "shape": "scope_paths",
+        "task_paths": task_paths,
+    });
+    let durations_ms = serde_json::json!({
+        "candidate_fetch_ms": durations.candidate_fetch_ms,
+        "classify_ms": durations.classify_ms,
+        "prompt_pack_ms": durations.prompt_pack_ms,
+        "persist_ms": durations.persist_ms,
+    });
+
+    let cap = djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP;
+
+    let repo = RetrievalTraceRepository::new(db.clone());
+    let params = CreateRetrievalTraceParams {
+        project_id: &task.project_id,
+        session_id: None,
+        task_run_id: None,
+        task_id: Some(&task.id),
+        entry_point: RetrievalTraceEntryPoint::LoadKnowledgeContext,
+        trigger: Some(&trigger),
+        candidates: &candidates_json,
+        candidate_cap: cap,
+        candidate_cap_exceeded,
+        sampling_metadata: None,
+        durations_ms: &durations_ms,
+        estimated_injected_tokens,
+    };
+
+    if let Err(e) = repo.insert(params).await {
+        tracing::debug!(
+            task_id = %task.short_id,
+            error = %e,
+            "Lifecycle: failed to persist retrieval trace for knowledge context; continuing (fail-open)"
+        );
     }
 }
 
@@ -943,3 +1273,7 @@ mod attempt_history_tests;
 #[cfg(test)]
 #[path = "ci_directive_tests.rs"]
 mod ci_directive_tests;
+
+#[cfg(test)]
+#[path = "knowledge_trace_tests.rs"]
+mod knowledge_trace_tests;

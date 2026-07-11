@@ -637,7 +637,7 @@ mod tests {
     fn empty_result_trace_path_classifies_below_threshold_as_min_confidence() {
         use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
 
-        let candidates = vec![
+        let candidates = [
             mk_scope_trace_candidate("note-below", 1, 0.10, "pitfall", "[]"),
             mk_scope_trace_candidate("note-above", 2, 0.85, "pattern", "[]"),
         ];
