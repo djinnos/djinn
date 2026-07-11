@@ -65,7 +65,7 @@ pub use repositories::{
     },
     events::EventsRepository,
     git_settings::GitSettingsRepository,
-    image::{Image, ImageRepository, ImageStatus},
+    image::{Image, ImageRepository, ImageStatus, SelectedCatalogImage},
     liveness::{
         ClaimExtensionRecord, CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository,
     },

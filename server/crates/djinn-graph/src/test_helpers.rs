@@ -24,6 +24,31 @@ use crate::repo_graph::{
     edge_confidence_floor, edge_weight_for,
 };
 
+/// Process-global lock serializing every test that mutates process-wide
+/// environment variables consumed by the SCIP indexer / canonical-graph
+/// pipeline — `PATH`, `DJINN_TEST_SCIP_FIXTURE`, `DJINN_GRAPH_OUT_OF_CORE*`,
+/// the `*CACHE_REUSE_ENABLED` toggles, and `DJINN_SCIP_CACHE_DIR`.
+///
+/// `std::env::{set_var,remove_var}` mutate shared process state, and the
+/// indexer spawns subprocesses that inherit `PATH`. Under Cargo's parallel
+/// test threads, two such tests can clobber each other's env mid-flight:
+/// one test's `PATH` restore drops the fake-`rust-analyzer` bin dir while a
+/// sibling's indexer is still resolving it, so the spawn falls back to the
+/// real (or missing) binary and the pipeline reports "no index produced".
+/// Every test that touches any of these vars MUST hold this single lock for
+/// its whole body so the mutations are fully serialized (a per-var or
+/// per-module lock is NOT enough — the vars are shared across modules).
+pub(crate) static PIPELINE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`PIPELINE_ENV_LOCK`], transparently recovering from a poisoned
+/// mutex so one panicking env-mutating test does not cascade into spurious
+/// failures across every other test that shares the lock.
+pub(crate) fn lock_pipeline_env() -> std::sync::MutexGuard<'static, ()> {
+    PIPELINE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Open a fresh test database (isolated Dolt branch via
 /// `Database::open_in_memory`).
 pub(crate) fn create_test_db() -> Database {
