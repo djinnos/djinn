@@ -908,6 +908,41 @@ pub fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Opti
     Some(out)
 }
 
+/// Format the canonical, parseable transcript header for an output-stash stub.
+///
+/// Attribute values use backslash escapes so quote and backslash characters in
+/// tool metadata cannot terminate a quoted field or otherwise make the header
+/// ambiguous to transcript consumers.
+pub(crate) fn format_output_stash_header(
+    tool_use_id: &str,
+    tool_name: &str,
+    reason: &str,
+    full_chars: usize,
+    preview_chars: usize,
+) -> String {
+    format!(
+        "[djinn-output-stash tool_use_id=\"{}\" tool_name=\"{}\" reason=\"{}\" full_chars=\"{full_chars}\" preview_chars=\"{preview_chars}\"]",
+        escape_stash_header_value(tool_use_id),
+        escape_stash_header_value(tool_name),
+        escape_stash_header_value(reason),
+    )
+}
+
+fn escape_stash_header_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 /// Render a successful tool result to the text handed back to the model.
 ///
 /// Serializes `value` to text (raw string, or pretty JSON), and when that
@@ -937,6 +972,7 @@ pub fn render_tool_result(
             .unwrap()
             .insert(tool_use_id.to_string(), tool_name.to_string(), stash_text);
         let full_bytes = text.len();
+        let full_chars = text.chars().count();
         // Generate the synopsis from the full text (before truncation) so
         // JSON/code/text classifiers see the complete payload. Only reduce the
         // smart_truncate budget when a synopsis will actually be appended, so
@@ -949,6 +985,14 @@ pub fn render_tool_result(
             None => MAX_TOOL_RESULT_CHARS,
         };
         text = crate::truncate::smart_truncate(&text, text_budget);
+        let preview_chars = text.chars().count();
+        let header = format_output_stash_header(
+            tool_use_id,
+            tool_name,
+            "single_threshold",
+            full_chars,
+            preview_chars,
+        );
         if let Some(synopsis) = synopsis {
             text.push_str("\n\nTool result synopsis:\n");
             text.push_str(&synopsis);
@@ -956,6 +1000,7 @@ pub fn render_tool_result(
         text.push_str(&format!(
             "\n\n[Full output stashed ({full_bytes} bytes). Use output_view(tool_use_id=\"{tool_use_id}\") to paginate or output_grep(tool_use_id=\"{tool_use_id}\", pattern=\"...\") to search.]"
         ));
+        text = format!("{header}\n{text}");
     }
     text
 }
@@ -999,8 +1044,12 @@ pub fn externalize_rendered_tool_result(
     let preview_body_chars = preview_body.chars().count();
 
     // Canonical parseable header. Character counts, not bytes.
-    let header = format!(
-        "[djinn-output-stash tool_use_id=\"{tool_use_id}\" tool_name=\"{tool_name}\" reason=\"turn_budget\" full_chars=\"{full_chars}\" preview_chars=\"{preview_body_chars}\"]"
+    let header = format_output_stash_header(
+        tool_use_id,
+        tool_name,
+        "turn_budget",
+        full_chars,
+        preview_body_chars,
     );
 
     let recovery_hint = format!(
