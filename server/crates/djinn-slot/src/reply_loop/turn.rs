@@ -1945,7 +1945,7 @@ mod tests {
             assistant
                 .content
                 .iter()
-                .any(|b| matches!(b, ContentBlock::Thinking { thinking } if thinking.contains("Thinking about"))),
+                .any(|b| matches!(b, ContentBlock::Thinking { thinking, .. } if thinking.contains("Thinking about"))),
             "thinking content should be preserved in the assistant message"
         );
         // Tool use block should be present.
