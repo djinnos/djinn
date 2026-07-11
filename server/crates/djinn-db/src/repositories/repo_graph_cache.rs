@@ -69,6 +69,28 @@ impl RepoGraphCacheRepository {
         .await?)
     }
 
+    /// Return only the `commit_sha` of the most recently warmed entry for
+    /// `project_id`, without fetching the (potentially multi-MB) graph blob.
+    ///
+    /// Used by the server-side read path's commit-aware revalidation backstop
+    /// (`load_canonical_graph`): a cached in-memory graph is only trusted while
+    /// its pinned commit still matches the latest persisted row. Fetching the
+    /// full blob on every revalidation probe would defeat the point of the
+    /// in-RAM cache, so this projection keeps the periodic check cheap.
+    pub async fn latest_commit_for_project(&self, project_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar!(
+            "SELECT commit_sha
+             FROM repo_graph_cache
+             WHERE project_id = $1
+             ORDER BY built_at DESC
+             LIMIT 1",
+            project_id,
+        )
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
     pub async fn upsert(&self, entry: RepoGraphCacheInsert<'_>) -> Result<()> {
         self.db.ensure_initialized().await?;
         // `built_at` defaults to "" in the schema; stamp it explicitly so the
