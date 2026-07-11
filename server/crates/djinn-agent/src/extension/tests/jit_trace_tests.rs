@@ -189,6 +189,139 @@ async fn jit_pitfalls_trace_preserves_top_two_output_and_candidate_outcomes() {
     }
 }
 
+/// A production-search schema failure must take the real `Err(e)` branch: it
+/// leaves the write and hint behavior fail-open, consumes the once-per-session
+/// attempt, and persists an error-specific JIT trace rather than an empty-search
+/// trace. Renaming the column only after a healthy query proves this is not the
+/// successful empty-result branch.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_search_error_persists_error_trace_and_consumes_session() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "enabled");
+    }
+
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-search-error-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+    seed_pitfall(
+        &db,
+        pid,
+        "Search Error Pitfall",
+        "would render before the forced failure",
+        "src",
+    )
+    .await;
+
+    // Confirm that this exact production query succeeds against the seeded,
+    // healthy database before changing only the column it selects and filters.
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let healthy_notes = note_repo
+        .query_by_scope_overlap(
+            pid,
+            &["src/a.rs".to_owned()],
+            &["pitfall", "pattern"],
+            0.3,
+            8,
+        )
+        .await
+        .expect("healthy production JIT query");
+    assert_eq!(
+        healthy_notes.len(),
+        1,
+        "seed must be eligible before failure"
+    );
+
+    // The production search references `notes.confidence` in both SELECT and
+    // WHERE. This repository-owned test helper therefore forces its actual
+    // `Err(e)` arm while preserving `retrieval_traces` for observation.
+    djinn_db::test_support::rename_note_confidence_column_for_test(&db).await;
+
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// error path\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let telemetry_before = jit_pitfall_outcome_snapshot();
+    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
+        .await
+        .expect("search error must not fail write");
+
+    assert_eq!(response.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        response.get("jit_pitfalls").is_none(),
+        "production search error must not append visible pitfall text: {response:?}"
+    );
+
+    let trace = latest_jit_trace(&db, pid).await;
+    assert_eq!(trace.entry_point, "jit_pitfalls");
+    assert_eq!(trace.candidate_cap, 50);
+    assert!(!trace.candidate_cap_exceeded);
+    assert_eq!(trace.estimated_injected_tokens, 0);
+    assert!(trace.durations_ms.get("search_elapsed_ms").is_some());
+    assert!(
+        trace.durations_ms.get("trace_search_elapsed_ms").is_none(),
+        "error path must not misrepresent an unrun candidate-universe search"
+    );
+    let trigger = trace
+        .trigger
+        .as_ref()
+        .expect("search-error trigger metadata");
+    assert_eq!(trigger["rollout_mode"], "enabled");
+    assert_eq!(trigger["rendered_note_count"], 0);
+    assert_eq!(trigger["result_count"], 0);
+    assert_eq!(
+        trigger["note_types"],
+        serde_json::json!(["pitfall", "pattern"])
+    );
+    assert!(
+        trigger["search_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("confidence")),
+        "trace must record the production-search error: {trigger:?}"
+    );
+    assert!(
+        trace.candidates_typed().is_empty(),
+        "a failed production search has no candidate universe to classify"
+    );
+
+    // The failed eligible attempt remains the session's first modification;
+    // follow-up writes preserve the existing once-per-session behavior.
+    let second_args = Some(
+        serde_json::json!({ "path": "src/b.rs", "content": "// second\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let second = call_write(&state, &second_args, worktree.path(), Some(pid), None, None)
+        .await
+        .expect("second write");
+    assert!(
+        second.get("jit_pitfalls").is_none(),
+        "once-per-session guard must remain unchanged after search error"
+    );
+    assert_jit_pitfall_outcome_deltas(
+        &telemetry_before,
+        &[
+            ("eligible_search", 1),
+            ("error", 1),
+            ("non_first_modification", 1),
+        ],
+    );
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
+    }
+}
+
 /// A failed trace insert is strictly observational: normal JIT rendering stays
 /// successful even after persistence is made unavailable.
 #[allow(clippy::await_holding_lock)]
@@ -236,8 +369,7 @@ async fn jit_pitfalls_trace_insert_failure_is_fail_open_for_rendered_hint() {
         .await
         .expect("trace insert failure must not fail write");
     assert_eq!(
-        response["jit_pitfalls"],
-        baseline_hint,
+        response["jit_pitfalls"], baseline_hint,
         "repository insert failure must return the normal-path hint unchanged"
     );
     assert_jit_pitfall_outcome_deltas(
@@ -305,8 +437,7 @@ async fn jit_pitfalls_trace_serialization_failure_is_fail_open() {
         .expect("serialization failure must not fail write");
     crate::extension::handlers::force_trace_candidate_serialization_failure_for_test(false);
     assert_eq!(
-        response["jit_pitfalls"],
-        baseline_hint,
+        response["jit_pitfalls"], baseline_hint,
         "serialization failure must return the normal-path hint unchanged"
     );
     assert_jit_pitfall_outcome_deltas(
