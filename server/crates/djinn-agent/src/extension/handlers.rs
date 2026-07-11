@@ -59,6 +59,9 @@ mod task_epic;
 mod workspace;
 mod workspace_helpers;
 
+#[cfg(test)]
+pub(crate) use jit_pitfalls::force_trace_candidate_serialization_failure_for_test;
+
 // ── Re-exports for agent-internal callers ────────────────────────────────
 // These handler functions are called directly from `direct_services.rs`,
 // `chat_tools.rs`, and other agent-internal modules.  They remain local

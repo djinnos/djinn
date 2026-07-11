@@ -27,10 +27,29 @@
 //! ## Resilience
 //! A search error or empty result NEVER fails the write — the hint is simply
 //! skipped and the original tool result is returned unchanged.
+//!
+//! ## Retrieval-trace contract
+//! `maybe_pitfall_hint` is the `RetrievalTraceEntryPoint::JitPitfalls` entry
+//! point for sibling `memory_recall_trace` MCP consumers. Only an eligible,
+//! first-modification search produces a trace: its trigger records rollout
+//! mode, touched-path metadata, the 0.3 confidence floor, production
+//! over-fetch limit (8), note types, rendered count, and result count. The
+//! trace universe is capped at `DEFAULT_CANDIDATE_CAP`; the row records that
+//! cap and whether it was exceeded. The two notes rendered into
+//! `<relevant-pitfalls>` are `injected` (with no skipped reason); every other
+//! candidate is deterministically `min_confidence` when below the floor or
+//! `not_top_k` otherwise. Durations separate production search, trace-universe
+//! search, and persistence where those phases ran; injected tokens are the
+//! rendered block's character count divided by four, rounded up. Candidate
+//! fetch, validation, serialization, and repository insertion are all
+//! fail-open: they may warn and omit/degrade trace persistence, but must never
+//! alter the returned `Option<String>` or the pre-existing Prometheus outcomes.
 
 mod trace;
 
 use std::collections::{BTreeSet, HashSet};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -45,6 +64,28 @@ use trace::{
 };
 
 const TELEMETRY_TARGET: &str = "djinn_agent::jit_pitfalls";
+
+/// Test-only failpoint at the candidate JSON serialization boundary. It avoids
+/// manufacturing invalid persisted notes while exercising the real fail-open
+/// branch that protects the caller-visible hint and telemetry contract.
+#[cfg(test)]
+static FORCE_TRACE_CANDIDATE_SERIALIZATION_FAILURE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn force_trace_candidate_serialization_failure_for_test(enabled: bool) {
+    FORCE_TRACE_CANDIDATE_SERIALIZATION_FAILURE.store(enabled, Ordering::SeqCst);
+}
+
+fn serialize_trace_candidates(
+    candidates: &[djinn_db::repositories::retrieval_trace::TraceCandidate],
+) -> Result<serde_json::Value, String> {
+    #[cfg(test)]
+    if FORCE_TRACE_CANDIDATE_SERIALIZATION_FAILURE.load(Ordering::SeqCst) {
+        return Err("forced trace candidate serialization failure".to_owned());
+    }
+
+    serde_json::to_value(candidates).map_err(|error| error.to_string())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JitPitfallOutcome {
@@ -446,7 +487,7 @@ pub(super) async fn maybe_pitfall_hint(
                      skipping trace persistence (fail-open)",
                 );
             } else {
-                match serde_json::to_value(&trace_candidates) {
+                match serialize_trace_candidates(&trace_candidates) {
                     Ok(json) => {
                         let candidate_count = trace_candidates.len();
                         let trace_universe_count = scope_candidates.len();
