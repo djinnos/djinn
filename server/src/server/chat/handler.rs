@@ -1727,4 +1727,137 @@ mod tests {
         assert_eq!(assembled[1].text_content(), "latest user turn");
         assert_eq!(assembled[2].text_content(), "latest assistant turn");
     }
+
+    // ---- handler thinking/provider-state regression (nbky) ---------------
+    //
+    // Verify that assistant messages containing the new provider-state
+    // ContentBlock variants (Thinking with signature, RedactedThinking,
+    // Unknown/passthrough) survive the history assembly filtering unchanged.
+
+    /// Assistant messages carrying signed Thinking, RedactedThinking, and
+    /// Unknown passthrough blocks must survive the assembly filter as-is.
+    /// The filter only removes system messages and compaction markers; it
+    /// must not strip or transform provider-state content blocks.
+    #[test]
+    fn assembly_preserves_provider_state_content_blocks() {
+        let mut extra = serde_json::Map::new();
+        extra.insert("provider_flag".into(), serde_json::json!(true));
+
+        let persisted = vec![
+            Message::system("You are a helpful assistant."),
+            Message::user("Explain quantum computing."),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "Let me reason about this...".into(),
+                        signature: Some("sig_test_123".into()),
+                    },
+                    ContentBlock::RedactedThinking {
+                        data: "b3BhcXVlX2Jsb2I=".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "Quantum computing uses qubits.".into(),
+                    },
+                    ContentBlock::Unknown {
+                        content_type: "provider_custom".into(),
+                        extra,
+                    },
+                ],
+                metadata: None,
+            },
+        ];
+
+        let has_projected_summary = persisted
+            .first()
+            .is_some_and(is_projected_compaction_summary);
+        assert!(!has_projected_summary);
+
+        let assembled: Vec<Message> = persisted
+            .into_iter()
+            .filter(|m| !matches!(m.role, Role::System) || is_projected_compaction_summary(m))
+            .filter(|m| !has_projected_summary || !is_compaction_marker_pair(m))
+            .collect();
+
+        // System filtered out; user + assistant survive.
+        assert_eq!(assembled.len(), 2);
+        assert_eq!(assembled[0].role, Role::User);
+        assert_eq!(assembled[1].role, Role::Assistant);
+
+        // All four content blocks must be preserved in order.
+        let blocks = &assembled[1].content;
+        assert_eq!(blocks.len(), 4, "all content blocks must survive assembly");
+
+        match &blocks[0] {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "Let me reason about this...");
+                assert_eq!(signature.as_deref(), Some("sig_test_123"));
+            }
+            other => panic!("expected signed Thinking, got: {other:?}"),
+        }
+        match &blocks[1] {
+            ContentBlock::RedactedThinking { data } => {
+                assert_eq!(data, "b3BhcXVlX2Jsb2I=");
+            }
+            other => panic!("expected RedactedThinking, got: {other:?}"),
+        }
+        assert!(
+            matches!(&blocks[2], ContentBlock::Text { text } if text == "Quantum computing uses qubits."),
+            "text block must survive in order"
+        );
+        match &blocks[3] {
+            ContentBlock::Unknown {
+                content_type,
+                extra,
+            } => {
+                assert_eq!(content_type, "provider_custom");
+                assert_eq!(extra.get("provider_flag"), Some(&serde_json::json!(true)));
+            }
+            other => panic!("expected Unknown block, got: {other:?}"),
+        }
+    }
+
+    /// The `incoming_to_content_blocks` conversion only produces Text, Image,
+    /// and Document blocks. It must never produce Thinking, RedactedThinking,
+    /// or Unknown blocks — those are provider-stream-only.
+    #[test]
+    fn incoming_content_blocks_never_produce_provider_state_variants() {
+        use super::ChatContent;
+        use super::ChatContentBlock;
+
+        let content = ChatContent::Blocks(vec![
+            ChatContentBlock::Text {
+                text: "hello".into(),
+            },
+            ChatContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "base64data".into(),
+            },
+            ChatContentBlock::Document {
+                media_type: "application/pdf".into(),
+                data: "pdfdata".into(),
+                filename: Some("doc.pdf".into()),
+            },
+        ]);
+
+        let blocks = incoming_to_content_blocks(content);
+        for block in &blocks {
+            match block {
+                ContentBlock::Text { .. }
+                | ContentBlock::Image { .. }
+                | ContentBlock::Document { .. } => {}
+                ContentBlock::Thinking { .. }
+                | ContentBlock::RedactedThinking { .. }
+                | ContentBlock::Unknown { .. }
+                | ContentBlock::ToolUse { .. }
+                | ContentBlock::ToolResult { .. }
+                | ContentBlock::OpenAIReasoning { .. } => {
+                    panic!("incoming_to_content_blocks produced provider-state variant: {block:?}");
+                }
+            }
+        }
+    }
 }
