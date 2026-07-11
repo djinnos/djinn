@@ -5,8 +5,10 @@
 //! one [`CatalogService`] and means a transient boot outage cannot leave a pod
 //! permanently serving its embedded snapshot.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
+use djinn_core::clock::Clock;
+use djinn_core::clock::SystemClock;
 use djinn_provider::catalog::{CatalogService, RefreshStatus};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -92,7 +94,10 @@ fn startup_jitter(interval: Duration) -> Duration {
     }
     // A per-process wall-clock sample is sufficient to spread pods which all
     // finish boot around the same time; it is intentionally sampled once only.
-    let entropy = SystemTime::now()
+    #[allow(clippy::disallowed_methods)]
+    // approved wall-clock boundary: djinn_core::clock::SystemClock
+    let entropy = SystemClock::new()
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos() as u64;

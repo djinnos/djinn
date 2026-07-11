@@ -236,8 +236,7 @@ async fn jit_pitfalls_trace_insert_failure_is_fail_open_for_rendered_hint() {
         .await
         .expect("trace insert failure must not fail write");
     assert_eq!(
-        response["jit_pitfalls"],
-        baseline_hint,
+        response["jit_pitfalls"], baseline_hint,
         "repository insert failure must return the normal-path hint unchanged"
     );
     assert_jit_pitfall_outcome_deltas(
@@ -305,8 +304,7 @@ async fn jit_pitfalls_trace_serialization_failure_is_fail_open() {
         .expect("serialization failure must not fail write");
     crate::extension::handlers::force_trace_candidate_serialization_failure_for_test(false);
     assert_eq!(
-        response["jit_pitfalls"],
-        baseline_hint,
+        response["jit_pitfalls"], baseline_hint,
         "serialization failure must return the normal-path hint unchanged"
     );
     assert_jit_pitfall_outcome_deltas(
