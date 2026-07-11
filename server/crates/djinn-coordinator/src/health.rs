@@ -65,6 +65,7 @@ pub(super) async fn sweep_stale_resources(
     sweep_orphaned_cargo_target_run_dirs(db, app_state.cargo_target_runs_root.as_deref()).await;
     sweep_durable_output_stash(db).await;
     sweep_cargo_health().await;
+    sweep_sccache_guard(&app_state.cache_cleanup).await;
 
     let project_repo = ProjectRepository::new(db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(db.clone(), app_state.event_bus.clone());
@@ -1199,6 +1200,444 @@ mod cargo_cache_health_tests {
         // in unit tests. The function's contract is that it doesn't panic
         // and runs to completion. Structured logging is validated by the
         // acceptance criteria review.
+    }
+}
+
+// ─── /cache/sccache guard ──────────────────────────────────────────────────
+
+/// Default path for the sccache directory on the shared PVC.
+/// This matches the `SCCACHE_DIR` convention used by warm/worker pods
+/// (namespaced per project), but the guard sweeps the parent `/cache/sccache`
+/// directory as a whole.
+const SCCACHE_ROOT: &str = "/cache/sccache";
+
+/// Distinct structured outcomes for the sccache sweep guard.
+///
+/// Each variant maps to a stable log/metric label so operators can build
+/// dashboards and alerts on the outcome stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SccacheSweepOutcome {
+    /// `/cache/sccache` does not exist — no-op, non-error.
+    Missing,
+    /// Dry-run mode: candidate bytes and latest mtime were computed and logged;
+    /// nothing was deleted.
+    DryRunReported,
+    /// Directory was older than the configured threshold and was successfully
+    /// deleted.
+    Deleted,
+    /// Directory exists but its latest mtime is *younger* than the configured
+    /// threshold.  It was retained and a warning was emitted so accidental new
+    /// writers are visible.
+    RetainedFresh,
+    /// `DJINN_CACHE_CLEANUP_MODE` is not `delete` — directory would be
+    /// deletable but the global mode prevents actual removal.
+    NotEnabled,
+    /// Deletion was attempted but `tokio::fs::remove_dir_all` failed.
+    DeletionError,
+}
+
+/// Production entry point: sweep the global `/cache/sccache` directory
+/// using the coordinator's cleanup config.
+///
+/// Called from [`sweep_stale_resources`] on every periodic tick.
+async fn sweep_sccache_guard(config: &crate::context::CacheCleanupConfig) {
+    sweep_sccache_guard_under(config, Path::new(SCCACHE_ROOT)).await;
+}
+
+/// Testable implementation that accepts an explicit sccache root path.
+///
+/// Returns the outcome so tests can assert it.
+async fn sweep_sccache_guard_under(
+    config: &crate::context::CacheCleanupConfig,
+    sccache_root: &Path,
+) -> SccacheSweepOutcome {
+    use djinn_telemetry::cache_cleanup as cleanup_metrics;
+    use djinn_telemetry::cache_cleanup::{
+        COMPONENT_SCCACHE, MODE_DELETE, MODE_DRY_RUN, OUTCOME_DELETED, OUTCOME_DRY_RUN,
+        OUTCOME_ERROR, OUTCOME_RETAINED, OUTCOME_SKIPPED,
+    };
+
+    if !config.sccache_enabled {
+        tracing::debug!("CoordinatorActor: sccache cleanup disabled; skipping guard");
+        return SccacheSweepOutcome::NotEnabled;
+    }
+
+    let mode_label = if config.mode.is_delete() {
+        MODE_DELETE
+    } else {
+        MODE_DRY_RUN
+    };
+
+    // Stat the sccache root — missing path is a non-error skip.
+    match tokio::fs::metadata(sccache_root).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                path = %sccache_root.display(),
+                "CoordinatorActor: sccache guard skipped; path does not exist"
+            );
+            cleanup_metrics::increment_cleanup_total(
+                COMPONENT_SCCACHE,
+                OUTCOME_SKIPPED,
+                mode_label,
+            );
+            return SccacheSweepOutcome::Missing;
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %sccache_root.display(),
+                "CoordinatorActor: sccache guard failed to stat path; skipping"
+            );
+            cleanup_metrics::increment_cleanup_total(COMPONENT_SCCACHE, OUTCOME_ERROR, mode_label);
+            return SccacheSweepOutcome::DeletionError;
+        }
+    };
+
+    // Compute latest mtime (recursive walk for the most recent file).
+    let now_unix_secs = time::OffsetDateTime::now_utc()
+        .unix_timestamp()
+        .try_into()
+        .unwrap_or(0_u64);
+
+    let latest_mtime_secs = latest_mtime_unix_secs(sccache_root).await;
+    let age_hours = latest_mtime_secs.map(|mtime| now_unix_secs.saturating_sub(mtime) / 3600);
+
+    let size_bytes = dir_size_recursive(sccache_root).await;
+
+    tracing::info!(
+        path = %sccache_root.display(),
+        size_bytes,
+        latest_mtime_secs = ?latest_mtime_secs,
+        age_hours = ?age_hours,
+        mode = %config.mode.as_metric_label(),
+        "CoordinatorActor: sccache guard candidate"
+    );
+
+    cleanup_metrics::increment_candidates(COMPONENT_SCCACHE, mode_label, 1);
+
+    // Determine staleness: only stale candidates are eligible for deletion.
+    let threshold_secs = config.sccache_max_age_hours * 3600;
+    // For staleness, fall back to the directory's own mtime when the recursive
+    // walk finds no files (empty directory).  An empty freshly-created directory
+    // should be considered fresh.
+    let effective_mtime = latest_mtime_secs.or_else(|| {
+        // Synchronous fallback: the directory's own mtime from the metadata
+        // we already validated exists above.
+        std::fs::metadata(sccache_root)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+    });
+    let is_stale = match effective_mtime {
+        Some(mtime) => now_unix_secs.saturating_sub(mtime) >= threshold_secs,
+        // Metadata genuinely unreadable — treat as stale to be conservative
+        // toward cleanup (avoids leaving genuinely old directories behind).
+        None => true,
+    };
+
+    if !is_stale {
+        tracing::warn!(
+            path = %sccache_root.display(),
+            age_hours = ?age_hours,
+            size_bytes,
+            threshold_hours = config.sccache_max_age_hours,
+            "CoordinatorActor: sccache directory is fresh — retaining. \
+             An accidental new writer may have recreated it."
+        );
+        cleanup_metrics::increment_cleanup_total(COMPONENT_SCCACHE, OUTCOME_RETAINED, mode_label);
+        return SccacheSweepOutcome::RetainedFresh;
+    }
+
+    // Directory is stale — check mode.
+    if !config.mode.is_delete() {
+        tracing::info!(
+            path = %sccache_root.display(),
+            age_hours = ?age_hours,
+            size_bytes,
+            "CoordinatorActor: sccache guard dry-run — would delete stale directory"
+        );
+        cleanup_metrics::increment_cleanup_total(COMPONENT_SCCACHE, OUTCOME_DRY_RUN, MODE_DRY_RUN);
+        return SccacheSweepOutcome::DryRunReported;
+    }
+
+    // Destructive mode: actually delete.
+    match tokio::fs::remove_dir_all(sccache_root).await {
+        Ok(()) => {
+            tracing::info!(
+                path = %sccache_root.display(),
+                age_hours = ?age_hours,
+                size_bytes,
+                cleanup_outcome = "deleted",
+                "CoordinatorActor: sccache guard deleted stale directory"
+            );
+            cleanup_metrics::increment_cleanup_total(
+                COMPONENT_SCCACHE,
+                OUTCOME_DELETED,
+                MODE_DELETE,
+            );
+            cleanup_metrics::record_reclaimed_bytes(COMPONENT_SCCACHE, MODE_DELETE, size_bytes);
+            SccacheSweepOutcome::Deleted
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %sccache_root.display(),
+                "CoordinatorActor: sccache guard failed to delete stale directory"
+            );
+            cleanup_metrics::increment_cleanup_total(COMPONENT_SCCACHE, OUTCOME_ERROR, MODE_DELETE);
+            SccacheSweepOutcome::DeletionError
+        }
+    }
+}
+
+/// Recursively compute the total byte size of all files under `dir`.
+/// Returns 0 if the directory doesn't exist or can't be read.
+async fn dir_size_recursive(dir: &Path) -> u64 {
+    use std::path::PathBuf;
+
+    let mut total: u64 = 0;
+    let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
+
+    while let Some(current) = stack.pop() {
+        let mut entries = match tokio::fs::read_dir(&current).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(e)) => e,
+                Ok(None) => break,
+                Err(_) => continue,
+            };
+
+            let file_type = match entry.file_type().await {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total = total.saturating_add(entry.metadata().await.map(|m| m.len()).unwrap_or(0));
+            }
+        }
+    }
+
+    total
+}
+
+/// Walk `dir` recursively and return the latest (most recent) file mtime
+/// as a unix-seconds timestamp.  Returns `None` when the directory is empty
+/// or metadata is unreadable.
+async fn latest_mtime_unix_secs(dir: &Path) -> Option<u64> {
+    use std::path::PathBuf;
+
+    let mut latest: Option<u64> = None;
+    let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
+
+    while let Some(current) = stack.pop() {
+        let mut entries = match tokio::fs::read_dir(&current).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(e)) => e,
+                Ok(None) => break,
+                Err(_) => continue,
+            };
+
+            let file_type = match entry.file_type().await {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if let Ok(metadata) = entry.metadata().await
+                && let Ok(modified) = metadata.modified()
+                && let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH)
+            {
+                let mtime = dur.as_secs();
+                if latest.is_none_or(|prev| mtime > prev) {
+                    latest = Some(mtime);
+                }
+            }
+        }
+    }
+
+    latest
+}
+
+#[cfg(test)]
+mod sccache_guard_tests {
+    use super::*;
+    use crate::context::{CacheCleanupConfig, CacheCleanupMode};
+
+    /// Missing sccache path is a harmless skip.
+    #[tokio::test]
+    async fn missing_path_is_noop() {
+        let config = CacheCleanupConfig {
+            mode: CacheCleanupMode::DryRun,
+            sccache_enabled: true,
+            ..CacheCleanupConfig::default()
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing = tmp.path().join("nonexistent_sccache");
+
+        let outcome = sweep_sccache_guard_under(&config, &missing).await;
+        assert_eq!(outcome, SccacheSweepOutcome::Missing);
+    }
+
+    /// Disabled config is a no-op.
+    #[tokio::test]
+    async fn disabled_config_skips() {
+        let config = CacheCleanupConfig {
+            sccache_enabled: false,
+            ..CacheCleanupConfig::default()
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sccache_dir = tmp.path().join("sccache");
+        std::fs::create_dir(&sccache_dir).unwrap();
+
+        let outcome = sweep_sccache_guard_under(&config, &sccache_dir).await;
+        assert_eq!(outcome, SccacheSweepOutcome::NotEnabled);
+        // Directory still exists.
+        assert!(sccache_dir.exists());
+    }
+
+    /// Dry-run reports candidate but does not delete.
+    #[tokio::test]
+    async fn dry_run_does_not_delete() {
+        let config = CacheCleanupConfig {
+            mode: CacheCleanupMode::DryRun,
+            sccache_enabled: true,
+            sccache_max_age_hours: 0, // any age is stale
+            ..CacheCleanupConfig::default()
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sccache_dir = tmp.path().join("sccache");
+        std::fs::create_dir(&sccache_dir).unwrap();
+        // Write a file so size > 0.
+        std::fs::write(sccache_dir.join("dummy.bin"), b"hello").unwrap();
+
+        let outcome = sweep_sccache_guard_under(&config, &sccache_dir).await;
+        assert_eq!(outcome, SccacheSweepOutcome::DryRunReported);
+        // Directory and file still exist.
+        assert!(sccache_dir.exists());
+        assert!(sccache_dir.join("dummy.bin").exists());
+    }
+
+    /// Delete mode removes an old sccache directory.
+    #[tokio::test]
+    async fn delete_removes_old_directory() {
+        let config = CacheCleanupConfig {
+            mode: CacheCleanupMode::Delete,
+            sccache_enabled: true,
+            sccache_max_age_hours: 0, // any age is stale
+            ..CacheCleanupConfig::default()
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sccache_dir = tmp.path().join("sccache");
+        std::fs::create_dir(&sccache_dir).unwrap();
+        std::fs::write(sccache_dir.join("old_cache"), b"data").unwrap();
+
+        let outcome = sweep_sccache_guard_under(&config, &sccache_dir).await;
+        assert_eq!(outcome, SccacheSweepOutcome::Deleted);
+        assert!(!sccache_dir.exists());
+    }
+
+    /// Fresh sccache directory (newer than threshold) is retained with a warning.
+    #[tokio::test]
+    async fn fresh_directory_is_retained() {
+        let config = CacheCleanupConfig {
+            mode: CacheCleanupMode::Delete,
+            sccache_enabled: true,
+            sccache_max_age_hours: 24, // 24h threshold
+            ..CacheCleanupConfig::default()
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sccache_dir = tmp.path().join("sccache");
+        std::fs::create_dir(&sccache_dir).unwrap();
+        std::fs::write(sccache_dir.join("fresh_cache"), b"data").unwrap();
+
+        // Directory was just created, so it's fresh (< 24h old).
+        let outcome = sweep_sccache_guard_under(&config, &sccache_dir).await;
+        assert_eq!(outcome, SccacheSweepOutcome::RetainedFresh);
+        assert!(sccache_dir.exists());
+        assert!(sccache_dir.join("fresh_cache").exists());
+    }
+
+    /// Delete mode with a high threshold retains a fresh directory.
+    #[tokio::test]
+    async fn delete_mode_with_high_threshold_retains_fresh() {
+        let config = CacheCleanupConfig {
+            mode: CacheCleanupMode::Delete,
+            sccache_enabled: true,
+            sccache_max_age_hours: 1000, // very high threshold
+            ..CacheCleanupConfig::default()
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sccache_dir = tmp.path().join("sccache");
+        std::fs::create_dir(&sccache_dir).unwrap();
+
+        let outcome = sweep_sccache_guard_under(&config, &sccache_dir).await;
+        assert_eq!(outcome, SccacheSweepOutcome::RetainedFresh);
+        assert!(sccache_dir.exists());
+    }
+
+    /// `dir_size_recursive` computes size of nested files.
+    #[tokio::test]
+    async fn dir_size_recursive_computes_total() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.txt"), b"hello").unwrap(); // 5 bytes
+        std::fs::write(root.join("sub").join("b.txt"), b"world!").unwrap(); // 6 bytes
+
+        let size = dir_size_recursive(root).await;
+        assert_eq!(size, 11);
+    }
+
+    /// `dir_size_recursive` returns 0 for a missing directory.
+    #[tokio::test]
+    async fn dir_size_recursive_missing_returns_zero() {
+        let size = dir_size_recursive(Path::new("/nonexistent/path")).await;
+        assert_eq!(size, 0);
+    }
+
+    /// `latest_mtime_unix_secs` returns a reasonable mtime for a newly
+    /// created file.
+    #[tokio::test]
+    async fn latest_mtime_returns_recent_time() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("file.txt"), b"content").unwrap();
+
+        #[allow(clippy::disallowed_methods)]
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mtime = latest_mtime_unix_secs(tmp.path()).await;
+        assert!(mtime.is_some());
+        // mtime should be within a few seconds of now.
+        assert!(now - mtime.unwrap() <= 2);
+    }
+
+    /// `latest_mtime_unix_secs` returns None for empty/missing dir.
+    #[tokio::test]
+    async fn latest_mtime_none_for_empty_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+
+        let mtime = latest_mtime_unix_secs(&empty).await;
+        assert!(mtime.is_none());
     }
 }
 
