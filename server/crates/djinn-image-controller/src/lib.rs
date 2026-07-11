@@ -37,6 +37,8 @@ pub mod build_job;
 pub mod config;
 pub mod controller;
 pub mod reseed;
+pub mod retention;
+pub mod retention_preflight;
 pub mod types;
 pub mod watcher;
 
@@ -46,5 +48,13 @@ pub use controller::{
     ImageController, ImageControllerError, format_catalog_image_tag, format_image_tag,
 };
 pub use reseed::{ReseedStats, reseed_empty_configs, reseed_empty_configs_arc};
+pub use retention::{
+    DeletedTag, RetainedTag, RetentionPlan, RetentionPolicy, SafePin, SafeReason, SelectedImage,
+    UnsafeImage, ZotRepository, ZotTag,
+};
+pub use retention_preflight::{
+    PreflightError, PreflightOutcome, RetentionPreflightConfig, ZotStateError, ZotStateSource,
+    adapt_selected_images, run_preflight,
+};
 pub use types::{BuildRequest, BuildStatus, ProjectImageView};
 pub use watcher::ImageBuildWatcher;

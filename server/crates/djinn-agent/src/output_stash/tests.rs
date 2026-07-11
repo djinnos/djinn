@@ -144,6 +144,7 @@ fn render_small_result_is_passthrough() {
     let text = render_tool_result(&stash, "small-passthrough-1", "task_list", &value);
     // Pretty JSON, untruncated, nothing stashed (no in-memory, no durable).
     assert!(text.contains("\"rows\""));
+    assert!(!text.contains("[djinn-output-stash"));
     assert!(!text.contains("Full output stashed"));
     assert!(
         stash
@@ -164,6 +165,9 @@ fn render_oversized_result_truncates_and_stashes() {
 
     // The inline text is clamped and carries the navigation hint…
     assert!(text.len() < big.len());
+    assert!(text.starts_with(
+        "[djinn-output-stash tool_use_id=\"call-1\" tool_name=\"shell\" reason=\"single_threshold\" full_chars=\"60000\""
+    ));
     assert!(text.contains("Full output stashed"));
     assert!(text.contains("output_view(tool_use_id=\"call-1\")"));
     // …and the full output is retrievable from the stash.
@@ -179,6 +183,28 @@ fn render_oversized_result_truncates_and_stashes() {
     )
     .unwrap();
     assert!(viewed.contains("xxx"));
+}
+
+#[test]
+fn render_header_uses_character_counts_and_escapes_metadata() {
+    let stash = Mutex::new(OutputStash::new());
+    let tool_use_id = "call-\\\"é";
+    let tool_name = "tool-\\\"name";
+    let full = "é".repeat(MAX_TOOL_RESULT_CHARS + 1);
+    let text = render_tool_result(
+        &stash,
+        tool_use_id,
+        tool_name,
+        &serde_json::Value::String(full.clone()),
+    );
+    let header = text.lines().next().expect("canonical header");
+
+    assert!(header.starts_with(
+        "[djinn-output-stash tool_use_id=\"call-\\\\\\\"é\" tool_name=\"tool-\\\\\\\"name\" reason=\"single_threshold\""
+    ));
+    assert!(header.contains(&format!("full_chars=\"{}\"", full.chars().count())));
+    assert!(header.contains("preview_chars=\""));
+    assert!(text.contains("output_view(tool_use_id=\"call-\\\"é\")"));
 }
 
 #[test]
@@ -895,7 +921,14 @@ fn render_oversized_non_json_no_synopsis() {
     // to what the old code produced.
     let expected_truncated = crate::truncate::smart_truncate(&big, MAX_TOOL_RESULT_CHARS);
     let expected = format!(
-        "{expected_truncated}\n\n[Full output stashed ({} bytes). Use output_view(tool_use_id=\"syn-bin-1\") to paginate or output_grep(tool_use_id=\"syn-bin-1\", pattern=\"...\") to search.]",
+        "{}\n{expected_truncated}\n\n[Full output stashed ({} bytes). Use output_view(tool_use_id=\"syn-bin-1\") to paginate or output_grep(tool_use_id=\"syn-bin-1\", pattern=\"...\") to search.]",
+        format_output_stash_header(
+            "syn-bin-1",
+            "shell",
+            "single_threshold",
+            big.chars().count(),
+            expected_truncated.chars().count(),
+        ),
         big.len()
     );
     assert_eq!(
