@@ -581,10 +581,10 @@ async fn trace_candidate_search_failure_does_not_change_prompt_output() {
 // When the production query itself fails, `load_knowledge_context` returns
 // `None` (preserving the original behavior) while still attempting to
 // persist a trace row with `search_error` outcomes from the trace-candidate
-// universe. We simulate the production failure by dropping the notes table
-// after seeding — both production and trace-candidate queries will fail, so
-// the function returns None. The key contract: no panic, no error
-// propagation — just None and a debug log.
+// universe. We simulate the production failure by renaming the `confidence`
+// column after seeding — both production and trace-candidate queries reference
+// that column and will fail, so the function returns None. The key contract:
+// no panic, no error propagation — just None and a debug log.
 
 #[tokio::test]
 async fn production_search_error_returns_none_fail_open() {
@@ -596,9 +596,10 @@ async fn production_search_error_returns_none_fail_open() {
     // Seed a note so we have a known-good state before breaking the schema.
     seed_scoped_note(&db, &project_id, "Prod fail note", "[]", 0.9).await;
 
-    // Drop the notes table to force production and trace-candidate queries
-    // to fail. Both queries reference the notes table.
-    djinn_db::test_support::drop_table_for_test(&db, "notes").await;
+    // Rename the confidence column to force production and trace-candidate
+    // queries to fail without dropping the dependency-heavy notes table. Both
+    // queries reference notes.confidence.
+    djinn_db::test_support::rename_note_confidence_column_for_test(&db).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
 

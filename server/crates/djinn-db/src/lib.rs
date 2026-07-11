@@ -18,8 +18,8 @@ pub mod test_support {
         corrupt_credential_encrypted_value, drop_table_for_test, ensure_doctor_findings_schema,
         event_bus_for, make_project, nullify_note_confidence_for_test,
         override_debate_trail_body_metadata, reject_new_task_arbitrations_for_test,
-        seed_chat_session_row, seed_project, seed_session_row, seed_session_row_with_id,
-        seed_task_row,
+        rename_note_confidence_column_for_test, seed_chat_session_row, seed_project,
+        seed_session_row, seed_session_row_with_id, seed_task_row,
     };
 }
 

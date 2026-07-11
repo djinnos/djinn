@@ -199,6 +199,20 @@ pub async fn nullify_note_confidence_for_test(db: &Database, note_id: &str) {
         .expect("failed to nullify note confidence");
 }
 
+/// Rename `notes.confidence` so note retrieval queries fail without dropping
+/// the dependency-heavy `notes` table. Test-fixture helper for fail-open
+/// retrieval tests that need both production and trace-candidate searches to
+/// hit a schema error on an ephemeral database.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn rename_note_confidence_column_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("ALTER TABLE notes RENAME COLUMN confidence TO confidence_for_test")
+        .execute(db.pool())
+        .await
+        .expect("failed to rename notes.confidence for test");
+}
+
 /// Add a test-only constraint that leaves existing `task_arbitrations` rows
 /// readable but makes subsequent INSERTs fail.  This lets coordinator
 /// regressions exercise the real `TaskArbitrationRepository::try_create` error
