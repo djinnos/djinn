@@ -4,6 +4,7 @@ mod fixtures;
 mod loader;
 mod metrics;
 pub mod qa;
+pub mod qa_judge;
 pub mod qa_run;
 mod report;
 mod run;
@@ -40,6 +41,13 @@ enum Commands {
     /// top-k 10, render results through format_knowledge_notes(2000), and
     /// record retrieval hit, gold rank, context recall, and age bucket.
     QaRun,
+    /// Run the Phase 2 credentialed dual-pass QA judge.
+    ///
+    /// This command is intended for nightly/manual use only. It writes the
+    /// Phase 2 JSON/Markdown artifacts even when credentials are missing, then
+    /// exits non-zero so the non-gating workflow can surface the provider error
+    /// without making Phase 2 a PR or merge-queue gate.
+    QaJudge,
 }
 
 #[tokio::main]
@@ -65,5 +73,6 @@ async fn main() -> anyhow::Result<()> {
         Commands::RefreshBaseline => commands::cmd_refresh_baseline(&crate_root).await,
         Commands::ValidateFixtures => commands::cmd_validate_fixtures(&crate_root),
         Commands::QaRun => commands::cmd_qa_run(&crate_root).await,
+        Commands::QaJudge => commands::cmd_qa_judge(&crate_root).await,
     }
 }
