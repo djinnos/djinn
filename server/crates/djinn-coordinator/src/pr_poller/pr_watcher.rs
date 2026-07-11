@@ -453,12 +453,25 @@ impl CoordinatorActor {
                     // If it fails (repo doesn't allow auto-merge, branch
                     // protection refuses, etc.) the pr_review loop falls
                     // back to the legacy REST merge path.
+                    //
+                    // Use a merge method the repo actually permits — enabling
+                    // auto-merge with SQUASH on a squash-disabled repo just
+                    // soft-fails and forfeits GitHub-managed gating. The first
+                    // allowed method is Djinn's preferred one (squash when
+                    // available, else merge commit, else rebase).
+                    let auto_merge_method = self
+                        .resolve_allowed_merge_methods(gh_client, &owner, &repo)
+                        .await
+                        .first()
+                        .copied()
+                        .unwrap_or(MergeMethod::Squash);
                     enable_auto_merge_best_effort(
                         gh_client,
                         &task.short_id,
                         pull_number,
                         &pr.node_id,
                         &pr.title,
+                        auto_merge_method,
                     )
                     .await;
 
