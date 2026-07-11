@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO org_ai_policy\n                   (id, blocked_subscriptions, default_lanes, lock_level,\n                    additional_recommended_model_ids, demoted_recommended_model_ids,\n                    updated_at)\n               VALUES (1, $1, $2, $3, $4, $5,\n                       to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))\n               ON CONFLICT (id) DO UPDATE SET\n                   blocked_subscriptions = EXCLUDED.blocked_subscriptions,\n                   default_lanes = EXCLUDED.default_lanes,\n                   lock_level = EXCLUDED.lock_level,\n                   additional_recommended_model_ids = EXCLUDED.additional_recommended_model_ids,\n                   demoted_recommended_model_ids = EXCLUDED.demoted_recommended_model_ids,\n                   updated_at = EXCLUDED.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Varchar",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e9a529e993802ac44471bed2a1dcbeee2c3850d3051131070d06c8cd42c91d32"
+}
