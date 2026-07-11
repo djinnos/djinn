@@ -13,6 +13,9 @@
 //!   streaming-SSE-adjacent tests, and the 3 `test_build_request_*` /
 //!   `test_system_blocks_*` tests that live above the L437 "Empty-segment
 //!   handling" section break).
+//! - `replay_roundtrip` — parse → shared serde → Anthropic request
+//!   round-trip regressions for signed/redacted thinking, opaque unknown blocks,
+//!   tool-use ordering, and the empty-text fallback regression guard.
 //! - `request` — system-blocks, build_request, reasoning-effort tests (the
 //!   `test_build_request_*` / `test_system_blocks_*` /
 //!   `test_serialize_system_blocks_*` / `test_reasoning_effort_*` family below
@@ -27,7 +30,7 @@
 //!     `drift_guard_fixture` local helper.
 //!
 //! The 3 shared helpers (`spawn_sse_server`, `test_anthropic_config`,
-//! `test_provider`) are defined here and marked `pub(super)` so the 4 sibling
+//! `test_provider`) are defined here and marked `pub(super)` so the 5 sibling
 //! test files can reach them via `use super::spawn_sse_server;` etc.
 
 #![allow(clippy::doc_overindented_list_items)]
@@ -39,6 +42,7 @@ use axum::{Router, routing::post};
 
 mod cache;
 mod e2e_request;
+mod replay_roundtrip;
 mod request;
 mod streaming;
 
