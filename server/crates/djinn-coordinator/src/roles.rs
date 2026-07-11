@@ -398,6 +398,39 @@ mod tests {
         }
     }
 
+    /// Part B (project-agnostic draft-PR CI-feedback flow): a task whose PR is
+    /// still a GitHub draft sits in `pr_draft` while the project's OWN CI runs
+    /// on the PR head. Reviewers must NOT be dispatched on a draft PR — the
+    /// pr_poller owns the task until CI goes green (or no CI is configured), at
+    /// which point it undrafts the PR and transitions the task to
+    /// `needs_task_review`. `reviewer_claims` is gated on the review statuses,
+    /// so a `pr_draft` task is never claimed by the reviewer (nor any other
+    /// dispatch role). This locks the "reviewers not dispatched while draft"
+    /// invariant that the draft flow relies on.
+    #[test]
+    fn reviewer_not_dispatched_while_pr_is_draft() {
+        let ctx = DispatchContext;
+
+        // While the PR is a draft the task is in `pr_draft` (or `pr_review`,
+        // both poller-owned): the reviewer claims neither.
+        for status in ["pr_draft", "pr_review"] {
+            let draft = task("task", status, "[]");
+            assert!(
+                !reviewer_claims(&draft, &ctx),
+                "reviewer must not claim a {status} task (PR still a draft / poller-owned, CI in flight)"
+            );
+        }
+
+        // Once the poller undrafts (CI green / no CI configured) and the task
+        // reaches `needs_task_review`, the reviewer DOES claim it — dispatch keys
+        // off the ready transition, not the draft state.
+        let ready = task("task", "needs_task_review", "[]");
+        assert!(
+            reviewer_claims(&ready, &ctx),
+            "reviewer claims the task only after it is ready for review"
+        );
+    }
+
     /// An autonomous arbiter-park escalation (`planner-park-escalation`) is a
     /// NORMAL planner-dispatchable review task: unlike a human-review hold it
     /// must be claimed by the planner (so a session resolves it) and it must

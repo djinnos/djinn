@@ -563,9 +563,11 @@ pub fn evaluate_large_delete_or_rewrite(
 /// Evaluate CI/workflow/release/deploy/automation change findings.
 ///
 /// Flags any changed file whose path matches the policy's CI workflow
-/// path globs (e.g. `.github/workflows/**`, `.github/actions/**`,
-/// `.gitlab-ci.yml`, `deploy/**`, `release/**`, `Makefile`,
-/// `Tiltfile`). Each matching file produces one file-level finding.
+/// path globs. The SHIPPED default is ecosystem-generic (e.g.
+/// `.github/workflows/**`, `.github/actions/**`, `.gitlab-ci.yml`,
+/// `.circleci/**`, `Jenkinsfile`); repo-specific paths (`Makefile`,
+/// `Tiltfile`, `deploy/**`, `release/**`) are opted into via org/project
+/// policy. Each matching file produces one file-level finding.
 ///
 /// This rule mirrors [`evaluate_migration_changes`] in structure but
 /// targets CI/automation surfaces instead of database migrations.

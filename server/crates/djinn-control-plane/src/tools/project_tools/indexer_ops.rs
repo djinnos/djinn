@@ -1,16 +1,12 @@
-use std::path::Path;
-
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::fs;
 
 use super::lifecycle_ops::resolve_project;
 use crate::server::DjinnMcpServer;
-use djinn_core::paths::project_dir;
 use djinn_db::{
-    Database, ProjectImageStatus, ProjectRepository, ProjectWorkspaceGraphRepository,
-    RepoGraphCacheRepository,
+    CODELESS_WORKSPACE_SLUG, Database, ProjectImageStatus, ProjectRepository,
+    ProjectWorkspaceGraphRepository, RepoGraphCacheRepository,
 };
 use djinn_stack::Stack;
 
@@ -52,22 +48,36 @@ fn derive_graph_warm_status_with_workspaces(
     graph_warmed_at: &Option<String>,
     workspace_statuses: &[WorkspaceWarmStatusEntry],
 ) -> String {
-    // Failed/timed_out always wins — an indexer that didn't produce a
-    // SCIP artifact is the operator's primary problem, and the graph-cache
-    // shrink backstop (see `canonical_graph::detect_graph_cache_shrink_warning`)
-    // explicitly suppresses its own warning when those statuses are present.
+    // A `failed`/`timed_out` workspace row means the indexer produced no
+    // SCIP artifact for that workspace. The warm's partial-success policy
+    // (`tally_indexer_results`) intentionally keeps the *overall* warm
+    // alive when some other workspace succeeds, so this is not necessarily
+    // a total failure — but the degradation MUST be visible instead of
+    // being masked as `ready`.
+    //
+    //   * If the project graph still warmed from other workspaces
+    //     (`graph_warmed_at` is set), surface `degraded`: the graph is
+    //     usable but incomplete, and the failing workspace(s) are listed
+    //     in `workspace_warm_statuses`.
+    //   * If nothing warmed at all, it is a hard `failed`.
+    //
+    // Failed/timed_out is checked first so it always wins over a shrink
+    // `warning`, mirroring the suppression in
+    // `canonical_graph::detect_graph_cache_shrink_warning`.
     if workspace_statuses
         .iter()
         .any(|entry| matches!(entry.status.as_str(), "failed" | "timed_out"))
     {
-        return "failed".to_string();
+        return if graph_warmed_at.is_some() {
+            "degraded".to_string()
+        } else {
+            "failed".to_string()
+        };
     }
-    // A non-fatal graph-cache shrink warning lands as a synthetic
-    // `graph-cache` row in `.djinn/graph_warm_status.json` (see
-    // `scip_indexer::append_graph_cache_shrink_warning`). It is
-    // warning-level (not failure-level) — preserve `graph_warmed_at`
-    // freshness, but surface it as `warning` so the UI can show the
-    // old/new counts and commit SHA to operators.
+    // A non-fatal graph-cache shrink warning surfaces as a workspace row
+    // carrying status `warning`. It is warning-level (not failure-level) —
+    // preserve `graph_warmed_at` freshness, but surface it as `warning` so
+    // the UI can prompt operators to inspect the matching workspace row.
     if workspace_statuses
         .iter()
         .any(|entry| entry.status.as_str() == "warning")
@@ -77,24 +87,37 @@ fn derive_graph_warm_status_with_workspaces(
     derive_graph_warm_status(image_status, graph_warmed_at)
 }
 
-async fn read_workspace_warm_statuses(project_root: &Path) -> Vec<WorkspaceWarmStatusEntry> {
-    let path = project_root.join(".djinn").join("graph_warm_status.json");
-    match fs::read_to_string(&path).await {
-        Ok(contents) => match serde_json::from_str::<Vec<WorkspaceWarmStatusEntry>>(&contents) {
-            Ok(mut statuses) => {
-                statuses.sort_by(|left, right| {
-                    left.workspace_slug
-                        .cmp(&right.workspace_slug)
-                        .then_with(|| left.indexer.cmp(&right.indexer))
-                });
-                statuses
-            }
-            Err(err) => {
-                tracing::warn!(path = %path.display(), error = %err, "failed to parse workspace graph warm statuses");
-                Vec::new()
-            }
-        },
-        Err(_) => Vec::new(),
+/// Build the per-workspace warm-status list from the durable
+/// `project_workspace_graph` rows — the SAME source the `code_graph
+/// workspaces` op reads. The previous implementation read a
+/// `.djinn/graph_warm_status.json` file written by the warm pod, which the
+/// control plane never sees in pod mode, so the list was always empty and a
+/// `timed_out` workspace stayed silently masked as `ready`.
+async fn workspace_warm_statuses_from_db(
+    db: Database,
+    project_id: &str,
+) -> Vec<WorkspaceWarmStatusEntry> {
+    match ProjectWorkspaceGraphRepository::new(db)
+        .list_for_project(project_id)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            // The code-less sentinel is a freshness marker ("nothing to
+            // warm = considered warmed"), not a real workspace — same
+            // filter the `workspaces` op applies.
+            .filter(|row| row.workspace_slug != CODELESS_WORKSPACE_SLUG)
+            .map(|row| WorkspaceWarmStatusEntry {
+                workspace_slug: row.workspace_slug,
+                status: row.status,
+                commit_sha: Some(row.commit_sha).filter(|sha| !sha.is_empty()),
+                warmed_at: Some(row.warmed_at).filter(|at| !at.is_empty()),
+            })
+            .collect(),
+        Err(err) => {
+            tracing::warn!(project = %project_id, error = %err, "failed to read project_workspace_graph rows for warm statuses");
+            Vec::new()
+        }
     }
 }
 
@@ -218,22 +241,26 @@ pub struct GetProjectDevcontainerStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_warmed_at: Option<String>,
     /// Derived status for the UI banner. One of
-    /// `pending | running | ready | warning | failed`. `pending` means no warm has
-    /// ever run; `running` means the image is ready and a warm should be
-    /// in flight (or imminent); `ready` means derived graph freshness exists;
-    /// `warning` means a non-fatal graph-cache shrink backstop fired
-    /// (see `scip_indexer::append_graph_cache_shrink_warning` and
-    /// `canonical_graph::detect_graph_cache_shrink_warning`) — the cache
-    /// is still fresh and graph usage is unaffected, but operators should
-    /// inspect the matching `workspace_warm_statuses` row carrying the
-    /// old/new node counts and commit SHA; `failed` mirrors the image
-    /// build's failed status (no warm possible) or any
-    /// `failed`/`timed_out` workspace warm status (which always overrides
-    /// a shrink warning).
+    /// `pending | running | ready | warning | degraded | failed`.
+    /// `pending` means no warm has ever run; `running` means the image is
+    /// ready and a warm should be in flight (or imminent); `ready` means
+    /// derived graph freshness exists and every workspace warmed cleanly;
+    /// `warning` means a non-fatal graph-cache shrink backstop fired — the
+    /// cache is still fresh and graph usage is unaffected, but operators
+    /// should inspect the matching `workspace_warm_statuses` row;
+    /// `degraded` means the overall graph warmed but at least one workspace
+    /// row is `failed`/`timed_out` (partial success — the graph is usable
+    /// but incomplete; the failing workspaces are listed in
+    /// `workspace_warm_statuses`); `failed` means the image build failed
+    /// (no warm possible) or a `failed`/`timed_out` workspace exists with
+    /// no successful warm at all. `failed`/`timed_out` always override a
+    /// shrink warning.
     pub graph_warm_status: String,
-    /// Per-workspace graph warm results from the most recent indexer run.
-    /// Entries with `failed` or `timed_out` explain which workspace did not
-    /// produce a SCIP artifact even when another workspace succeeded.
+    /// Per-workspace graph warm results, sourced from the durable
+    /// `project_workspace_graph` rows (the same source the `code_graph
+    /// workspaces` op reads). Entries with `failed` or `timed_out` explain
+    /// which workspace did not produce a SCIP artifact even when another
+    /// workspace succeeded and the overall warm reports `degraded`.
     #[serde(default)]
     pub workspace_warm_statuses: Vec<WorkspaceWarmStatusEntry>,
     /// Populated on lookup failures; clients should surface this verbatim.
@@ -241,13 +268,23 @@ pub struct GetProjectDevcontainerStatusResponse {
     pub error: Option<String>,
 }
 
+/// A single per-workspace graph-warm result, projected from a
+/// `project_workspace_graph` row (the durable freshness source of truth).
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceWarmStatusEntry {
+    /// Workspace slug (matches the `code_graph workspaces` op).
     pub workspace_slug: String,
-    pub indexer: String,
+    /// Persisted warm status: `ready | warming | failed | timed_out`.
+    /// `failed`/`timed_out` mean the indexer produced no SCIP artifact for
+    /// this workspace, even if the overall project graph warmed from other
+    /// workspaces.
     pub status: String,
+    /// Commit SHA the row was warmed at, when recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
+    pub commit_sha: Option<String>,
+    /// ISO-8601 UTC timestamp of the last warm attempt for this workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warmed_at: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -509,17 +546,8 @@ impl DjinnMcpServer {
         let graph_warmed_at =
             graph_warmed_at_from_freshness(self.state.db().clone(), &input.project).await;
 
-        let workspace_warm_statuses = match resolve_project(&repo, &input.project).await {
-            Ok(Some(project)) => {
-                let project_root = project_dir(&project.github_owner, &project.github_repo);
-                read_workspace_warm_statuses(&project_root).await
-            }
-            Ok(None) => Vec::new(),
-            Err(err) => {
-                tracing::warn!(project = %input.project, error = %err, "project lookup failed while reading workspace warm statuses");
-                Vec::new()
-            }
-        };
+        let workspace_warm_statuses =
+            workspace_warm_statuses_from_db(self.state.db().clone(), &input.project).await;
         let graph_warm_status = derive_graph_warm_status_with_workspaces(
             &dispatch.status,
             &graph_warmed_at,
@@ -679,41 +707,29 @@ mod tests {
         );
     }
 
-    fn warm_entry(
-        workspace_slug: &str,
-        indexer: &str,
-        status: &str,
-        detail: Option<&str>,
-    ) -> WorkspaceWarmStatusEntry {
+    fn warm_entry(workspace_slug: &str, status: &str) -> WorkspaceWarmStatusEntry {
         WorkspaceWarmStatusEntry {
             workspace_slug: workspace_slug.to_string(),
-            indexer: indexer.to_string(),
             status: status.to_string(),
-            detail: detail.map(str::to_string),
+            commit_sha: Some("abc123".to_string()),
+            warmed_at: Some("2026-06-12T00:00:00Z".to_string()),
         }
     }
 
-    // `failed` always wins over `warning` so a workspace indexer blow-up
-    // is not masked by a co-existing graph-cache shrink warning. Mirrors
-    // the precedence in `canonical_graph::detect_graph_cache_shrink_warning`
-    // (clky) which suppresses the shrink warning on failed/timed_out
-    // workspaces — the warm-status surface must apply the same rule.
+    // The live bug: `server` warms `timed_out` while other workspaces warm
+    // fine. Because the overall graph IS warmed from those other
+    // workspaces (`graph_warmed_at` is set), the aggregate must surface
+    // `degraded` — usable but incomplete — rather than masking it as
+    // `ready` or over-alarming as `failed`. `failed`/`timed_out` is
+    // evaluated first so it still wins over a co-existing shrink
+    // `warning`, mirroring the precedence in
+    // `canonical_graph::detect_graph_cache_shrink_warning` (clky).
     #[test]
-    fn graph_warm_status_failed_beats_warning() {
+    fn graph_warm_status_degraded_when_failed_and_graph_warmed() {
         let statuses = vec![
-            warm_entry("server", "rust-analyzer", "ready", None),
-            warm_entry(
-                "graph-cache",
-                "rust-analyzer",
-                "warning",
-                Some("old=1000 new=700 delta=300"),
-            ),
-            warm_entry(
-                "desktop",
-                "scip-typescript",
-                "failed",
-                Some("indexer exit 1"),
-            ),
+            warm_entry("ui", "ready"),
+            warm_entry("graph-cache", "warning"),
+            warm_entry("server", "failed"),
         ];
 
         assert_eq!(
@@ -722,29 +738,17 @@ mod tests {
                 &Some("2026-06-12T00:00:00Z".to_string()),
                 &statuses,
             ),
-            "failed"
+            "degraded"
         );
     }
 
-    // `timed_out` follows the same rule as `failed` (both suppress
-    // shrink warnings upstream and must also be terminal in the
-    // status surface).
+    // `timed_out` follows the same rule as `failed`.
     #[test]
-    fn graph_warm_status_timed_out_beats_warning() {
+    fn graph_warm_status_degraded_when_timed_out_and_graph_warmed() {
         let statuses = vec![
-            warm_entry("server", "rust-analyzer", "ready", None),
-            warm_entry(
-                "graph-cache",
-                "rust-analyzer",
-                "warning",
-                Some("old=1000 new=700 delta=300"),
-            ),
-            warm_entry(
-                "desktop",
-                "scip-typescript",
-                "timed_out",
-                Some("indexer exceeded 600s"),
-            ),
+            warm_entry("ui", "ready"),
+            warm_entry("graph-cache", "warning"),
+            warm_entry("server", "timed_out"),
         ];
 
         assert_eq!(
@@ -753,29 +757,32 @@ mod tests {
                 &Some("2026-06-12T00:00:00Z".to_string()),
                 &statuses,
             ),
+            "degraded"
+        );
+    }
+
+    // When NOTHING warmed at all (no `graph_warmed_at`) but a workspace
+    // failed/timed_out, it is a hard `failed` — there is no usable graph
+    // to call `degraded`.
+    #[test]
+    fn graph_warm_status_failed_when_failed_and_nothing_warmed() {
+        let statuses = vec![warm_entry("server", "timed_out")];
+
+        assert_eq!(
+            derive_graph_warm_status_with_workspaces(ProjectImageStatus::READY, &None, &statuses,),
             "failed"
         );
     }
 
     // A non-fatal graph-cache shrink warning beats the regular
     // ready/running precedence when no failed/timed_out workspaces are
-    // present — this is the user-visible path for the clky backstop.
-    // `graph_warmed_at` is preserved (the cache is fresh) but the
-    // derived status flips to `warning` so the UI banner can prompt
-    // the operator to inspect the matching `workspace_warm_statuses`
-    // row carrying old/new counts and commit SHA.
+    // present. `graph_warmed_at` is preserved (the cache is fresh) but the
+    // derived status flips to `warning`.
     #[test]
     fn graph_warm_status_warning_beats_ready_when_no_failures() {
         let statuses = vec![
-            warm_entry("server", "rust-analyzer", "ready", None),
-            warm_entry(
-                "graph-cache",
-                "rust-analyzer",
-                "warning",
-                Some(
-                    r#"{"kind":"graph_cache_shrink_warning","project_id":"acme/wu8h","commit_sha":"abc123","old_node_count":1000,"new_node_count":700,"delta":300,"tolerance_min_absolute_delta":100,"tolerance_min_percent":0.1,"workspace_status_summary":"root:rust-analyzer=ready"}"#,
-                ),
-            ),
+            warm_entry("ui", "ready"),
+            warm_entry("graph-cache", "warning"),
         ];
 
         assert_eq!(
@@ -790,16 +797,10 @@ mod tests {
 
     // The warning must still surface when the image is in `running`
     // state — the running/runnable projection should not mask a
-    // shrink warning. A shrink is a cache-integrity signal, not an
-    // image-build signal.
+    // shrink warning.
     #[test]
     fn graph_warm_status_warning_beats_running_when_no_failures() {
-        let statuses = vec![warm_entry(
-            "graph-cache",
-            "rust-analyzer",
-            "warning",
-            Some("old=1000 new=700 delta=300"),
-        )];
+        let statuses = vec![warm_entry("graph-cache", "warning")];
 
         assert_eq!(
             derive_graph_warm_status_with_workspaces(ProjectImageStatus::READY, &None, &statuses,),
@@ -808,10 +809,10 @@ mod tests {
     }
 
     // Sanity: the existing normal-ready/running behavior must remain
-    // unchanged when no warning row is present.
+    // unchanged when every workspace is healthy.
     #[test]
     fn graph_warm_status_ready_when_warmed_and_workspaces_ready() {
-        let statuses = vec![warm_entry("server", "rust-analyzer", "ready", None)];
+        let statuses = vec![warm_entry("server", "ready")];
 
         assert_eq!(
             derive_graph_warm_status_with_workspaces(
@@ -825,7 +826,7 @@ mod tests {
 
     #[test]
     fn graph_warm_status_running_when_image_ready_but_not_yet_warmed() {
-        let statuses = vec![warm_entry("server", "rust-analyzer", "ready", None)];
+        let statuses = vec![warm_entry("server", "ready")];
 
         assert_eq!(
             derive_graph_warm_status_with_workspaces(ProjectImageStatus::READY, &None, &statuses,),
@@ -841,26 +842,99 @@ mod tests {
         );
     }
 
-    // The clky append helper writes a `graph-cache` row with status
-    // "warning" carrying a JSON detail payload (old/new counts, commit
-    // SHA). The control-plane surface reads the same
-    // `.djinn/graph_warm_status.json` and must deserialize that row
-    // cleanly so the warning details flow through to the UI.
+    // End-to-end handler read path (the live djinnos/djinn bug): a
+    // `timed_out` row for `server` alongside a healthy `ui` row must yield
+    // a POPULATED `workspace_warm_statuses` list AND a `degraded`
+    // aggregate — the previous filesystem source returned an empty list
+    // and a `ready` aggregate, hiding the failure. The `__djinn_no_code__`
+    // sentinel is filtered out, matching the `workspaces` op.
+    #[tokio::test]
+    async fn workspace_warm_statuses_from_db_surfaces_timed_out_and_degrades_aggregate() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let workspace_repo = ProjectWorkspaceGraphRepository::new(db.clone());
+        let project = project_repo
+            .create("degraded-project", "djinnos", "djinn")
+            .await
+            .expect("create project");
+
+        workspace_repo
+            .upsert(ProjectWorkspaceGraphUpsert {
+                project_id: &project.id,
+                workspace_slug: "ui",
+                commit_sha: "sha-ui",
+                status: "ready",
+            })
+            .await
+            .expect("ui upsert");
+        workspace_repo
+            .upsert(ProjectWorkspaceGraphUpsert {
+                project_id: &project.id,
+                workspace_slug: "server",
+                commit_sha: "sha-server",
+                status: "timed_out",
+            })
+            .await
+            .expect("server upsert");
+        // The code-less sentinel must NOT appear in the surfaced list.
+        workspace_repo
+            .upsert(ProjectWorkspaceGraphUpsert {
+                project_id: &project.id,
+                workspace_slug: djinn_db::CODELESS_WORKSPACE_SLUG,
+                commit_sha: "sha-none",
+                status: "ready",
+            })
+            .await
+            .expect("sentinel upsert");
+
+        let statuses = workspace_warm_statuses_from_db(db.clone(), &project.id).await;
+        assert_eq!(
+            statuses.len(),
+            2,
+            "sentinel filtered out; ui + server surfaced"
+        );
+        let server = statuses
+            .iter()
+            .find(|entry| entry.workspace_slug == "server")
+            .expect("server row surfaced");
+        assert_eq!(server.status, "timed_out");
+        assert_eq!(server.commit_sha.as_deref(), Some("sha-server"));
+        assert!(server.warmed_at.is_some(), "warmed_at populated from row");
+        assert!(
+            statuses
+                .iter()
+                .all(|e| e.workspace_slug != djinn_db::CODELESS_WORKSPACE_SLUG),
+            "code-less sentinel excluded"
+        );
+
+        // The overall graph warmed from `ui`, so the aggregate is the
+        // partial-success `degraded`, not `failed` and not a masked `ready`.
+        let warmed_at = graph_warmed_at_from_freshness(db, &project.id).await;
+        assert!(warmed_at.is_some(), "ui warm produced a freshness stamp");
+        assert_eq!(
+            derive_graph_warm_status_with_workspaces(
+                ProjectImageStatus::READY,
+                &warmed_at,
+                &statuses,
+            ),
+            "degraded"
+        );
+    }
+
     #[test]
-    fn workspace_warm_status_entries_round_trip_shrink_warning_payload() {
-        let detail = r#"{"kind":"graph_cache_shrink_warning","project_id":"acme/wu8h","commit_sha":"abc123","old_node_count":1000,"new_node_count":700,"delta":300}"#;
+    fn workspace_warm_status_entry_round_trips() {
         let entries = vec![
             WorkspaceWarmStatusEntry {
-                workspace_slug: "server".to_string(),
-                indexer: "rust-analyzer".to_string(),
+                workspace_slug: "ui".to_string(),
                 status: "ready".to_string(),
-                detail: None,
+                commit_sha: Some("sha-ui".to_string()),
+                warmed_at: Some("2026-06-12T00:00:00Z".to_string()),
             },
             WorkspaceWarmStatusEntry {
-                workspace_slug: "graph-cache".to_string(),
-                indexer: "rust-analyzer".to_string(),
-                status: "warning".to_string(),
-                detail: Some(detail.to_string()),
+                workspace_slug: "server".to_string(),
+                status: "timed_out".to_string(),
+                commit_sha: Some("sha-server".to_string()),
+                warmed_at: Some("2026-06-12T00:00:01Z".to_string()),
             },
         ];
 
@@ -869,11 +943,10 @@ mod tests {
             serde_json::from_str(&serialized).expect("deserialize");
 
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].workspace_slug, "server");
+        assert_eq!(parsed[0].workspace_slug, "ui");
         assert_eq!(parsed[0].status, "ready");
-        assert_eq!(parsed[1].workspace_slug, "graph-cache");
-        assert_eq!(parsed[1].indexer, "rust-analyzer");
-        assert_eq!(parsed[1].status, "warning");
-        assert_eq!(parsed[1].detail.as_deref(), Some(detail));
+        assert_eq!(parsed[1].workspace_slug, "server");
+        assert_eq!(parsed[1].status, "timed_out");
+        assert_eq!(parsed[1].commit_sha.as_deref(), Some("sha-server"));
     }
 }
