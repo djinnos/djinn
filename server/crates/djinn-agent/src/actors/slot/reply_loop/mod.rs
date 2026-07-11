@@ -6,7 +6,10 @@ use djinn_provider::message::Conversation;
 
 use crate::context::AgentContext;
 use crate::output_parser::ParsedAgentOutput;
-use crate::output_stash::{OutputStash, handle_stash_tool, is_stash_tool, render_tool_result};
+use crate::output_stash::{
+    OutputStash, externalize_rendered_tool_result, handle_stash_tool, is_stash_tool,
+    render_tool_result,
+};
 
 pub(crate) mod error_handling {
     pub(crate) use djinn_slot::reply_loop::error_handling::*;
@@ -158,6 +161,21 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
         value: &serde_json::Value,
     ) -> String {
         render_tool_result(&self.output_stash, tool_use_id, tool_name, value)
+    }
+    fn externalize_rendered_result(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        rendered: &str,
+        preview_chars: usize,
+    ) -> String {
+        externalize_rendered_tool_result(
+            &self.output_stash,
+            tool_use_id,
+            tool_name,
+            rendered,
+            preview_chars,
+        )
     }
     fn dispatch_extension_tool<'a>(
         &'a self,

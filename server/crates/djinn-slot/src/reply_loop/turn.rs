@@ -2056,4 +2056,351 @@ mod tests {
             "early stream end is not an interruption"
         );
     }
+
+    // ---- thinking persistence regressions (nbky) --------------------------
+    //
+    // These tests validate that the new ContentBlock variants introduced by
+    // task `a7wa` (signed Thinking, RedactedThinking, Unknown/passthrough)
+    // survive the session-message persistence boundary — Message → JSON → DB →
+    // JSON → Message — without data loss or semantic drift.
+    //
+    // Old stored Thinking blocks that lack `signature` must continue to
+    // deserialize as `signature: None` (the serde default). Signed thinking,
+    // redacted thinking, and opaque passthrough blocks must preserve their
+    // fields exactly through the round-trip.
+    //
+    // The `flush_in_flight_turn` path (which constructs a Thinking block from
+    // the plain `turn_thinking` string with `signature: None`) is also
+    // exercised to confirm it does not accidentally attach or drop signatures.
+
+    /// Old stored Thinking blocks that only contain `thinking` (no `signature`
+    /// key in JSON) must deserialize as `signature: None` after a persistence
+    /// round-trip through the session-message DB. This is the backward-
+    /// compatibility guarantee for pre-`a7wa` data.
+    #[tokio::test]
+    async fn persisted_old_style_thinking_loads_with_none_signature() {
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("db init");
+        let (session_id, task_id) = create_flush_test_session(&db).await;
+        let msg_repo =
+            SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        // Simulate an old assistant message whose Thinking block has no
+        // signature field — the shape that existed before `a7wa`.
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: "legacy reasoning without signature".into(),
+                signature: None,
+            }],
+            metadata: None,
+        };
+        persist_session_message(&msg_repo, &session_id, &task_id, &msg).await;
+
+        let loaded = msg_repo
+            .load_raw_conversation(&session_id)
+            .await
+            .expect("load conversation");
+        assert_eq!(loaded.messages.len(), 1);
+        match &loaded.messages[0].content[0] {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "legacy reasoning without signature");
+                assert_eq!(
+                    signature, &None,
+                    "old stored Thinking must have signature == None"
+                );
+            }
+            other => panic!("expected Thinking block, got: {other:?}"),
+        }
+    }
+
+    /// Signed Thinking blocks (Anthropic extended-thinking with a cryptographic
+    /// signature) must survive the persistence boundary with the signature
+    /// intact. This is the critical fidelity path for provider replay.
+    #[tokio::test]
+    async fn persisted_signed_thinking_preserves_signature() {
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("db init");
+        let (session_id, task_id) = create_flush_test_session(&db).await;
+        let msg_repo =
+            SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let original_signature = "eyJhbGciOiJFUzI1NiJ9.test_sig_payload";
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: "deep model reasoning about the problem".into(),
+                signature: Some(original_signature.into()),
+            }],
+            metadata: None,
+        };
+        persist_session_message(&msg_repo, &session_id, &task_id, &msg).await;
+
+        let loaded = msg_repo
+            .load_raw_conversation(&session_id)
+            .await
+            .expect("load conversation");
+        assert_eq!(loaded.messages.len(), 1);
+        match &loaded.messages[0].content[0] {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "deep model reasoning about the problem");
+                assert_eq!(
+                    signature.as_deref(),
+                    Some(original_signature),
+                    "signed Thinking signature must survive the DB round-trip"
+                );
+            }
+            other => panic!("expected Thinking block, got: {other:?}"),
+        }
+    }
+
+    /// RedactedThinking blocks (opaque base64 `data` from Anthropic's safety
+    /// filter) must round-trip through persistence with the data blob intact.
+    #[tokio::test]
+    async fn persisted_redacted_thinking_preserves_data() {
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("db init");
+        let (session_id, task_id) = create_flush_test_session(&db).await;
+        let msg_repo =
+            SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let redacted_data = "dGhpcyBpcyBhIHJlZGFjdGVkIHRoaW5raW5nIGJsb2I=";
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "Here is my answer.".into(),
+                },
+                ContentBlock::RedactedThinking {
+                    data: redacted_data.into(),
+                },
+            ],
+            metadata: None,
+        };
+        persist_session_message(&msg_repo, &session_id, &task_id, &msg).await;
+
+        let loaded = msg_repo
+            .load_raw_conversation(&session_id)
+            .await
+            .expect("load conversation");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(
+            loaded.messages[0].content.len(),
+            2,
+            "both content blocks must be present"
+        );
+        // Text block is first.
+        assert!(
+            matches!(&loaded.messages[0].content[0], ContentBlock::Text { text } if text == "Here is my answer."),
+            "text block must survive"
+        );
+        // RedactedThinking is second.
+        match &loaded.messages[0].content[1] {
+            ContentBlock::RedactedThinking { data } => {
+                assert_eq!(
+                    data, redacted_data,
+                    "RedactedThinking data blob must survive the DB round-trip exactly"
+                );
+            }
+            other => panic!("expected RedactedThinking block, got: {other:?}"),
+        }
+    }
+
+    /// Unknown/passthrough blocks (provider-owned content not modeled by the
+    /// shared schema) must survive persistence with `content_type` and all
+    /// `extra` fields intact, including nested JSON.
+    #[tokio::test]
+    async fn persisted_unknown_passthrough_preserves_extra_fields() {
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("db init");
+        let (session_id, task_id) = create_flush_test_session(&db).await;
+        let msg_repo =
+            SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let mut extra = serde_json::Map::new();
+        extra.insert("provider_specific_flag".into(), serde_json::json!(true));
+        extra.insert(
+            "nested".into(),
+            serde_json::json!({"a": [1, 2, {"b": true}]}),
+        );
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Unknown {
+                content_type: "custom_thinking_block".into(),
+                extra,
+            }],
+            metadata: None,
+        };
+        persist_session_message(&msg_repo, &session_id, &task_id, &msg).await;
+
+        let loaded = msg_repo
+            .load_raw_conversation(&session_id)
+            .await
+            .expect("load conversation");
+        assert_eq!(loaded.messages.len(), 1);
+        match &loaded.messages[0].content[0] {
+            ContentBlock::Unknown {
+                content_type,
+                extra,
+            } => {
+                assert_eq!(
+                    content_type, "custom_thinking_block",
+                    "content_type must survive the DB round-trip"
+                );
+                assert_eq!(
+                    extra.get("provider_specific_flag"),
+                    Some(&serde_json::json!(true)),
+                    "boolean extra field must survive"
+                );
+                assert_eq!(
+                    extra.get("nested"),
+                    Some(&serde_json::json!({"a": [1, 2, {"b": true}]})),
+                    "nested JSON in extra must survive the DB round-trip"
+                );
+            }
+            other => panic!("expected Unknown block, got: {other:?}"),
+        }
+    }
+
+    /// `flush_in_flight_turn` constructs a Thinking block from the plain
+    /// `turn_thinking` string with `signature: None`. After persistence and
+    /// reload, the block must still carry `signature: None` — this confirms
+    /// the flush path does not accidentally attach or drop signatures.
+    #[tokio::test]
+    async fn flush_unsigned_thinking_survives_persistence_boundary() {
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("db init");
+        let (session_id, task_id) = create_flush_test_session(&db).await;
+        let msg_repo =
+            SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let mut state = StreamTurnState::new();
+        state.turn_thinking = "internal reasoning about the task".into();
+        state.turn_text = "Here is the answer.".into();
+
+        flush_in_flight_turn(&msg_repo, &session_id, &task_id, 0, &mut state).await;
+        assert!(state.turn_flushed);
+
+        let loaded = msg_repo
+            .load_raw_conversation(&session_id)
+            .await
+            .expect("load conversation");
+        assert_eq!(loaded.messages.len(), 1, "one assistant message");
+        let assistant = &loaded.messages[0];
+        assert_eq!(assistant.role, Role::Assistant);
+
+        // Thinking block from flush must have signature: None.
+        let thinking_block = assistant
+            .content
+            .iter()
+            .find(|b| matches!(b, ContentBlock::Thinking { .. }));
+        match thinking_block {
+            Some(ContentBlock::Thinking {
+                thinking,
+                signature,
+            }) => {
+                assert_eq!(thinking, "internal reasoning about the task");
+                assert_eq!(
+                    signature, &None,
+                    "flush-created Thinking must carry signature: None"
+                );
+            }
+            None => panic!("Thinking block must be present after flush"),
+            _ => unreachable!(),
+        }
+        // Text block must also be present.
+        assert!(
+            assistant
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text == "Here is the answer.")),
+            "text block must survive flush"
+        );
+    }
+
+    /// A mixed assistant message containing signed Thinking, RedactedThinking,
+    /// regular Text, and an Unknown passthrough block must survive persistence
+    /// with every block preserved in order and with all fields intact.
+    #[tokio::test]
+    async fn mixed_thinking_content_survives_persistence_boundary() {
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("db init");
+        let (session_id, task_id) = create_flush_test_session(&db).await;
+        let msg_repo =
+            SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let mut extra = serde_json::Map::new();
+        extra.insert("lang".into(), serde_json::json!("en"));
+
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "signed reasoning".into(),
+                    signature: Some("sig_v2_abc".into()),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "cmVkYWN0ZWQ=".into(),
+                },
+                ContentBlock::Text {
+                    text: "The answer is 42.".into(),
+                },
+                ContentBlock::Unknown {
+                    content_type: "provider_meta".into(),
+                    extra,
+                },
+            ],
+            metadata: None,
+        };
+        persist_session_message(&msg_repo, &session_id, &task_id, &msg).await;
+
+        let loaded = msg_repo
+            .load_raw_conversation(&session_id)
+            .await
+            .expect("load conversation");
+        assert_eq!(loaded.messages.len(), 1);
+        let blocks = &loaded.messages[0].content;
+        assert_eq!(blocks.len(), 4, "all four content blocks must survive");
+
+        // 1. Signed Thinking.
+        match &blocks[0] {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "signed reasoning");
+                assert_eq!(signature.as_deref(), Some("sig_v2_abc"));
+            }
+            other => panic!("expected signed Thinking, got: {other:?}"),
+        }
+        // 2. RedactedThinking.
+        match &blocks[1] {
+            ContentBlock::RedactedThinking { data } => {
+                assert_eq!(data, "cmVkYWN0ZWQ=");
+            }
+            other => panic!("expected RedactedThinking, got: {other:?}"),
+        }
+        // 3. Text.
+        assert!(
+            matches!(&blocks[2], ContentBlock::Text { text } if text == "The answer is 42."),
+            "text block must survive in order"
+        );
+        // 4. Unknown passthrough.
+        match &blocks[3] {
+            ContentBlock::Unknown {
+                content_type,
+                extra,
+            } => {
+                assert_eq!(content_type, "provider_meta");
+                assert_eq!(extra.get("lang"), Some(&serde_json::json!("en")));
+            }
+            other => panic!("expected Unknown block, got: {other:?}"),
+        }
+    }
 }
