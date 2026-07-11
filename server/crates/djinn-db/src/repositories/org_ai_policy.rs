@@ -10,10 +10,10 @@ use djinn_core::models::{LockLevel, OrgAiPolicy, OrgDefaultLanes};
 use crate::Result;
 use crate::database::Database;
 
-/// Parse the `blocked_subscriptions` TEXT column (a JSON string array).
-/// `NULL`/empty/invalid JSON all read as an empty list (fail-open: a corrupt
-/// value never silently blocks every provider).
-fn parse_blocked(raw: &str) -> Vec<String> {
+/// Parse a JSON string-array TEXT column (e.g. `blocked_subscriptions` or
+/// recommended-model override lists). `NULL`/empty/invalid JSON all read as an
+/// empty list.
+fn parse_string_array(raw: &str) -> Vec<String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Vec::new();
@@ -46,16 +46,23 @@ impl OrgAiPolicyRepository {
     pub async fn get(&self) -> Result<OrgAiPolicy> {
         self.db.ensure_initialized().await?;
         let row = sqlx::query!(
-            r#"SELECT blocked_subscriptions, default_lanes, lock_level, updated_at
+            r#"SELECT blocked_subscriptions, default_lanes, lock_level,
+                      additional_recommended_model_ids,
+                      demoted_recommended_model_ids,
+                      updated_at
                FROM org_ai_policy WHERE id = 1"#,
         )
         .fetch_optional(self.db.pool())
         .await?;
         Ok(row
             .map(|r| OrgAiPolicy {
-                blocked_subscriptions: parse_blocked(&r.blocked_subscriptions),
+                blocked_subscriptions: parse_string_array(&r.blocked_subscriptions),
                 default_lanes: parse_default_lanes(&r.default_lanes),
                 lock_level: LockLevel::from_db(&r.lock_level),
+                additional_recommended_model_ids: parse_string_array(
+                    &r.additional_recommended_model_ids,
+                ),
+                demoted_recommended_model_ids: parse_string_array(&r.demoted_recommended_model_ids),
                 updated_at: r.updated_at,
             })
             .unwrap_or_default())
@@ -70,19 +77,33 @@ impl OrgAiPolicyRepository {
         let default_lanes = serde_json::to_string(&policy.default_lanes)
             .map_err(|e| crate::Error::Internal(format!("serialize default_lanes: {e}")))?;
         let lock_level = policy.lock_level.as_db();
+        let additional =
+            serde_json::to_string(&policy.additional_recommended_model_ids).map_err(|e| {
+                crate::Error::Internal(format!("serialize additional_recommended_model_ids: {e}"))
+            })?;
+        let demoted =
+            serde_json::to_string(&policy.demoted_recommended_model_ids).map_err(|e| {
+                crate::Error::Internal(format!("serialize demoted_recommended_model_ids: {e}"))
+            })?;
         sqlx::query!(
             r#"INSERT INTO org_ai_policy
-                   (id, blocked_subscriptions, default_lanes, lock_level, updated_at)
-               VALUES (1, $1, $2, $3,
+                   (id, blocked_subscriptions, default_lanes, lock_level,
+                    additional_recommended_model_ids, demoted_recommended_model_ids,
+                    updated_at)
+               VALUES (1, $1, $2, $3, $4, $5,
                        to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
                ON CONFLICT (id) DO UPDATE SET
                    blocked_subscriptions = EXCLUDED.blocked_subscriptions,
                    default_lanes = EXCLUDED.default_lanes,
                    lock_level = EXCLUDED.lock_level,
+                   additional_recommended_model_ids = EXCLUDED.additional_recommended_model_ids,
+                   demoted_recommended_model_ids = EXCLUDED.demoted_recommended_model_ids,
                    updated_at = EXCLUDED.updated_at"#,
             blocked,
             default_lanes,
             lock_level,
+            additional,
+            demoted,
         )
         .execute(self.db.pool())
         .await?;
@@ -102,6 +123,8 @@ mod tests {
         assert!(p.blocked_subscriptions.is_empty());
         assert!(p.default_lanes.is_empty());
         assert_eq!(p.lock_level, LockLevel::Flexible);
+        assert!(p.additional_recommended_model_ids.is_empty());
+        assert!(p.demoted_recommended_model_ids.is_empty());
     }
 
     #[tokio::test]
@@ -120,17 +143,35 @@ mod tests {
                 review: vec![],
             },
             lock_level: LockLevel::Locked,
+            additional_recommended_model_ids: vec!["anthropic/claude-sonnet-4-7".to_string()],
+            demoted_recommended_model_ids: vec!["openai/gpt-5.5".to_string()],
             updated_at: String::new(),
         };
         let saved = repo.set(&policy).await.unwrap();
         assert_eq!(saved.blocked_subscriptions, policy.blocked_subscriptions);
         assert_eq!(saved.default_lanes, policy.default_lanes);
         assert_eq!(saved.lock_level, LockLevel::Locked);
+        assert_eq!(
+            saved.additional_recommended_model_ids,
+            vec!["anthropic/claude-sonnet-4-7".to_string()]
+        );
+        assert_eq!(
+            saved.demoted_recommended_model_ids,
+            vec!["openai/gpt-5.5".to_string()]
+        );
         assert!(!saved.updated_at.is_empty(), "updated_at stamped on write");
 
         let read = repo.get().await.unwrap();
         assert_eq!(read.lock_level, LockLevel::Locked);
         assert!(read.is_blocked("MiniMax-Coding-Plan"));
+        assert_eq!(
+            read.additional_recommended_model_ids,
+            vec!["anthropic/claude-sonnet-4-7".to_string()]
+        );
+        assert_eq!(
+            read.demoted_recommended_model_ids,
+            vec!["openai/gpt-5.5".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -141,6 +182,7 @@ mod tests {
         repo.set(&OrgAiPolicy {
             blocked_subscriptions: vec!["zai-coding-plan".to_string()],
             lock_level: LockLevel::Locked,
+            additional_recommended_model_ids: vec!["anthropic/claude-opus-4-8".to_string()],
             ..Default::default()
         })
         .await
@@ -150,5 +192,7 @@ mod tests {
         let cleared = repo.set(&OrgAiPolicy::default()).await.unwrap();
         assert!(cleared.blocked_subscriptions.is_empty());
         assert_eq!(cleared.lock_level, LockLevel::Flexible);
+        assert!(cleared.additional_recommended_model_ids.is_empty());
+        assert!(cleared.demoted_recommended_model_ids.is_empty());
     }
 }

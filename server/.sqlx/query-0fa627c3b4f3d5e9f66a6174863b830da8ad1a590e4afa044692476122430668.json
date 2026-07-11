@@ -1,0 +1,84 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS DOUBLE PRECISION)), 0.0) AS \"avg_tokens!: f64\",\n                COALESCE(AVG(CAST(s.tokens_in AS DOUBLE PRECISION)), 0.0) AS \"avg_tokens_in!: f64\",\n                COALESCE(AVG(CAST(s.tokens_out AS DOUBLE PRECISION)), 0.0) AS \"avg_tokens_out!: f64\",\n                COALESCE(CAST(AVG(\n                    CASE WHEN s.ended_at IS NOT NULL\n                        THEN EXTRACT(EPOCH FROM (s.ended_at::timestamp - s.started_at::timestamp))\n                        ELSE NULL END\n                ) AS DOUBLE PRECISION), 0.0) AS \"avg_time_seconds!: f64\",\n                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'extracted') ~ '^-?[0-9]+$'\n                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'extracted')::bigint END), 0) AS BIGINT) AS \"extracted!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'dedup_skipped') ~ '^-?[0-9]+$'\n                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'dedup_skipped')::bigint END), 0) AS BIGINT) AS \"dedup_skipped!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'novelty_skipped') ~ '^-?[0-9]+$'\n                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'novelty_skipped')::bigint END), 0) AS BIGINT) AS \"novelty_skipped!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'written') ~ '^-?[0-9]+$'\n                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'written')::bigint END), 0) AS BIGINT) AS \"written!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'merged') ~ '^-?[0-9]+$'\n                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'merged')::bigint END), 0) AS BIGINT) AS \"merged!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'downgraded') ~ '^-?[0-9]+$'\n                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'downgraded')::bigint END), 0) AS BIGINT) AS \"downgraded!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN (s.event_taxonomy -> 'extraction_quality' ->> 'discarded') ~ '^-?[0-9]+$'\n                    THEN (s.event_taxonomy -> 'extraction_quality' ->> 'discarded')::bigint END), 0) AS BIGINT) AS \"discarded!: i64\"\n             FROM sessions s\n             JOIN tasks t ON t.id = s.task_id\n             WHERE t.project_id = $1\n               AND s.agent_type = $2\n               AND s.status = 'completed'\n               AND s.started_at >= to_char((now() at time zone 'utc') - (interval '1 day' * $3), 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "avg_tokens!: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 1,
+        "name": "avg_tokens_in!: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "avg_tokens_out!: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "avg_time_seconds!: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 4,
+        "name": "extracted!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "dedup_skipped!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "novelty_skipped!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "written!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "merged!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "downgraded!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "discarded!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "0fa627c3b4f3d5e9f66a6174863b830da8ad1a590e4afa044692476122430668"
+}

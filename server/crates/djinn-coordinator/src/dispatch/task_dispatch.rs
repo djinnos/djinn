@@ -2179,6 +2179,20 @@ impl CoordinatorActor {
                     .await;
             }
 
+            // Dispatch-time throttle deprioritization: move any model that is
+            // currently inside a throttle cooldown window to the BACK of the
+            // ordered list so a healthy lane-mate is attempted first. A model
+            // whose token plan just 429'd is likely still quota-dead; retrying
+            // it head-of-line wastes a session spawn + a <10s crash + the
+            // ~30-minute task redispatch cooldown before failover finally
+            // happens. This is a pure reorder (not a filter): a throttle-cooling
+            // model stays in the list as a last-resort candidate, so if every
+            // lane model is cooling the existing all-unavailable path still
+            // applies (the dispatch loop's `is_available` gate + escalating
+            // backoff), and a half-open (cooldown-expired) throttle model is
+            // still tried when it is the only option.
+            deprioritize_throttle_cooling(&self.health, creator.as_deref(), &mut model_ids);
+
             // Structured observability: emit one log record per candidate in
             // the final ordered list so post-apply / post-rollback model order
             // can be inspected without production-only tooling.
@@ -2603,6 +2617,38 @@ impl CoordinatorActor {
         }
         self.publish_status();
     }
+}
+
+/// Reorder `model_ids` in place so that models currently inside a **throttle
+/// cooldown window** are moved to the back, preserving relative order within
+/// each group (healthy/available first, throttle-cooling last).
+///
+/// This is a pure reorder, not a filter: a throttle-cooling model stays in the
+/// list as a last-resort candidate. Its purpose is to prefer a healthy lane-mate
+/// over a model whose token plan just 429'd — avoiding a wasted session spawn +
+/// <10s crash + task-redispatch cooldown on a model known to be cooling — while
+/// keeping the all-cooling / only-candidate case sane: the dispatch loop's
+/// `is_available` gate still skips a model in an *active* cooldown, and a
+/// half-open (cooldown-expired) throttle model is still attempted when it is the
+/// only option. A list shorter than two candidates is left untouched.
+fn deprioritize_throttle_cooling(
+    health: &djinn_provider::catalog::HealthTracker,
+    scope: Option<&str>,
+    model_ids: &mut Vec<String>,
+) {
+    if model_ids.len() < 2 {
+        return;
+    }
+    let mut cooling: Vec<String> = Vec::new();
+    model_ids.retain(|m| {
+        if health.is_throttle_cooling(scope, m) {
+            cooling.push(m.clone());
+            false
+        } else {
+            true
+        }
+    });
+    model_ids.extend(cooling);
 }
 
 /// E6 regression tests.
@@ -6765,5 +6811,84 @@ mod monitored_reopen_no_eligible_model_tests {
         );
 
         cancel.cancel();
+    }
+}
+
+/// Dispatch-time throttle-deprioritization tests for
+/// [`deprioritize_throttle_cooling`].
+#[cfg(test)]
+mod throttle_deprioritization_tests {
+    use super::deprioritize_throttle_cooling;
+    use djinn_provider::catalog::health::HealthTracker;
+
+    const SCOPE: Option<&str> = Some("user-a");
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn cooling_model_is_moved_behind_healthy_lanemate() {
+        let health = HealthTracker::new();
+        // model-a is throttle-cooling; model-b is healthy.
+        health.record_stall(SCOPE, "model-a", false);
+        assert!(health.is_throttle_cooling(SCOPE, "model-a"));
+
+        let mut model_ids = ids(&["model-a", "model-b"]);
+        deprioritize_throttle_cooling(&health, SCOPE, &mut model_ids);
+        assert_eq!(
+            model_ids,
+            ids(&["model-b", "model-a"]),
+            "a throttle-cooling head-of-line model is moved behind a healthy lane-mate"
+        );
+    }
+
+    #[test]
+    fn healthy_order_is_preserved_when_nothing_is_cooling() {
+        let health = HealthTracker::new();
+        let mut model_ids = ids(&["model-a", "model-b", "model-c"]);
+        deprioritize_throttle_cooling(&health, SCOPE, &mut model_ids);
+        assert_eq!(
+            model_ids,
+            ids(&["model-a", "model-b", "model-c"]),
+            "with no cooling model the priority order is untouched"
+        );
+    }
+
+    #[test]
+    fn relative_order_within_each_group_is_stable() {
+        let health = HealthTracker::new();
+        // a and c cooling; b and d healthy. Expect [b, d, a, c].
+        health.record_stall(SCOPE, "model-a", false);
+        health.record_stall(SCOPE, "model-c", false);
+        let mut model_ids = ids(&["model-a", "model-b", "model-c", "model-d"]);
+        deprioritize_throttle_cooling(&health, SCOPE, &mut model_ids);
+        assert_eq!(
+            model_ids,
+            ids(&["model-b", "model-d", "model-a", "model-c"])
+        );
+    }
+
+    #[test]
+    fn only_candidate_that_is_cooling_is_left_in_place() {
+        let health = HealthTracker::new();
+        health.record_stall(SCOPE, "model-a", false);
+        // A lone cooling candidate is NOT dropped — it stays as the last-resort
+        // candidate so the dispatch loop can still attempt it (half-open) or
+        // defer via the existing all-unavailable path.
+        let mut model_ids = ids(&["model-a"]);
+        deprioritize_throttle_cooling(&health, SCOPE, &mut model_ids);
+        assert_eq!(model_ids, ids(&["model-a"]));
+    }
+
+    #[test]
+    fn all_cooling_keeps_all_candidates() {
+        let health = HealthTracker::new();
+        health.record_stall(SCOPE, "model-a", false);
+        health.record_stall(SCOPE, "model-b", false);
+        let mut model_ids = ids(&["model-a", "model-b"]);
+        deprioritize_throttle_cooling(&health, SCOPE, &mut model_ids);
+        // No candidate is lost; order among the cooling group is preserved.
+        assert_eq!(model_ids, ids(&["model-a", "model-b"]));
     }
 }

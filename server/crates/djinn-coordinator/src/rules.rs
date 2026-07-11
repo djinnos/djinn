@@ -1540,8 +1540,11 @@ mod tests {
             .await
             .unwrap();
 
+        let closed_child = task_repo.get(&t1.id).await.unwrap().unwrap();
+        assert_eq!(closed_child.status, "closed");
+        assert_eq!(closed_child.close_reason.as_deref(), Some("parent_closed"));
+
         let _handle = spawn_coordinator(&db, &tx);
-        close_task(&db, &t1.id, &tx).await;
         // Negative assertion — same 400ms budget as the sibling tests above.
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 

@@ -75,16 +75,27 @@ resources:
     limits:
       cpu: "2"
       memory: "2Gi"
-  # Defaults the controller will apply to Job PodSpecs when dispatching
-  # task-run workloads. Surfaced here so operators can tune without editing
-  # controller env directly. djinn-server reads these via env.
+  # Resource sizing the controller stamps onto the task-run Job PodSpecs it
+  # dispatches. These size the EPHEMERAL worker Pods djinn-server spawns, NOT
+  # the long-lived server Deployment above (that's `resources.server`). They
+  # reach the running server as the DJINN_K8S_CPU/MEMORY_{REQUEST,LIMIT} env
+  # vars emitted by templates/deployment-server.yaml, and the k8s runtime
+  # stamps them onto every task-run Pod it creates.
+  #
+  # Rationale for low requests / high limits (proven on a single 12-CPU/47Gi
+  # VPS node running several concurrent workers): keep requests small so many
+  # Pods schedule onto one node, and set limits high so a cargo build/link
+  # burst can spike into the node's idle headroom. Workers idle-wait on the
+  # LLM most of the time, so their steady-state footprint sits far below the
+  # limit — over-committing the node is safe and lets more work run in
+  # parallel.
   taskrun:
     requests:
-      cpu: "500m"
-      memory: "1Gi"
+      cpu: "1"
+      memory: "2Gi"
     limits:
-      cpu: "2"
-      memory: "4Gi"
+      cpu: "6"
+      memory: "22Gi"
     # Pod scheduling for both task-run and warm Jobs. Warm Pods pre-warm the
     # graph cache that task-runs later adopt, so they MUST land on the same
     # NodePool — that's why one set of hints covers both.
@@ -105,6 +116,29 @@ resources:
     # constraints allow is eligible (preserves the pre-feature behavior).
     nodeSelector: {}
     tolerations: []
+  # Resource sizing for graph-warm Jobs — the short-lived Pods that populate
+  # the canonical graph cache a later task-run adopts. These reach the running
+  # server as the DJINN_K8S_WARM_* env vars emitted by
+  # templates/deployment-server.yaml and are stamped onto every warm Pod.
+  #
+  # Same low-request / high-limit rationale as `taskrun` above: SCIP indexer
+  # subprocesses (rust-analyzer, scip-go, ...) spike CPU/memory during a warm
+  # pass but idle otherwise, so a small request packs Pods onto a node while a
+  # high limit lets a burst use the idle headroom. Warm Jobs run in the
+  # background and don't gate worker latency, so over-committing is safe.
+  warm:
+    requests:
+      cpu: "2"
+      memory: "2Gi"
+    limits:
+      cpu: "6"
+      memory: "16Gi"
+    # Max wall-clock seconds a warm Job may run before the kubelet terminates
+    # it (activeDeadlineSeconds), surfaced as DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS.
+    # 3600s (60 min) covers a cold single-pass warm of a ~12-crate workspace
+    # (~20-25 min observed) with ample margin. Raise it if a larger workspace
+    # consistently hits the deadline.
+    jobTimeoutSeconds: 3600
 
 # -----------------------------------------------------------------------------
 # Storage

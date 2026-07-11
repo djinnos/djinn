@@ -134,7 +134,8 @@ pub use repositories::{
     settings::SettingsRepository,
     task::TaskRepository,
     task::{
-        ActivityQuery, BlockerRef, CountQuery, CreateTaskInProjectParams, CreateTaskParams,
+        ActivityQuery, BlockerRef, ChildDisposition, CountQuery, CreateTaskInProjectParams,
+        CreateTaskParams, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
         ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
     },
     task_arbitration::{
