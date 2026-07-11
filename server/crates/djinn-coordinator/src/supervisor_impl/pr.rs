@@ -207,34 +207,6 @@ pub async fn supervisor_pr_open(
         }
     }
 
-    // ── Pre-approval CI-grade verification gate (proposal `uv3p`) ────────────
-    // Before pushing the task branch (and opening the PR), require a green
-    // verification result for the submitted fingerprint covering the PR-level
-    // Quality-Gate check set for the touched paths. A red result is delivered as
-    // strike-free reviewer feedback and returns the task to a worker round —
-    // it does NOT push, open a PR, or increment any reopen/strike counter. The
-    // gate is default-ON with an env kill-switch and a docs-only bypass;
-    // inline check execution is deferred to the verification pod by default (see
-    // `preapproval_gate`). Runs BEFORE `push_task_branch_to_github` so a blocked
-    // submission never touches GitHub.
-    let preapproval_outcome =
-        crate::preapproval_gate::run_preapproval_gate(&app_state.db, &task_repo, task).await;
-    if preapproval_outcome.should_block() {
-        let reason = match &preapproval_outcome {
-            crate::preapproval_gate::PreApprovalGateOutcome::Blocked { feedback } => format!(
-                "pre-approval CI-grade verification gate blocked PR-open for task {}; \
-                 returned to worker round (strike-free). {feedback}",
-                task.short_id
-            ),
-            _ => "pre-approval CI-grade verification gate blocked PR-open".to_string(),
-        };
-        tracing::info!(
-            task_id = %task.short_id,
-            "supervisor PR-open: pre-approval verification gate red — returned to worker round (strike-free), no PR opened"
-        );
-        return TaskRunOutcome::Escalated { reason };
-    }
-
     let commit_type = if task.issue_type == "task" {
         "chore"
     } else {

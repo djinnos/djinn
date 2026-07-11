@@ -31,6 +31,7 @@ mod contents;
 mod error;
 mod pull_requests;
 pub mod refresh;
+mod repo_config;
 mod reviews;
 pub mod search;
 #[cfg(test)]
@@ -51,7 +52,7 @@ pub use types::{
     ActionsJob, ActionsJobStep, AutoMergeRequest, CheckAnnotation, CheckRun, CheckRunsResponse,
     CiFailureContextBundle, CiFailureContextRequest, CiSetupStep, CreatePrParams, DequeueEvent,
     GitHubUser, MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrFile, PrMergeQueueState,
-    PrRef, PrReview, PrReviewFeedback, PrState, PullRequest, ReproductionJob,
+    PrRef, PrReview, PrReviewFeedback, PrState, PullRequest, RepoMergeConfig, ReproductionJob,
     ReproductionSetupStep, ReproductionStep, RequiredCheckReproduction,
     RequiredCheckReproductionContext, RequiredCheckUnreproducible,
     RequiredCheckUnreproducibleReason, ReviewComment,
