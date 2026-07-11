@@ -545,7 +545,9 @@ fn estimate_message_chars(msg: &Message) -> usize {
                 .sum(),
             ContentBlock::Image { data, .. } => data.len(),
             ContentBlock::Document { data, .. } => data.len(),
-            ContentBlock::Thinking { thinking } => thinking.len(),
+            ContentBlock::Thinking { thinking, .. } => thinking.len(),
+            ContentBlock::RedactedThinking { data } => data.len(),
+            ContentBlock::Unknown { extra, .. } => extra.len(),
             ContentBlock::OpenAIReasoning {
                 encrypted_content, ..
             } => encrypted_content.len(),

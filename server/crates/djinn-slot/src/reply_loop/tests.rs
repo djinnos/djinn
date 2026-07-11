@@ -3883,7 +3883,7 @@ async fn flushed_tool_round_visible_exactly_once_in_load_conversation() {
     assert!(
         assistant.content.iter().any(|b| matches!(
             b,
-            ContentBlock::Thinking { thinking } if thinking.contains("Need to verify")
+            ContentBlock::Thinking { thinking, .. } if thinking.contains("Need to verify")
         )),
         "thinking content must be preserved"
     );
