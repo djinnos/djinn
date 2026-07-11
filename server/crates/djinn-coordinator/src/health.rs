@@ -2887,3 +2887,142 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
         }
     }
 }
+
+#[cfg(test)]
+mod cache_cleanup_cross_path_tests {
+    use super::*;
+    use crate::context::{CacheCleanupConfig, CacheCleanupMode};
+
+    fn cache_metric_value(metric: &str, labels: &[(&str, &str)]) -> f64 {
+        djinn_telemetry::init().unwrap();
+        djinn_telemetry::render()
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                let (sample, value) = line.split_once('}')?;
+                (sample.starts_with(&format!("{metric}{{"))
+                    && labels
+                        .iter()
+                        .all(|(key, value)| sample.contains(&format!("{key}=\"{value}\""))))
+                .then(|| value.trim().parse::<f64>().ok())?
+            })
+            .unwrap_or(0.0)
+    }
+
+    fn backdate(path: &Path, days: u64) {
+        let spec = format!("{days} days ago");
+        assert!(
+            std::process::Command::new("touch")
+                .args(["-d", &spec, path.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_and_delete_select_same_cross_path_cache_candidates() {
+        use djinn_telemetry::cache_cleanup as metrics;
+
+        // Install the global recorder before either sweep emits counters; metrics
+        // sent to the default no-op recorder before initialization are discarded.
+        djinn_telemetry::init().unwrap();
+
+        let db = crate::test_helpers::create_test_db();
+        let _project = crate::test_helpers::create_test_project(&db).await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sccache = tmp.path().join("sccache");
+        let runs = tmp.path().join("cargo-target-runs");
+        std::fs::create_dir(&sccache).unwrap();
+        std::fs::create_dir(&runs).unwrap();
+        let cache_file = sccache.join("stale.cache");
+        let stale_dir = runs.join("stale-malformed-dir");
+        let stale_file = runs.join("stale-loose-file");
+        std::fs::write(&cache_file, b"sccache").unwrap();
+        std::fs::create_dir(&stale_dir).unwrap();
+        std::fs::write(stale_dir.join("artifact"), b"dir debris").unwrap();
+        std::fs::write(&stale_file, b"file debris").unwrap();
+        backdate(&cache_file, 2);
+        backdate(&stale_dir, 30);
+        backdate(&stale_file, 30);
+
+        let dry_run = CacheCleanupConfig {
+            mode: CacheCleanupMode::DryRun,
+            sccache_enabled: true,
+            sccache_max_age_hours: 1,
+            cargo_debris_enabled: true,
+            cargo_debris_max_age_days: 7,
+        };
+        assert_eq!(
+            sweep_sccache_guard_under(&dry_run, &sccache).await,
+            SccacheSweepOutcome::DryRunReported
+        );
+        let dry = sweep_orphaned_cargo_target_run_dirs_under(&db, &runs, &dry_run).await;
+        assert_eq!(
+            dry.errors, 0,
+            "dry stats: scanned={}, retained={}",
+            dry.scanned, dry.retained
+        );
+        assert_eq!((dry.malformed_dir_deleted, dry.loose_file_deleted), (1, 1));
+        assert_eq!(dry.debris_bytes_deleted, 0);
+        assert!(
+            sccache.is_dir() && cache_file.exists() && stale_dir.is_dir() && stale_file.exists()
+        );
+        assert!(
+            cache_metric_value(
+                "djinn_cache_cleanup_total",
+                &[
+                    ("component", metrics::COMPONENT_SCCACHE),
+                    ("outcome", metrics::OUTCOME_DRY_RUN),
+                    ("mode", metrics::MODE_DRY_RUN)
+                ],
+            ) >= 1.0
+        );
+        assert!(
+            cache_metric_value(
+                "djinn_cache_cleanup_total",
+                &[
+                    ("component", metrics::COMPONENT_CARGO_TARGET_RUNS),
+                    ("outcome", metrics::OUTCOME_MALFORMED_DIR_DELETED),
+                    ("mode", metrics::MODE_DRY_RUN)
+                ],
+            ) >= 1.0
+        );
+
+        let delete = CacheCleanupConfig {
+            mode: CacheCleanupMode::Delete,
+            ..dry_run
+        };
+        assert_eq!(
+            sweep_sccache_guard_under(&delete, &sccache).await,
+            SccacheSweepOutcome::Deleted
+        );
+        let deleted = sweep_orphaned_cargo_target_run_dirs_under(&db, &runs, &delete).await;
+        assert_eq!(
+            (deleted.malformed_dir_deleted, deleted.loose_file_deleted),
+            (dry.malformed_dir_deleted, dry.loose_file_deleted)
+        );
+        assert!(deleted.debris_bytes_deleted > 0);
+        assert!(!sccache.exists() && !stale_dir.exists() && !stale_file.exists());
+        assert!(
+            cache_metric_value(
+                "djinn_cache_cleanup_total",
+                &[
+                    ("component", metrics::COMPONENT_SCCACHE),
+                    ("outcome", metrics::OUTCOME_DELETED),
+                    ("mode", metrics::MODE_DELETE)
+                ],
+            ) >= 1.0
+        );
+        assert!(
+            cache_metric_value(
+                "djinn_cache_cleanup_total",
+                &[
+                    ("component", metrics::COMPONENT_CARGO_TARGET_RUNS),
+                    ("outcome", metrics::OUTCOME_LOOSE_FILE_DELETED),
+                    ("mode", metrics::MODE_DELETE)
+                ],
+            ) >= 1.0
+        );
+    }
+}

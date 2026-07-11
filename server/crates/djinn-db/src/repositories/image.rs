@@ -42,6 +42,33 @@ pub struct Image {
     pub last_error: Option<String>,
 }
 
+/// A catalog image currently selected by at least one project, with the
+/// data retention preflight needs to prove it remains pullable after
+/// destructive tag deletion.
+///
+/// Unlike [`crate::DispatchImage`] (which resolves a single project's
+/// selection), this struct aggregates *all* projects selecting the same
+/// image so the retention preflight can report blast radius. It deliberately
+/// includes not-ready and digestless images — fail-closed safety requires
+/// knowing about every selected image, even if it's not yet pullable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedCatalogImage {
+    /// `images.id`.
+    pub image_id: String,
+    /// Human-readable name from `images.name`.
+    pub name: String,
+    /// Registry tag (e.g. `reg/djinn-image-<id>:<hash>`), `None` if not yet built.
+    pub tag: Option<String>,
+    /// Immutable manifest digest (`sha256:…`), `None` if not captured.
+    pub registry_digest: Option<String>,
+    /// Build status: `none` | `building` | `ready` | `failed`.
+    pub status: String,
+    /// Last build error, surfaced in preflight reports.
+    pub last_error: Option<String>,
+    /// Project ids selecting this image (sorted; non-empty by construction).
+    pub selected_project_ids: Vec<String>,
+}
+
 fn map_image(r: &sqlx::postgres::PgRow) -> Image {
     Image {
         id: r.get("id"),
@@ -270,6 +297,62 @@ impl ImageRepository {
             Some(id) => self.get(&id).await,
             None => Ok(None),
         }
+    }
+
+    /// Enumerate every catalog image currently selected by at least one
+    /// project, with enough data for retention preflight to prove each
+    /// remains pullable after destructive tag deletion.
+    ///
+    /// Each row aggregates *all* projects selecting the same image
+    /// (`selected_project_ids`, sorted) so the preflight can report the
+    /// blast radius. Images that are not yet `ready`, or that lack a
+    /// digest, are still included — fail-closed safety demands knowing
+    /// about every selected image, even if it's not yet pullable.
+    ///
+    /// Returns rows ordered by image id for deterministic iteration.
+    pub async fn list_selected_catalog_images(&self) -> Result<Vec<SelectedCatalogImage>> {
+        self.db.ensure_initialized().await?;
+        // Single join: every image that at least one project points at.
+        // `selected_project_ids` is built by collecting per-image project ids
+        // in a second pass (avoids array_agg ordering non-determinism across
+        // Postgres versions).
+        let rows = sqlx::query(
+            r#"SELECT i.id      AS image_id,
+                      i.name     AS name,
+                      i.tag      AS tag,
+                      i.registry_digest AS registry_digest,
+                      i.status   AS status,
+                      i.last_error AS last_error,
+                      p.id       AS project_id
+                 FROM images i
+                 JOIN projects p ON p.selected_image_id = i.id
+                ORDER BY i.id, p.id"#,
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+
+        // Group by image_id, preserving the image-id ordering.
+        let mut out: Vec<SelectedCatalogImage> = Vec::new();
+        for r in &rows {
+            let image_id: String = r.get("image_id");
+            if out.last().is_none_or(|e| e.image_id != image_id) {
+                out.push(SelectedCatalogImage {
+                    image_id: image_id.clone(),
+                    name: r.get("name"),
+                    tag: r.get("tag"),
+                    registry_digest: r.get("registry_digest"),
+                    status: r.get("status"),
+                    last_error: r.get("last_error"),
+                    selected_project_ids: Vec::new(),
+                });
+            }
+            let project_id: String = r.get("project_id");
+            out.last_mut()
+                .unwrap()
+                .selected_project_ids
+                .push(project_id);
+        }
+        Ok(out)
     }
 }
 
@@ -553,5 +636,122 @@ mod tests {
                 "absent lifecycle should not have spurious pre_task entries, got: {pre_task}"
             );
         }
+    }
+
+    // ── list_selected_catalog_images ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_selected_catalog_images_no_selections() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let repo = ImageRepository::new(db.clone());
+        // Image exists but no project selects it.
+        repo.create("i1", "Rust", None, "{}").await.unwrap();
+        let rows = repo.list_selected_catalog_images().await.unwrap();
+        assert!(rows.is_empty(), "no projects select anything");
+    }
+
+    #[tokio::test]
+    async fn list_selected_catalog_images_multiple_projects_same_image() {
+        let db = Database::open_in_memory().unwrap();
+        seed_project(&db, "p1").await;
+        seed_project(&db, "p2").await;
+        let repo = ImageRepository::new(db.clone());
+        repo.create("i1", "Rust", None, "{}").await.unwrap();
+        repo.set_project_image("p1", Some("i1")).await.unwrap();
+        repo.set_project_image("p2", Some("i1")).await.unwrap();
+
+        let rows = repo.list_selected_catalog_images().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].image_id, "i1");
+        assert_eq!(rows[0].selected_project_ids, vec!["p1", "p2"]);
+    }
+
+    #[tokio::test]
+    async fn list_selected_catalog_images_ready_with_digest() {
+        let db = Database::open_in_memory().unwrap();
+        seed_project(&db, "p1").await;
+        let repo = ImageRepository::new(db.clone());
+        repo.create("i1", "Go", None, "{}").await.unwrap();
+        repo.set_project_image("p1", Some("i1")).await.unwrap();
+        repo.mark_ready("i1", "reg/djinn-image-i1:hash", Some("sha256:abc"))
+            .await
+            .unwrap();
+
+        let rows = repo.list_selected_catalog_images().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "ready");
+        assert_eq!(rows[0].tag.as_deref(), Some("reg/djinn-image-i1:hash"));
+        assert_eq!(rows[0].registry_digest.as_deref(), Some("sha256:abc"));
+    }
+
+    #[tokio::test]
+    async fn list_selected_catalog_images_ready_without_digest() {
+        let db = Database::open_in_memory().unwrap();
+        seed_project(&db, "p1").await;
+        let repo = ImageRepository::new(db.clone());
+        repo.create("i1", "Node", None, "{}").await.unwrap();
+        repo.set_project_image("p1", Some("i1")).await.unwrap();
+        repo.mark_ready("i1", "reg/djinn-image-i1:hash", None)
+            .await
+            .unwrap();
+
+        let rows = repo.list_selected_catalog_images().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "ready");
+        assert_eq!(rows[0].tag.as_deref(), Some("reg/djinn-image-i1:hash"));
+        assert!(
+            rows[0].registry_digest.is_none(),
+            "digestless image must still be enumerated for fail-closed safety"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_selected_catalog_images_includes_not_ready() {
+        let db = Database::open_in_memory().unwrap();
+        seed_project(&db, "p1").await;
+        let repo = ImageRepository::new(db.clone());
+        repo.create("i1", "Python", None, "{}").await.unwrap();
+        repo.set_project_image("p1", Some("i1")).await.unwrap();
+        // Image is `none` (not built yet) — fail-closed safety needs to see it.
+        let rows = repo.list_selected_catalog_images().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "none");
+        assert!(rows[0].tag.is_none());
+        assert!(rows[0].registry_digest.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_selected_catalog_images_excludes_unselected() {
+        let db = Database::open_in_memory().unwrap();
+        seed_project(&db, "p1").await;
+        seed_project(&db, "p2").await;
+        let repo = ImageRepository::new(db.clone());
+        repo.create("i1", "Rust", None, "{}").await.unwrap();
+        repo.create("i2", "Go", None, "{}").await.unwrap();
+        // Only p1 selects i1; p2 has no selection.
+        repo.set_project_image("p1", Some("i1")).await.unwrap();
+
+        let rows = repo.list_selected_catalog_images().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].image_id, "i1");
+    }
+
+    #[tokio::test]
+    async fn list_selected_catalog_images_deterministic_order() {
+        let db = Database::open_in_memory().unwrap();
+        seed_project(&db, "p1").await;
+        seed_project(&db, "p2").await;
+        let repo = ImageRepository::new(db.clone());
+        repo.create("img-b", "Beta", None, "{}").await.unwrap();
+        repo.create("img-a", "Alpha", None, "{}").await.unwrap();
+        repo.set_project_image("p1", Some("img-a")).await.unwrap();
+        repo.set_project_image("p2", Some("img-b")).await.unwrap();
+
+        let rows = repo.list_selected_catalog_images().await.unwrap();
+        assert_eq!(rows.len(), 2);
+        // Ordered by image id.
+        assert_eq!(rows[0].image_id, "img-a");
+        assert_eq!(rows[1].image_id, "img-b");
     }
 }
