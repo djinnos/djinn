@@ -1471,6 +1471,15 @@ pub mod cache_cleanup {
     pub const OUTCOME_ERROR: &str = "error";
     pub const OUTCOME_DRY_RUN: &str = "dry_run";
 
+    /// Granular cargo-target-runs outcome labels for distinguishing
+    /// UUID orphan, malformed-dir, loose-file, retained fresh malformed,
+    /// and retained non-UTF8 entries in structured metrics.
+    pub const OUTCOME_UUID_ORPHAN_DELETED: &str = "uuid_orphan_deleted";
+    pub const OUTCOME_MALFORMED_DIR_DELETED: &str = "malformed_dir_deleted";
+    pub const OUTCOME_LOOSE_FILE_DELETED: &str = "loose_file_deleted";
+    pub const OUTCOME_RETAINED_FRESH_MALFORMED: &str = "retained_fresh_malformed";
+    pub const OUTCOME_RETAINED_NON_UTF8: &str = "retained_non_utf8";
+
     /// Stable mode labels.
     pub const MODE_DRY_RUN: &str = "dry_run";
     pub const MODE_DELETE: &str = "delete";
@@ -1481,12 +1490,17 @@ pub mod cache_cleanup {
 
     /// All bounded outcome labels — used for registration seeding.
     #[cfg(test)]
-    pub(crate) const ALL_OUTCOMES: [&str; 5] = [
+    pub(crate) const ALL_OUTCOMES: [&str; 10] = [
         OUTCOME_DELETED,
         OUTCOME_SKIPPED,
         OUTCOME_RETAINED,
         OUTCOME_ERROR,
         OUTCOME_DRY_RUN,
+        OUTCOME_UUID_ORPHAN_DELETED,
+        OUTCOME_MALFORMED_DIR_DELETED,
+        OUTCOME_LOOSE_FILE_DELETED,
+        OUTCOME_RETAINED_FRESH_MALFORMED,
+        OUTCOME_RETAINED_NON_UTF8,
     ];
 
     /// All bounded mode labels — used for registration seeding.

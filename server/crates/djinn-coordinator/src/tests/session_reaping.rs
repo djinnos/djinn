@@ -1018,6 +1018,40 @@ async fn cargo_target_run_dir_sweep_retains_when_debris_disabled() {
     assert_eq!(stats.retained_fresh_malformed, 0);
 }
 
+/// Non-UTF8 entry names are always retained with a stable
+/// `retained_non_utf8` outcome, even when debris cleanup is enabled
+/// and the entry would otherwise be old enough to sweep.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cargo_target_run_dir_sweep_retains_non_utf8_entries() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let db = test_helpers::create_test_db();
+    let root = temp_cargo_target_runs_root();
+
+    // Create a non-UTF8 entry using raw bytes (invalid UTF-8 sequence).
+    let non_utf8_name = OsStr::from_bytes(b"bad\xffname");
+    let non_utf8_path = root.path().join(non_utf8_name);
+    std::fs::create_dir(&non_utf8_path).unwrap();
+
+    let config = crate::context::CacheCleanupConfig {
+        mode: crate::context::CacheCleanupMode::Delete,
+        ..Default::default()
+    };
+    let stats = health::sweep_orphaned_cargo_target_run_dirs_under(&db, root.path(), &config).await;
+
+    // Non-UTF8 entry must be retained regardless of age.
+    assert!(non_utf8_path.exists());
+    assert_eq!(stats.scanned, 1);
+    assert_eq!(stats.retained_non_utf8, 1);
+    assert_eq!(stats.retained, 1);
+    assert_eq!(stats.deleted, 0);
+    assert_eq!(stats.malformed_dir_deleted, 0);
+    assert_eq!(stats.loose_file_deleted, 0);
+    assert_eq!(stats.errors, 0);
+}
+
 /// Helper: backdate an entry's mtime to N days ago.
 ///
 /// Uses `touch -d` for portability across file/directory entries on Linux

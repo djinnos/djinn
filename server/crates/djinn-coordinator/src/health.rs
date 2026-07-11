@@ -1774,8 +1774,14 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
             stats.retained_non_utf8 += 1;
             tracing::warn!(
                 path = %path.display(),
+                cleanup_outcome = "retained_non_utf8",
                 "CoordinatorActor: cargo target run-dir sweep retained non-UTF8 entry name \
                  (cannot safely compare for age-gate deletion)"
+            );
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                djinn_telemetry::cache_cleanup::OUTCOME_RETAINED_NON_UTF8,
+                mode_label,
             );
             continue;
         };
@@ -1817,6 +1823,11 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                         cleanup_outcome = "uuid_orphan_deleted",
                         "CoordinatorActor: deleted orphaned cargo target run-dir"
                     );
+                    djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                        djinn_telemetry::cache_cleanup::OUTCOME_UUID_ORPHAN_DELETED,
+                        mode_label,
+                    );
                 }
                 Err(e) => {
                     stats.errors += 1;
@@ -1824,8 +1835,13 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                         error = %e,
                         task_run_id = %task_run_id,
                         path = %path.display(),
-                        cleanup_outcome = "failed",
+                        cleanup_outcome = "error",
                         "CoordinatorActor: failed to delete orphaned cargo target run-dir; continuing"
+                    );
+                    djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                        djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+                        mode_label,
                     );
                 }
             }
@@ -1885,8 +1901,14 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                 entry_kind,
                 age_secs = ?entry_mtime_secs.map(|m| now_secs.saturating_sub(m)),
                 threshold_secs,
+                cleanup_outcome = "retained_fresh_malformed",
                 "CoordinatorActor: cargo target run-dir sweep retaining fresh malformed \
                  entry — an accidental new writer may have created it"
+            );
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                djinn_telemetry::cache_cleanup::OUTCOME_RETAINED_FRESH_MALFORMED,
+                mode_label,
             );
             continue;
         }
@@ -1927,7 +1949,11 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
             );
             djinn_telemetry::cache_cleanup::increment_cleanup_total(
                 djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
-                djinn_telemetry::cache_cleanup::OUTCOME_DRY_RUN,
+                if file_type.is_dir() {
+                    djinn_telemetry::cache_cleanup::OUTCOME_MALFORMED_DIR_DELETED
+                } else {
+                    djinn_telemetry::cache_cleanup::OUTCOME_LOOSE_FILE_DELETED
+                },
                 mode_label,
             );
             continue;
@@ -1947,7 +1973,7 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                     );
                     djinn_telemetry::cache_cleanup::increment_cleanup_total(
                         djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
-                        djinn_telemetry::cache_cleanup::OUTCOME_DELETED,
+                        djinn_telemetry::cache_cleanup::OUTCOME_MALFORMED_DIR_DELETED,
                         mode_label,
                     );
                     djinn_telemetry::cache_cleanup::record_reclaimed_bytes(
@@ -1984,7 +2010,7 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                     );
                     djinn_telemetry::cache_cleanup::increment_cleanup_total(
                         djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
-                        djinn_telemetry::cache_cleanup::OUTCOME_DELETED,
+                        djinn_telemetry::cache_cleanup::OUTCOME_LOOSE_FILE_DELETED,
                         mode_label,
                     );
                     djinn_telemetry::cache_cleanup::record_reclaimed_bytes(
