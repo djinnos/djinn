@@ -1254,11 +1254,12 @@ async fn short_id_exists(pool: &sqlx::PgPool, table: &str, short_id: &str) -> Re
 
 /// Map a park-eligible child status to its park-reason string.
 ///
-/// PR-active statuses (`pr_draft`, `pr_review`) get `parent_closed_pr_active`;
-/// all other park-eligible statuses get `parent_closed_in_flight`.
+/// PR-active statuses (`approved`, `pr_draft`, `pr_review`) get
+/// `parent_closed_pr_active`; all other park-eligible statuses get
+/// `parent_closed_in_flight`.
 fn park_reason_for_status(status: &str) -> &'static str {
     match status {
-        "pr_draft" | "pr_review" => "parent_closed_pr_active",
+        "approved" | "pr_draft" | "pr_review" => "parent_closed_pr_active",
         _ => "parent_closed_in_flight",
     }
 }
@@ -1283,6 +1284,116 @@ mod tests {
             move |ev| captured.lock().unwrap().push(ev)
         });
         (bus, captured)
+    }
+
+    #[derive(Debug, sqlx::FromRow)]
+    struct TaskSnapshot {
+        status: String,
+        close_reason: Option<String>,
+        closed_at: Option<String>,
+    }
+
+    #[derive(Debug, sqlx::FromRow)]
+    struct ActivityRow {
+        event_type: String,
+        payload: serde_json::Value,
+    }
+
+    async fn insert_epic_child(db: &Database, epic: &Epic, short_id: &str, status: &str) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        let title = format!("Child {short_id}");
+        sqlx::query(
+            r#"INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                    issue_type, priority, owner, status, labels, acceptance_criteria, memory_refs)
+               VALUES ($1, $2, $3, $4, $5, '', '', 'task', 1, '', $6,
+                       '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)"#,
+        )
+        .bind(&id)
+        .bind(&epic.project_id)
+        .bind(short_id)
+        .bind(&epic.id)
+        .bind(&title)
+        .bind(status)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn fetch_task_snapshot(db: &Database, task_id: &str) -> TaskSnapshot {
+        sqlx::query_as::<_, TaskSnapshot>(
+            "SELECT status, close_reason, closed_at FROM tasks WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+    }
+
+    async fn fetch_activity_rows(db: &Database, task_id: &str) -> Vec<ActivityRow> {
+        sqlx::query_as::<_, ActivityRow>(
+            "SELECT event_type, payload FROM activity_log WHERE task_id = $1 ORDER BY created_at",
+        )
+        .bind(task_id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap()
+    }
+
+    fn assert_activity_payload(
+        rows: &[ActivityRow],
+        event_type: &str,
+        from_status: &str,
+        to_status: &str,
+        reason_key: Option<(&str, &str)>,
+    ) {
+        let row = rows
+            .iter()
+            .find(|row| row.event_type == event_type)
+            .unwrap_or_else(|| panic!("missing activity event {event_type}; rows={rows:?}"));
+        assert_eq!(row.payload["from_status"], from_status);
+        assert_eq!(row.payload["to_status"], to_status);
+        if event_type.starts_with("parent_child_") {
+            assert_eq!(row.payload["entry_point"], "epic_close");
+        }
+        if let Some((key, expected)) = reason_key {
+            assert_eq!(row.payload[key], expected);
+        }
+    }
+
+    async fn insert_proposal_link(db: &Database, epic: &Epic, status: &str) -> String {
+        let proposal_id = uuid::Uuid::now_v7().to_string();
+        let short_id = format!("p{}", &proposal_id.replace('-', "")[..3]);
+        sqlx::query(
+            r#"INSERT INTO proposals
+                    (id, short_id, title, body, body_format, acceptance_criteria, status, latest_revision_seq)
+               VALUES ($1, $2, 'Proposal', '', 'markdown', '[]'::jsonb, $3, 1)"#,
+        )
+        .bind(&proposal_id)
+        .bind(&short_id)
+        .bind(status)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO proposal_epics (proposal_id, epic_id, project_id) VALUES ($1, $2, $3)",
+        )
+        .bind(&proposal_id)
+        .bind(&epic.id)
+        .bind(&epic.project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        proposal_id
+    }
+
+    async fn add_task_blocker(db: &Database, task_id: &str, blocking_task_id: &str) {
+        sqlx::query("INSERT INTO blockers (task_id, blocking_task_id) VALUES ($1, $2)")
+            .bind(task_id)
+            .bind(blocking_task_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1361,6 +1472,272 @@ mod tests {
         assert_eq!(events[0].action, "updated");
         let e: Epic = serde_json::from_value(events[0].payload.clone()).unwrap();
         assert_eq!(e.title, "New");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_disposes_ready_and_intervention_children_with_activity() {
+        let (bus, captured) = capturing_bus();
+        let db = test_db();
+        let repo = EpicRepository::new(db.clone(), bus);
+        let epic = repo
+            .create("Disposition close buckets", "", "", "", "", None)
+            .await
+            .unwrap();
+
+        let cases = [
+            ("dc01", "open"),
+            ("dc02", "needs_lead_intervention"),
+            ("dc03", "in_lead_intervention"),
+        ];
+        let mut task_ids = Vec::new();
+        for (short_id, status) in cases {
+            task_ids.push((
+                insert_epic_child(&db, &epic, short_id, status).await,
+                status,
+            ));
+        }
+        captured.lock().unwrap().clear();
+
+        let closed = repo.close(&epic.id).await.unwrap();
+        assert_eq!(closed.status, "closed");
+        assert!(closed.closed_at.is_some());
+
+        for (task_id, from_status) in &task_ids {
+            let task = fetch_task_snapshot(&db, task_id).await;
+            assert_eq!(task.status, "closed");
+            assert_eq!(task.close_reason.as_deref(), Some("parent_closed"));
+            assert!(task.closed_at.is_some());
+
+            let activity = fetch_activity_rows(&db, task_id).await;
+            assert_activity_payload(
+                &activity,
+                "status_changed",
+                from_status,
+                "closed",
+                Some(("reason", "parent_closed")),
+            );
+            assert_activity_payload(
+                &activity,
+                "parent_child_disposed",
+                from_status,
+                "closed",
+                None,
+            );
+        }
+
+        let events = captured.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.entity_type == "task" && event.action == "updated")
+                .count(),
+            task_ids.len()
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.entity_type == "epic" && event.action == "updated")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_parks_in_flight_review_and_pr_children_with_activity() {
+        let (bus, captured) = capturing_bus();
+        let db = test_db();
+        let repo = EpicRepository::new(db.clone(), bus);
+        let epic = repo
+            .create("Disposition park buckets", "", "", "", "", None)
+            .await
+            .unwrap();
+
+        let cases = [
+            ("dp01", "in_progress", "parent_closed_in_flight"),
+            ("dp02", "needs_task_review", "parent_closed_in_flight"),
+            ("dp03", "in_task_review", "parent_closed_in_flight"),
+            ("dp04", "approved", "parent_closed_pr_active"),
+            ("dp05", "pr_draft", "parent_closed_pr_active"),
+            ("dp06", "pr_review", "parent_closed_pr_active"),
+        ];
+        let mut task_ids = Vec::new();
+        for (short_id, status, reason) in cases {
+            task_ids.push((
+                insert_epic_child(&db, &epic, short_id, status).await,
+                status,
+                reason,
+            ));
+        }
+        captured.lock().unwrap().clear();
+
+        let closed = repo.close(&epic.id).await.unwrap();
+        assert_eq!(closed.status, "closed");
+        assert!(closed.closed_at.is_some());
+
+        for (task_id, from_status, park_reason) in &task_ids {
+            let task = fetch_task_snapshot(&db, task_id).await;
+            assert_eq!(task.status, "needs_lead_intervention");
+            assert!(task.close_reason.is_none());
+            assert!(task.closed_at.is_none());
+
+            let activity = fetch_activity_rows(&db, task_id).await;
+            assert_activity_payload(
+                &activity,
+                "status_changed",
+                from_status,
+                "needs_lead_intervention",
+                Some(("reason", park_reason)),
+            );
+            assert_activity_payload(
+                &activity,
+                "parent_child_parked",
+                from_status,
+                "needs_lead_intervention",
+                Some(("park_reason", park_reason)),
+            );
+        }
+
+        let events = captured.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.entity_type == "task" && event.action == "updated")
+                .count(),
+            task_ids.len()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_leaves_already_closed_child_unchanged() {
+        let db = test_db();
+        let repo = EpicRepository::new(db.clone(), EventBus::noop());
+        let epic = repo
+            .create("Already terminal child", "", "", "", "", None)
+            .await
+            .unwrap();
+        let task_id = insert_epic_child(&db, &epic, "dt01", "closed").await;
+        sqlx::query(
+            r#"UPDATE tasks
+                  SET close_reason = 'completed',
+                      closed_at = '2026-01-01T00:00:00.000Z'
+                WHERE id = $1"#,
+        )
+        .bind(&task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let closed = repo.close(&epic.id).await.unwrap();
+        assert_eq!(closed.status, "closed");
+
+        let task = fetch_task_snapshot(&db, &task_id).await;
+        assert_eq!(task.status, "closed");
+        assert_eq!(task.close_reason.as_deref(), Some("completed"));
+        assert_eq!(task.closed_at.as_deref(), Some("2026-01-01T00:00:00.000Z"));
+        assert!(fetch_activity_rows(&db, &task_id).await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_commits_parent_when_other_open_proposal_parent_retains_child() {
+        let db = test_db();
+        let repo = EpicRepository::new(db.clone(), EventBus::noop());
+        let epic = repo
+            .create("Other proposal retained child", "", "", "", "", None)
+            .await
+            .unwrap();
+        let proposal_id = insert_proposal_link(&db, &epic, "building").await;
+        let task_id = insert_epic_child(&db, &epic, "dr01", "open").await;
+
+        let closed = repo.close(&epic.id).await.unwrap();
+        assert_eq!(closed.status, "closed");
+        assert!(closed.closed_at.is_some());
+
+        let task = fetch_task_snapshot(&db, &task_id).await;
+        assert_eq!(task.status, "open");
+        assert!(task.close_reason.is_none());
+        assert!(task.closed_at.is_none());
+        assert!(fetch_activity_rows(&db, &task_id).await.is_empty());
+
+        let evidence: (String,) = sqlx::query_as(
+            r#"SELECT p.id
+                 FROM proposal_epics pe
+                 JOIN proposals p ON p.id = pe.proposal_id
+                WHERE pe.epic_id = $1 AND p.status = 'building'"#,
+        )
+        .bind(&epic.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(evidence.0, proposal_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_retains_external_dependent_but_allows_internal_blocker_cascade() {
+        let db = test_db();
+        let repo = EpicRepository::new(db.clone(), EventBus::noop());
+        let closing_epic = repo
+            .create("Dependency guard closing", "", "", "", "", None)
+            .await
+            .unwrap();
+        let other_epic = repo
+            .create("Dependency guard external", "", "", "", "", None)
+            .await
+            .unwrap();
+
+        let retained_blocker = insert_epic_child(&db, &closing_epic, "dg01", "open").await;
+        let external_dependent = insert_epic_child(&db, &other_epic, "dg02", "open").await;
+        add_task_blocker(&db, &external_dependent, &retained_blocker).await;
+
+        let internal_blocker = insert_epic_child(&db, &closing_epic, "dg03", "open").await;
+        let internal_dependent = insert_epic_child(&db, &closing_epic, "dg04", "in_progress").await;
+        add_task_blocker(&db, &internal_dependent, &internal_blocker).await;
+
+        let closed = repo.close(&closing_epic.id).await.unwrap();
+        assert_eq!(closed.status, "closed");
+        assert!(closed.closed_at.is_some());
+
+        let retained = fetch_task_snapshot(&db, &retained_blocker).await;
+        assert_eq!(retained.status, "open");
+        assert!(retained.close_reason.is_none());
+        assert!(fetch_activity_rows(&db, &retained_blocker).await.is_empty());
+
+        let dependent = fetch_task_snapshot(&db, &external_dependent).await;
+        assert_eq!(dependent.status, "open");
+
+        let blocker = fetch_task_snapshot(&db, &internal_blocker).await;
+        assert_eq!(blocker.status, "closed");
+        assert_eq!(blocker.close_reason.as_deref(), Some("parent_closed"));
+        assert_activity_payload(
+            &fetch_activity_rows(&db, &internal_blocker).await,
+            "parent_child_disposed",
+            "open",
+            "closed",
+            None,
+        );
+
+        let internal = fetch_task_snapshot(&db, &internal_dependent).await;
+        assert_eq!(internal.status, "needs_lead_intervention");
+        assert!(internal.close_reason.is_none());
+        assert_activity_payload(
+            &fetch_activity_rows(&db, &internal_dependent).await,
+            "parent_child_parked",
+            "in_progress",
+            "needs_lead_intervention",
+            Some(("park_reason", "parent_closed_in_flight")),
+        );
+
+        let evidence: (String,) = sqlx::query_as(
+            r#"SELECT t.id
+                 FROM blockers b
+                 JOIN tasks t ON t.id = b.task_id
+                WHERE b.blocking_task_id = $1
+                  AND t.epic_id <> $2
+                  AND t.status <> 'closed'"#,
+        )
+        .bind(&retained_blocker)
+        .bind(&closing_epic.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(evidence.0, external_dependent);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
