@@ -1275,6 +1275,267 @@ async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
     );
 }
 
+// ── Resume Context prompt rendering regressions (proposal phif) ──────
+// These tests prove that the worker prompt renders `## Resume Context`
+// with typed discontinuity fields: prior session id, source kind,
+// commit SHA, selection reason, and failover context.
+
+/// AC 2: The `## Resume Context` section must render attempt-level
+/// metadata including prior session id, source kind, commit SHA, and
+/// selection reason when a safe checkpoint is selected.
+#[tokio::test]
+async fn resume_context_renders_attempt_and_discontinuity_fields() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task =
+        create_project_epic_task(&db, &events, "Discontinuity epic", "Discontinuity task").await;
+    let role = WorkerRole;
+
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        checkpoint_id: Some("ckpt-discontinuity".to_string()),
+        commit_sha: Some("abc123deadbeef".to_string()),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::LatestSafeCheckpoint),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::TaskBranchCheckpoint),
+        target_ref: Some("refs/heads/task/discontinuity-task".to_string()),
+        prior_session_lineage: Some("session-attempt-2".to_string()),
+        previous_model: Some("anthropic/claude-opus-4.7".to_string()),
+        new_model: Some("openai/gpt-4.1".to_string()),
+        failover_reason: Some("no_durable_progress_streak".to_string()),
+        last_durable_progress_summary: Some("Wrote the resume metadata module".to_string()),
+        verification_command: Some("cargo test -p djinn-coordinator".to_string()),
+        ..Default::default()
+    };
+
+    let note = build_worker_resume_note(role.config().name, Some(&metadata));
+    assert!(
+        note.is_some(),
+        "resume note must be produced for worker role"
+    );
+
+    let note_text = note.unwrap();
+    // Must contain all the discontinuity fields.
+    assert_contains_all(
+        &note_text,
+        &[
+            "session-attempt-2",                  // prior session id
+            "task-branch checkpoint",             // source kind label
+            "abc123deadbeef",                     // commit SHA
+            "no-progress checkpoint",             // selection reason label
+            "refs/heads/task/discontinuity-task", // target ref
+            "claude-opus-4.7",                    // previous model
+            "gpt-4.1",                            // new model
+            "no_durable_progress_streak",         // failover reason
+            "Wrote the resume metadata module",   // last progress summary
+            "cargo test -p djinn-coordinator",    // verification command
+        ],
+    );
+
+    // Render into the prompt.
+    let ctx = assemble_for_role_with_resume(db, &task, &role, Some(&note_text)).await;
+    assert!(
+        ctx.system_prompt.contains("## Resume Context"),
+        "rendered prompt must contain Resume Context section"
+    );
+    assert!(
+        ctx.system_prompt.contains("session-attempt-2"),
+        "rendered prompt must contain prior session id"
+    );
+}
+
+/// AC 4: Missing evidence path — when prior session/evidence is absent,
+/// the resume note renders unknown/unavailable fields without blocking
+/// dispatch. The `build_worker_resume_note` function returns None when
+/// only `considered: true` is set with no actual fields, so the prompt
+/// does not include a Resume Context section at all (graceful omission).
+#[test]
+fn resume_context_absent_when_only_considered_flag_set() {
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        // No checkpoint, no prior session, no failover — all absent.
+        ..Default::default()
+    };
+
+    let note = build_worker_resume_note("worker", Some(&metadata));
+    assert!(
+        note.is_none(),
+        "resume note must be None when only `considered` is set with no actual fields"
+    );
+}
+
+/// AC 4: When prior session lineage is present but commit SHA and
+/// submit/review id are absent (provider rejection path), the resume
+/// note still renders with the available fields and marks the
+/// unavailable sources as absent.
+#[test]
+fn resume_context_renders_minimal_fields_for_provider_rejection() {
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        prior_session_lineage: Some("session-provider-rejected".to_string()),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
+        target_ref: Some("refs/heads/task/test".to_string()),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
+        // No checkpoint, no auto-submit, no failover — provider rejection.
+        ..Default::default()
+    };
+
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    assert_contains_all(
+        &note,
+        &[
+            "session-provider-rejected",
+            "clean task branch", // source kind label
+            "clean fallback",    // selection reason label
+            "refs/heads/task/test",
+        ],
+    );
+    // Must NOT contain checkpoint or auto-submit fields.
+    assert!(
+        !note.contains("checkpoint `"),
+        "must not mention checkpoint SHA when absent"
+    );
+    assert!(
+        !note.contains("submit/review `"),
+        "must not mention submit/review id when absent"
+    );
+}
+
+/// AC 5: Preservation/no-replay — accepted auto-submit work produces a
+/// resume note that references the review id (not a checkpoint SHA).
+/// This proves the worker sees the auto-submit as the resume source
+/// and will not replay stale checkpoint work.
+#[test]
+fn preservation_no_replay_auto_submit_renders_review_id_not_checkpoint() {
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
+        target_ref: Some("refs/heads/task/test".to_string()),
+        submit_or_review_id: Some("review-accepted-42".to_string()),
+        prior_session_lineage: Some("session-auto-submit".to_string()),
+        ..Default::default()
+    };
+
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    assert_contains_all(
+        &note,
+        &[
+            "session-auto-submit",
+            "review-accepted-42",   // review id, not checkpoint
+            "auto-submit accepted", // selection reason label
+            "auto-submit",          // source kind label
+        ],
+    );
+    // Must NOT contain checkpoint references.
+    assert!(
+        !note.contains("checkpoint `"),
+        "auto-submit note must not reference checkpoint SHA"
+    );
+}
+
+/// AC 5: Preservation/no-replay — when the resume note includes clean
+/// fallback (stall/zombie kill), the prompt includes the fallback source
+/// and terminates label. This proves the worker sees the discontinuity
+/// and starts fresh rather than replaying stale work.
+#[test]
+fn preservation_no_replay_clean_fallback_renders_fallback_source() {
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
+        target_ref: Some("refs/heads/task/test".to_string()),
+        prior_session_lineage: Some("session-stall-killed".to_string()),
+        ..Default::default()
+    };
+
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    assert_contains_all(
+        &note,
+        &[
+            "session-stall-killed",
+            "clean task branch", // source kind
+            "clean fallback",    // terminated label
+        ],
+    );
+}
+
+/// AC 5: When no-replay metadata exists (discontinuity present but no
+/// prior output to resume), the prompt rendering is still deterministic.
+/// Running twice with identical inputs produces identical prompts.
+#[tokio::test]
+async fn resume_context_deterministic_with_discontinuity_metadata() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Determinism epic", "Determinism task").await;
+    let role = WorkerRole;
+
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
+        target_ref: Some("refs/heads/task/determinism-task".to_string()),
+        prior_session_lineage: Some("session-determinism".to_string()),
+        ..Default::default()
+    };
+
+    let note = build_worker_resume_note(role.config().name, Some(&metadata));
+    assert!(note.is_some());
+
+    // Use shared worktree/app_state so the workspace_path in the rendered
+    // prompt is identical across both runs (matches the existing
+    // concurrent_assembly_is_deterministic pattern).
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let worktree = test_tempdir("prompt-context-worktree-");
+    let empty_instructions = std::collections::BTreeMap::new();
+
+    let ctx1 = assemble_prompt_context(PromptContextInputs {
+        task: &task,
+        runtime_role: &role,
+        role_for_epic_check: &role,
+        project_path: "/workspace/test-project",
+        worktree_path: worktree.path(),
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands: None,
+        system_prompt_extensions: "",
+        resolved_skills: &[],
+        app_state: &app_state,
+        read_sources: &[],
+        worker_resume_note: note.as_deref(),
+        arbiter_directive: None,
+        mcp_server_instructions: &empty_instructions,
+    })
+    .await;
+
+    let ctx2 = assemble_prompt_context(PromptContextInputs {
+        task: &task,
+        runtime_role: &role,
+        role_for_epic_check: &role,
+        project_path: "/workspace/test-project",
+        worktree_path: worktree.path(),
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands: None,
+        system_prompt_extensions: "",
+        resolved_skills: &[],
+        app_state: &app_state,
+        read_sources: &[],
+        worker_resume_note: note.as_deref(),
+        arbiter_directive: None,
+        mcp_server_instructions: &empty_instructions,
+    })
+    .await;
+
+    assert_eq!(
+        ctx1.system_prompt, ctx2.system_prompt,
+        "prompt with discontinuity metadata must be deterministic"
+    );
+    assert_eq!(
+        ctx1.worker_resume_note, ctx2.worker_resume_note,
+        "resume note must be deterministic"
+    );
+}
+
 // ─── Prompt-context assembly instrumentation tests ────────────────────
 // These tests invoke the real `assemble_prompt_context` path via
 // `assemble_for_role` and assert that the telemetry metrics
