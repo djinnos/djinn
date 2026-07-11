@@ -94,6 +94,7 @@ impl CoordinatorActor {
             rpc_registry: None,
             default_project_id: None,
             reconciliation_sweep: crate::context::ReconciliationSweepConfig::from_env(),
+            cache_cleanup: crate::context::CacheCleanupConfig::from_env(),
         };
 
         for task in tasks {
