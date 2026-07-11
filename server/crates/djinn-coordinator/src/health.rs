@@ -2924,6 +2924,10 @@ mod cache_cleanup_cross_path_tests {
     async fn dry_run_and_delete_select_same_cross_path_cache_candidates() {
         use djinn_telemetry::cache_cleanup as metrics;
 
+        // Install the global recorder before either sweep emits counters; metrics
+        // sent to the default no-op recorder before initialization are discarded.
+        djinn_telemetry::init().unwrap();
+
         let db = crate::test_helpers::create_test_db();
         let _project = crate::test_helpers::create_test_project(&db).await;
         let tmp = tempfile::TempDir::new().unwrap();
