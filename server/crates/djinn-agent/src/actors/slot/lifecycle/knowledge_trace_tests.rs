@@ -227,12 +227,13 @@ async fn trace_classifies_injected_and_budget_pruned() {
     let task = create_project_epic_task(&db, &events, "Budget epic", "Budget task").await;
     let project_id = task.project_id.clone();
 
-    // Seed several notes that pass confidence but are large enough to trigger
-    // budget pruning (budget is 2000 chars). We'll create notes with long
-    // content so the prompt packing prunes some.
+    // Seed 10 notes all with high confidence (> 0.8) so each summary uses
+    // 200 chars from content. With ~270 chars per rendered line, 10 notes
+    // total ~2700 chars which exceeds the 2000-char budget, causing the
+    // last few notes to be budget-pruned by `pack_knowledge_notes`.
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let mut note_ids = Vec::new();
-    for i in 0..5 {
+    for i in 0..10 {
         let long_content = "x".repeat(800);
         let note = note_repo
             .create(
@@ -244,8 +245,8 @@ async fn trace_classifies_injected_and_budget_pruned() {
             )
             .await
             .unwrap();
-        // All pass confidence threshold.
-        set_note_confidence(&db, &note.id, 0.9 - i as f64 * 0.05).await;
+        // All high confidence (> 0.8) so each summary uses 200 chars.
+        set_note_confidence(&db, &note.id, 0.95 - i as f64 * 0.01).await;
         note_ids.push(note.id);
     }
 
@@ -273,7 +274,7 @@ async fn trace_classifies_injected_and_budget_pruned() {
     );
 
     // Every candidate should be classified.
-    assert_eq!(outcomes.len(), 5, "all 5 candidates should be in trace");
+    assert_eq!(outcomes.len(), 10, "all 10 candidates should be in trace");
 }
 
 #[tokio::test]
