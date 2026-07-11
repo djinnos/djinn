@@ -624,9 +624,17 @@ fn select_actions_job<'a>(
         return Some(job);
     }
 
+    // Prefer the job matching the required check only when it carries a real
+    // failing step. Aggregate-gate setups (a required "gate" job that `needs:`
+    // every real job) combined with fail-fast run cancellation leave the gate
+    // job `cancelled` with no steps — the diagnosable failure lives in the
+    // sibling job that hard-failed before the cancel.
     jobs.iter()
         .filter(|job| is_failing_conclusion(job.conclusion.as_deref()))
-        .find(|job| check_name_matches_job(&request.required_check_name, job))
+        .find(|job| {
+            check_name_matches_job(&request.required_check_name, job) && has_failing_step(job)
+        })
+        .or_else(|| jobs.iter().find(|job| has_hard_failed_step(job)))
         .or_else(|| {
             jobs.iter()
                 .find(|job| check_name_matches_job(&request.required_check_name, job))
@@ -656,6 +664,30 @@ fn is_failing_conclusion(conclusion: Option<&str>) -> bool {
         conclusion,
         Some("failure") | Some("timed_out") | Some("cancelled") | Some("action_required")
     )
+}
+
+/// A *hard* failure — the work itself broke, as opposed to `cancelled`, which
+/// under fail-fast semantics usually means a sibling job failed first.
+fn is_hard_failed_conclusion(conclusion: Option<&str>) -> bool {
+    matches!(conclusion, Some("failure") | Some("timed_out"))
+}
+
+fn has_failing_step(job: &ActionsJob) -> bool {
+    job.steps
+        .iter()
+        .any(|step| is_failing_conclusion(step.conclusion.as_deref()))
+}
+
+/// True when the job contains a step that hard-failed. Detected at step level
+/// on purpose: a job that cancels its own run on failure can end up with a
+/// job-level conclusion of `cancelled` (the cancel signal races its post
+/// steps), but the failed step's conclusion is sealed before that — so this
+/// identifies the real source of failure in a fail-fast-cancelled run
+/// regardless of how the job-level race resolved.
+fn has_hard_failed_step(job: &ActionsJob) -> bool {
+    job.steps
+        .iter()
+        .any(|step| is_hard_failed_conclusion(step.conclusion.as_deref()))
 }
 
 fn workflow_path_from_name(name: &str) -> String {
@@ -814,9 +846,17 @@ impl GitHubApiClient {
         run: &WorkflowRun,
     ) -> std::result::Result<RequiredCheckReproduction, GitHubApiError> {
         let jobs = self.list_run_jobs(owner, repo, run.id).await?;
+        // Same fail-fast-aware preference as `select_actions_job`: an
+        // aggregate required gate cancelled by a fail-fast watchdog has no
+        // failing step, so a check-name match only wins when it can actually
+        // name a failing step; otherwise take the hard-failed sibling job that
+        // caused the cancellation. Without this, every bundle for such a run
+        // comes back Unreproducible (FailingStepNotFound on the gate job).
         let Some(job) = jobs
             .iter()
-            .find(|job| job_matches_check(job, check_run))
+            .find(|job| job_matches_check(job, check_run) && has_failing_step(job))
+            .or_else(|| jobs.iter().find(|job| has_hard_failed_step(job)))
+            .or_else(|| jobs.iter().find(|job| job_matches_check(job, check_run)))
             .or_else(|| {
                 jobs.iter()
                     .find(|job| is_failed_conclusion(job.conclusion.as_deref()))
