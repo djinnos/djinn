@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use super::*;
 use djinn_core::models::CiStatus;
 
@@ -298,6 +299,32 @@ impl CoordinatorActor {
                 .unwrap_or(true);
 
             if (sha_changed || !self.pr_status_cache.contains_key(&task.id))
+                && checks.check_runs.is_empty()
+            {
+                // No CI check-runs configured on this repo. A `pr_review` PR has
+                // already cleared the `pr_draft` min-age guard and been
+                // undrafted, so an empty check-run set reliably means "this repo
+                // has no CI", NOT "checks not yet registered". Treat it as green
+                // and persist `Passing` for the current head so the CI merge gate
+                // below returns `Allow`. Without this the review-path
+                // `record_ci_snapshot` above records `Unknown` (empty checks) and
+                // the merge gate maps `Unknown → Hold`, wedging the task in
+                // `pr_review` forever on vanilla repos. Mirrors the pr_draft no-CI
+                // fast path (`poll_pr_draft_tasks`).
+                self.pr_status_cache
+                    .insert(task.id.clone(), current_sha.clone());
+                self.persist_ci_snapshot(
+                    &task.id,
+                    pull_number,
+                    &current_sha,
+                    CiStatus::Passing,
+                    vec![],
+                    None,
+                    0,
+                    None,
+                )
+                .await;
+            } else if (sha_changed || !self.pr_status_cache.contains_key(&task.id))
                 && !checks.check_runs.is_empty()
             {
                 let all_completed = checks.check_runs.iter().all(|cr| cr.status == "completed");
@@ -777,20 +804,35 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // Either approved or no reviews — attempt squash merge.
+            // Either approved or no reviews — merge using a method the repo
+            // actually permits. Djinn prefers squash, but many repos disable
+            // squash (or allow only merge-commit / rebase); blindly attempting
+            // squash there 405-loops forever. Resolve the allowed methods and
+            // fall back across them on a "not allowed" rejection.
+            let allowed_methods = self
+                .resolve_allowed_merge_methods(gh_client, &owner, &repo)
+                .await;
             tracing::info!(
                 task_id = %task.short_id,
                 pr = pull_number,
                 approved = has_approved,
-                "PR poller: attempting squash merge"
+                methods = ?allowed_methods,
+                "PR poller: attempting merge with repo-permitted method(s)"
             );
 
-            match gh_client
-                .merge_pull_request(&owner, &repo, pull_number, MergeMethod::Squash, &pr.title)
+            match self
+                .merge_pr_with_fallback(
+                    gh_client,
+                    &owner,
+                    &repo,
+                    pull_number,
+                    &pr.title,
+                    &allowed_methods,
+                )
                 .await
             {
                 Ok(merge_response) => {
-                    // The PUT /merge response carries the landed squash-commit
+                    // The PUT /merge response carries the landed merge-commit
                     // SHA; record it so the task lands in the Merged column.
                     let merge_commit_sha = merge_response
                         .get("sha")
@@ -800,7 +842,7 @@ impl CoordinatorActor {
                         task_id = %task.short_id,
                         pr = pull_number,
                         sha = merge_commit_sha.as_deref().unwrap_or("<unknown>"),
-                        "PR poller: squash merge succeeded → closing task"
+                        "PR poller: merge succeeded → closing task"
                     );
                     self.apply_pr_merge(&task.id, merge_commit_sha.as_deref())
                         .await;
@@ -907,6 +949,46 @@ impl CoordinatorActor {
                                     *count = 0;
                                 }
                             }
+                        }
+                        continue;
+                    }
+
+                    // ── Genuine merge-method wedge ────────────────────────────
+                    // `merge_pr_with_fallback` already tried every method the
+                    // repo permits (squash → merge commit → rebase) and GitHub
+                    // rejected each one as "not allowed on this repository".
+                    // Retrying identical PUT /merge calls can never succeed, so —
+                    // unlike the generic merge-retry path below, which resets its
+                    // counter and loops forever — count these failures WITHOUT
+                    // resetting and escalate + park through the autonomous
+                    // escalation ladder once the threshold is reached.
+                    if is_merge_method_not_allowed(&e) {
+                        let count = self.merge_fail_count.entry(task.id.clone()).or_insert(0);
+                        *count += 1;
+                        let github_error = render_github_write_error("GitHub merge failed", &e);
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            attempt = *count,
+                            error = %github_error,
+                            "PR poller: repo rejects every permitted merge method as not allowed — genuine merge-method wedge"
+                        );
+                        if *count >= MERGE_METHOD_NOT_ALLOWED_ESCALATION_THRESHOLD {
+                            let reason = format!(
+                                "PR #{pull_number} cannot be merged: the repository rejected every \
+                                 merge method Djinn attempted (squash / merge-commit / rebase) as \
+                                 \"not allowed\" across {count} attempts. This is a repository \
+                                 configuration issue (allowed merge methods and/or branch \
+                                 protection), not something a code change can fix — escalating for \
+                                 intervention instead of retrying forever."
+                            );
+                            self.escalate_to_planner_or_terminally_fail(&task, &reason)
+                                .await;
+                            self.pr_status_cache.remove(&task.id);
+                            self.review_stuck_sha_first_seen.remove(&task.id);
+                            self.merge_fail_count.remove(&task.id);
+                            self.delegated_to_github.remove(&task.id);
+                            self.conversations_resolved.remove(&task.id);
                         }
                         continue;
                     }

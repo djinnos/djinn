@@ -27,6 +27,38 @@ pub enum MergeMethod {
     Rebase,
 }
 
+/// The repository's allowed merge methods, as reported by `GET /repos`.
+///
+/// GitHub exposes three independent per-repository toggles governing which
+/// merge strategies the PUT `/merge` endpoint (and GitHub-managed auto-merge)
+/// will accept. Djinn hardcoded squash historically, which wedges forever on
+/// repos that disable squash. Each field defaults to `true` so a missing field
+/// (older API surface / partial payload) degrades to the permissive legacy
+/// assumption rather than falsely reporting a method as disallowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoMergeConfig {
+    #[serde(default = "default_true")]
+    pub allow_squash_merge: bool,
+    #[serde(default = "default_true")]
+    pub allow_merge_commit: bool,
+    #[serde(default = "default_true")]
+    pub allow_rebase_merge: bool,
+}
+
+impl Default for RepoMergeConfig {
+    fn default() -> Self {
+        Self {
+            allow_squash_merge: true,
+            allow_merge_commit: true,
+            allow_rebase_merge: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Pull request state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
