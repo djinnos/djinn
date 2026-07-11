@@ -206,7 +206,9 @@ pub(super) async fn consume_provider_stream(
                     | StreamEvent::Delta(ContentBlock::Image { .. })
                     | StreamEvent::Delta(ContentBlock::Document { .. }) => {}
                     StreamEvent::Delta(reasoning @ ContentBlock::OpenAIReasoning { .. })
-                    | StreamEvent::Delta(reasoning @ ContentBlock::Thinking { .. }) => {
+                    | StreamEvent::Delta(reasoning @ ContentBlock::Thinking { .. })
+                    | StreamEvent::Delta(reasoning @ ContentBlock::RedactedThinking { .. })
+                    | StreamEvent::Delta(reasoning @ ContentBlock::Unknown { .. }) => {
                         state.turn_provider_state.push(reasoning);
                     }
                     StreamEvent::Thinking(thinking) => {
