@@ -24,6 +24,7 @@ pub(crate) struct ContentBlockAcc {
     blocks: BTreeMap<u64, PendingContentBlock>,
 }
 
+#[cfg(test)]
 impl ContentBlockAcc {
     pub(crate) fn is_empty(&self) -> bool {
         self.blocks.is_empty()
