@@ -256,9 +256,30 @@ pub fn classify_cargo_target_path(relative_path: &Path) -> CloneAction {
         return CloneAction::Skip;
     }
 
+    // Cargo's per-profile build-directory lock file (`debug/.cargo-lock`,
+    // `release/.cargo-lock`, one per profile dir at any depth). File locks
+    // (flock) attach to the INODE, not the path, so a hardlinked lock file makes
+    // every seeded run's `cargo` serialize against the warm base's `cargo` — and
+    // against every sibling run seeded from the same base file — across pods via
+    // the shared PVC. Cargo recreates the lock on demand, so seeding it is
+    // pointless and hardlinking it is the bug. Never seed it.
+    if file_name_is(relative_path, ".cargo-lock") {
+        return CloneAction::Skip;
+    }
+
     if has_component(relative_path, ".fingerprint")
         || relative_path.extension().is_some_and(|ext| ext == "d")
     {
+        return CloneAction::Copy;
+    }
+
+    // `.rustc_info.json` (rustc-version cache at the target root) is rewritten
+    // IN PLACE by cargo's `paths::write` (`File::create` truncates the existing
+    // inode; it is not an atomic tmp+rename) whenever a new rustc invocation is
+    // cached. Verified empirically: a hardlinked copy shares the inode, so a
+    // regenerate writes through and corrupts the shared warm base. Copy it so
+    // each run mutates a private inode while still inheriting the cached value.
+    if file_name_is(relative_path, ".rustc_info.json") {
         return CloneAction::Copy;
     }
 
@@ -462,6 +483,10 @@ fn has_component(path: &Path, needle: &str) -> bool {
     })
 }
 
+fn file_name_is(path: &Path, needle: &str) -> bool {
+    path.file_name().is_some_and(|name| name == needle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +523,41 @@ mod tests {
         );
         assert_eq!(
             classify_cargo_target_path(Path::new("debug/build/foo/output.d")),
+            CloneAction::Copy
+        );
+    }
+
+    #[test]
+    fn classifies_build_directory_lock_for_skip() {
+        // Cargo's per-profile lock file must never be hardlinked: flock attaches
+        // to the inode, so a shared lock serializes `cargo` across every run and
+        // the warm base via the shared PVC.
+        assert_eq!(
+            classify_cargo_target_path(Path::new("debug/.cargo-lock")),
+            CloneAction::Skip
+        );
+        assert_eq!(
+            classify_cargo_target_path(Path::new("release/.cargo-lock")),
+            CloneAction::Skip
+        );
+        // Root-level and nested-profile variants are also skipped by file name.
+        assert_eq!(
+            classify_cargo_target_path(Path::new(".cargo-lock")),
+            CloneAction::Skip
+        );
+        assert_eq!(
+            classify_cargo_target_path(Path::new("x86_64-unknown-linux-gnu/debug/.cargo-lock")),
+            CloneAction::Skip
+        );
+    }
+
+    #[test]
+    fn classifies_rustc_info_cache_for_copy() {
+        // `.rustc_info.json` is rewritten in place by cargo, so a hardlink would
+        // write through to the shared warm base. Copy gives each run a private
+        // inode while inheriting the cached value.
+        assert_eq!(
+            classify_cargo_target_path(Path::new(".rustc_info.json")),
             CloneAction::Copy
         );
     }
@@ -566,11 +626,15 @@ mod tests {
         let fingerprint = Path::new("debug/.fingerprint/foo-abc/invoked.timestamp");
         let dep_info = Path::new("debug/deps/foo.d");
         let incremental = Path::new("debug/incremental/foo-abc/s-cache.bin");
+        let build_lock = Path::new("debug/.cargo-lock");
+        let rustc_info = Path::new(".rustc_info.json");
 
         write_base_file(&base, heavy, b"large immutable artifact");
         write_base_file(&base, fingerprint, b"fingerprint metadata");
         write_base_file(&base, dep_info, b"dep-info metadata");
         write_base_file(&base, incremental, b"incremental state");
+        write_base_file(&base, build_lock, b"");
+        write_base_file(&base, rustc_info, b"rustc info cache");
 
         let result =
             seed_cargo_target_dir_with_options(&base, &run, &CargoTargetSeedOptions::new(4))
@@ -578,10 +642,11 @@ mod tests {
 
         assert_eq!(result.fallback_reason, None);
         assert_eq!(result.linked_file_count, 1);
-        assert_eq!(result.copied_file_count, 2);
+        // fingerprint + dep-info + .rustc_info.json are byte-copied.
+        assert_eq!(result.copied_file_count, 3);
         assert!(
-            result.skipped_file_count >= 1,
-            "incremental directory should be counted as skipped"
+            result.skipped_file_count >= 2,
+            "incremental state and the build-directory lock should be skipped"
         );
 
         assert_eq!(
@@ -604,12 +669,31 @@ mod tests {
             !run.join("debug/incremental").exists(),
             "incremental directories must be skipped before descent"
         );
+        assert!(
+            !run.join(build_lock).exists(),
+            "the build-directory lock file must not be seeded into the private run dir"
+        );
+        assert_eq!(
+            fs::read(run.join(rustc_info)).expect("read copied rustc info"),
+            b"rustc info cache"
+        );
 
         #[cfg(unix)]
         {
             assert_same_inode(&base.join(heavy), &run.join(heavy));
             assert_different_inode(&base.join(fingerprint), &run.join(fingerprint));
             assert_different_inode(&base.join(dep_info), &run.join(dep_info));
+            // The seeded tree must NOT share the build-directory lock inode with
+            // the warm base: flock is inode-scoped, so a shared inode would make
+            // this run's `cargo` serialize against the base and every sibling.
+            // The lock is skipped entirely, so it must simply be absent.
+            assert!(
+                !run.join(build_lock).exists(),
+                "lock file must be absent, never inode-shared with the base"
+            );
+            // `.rustc_info.json` is copied, so the run owns a private inode and a
+            // cargo rewrite cannot corrupt the shared warm base.
+            assert_different_inode(&base.join(rustc_info), &run.join(rustc_info));
         }
     }
 
