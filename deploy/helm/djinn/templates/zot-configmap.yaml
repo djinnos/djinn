@@ -22,7 +22,7 @@ data:
         "gc": true,
         "gcDelay": "1h",
         "gcInterval": "24h"{{- if .Values.imagePipeline.zot.retention.enabled }},
-        ,"retention": {
+        "retention": {
           "dryRun": {{ .Values.imagePipeline.zot.retention.dryRun }},
           "delay": "1h",
           "policies": [
