@@ -599,7 +599,14 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         .tempdir_in(&temp_base)
         .map_err(|e| format!("create canonical-graph tempdir: {e}"))?;
     let output_dir = output_temp.path().to_path_buf();
-    let target_dir = handle.target_dir().to_path_buf();
+    // In the K8s warm-Pod path this resolves to `None` when the Pod already
+    // routes `CARGO_TARGET_DIR` at the warmed per-project base
+    // (`/cache/cargo-target/<project>`), so the indexer inherits that
+    // pre-warmed target instead of recompiling into the Pod's ephemeral
+    // `_index-target` every warm. In the in-process (dev/peer) path it
+    // resolves to `Some(<_index-target>)` and the CargoTargetDirGuard isolates
+    // the indexer build from the host server's own target dir as before.
+    let target_dir = handle.indexer_target_dir_override();
 
     // Phase 3 PR 8: ask the DB for the detected stack and filter the SCIP
     // indexer set to languages the project actually uses. Falls back to
@@ -613,7 +620,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let run = crate::scip_indexer::run_indexers_already_locked(
         handle.path(),
         &output_dir,
-        Some(&target_dir),
+        target_dir.as_deref(),
         stack_filter.as_deref(),
         declared_workspaces.as_deref(),
     )
