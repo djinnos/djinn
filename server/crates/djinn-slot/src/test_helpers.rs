@@ -42,6 +42,15 @@ impl SlotToolDispatcher for MockToolDispatcher {
     ) -> String {
         serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
     }
+    fn externalize_rendered_result(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        rendered: &str,
+        preview_chars: usize,
+    ) -> String {
+        mock_externalize_rendered_result(tool_use_id, tool_name, rendered, preview_chars)
+    }
     fn dispatch_extension_tool<'a>(
         &'a self,
         tool_name: &'a str,
@@ -150,6 +159,15 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
     ) -> String {
         serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
     }
+    fn externalize_rendered_result(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        rendered: &str,
+        preview_chars: usize,
+    ) -> String {
+        mock_externalize_rendered_result(tool_use_id, tool_name, rendered, preview_chars)
+    }
     fn dispatch_extension_tool<'a>(
         &'a self,
         tool_name: &'a str,
@@ -244,6 +262,45 @@ pub fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Opti
         return None;
     }
     Some(out)
+}
+
+/// Slot-local mock of the agent's `externalize_rendered_tool_result`.
+///
+/// Test dispatchers (`MockToolDispatcher`, `ConfigurableToolDispatcher`) share
+/// this so future reply-loop unit tests can assert turn-budget externalization
+/// happened deterministically without depending on `djinn-agent`.
+///
+/// The mock emits the canonical `[djinn-output-stash ...]` header so tests can
+/// grep for it, and truncates the preview to `preview_chars` characters with a
+/// simple head cut (not the real `smart_truncate`). When the stub would not be
+/// smaller than `rendered`, the original text is returned unchanged — mirroring
+/// the real non-shrinking guard so tests observe the same contract.
+pub fn mock_externalize_rendered_result(
+    tool_use_id: &str,
+    tool_name: &str,
+    rendered: &str,
+    preview_chars: usize,
+) -> String {
+    let full_chars = rendered.chars().count();
+    let preview_chars = preview_chars.max(1);
+
+    // Simple head-cut preview for the mock (not smart_truncate).
+    let preview_body: String = rendered.chars().take(preview_chars).collect();
+    let preview_body_chars = preview_body.chars().count();
+
+    let header = format!(
+        "[djinn-output-stash tool_use_id=\"{tool_use_id}\" tool_name=\"{tool_name}\" reason=\"turn_budget\" full_chars=\"{full_chars}\" preview_chars=\"{preview_body_chars}\"]"
+    );
+
+    let stub =
+        format!("{header}\n{preview_body}\n\n[mock externalized output — {full_chars} chars]");
+
+    // Non-shrinking guard (same contract as the real helper).
+    if stub.chars().count() >= full_chars {
+        return rendered.to_string();
+    }
+
+    stub
 }
 
 /// Map a `StageOutcome` to `(SessionStatus, Option<park_reason>)`.

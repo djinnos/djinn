@@ -191,6 +191,30 @@ pub trait SlotToolDispatcher: Send + Sync + 'static {
         tool_name: &str,
         value: &serde_json::Value,
     ) -> String;
+    /// Externalize an already-rendered tool result into a smaller inline stash
+    /// stub with a caller-chosen preview size.
+    ///
+    /// This is the turn-budget externalization seam: the slot crate can ask the
+    /// host to replace a previously-rendered result string with a compact
+    /// `[djinn-output-stash ...]` stub (`reason="turn_budget"`) whose preview is
+    /// `smart_truncate`d to at most `preview_chars` characters, while the full
+    /// rendered text is preserved for `output_view` / `output_grep` recovery.
+    ///
+    /// The **host owns all stash mechanics** — `djinn-slot` never imports
+    /// `djinn-agent` internals.  The host implementation decides whether to
+    /// stash (it guards against non-shrinking replacements) and how to render
+    /// the canonical header and recovery hint.
+    ///
+    /// Returns the externalized stub text, or the original `rendered` string
+    /// unchanged when the host determines externalization would not reduce the
+    /// inline size.
+    fn externalize_rendered_result(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        rendered: &str,
+        preview_chars: usize,
+    ) -> String;
     /// Dispatch a tool call through the host's extension layer (non-stash,
     /// non-MCP tools).  The host resolves the tool, runs it, and returns
     /// the raw JSON result.
