@@ -262,13 +262,6 @@ impl SupervisorServices for FakeServices {
         unimplemented!("not exercised on the auth-rejection path")
     }
 
-    async fn run_arbiter_preapproval_gate(
-        &self,
-        _task: &djinn_core::models::Task,
-    ) -> Result<djinn_supervisor::ArbiterGateResult, String> {
-        unimplemented!("not exercised on the auth-rejection path")
-    }
-
     async fn record_arbiter_decision(
         &self,
         _task_id: String,

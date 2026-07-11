@@ -222,20 +222,175 @@ fn trip_rate_ceiling_hard_disables_until_manual_enable() {
 }
 
 #[test]
-fn throttle_stalls_never_hit_the_hard_disable_ceiling() {
+fn throttle_stalls_below_persistence_threshold_never_escalate() {
     // A quota throttle (`escalate = false`) resets on a clock, not on model
-    // health, so it must NOT count toward the hard-disable ceiling — even far
-    // more than CEILING throttle trips must keep auto-recovering.
+    // health, so — up to the persistence threshold — it must NOT count toward
+    // the hard-disable ceiling or ratchet the escalating cap, and must keep
+    // auto-recovering. (Persistent throttling past the threshold DOES escalate;
+    // see `persistent_throttle_escalates_after_consecutive_trips`.)
     let ht = HealthTracker::new();
-    for _ in 0..(TRIP_RATE_CEILING * 3) {
+    for _ in 0..(PERSISTENT_THROTTLE_TRIP_THRESHOLD - 1) {
         ht.record_stall(S, TEST_MODEL, false);
         let h = ht.model_health(S, TEST_MODEL);
-        assert!(!h.hard_disabled, "throttles never hard-disable");
-        assert_eq!(h.trips_in_window, 0, "throttles are not counted");
+        assert!(
+            !h.hard_disabled,
+            "sub-threshold throttles never hard-disable"
+        );
+        assert_eq!(
+            h.trips_in_window, 0,
+            "sub-threshold throttles are not counted"
+        );
         assert_eq!(h.disable_ttl_trips, 0);
         expire_cooldown(&ht, S, TEST_MODEL);
         assert!(ht.is_available(S, TEST_MODEL), "throttle always self-heals");
     }
+}
+
+#[test]
+fn persistent_throttle_escalates_after_consecutive_trips() {
+    // Fix (persistent-throttle escalation): a plan/subscription that has been
+    // over-quota for days keeps flapping (throttle-cooldown → re-enable →
+    // crash → repeat) and never escalates. Once a bucket has throttle-tripped
+    // PERSISTENT_THROTTLE_TRIP_THRESHOLD consecutive times with no success,
+    // further throttle trips escalate like genuine failures — advancing
+    // `disable_ttl_trips` AND counting toward the hard-disable ceiling.
+    let ht = HealthTracker::new();
+
+    // Trips below the threshold do not escalate.
+    for _ in 0..(PERSISTENT_THROTTLE_TRIP_THRESHOLD - 1) {
+        ht.record_stall(S, TEST_MODEL, false);
+        let h = ht.model_health(S, TEST_MODEL);
+        assert_eq!(h.disable_ttl_trips, 0);
+        assert_eq!(h.trips_in_window, 0);
+        expire_cooldown(&ht, S, TEST_MODEL);
+    }
+
+    // The threshold-th consecutive throttle trip escalates.
+    ht.record_stall(S, TEST_MODEL, false);
+    let h = ht.model_health(S, TEST_MODEL);
+    assert_eq!(
+        h.disable_ttl_trips, 1,
+        "persistent throttle now ratchets the escalating cap"
+    );
+    assert_eq!(
+        h.trips_in_window, 1,
+        "and now counts toward the hard-disable ceiling"
+    );
+    // The floored stall cooldown still applies (>= the task-redispatch ladder).
+    assert!(!ht.is_available(S, TEST_MODEL));
+}
+
+#[test]
+fn success_resets_persistent_throttle_escalation() {
+    // A single productive session must fully reset the throttle streak: the
+    // plan's quota came back, so the model returns to the gentle clock-reset
+    // treatment and the next throttle starts a fresh streak from trip 1.
+    let ht = HealthTracker::new();
+    for _ in 0..(PERSISTENT_THROTTLE_TRIP_THRESHOLD - 1) {
+        ht.record_stall(S, TEST_MODEL, false);
+        expire_cooldown(&ht, S, TEST_MODEL);
+    }
+    ht.record_success(S, TEST_MODEL);
+
+    // The next throttle trip is treated as trip 1 again — no escalation.
+    ht.record_stall(S, TEST_MODEL, false);
+    let h = ht.model_health(S, TEST_MODEL);
+    assert_eq!(
+        h.disable_ttl_trips, 0,
+        "success reset the streak, so this throttle does not escalate"
+    );
+    assert_eq!(h.trips_in_window, 0);
+    assert!(!h.hard_disabled);
+}
+
+#[test]
+fn persistent_throttle_eventually_hard_disables() {
+    // The end-to-end backstop: a subscription that keeps 429-ing forever with
+    // no success must eventually be hard-disabled (held until a human
+    // re-enables) instead of flapping indefinitely and burning task wall-clock.
+    let ht = HealthTracker::new();
+    for _ in 0..(PERSISTENT_THROTTLE_TRIP_THRESHOLD + TRIP_RATE_CEILING as u32) {
+        ht.record_stall(S, TEST_MODEL, false);
+        expire_cooldown(&ht, S, TEST_MODEL);
+    }
+    let h = ht.model_health(S, TEST_MODEL);
+    assert!(
+        h.hard_disabled,
+        "a plan throttling for days must eventually hard-disable"
+    );
+    assert!(
+        !ht.is_available(S, TEST_MODEL),
+        "a hard-disabled bucket never self-heals on the clock"
+    );
+}
+
+#[test]
+fn persistent_throttle_escalates_on_wall_clock_window() {
+    // The wall-clock companion: even when the consecutive-trip *count* is still
+    // low, a throttle streak that has lasted PERSISTENT_THROTTLE_WINDOW (sparse
+    // but continuous throttling — long provider retry-after windows) escalates.
+    let ht = HealthTracker::new();
+    // First throttle trip starts the streak.
+    ht.record_stall(S, TEST_MODEL, false);
+    assert_eq!(ht.model_health(S, TEST_MODEL).disable_ttl_trips, 0);
+    // Age the streak start past the wall-clock window.
+    {
+        let mut map = ht.inner.lock().unwrap();
+        let state = map.get_mut(&HealthKey::new(S, TEST_MODEL)).unwrap();
+        state.throttle_streak_started_at =
+            Some(Instant::now() - PERSISTENT_THROTTLE_WINDOW - Duration::from_secs(1));
+    }
+    expire_cooldown(&ht, S, TEST_MODEL);
+
+    // The next throttle trip escalates on the wall-clock bound alone.
+    ht.record_stall(S, TEST_MODEL, false);
+    let h = ht.model_health(S, TEST_MODEL);
+    assert_eq!(
+        h.disable_ttl_trips, 1,
+        "a throttle streak older than the window escalates regardless of count"
+    );
+    assert_eq!(h.trips_in_window, 1);
+}
+
+#[test]
+fn is_throttle_cooling_tracks_throttle_cooldown_only() {
+    let ht = HealthTracker::new();
+    assert!(
+        !ht.is_throttle_cooling(S, TEST_MODEL),
+        "an untracked model is not throttle-cooling"
+    );
+
+    // A throttle trip flags the model as throttle-cooling…
+    ht.record_stall(S, TEST_MODEL, false);
+    assert!(ht.is_throttle_cooling(S, TEST_MODEL));
+
+    // …and it stays flagged through the half-open window (cooldown expired but
+    // no success has re-proven it) so dispatch keeps deprioritizing it.
+    expire_cooldown(&ht, S, TEST_MODEL);
+    assert!(
+        ht.is_available(S, TEST_MODEL),
+        "cooldown expired → available (half-open)"
+    );
+    assert!(
+        ht.is_throttle_cooling(S, TEST_MODEL),
+        "still throttle-cooling until a success clears it"
+    );
+
+    // A success clears the flag.
+    ht.record_success(S, TEST_MODEL);
+    assert!(!ht.is_throttle_cooling(S, TEST_MODEL));
+
+    // A GENUINE (non-throttle) breaker trip is not reported as throttle-cooling.
+    ht.reset(S, TEST_MODEL);
+    ht.record_stall(S, TEST_MODEL, true);
+    assert!(
+        !ht.is_available(S, TEST_MODEL),
+        "genuine stall trips the breaker"
+    );
+    assert!(
+        !ht.is_throttle_cooling(S, TEST_MODEL),
+        "a genuine (escalating) trip is not a throttle cooldown"
+    );
 }
 
 #[test]

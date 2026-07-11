@@ -528,6 +528,13 @@ mod tests {
         );
         assert_eq!(envs.get("SCCACHE_CACHE_SIZE").copied(), Some("20G"));
         assert_eq!(envs.get("SQLX_OFFLINE").copied(), Some("true"));
+        // Fast linker: mold is installed in the devcontainer image; wire it in
+        // for the warm build so the warm base is linked (and fingerprinted)
+        // identically to the task-run pods that seed from it.
+        assert_eq!(
+            envs.get("CARGO_BUILD_RUSTFLAGS").copied(),
+            Some("-Clink-arg=-fuse-ld=mold"),
+        );
 
         let mounts = container.volume_mounts.as_ref().expect("mounts");
         assert_eq!(mounts.len(), 4, "mirror + workspace + cache + env-config");
@@ -616,7 +623,7 @@ mod tests {
         // Defaults pin the documented values. Memory limit bumped 4Gi → 6Gi to
         // cover the added test-compile warm pass (--all-targets test codegen).
         assert_eq!(cfg.warm_cpu_request, "1");
-        assert_eq!(cfg.warm_cpu_limit, "2");
+        assert_eq!(cfg.warm_cpu_limit, "4");
         assert_eq!(cfg.warm_memory_request, "2Gi");
         assert_eq!(cfg.warm_memory_limit, "6Gi");
     }

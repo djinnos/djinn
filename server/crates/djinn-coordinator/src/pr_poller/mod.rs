@@ -2,7 +2,7 @@ use djinn_core::models::{Task, TransitionAction};
 use djinn_db::{ActivityQuery, SessionAuthRepository, TaskRepository, UserSettingsRepository};
 use djinn_provider::github_api::{
     ActionsJob, CheckRun, DbBackedRefresher, GitHubApiClient, MergeMethod, PrReview,
-    PrReviewFeedback, PrState, PullRequest, UserTokenExpired,
+    PrReviewFeedback, PrState, PullRequest, RepoMergeConfig, UserTokenExpired,
 };
 use djinn_provider::oauth::github_app_user;
 
@@ -26,6 +26,16 @@ const PR_DRAFT_MIN_AGE_SECS: i64 = 10;
 /// after we cached a "green" SHA, or where branch-protection rules block
 /// the merge for reasons we didn't anticipate.
 const MERGE_RETRY_RECHECK_THRESHOLD: u32 = 3;
+
+/// Maximum consecutive "no allowed merge method succeeded" failures before the
+/// PR poller escalates + parks the task instead of retrying. Unlike the generic
+/// merge-retry path (which resets its counter and loops), this failure class is
+/// a genuine repository-configuration wedge — the repo rejects every merge
+/// method Djinn attempts (squash/merge-commit/rebase) as "not allowed". Retrying
+/// identical PUT `/merge` calls can never succeed, so after this many attempts
+/// the task is routed through the autonomous escalation ladder rather than
+/// looping silently forever.
+const MERGE_METHOD_NOT_ALLOWED_ESCALATION_THRESHOLD: u32 = 3;
 
 /// Maximum number of distinct failing workflow runs whose jobs/steps are
 /// aggregated into a single CI-failure rework comment. Failures frequently
@@ -104,9 +114,11 @@ use crate::ci_preflight_gate::{
     run_ci_reproduction_preflight_gate,
 };
 use crate::github_error_render::render_github_write_error;
+#[cfg(test)]
+use ci_helpers::allowed_merge_methods;
 use ci_helpers::{
     advisory_checks_section, blocking_failed_checks, build_ci_failure_sections, is_already_queued,
-    is_failing_conclusion, is_merge_queue_405, parse_actions_run_id,
+    is_failing_conclusion, is_merge_method_not_allowed, is_merge_queue_405, parse_actions_run_id,
 };
 use conversation_resolution::{
     is_conversation_resolution_block, should_auto_resolve_conversations,

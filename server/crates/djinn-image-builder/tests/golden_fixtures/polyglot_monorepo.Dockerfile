@@ -10,6 +10,8 @@ ENV HOME=/home/djinn
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 ENV GOPATH=/go GOROOT=/usr/local/go
 ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build GOBIN=/cache/go/bin
+ENV PNPM_HOME=/cache/pnpm npm_config_cache=/cache/npm YARN_CACHE_FOLDER=/cache/yarn
+ENV PIP_CACHE_DIR=/cache/pip UV_CACHE_DIR=/cache/uv
 RUN APT_PACKAGES="postgresql-client" /tmp/djinn-scripts/install-system.sh
 COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker
 RUN /tmp/djinn-scripts/install-agent-worker.sh

@@ -798,3 +798,109 @@ async fn totals_split_actual_projected_and_unpriced() {
     );
     assert_eq!(proj_row.unpriced_session_count, 1, "breakdown unpriced");
 }
+
+/// Regression for shared-credit masking the worst first-pass model.
+///
+/// Scenario mirrors the production finding: a "first-pass" model runs early
+/// worker sessions whose passes are reopened/reworked, while a second model
+/// runs the later session that actually lands the merge. Shared-credit
+/// `success_rate` flatters the first-pass model; the new
+/// `first_pass_rejection_rate` and `final_pass_share` columns must expose it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn effectiveness_first_pass_rejection_and_final_pass_share() {
+    let db = create_test_db();
+    db.ensure_initialized().await.expect("ensure_initialized");
+
+    let proj = seed_project(&db, "first-pass-proj").await;
+
+    // Task 1: closed/completed, reopened once (first pass was rejected).
+    seed_task(&db, "task-1-aaa", &proj, "closed", Some("completed"), 1).await;
+    // Task 2: closed/completed, single clean pass, no reopens.
+    seed_task(&db, "task-2-bbb", &proj, "closed", Some("completed"), 0).await;
+
+    // Task 1: mimo runs first (rejected), gpt runs the landing session later.
+    seed_worker_session(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-1-aaa",
+        "mimo",
+        Some(0.05),
+        100,
+        200,
+        "2025-06-01T10:00:00.000Z",
+        "actual",
+    )
+    .await;
+    seed_worker_session(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-1-aaa",
+        "gpt",
+        Some(0.03),
+        150,
+        250,
+        "2025-06-01T12:00:00.000Z",
+        "actual",
+    )
+    .await;
+    // Task 2: gpt lands it in a single pass.
+    seed_worker_session(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-2-bbb",
+        "gpt",
+        Some(0.02),
+        120,
+        180,
+        "2025-06-02T10:00:00.000Z",
+        "actual",
+    )
+    .await;
+
+    let repo = UsageAnalyticsRepository::new(db);
+    let (effectiveness, _matrix) = repo
+        .query_effectiveness(&effectiveness_params())
+        .await
+        .expect("query_effectiveness should succeed");
+
+    // ── mimo: best shared-credit success, worst first-pass reality ──
+    let mimo = find_model(&effectiveness, "mimo");
+    assert_eq!(mimo.sessions, 1);
+    // Shared credit: mimo touched completed task-1 → success looks perfect.
+    assert!(
+        (mimo.success_rate.unwrap() - 1.0).abs() < 1e-9,
+        "mimo shared-credit success_rate is a flattering 1.0"
+    );
+    // Its one session was superseded on a reopened task → 100% rejection.
+    assert_eq!(mimo.first_pass_rejected_session_count, 1);
+    assert!(
+        (mimo.first_pass_rejection_rate.unwrap() - 1.0).abs() < 1e-9,
+        "mimo first_pass_rejection_rate should be 1.0"
+    );
+    // It never ran the last worker session on a completed task.
+    assert_eq!(mimo.final_pass_completed_task_count, 0);
+    assert!(
+        (mimo.final_pass_share.unwrap() - 0.0).abs() < 1e-9,
+        "mimo final_pass_share should be 0.0"
+    );
+
+    // ── gpt: actually landed both tasks ──
+    let gpt = find_model(&effectiveness, "gpt");
+    assert_eq!(gpt.sessions, 2);
+    // Neither of gpt's sessions was superseded → no first-pass rejections.
+    assert_eq!(gpt.first_pass_rejected_session_count, 0);
+    assert!(
+        (gpt.first_pass_rejection_rate.unwrap() - 0.0).abs() < 1e-9,
+        "gpt first_pass_rejection_rate should be 0.0"
+    );
+    // gpt ran the last worker session on both completed tasks it touched.
+    assert_eq!(gpt.shared_credit_completed_task_count, 2);
+    assert_eq!(gpt.final_pass_completed_task_count, 2);
+    assert!(
+        (gpt.final_pass_share.unwrap() - 1.0).abs() < 1e-9,
+        "gpt final_pass_share should be 1.0"
+    );
+}
