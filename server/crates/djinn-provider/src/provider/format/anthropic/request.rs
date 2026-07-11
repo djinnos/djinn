@@ -131,6 +131,79 @@ impl AnthropicProvider {
         ))
     }
 
+    /// Serialize a shared content block using Anthropic's native wire schema.
+    ///
+    /// Shared `Conversation::to_anthropic_messages` deliberately skips
+    /// provider-private state so non-Anthropic callers cannot accidentally
+    /// replay it. Anthropic assistant history is the exception: signed and
+    /// redacted thinking are required to continue an extended-thinking turn.
+    /// Unsigned thinking cannot satisfy Anthropic's replay contract, so it is
+    /// omitted rather than turned into an empty text placeholder.
+    fn serialize_content_block(block: &ContentBlock, assistant_replay: bool) -> Option<Value> {
+        match block {
+            ContentBlock::Text { text } => Some(json!({"type": "text", "text": text})),
+            ContentBlock::ToolUse { id, name, input } => Some(json!({
+                "type": "tool_use", "id": id, "name": name, "input": input,
+            })),
+            ContentBlock::ToolResult { tool_use_id, content, is_error } => Some(json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content.iter()
+                    .filter_map(|block| Self::serialize_content_block(block, false))
+                    .collect::<Vec<_>>(),
+                "is_error": is_error,
+            })),
+            ContentBlock::Image { media_type, data } => Some(json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data}
+            })),
+            ContentBlock::Document { media_type, data, filename } => {
+                let mut document = json!({
+                    "type": "document",
+                    "source": {"type": "base64", "media_type": media_type, "data": data}
+                });
+                if let Some(filename) = filename {
+                    document["title"] = json!(filename);
+                }
+                Some(document)
+            }
+            ContentBlock::Thinking { thinking, signature: Some(signature) }
+                if assistant_replay && !signature.is_empty() => Some(json!({
+                    "type": "thinking", "thinking": thinking, "signature": signature,
+                })),
+            ContentBlock::RedactedThinking { data } if assistant_replay => {
+                Some(json!({"type": "redacted_thinking", "data": data}))
+            }
+            ContentBlock::Unknown { content_type, extra } if assistant_replay => {
+                // Insert opaque fields first so Djinn's owned discriminant cannot
+                // be overridden by a persisted/foreign `extra.type` value.
+                let mut object = extra.clone();
+                object.insert("type".to_string(), json!(content_type));
+                Some(Value::Object(object))
+            }
+            ContentBlock::Thinking { .. }
+            | ContentBlock::RedactedThinking { .. }
+            | ContentBlock::Unknown { .. }
+            | ContentBlock::OpenAIReasoning { .. } => None,
+        }
+    }
+
+    /// Serialize messages locally so Anthropic assistant replay can retain its
+    /// signed/provider-owned blocks without altering generic serializer behavior.
+    fn serialize_messages(conversation: &Conversation) -> Vec<Value> {
+        conversation.messages.iter().filter_map(|message| {
+            let (role, assistant_replay) = match message.role {
+                djinn_core::message::Role::System => return None,
+                djinn_core::message::Role::User => ("user", false),
+                djinn_core::message::Role::Assistant => ("assistant", true),
+            };
+            let content = message.content.iter()
+                .filter_map(|block| Self::serialize_content_block(block, assistant_replay))
+                .collect::<Vec<_>>();
+            Some(json!({"role": role, "content": content}))
+        }).collect()
+    }
+
     fn tool_definition_cache_control(conversation: &Conversation) -> Option<Value> {
         conversation
             .messages
@@ -405,7 +478,7 @@ impl AnthropicProvider {
         tools: &[Value],
         tool_choice: Option<ToolChoice>,
     ) -> Value {
-        let (_system, mut messages) = conversation.to_anthropic_messages();
+        let mut messages = Self::serialize_messages(conversation);
         let mut system_blocks = Self::system_blocks(conversation);
 
         // Caching policy. Explicit: the chat layer annotates system messages
