@@ -483,38 +483,82 @@ When adjusting decay functions, always tier the curve so the long tail is preser
 
     #[tokio::test]
     async fn context_recall_passes_when_gold_answer_in_rendered_payload() {
-        let fixtures = test_fixtures();
+        // Build a pitfall note where the gold answer text (Prevention body +
+        // "\n\n" + Recovery body) appears verbatim in the rendered 200-char
+        // summary. The trick: the question sections are placed first in the
+        // content. By replicating the answer-body text in the Trigger section
+        // body, the gold answer appears as a substring of the rendered payload.
+        //
+        // Prevention body = "Prevention text."
+        // Recovery body   = "Recovery text."
+        // Gold answer     = "Prevention text.\n\nRecovery text."
+        //
+        // Trigger body    = "Prevention text.\n\nRecovery text."  ← matches
+        let content = "\
+## Trigger / smell\n\n\
+Prevention text.\n\n\
+Recovery text.\n\n\
+## Failure mode\n\n\
+Fails.\n\n\
+## Observable symptoms\n\n\
+Crash.\n\n\
+## Prevention\n\n\
+Prevention text.\n\n\
+## Recovery\n\n\
+Recovery text.\n\n\
+## Related\n\n\
+- x";
+
+        let note = CorpusNoteRow {
+            permalink: "pitfalls/recall-pass".to_string(),
+            title: "Recall pass pitfall".to_string(),
+            content: content.to_string(),
+            note_type: "pitfall".to_string(),
+            folder: "pitfalls".to_string(),
+            status: "active".to_string(),
+            tags: vec![],
+            retrieval_anchor: None,
+            timestamps: LifecycleTimestamps {
+                created_at: "2026-06-01T10:00:00.000Z".to_string(),
+                updated_at: "2026-07-01T10:00:00.000Z".to_string(),
+                last_accessed: "2026-07-10T10:00:00.000Z".to_string(),
+            },
+            confidence: 0.9,
+            embedding: None,
+            labels: vec![],
+            graph_edges: vec![],
+            expected_signals: Default::default(),
+        };
+
+        let fixtures = Phase1Fixtures {
+            corpus_notes: vec![note],
+            memory_ref_queries: vec![],
+            bad_cases: vec![],
+            manifest: None,
+        };
+
         let output = execute_qa_run_with_fixtures(&fixtures)
             .await
             .expect("QA run should succeed");
 
-        // With a corpus of only 3 notes and a budget of 2000 chars,
-        // the gold answer should fit in the rendered payload for at least
-        // some QA pairs.
-        let pitfall_record = output
-            .records
-            .iter()
-            .find(|r| r.note_type == "pitfall")
-            .expect("should have a pitfall QA record");
+        assert_eq!(output.qa_count, 1);
 
-        // The gold answer for our pitfall is:
-        // "Always check `slot.status()` before dispatching async callbacks..."
-        // This should appear in the rendered output since we only have 3 notes
-        // and 2000 chars is generous for 3 notes.
-        //
-        // However, the gold answer must be in the SOURCE note's content.
-        // If the gold note is retrieved, its summary in format_knowledge_notes
-        // is truncated (L1 overview for confidence > 0.8 → up to 200 chars,
-        // L0 abstract → up to 100 chars). Since these test notes have no
-        // abstract/overview, the content.slice(0, 200) is used.
-        //
-        // The gold answer for the pitfall is ~150 chars, and the rendered
-        // summary is the first 200 chars of content. So the full gold answer
-        // text must be present in the rendered payload for context_recall=true.
-        //
-        // We test this by asserting the record was produced:
+        let record = &output.records[0];
+
+        // The gold answer "Prevention text.\n\nRecovery text." appears in
+        // the Trigger section body, which falls within the first 200 chars
+        // of content. format_knowledge_notes renders content[..200] as the
+        // summary for high-confidence notes, so the gold answer IS present
+        // in the rendered 2000-char injection payload.
         assert!(
-            !pitfall_record.injected_payload_preview.is_empty(),
+            record.context_recall,
+            "context_recall should be true when gold answer is present in the \
+             rendered payload. record: {:?}",
+            record
+        );
+
+        assert!(
+            !record.injected_payload_preview.is_empty(),
             "should have non-empty payload preview"
         );
     }
@@ -587,23 +631,38 @@ When adjusting decay functions, always tier the curve so the long tail is preser
 
     #[tokio::test]
     async fn context_recall_passes_when_gold_answer_in_short_summary() {
-        // Build a note where the gold answer text appears early in the content
-        // (within the first 200 chars for high-confidence summary rendering).
-        let gold_snippet = "slot.status() guard helper";
-        let short_content = format!(
-            "## Trigger / smell\n\nSlot guard violation trigger.\n\n\
-             ## Failure mode\n\n{} is the key prevention.\n\n\
-             ## Observable symptoms\n\nSymptoms here.\n\n\
-             ## Prevention\n\n{}\n\n\
-             ## Recovery\n\nRecovery text.\n\n\
-             ## Related\n\n- some/related",
-            gold_snippet, gold_snippet,
-        );
+        // Build a pitfall note with very short content where the gold answer
+        // text (Prevention body + "\n\n" + Recovery body) appears verbatim in
+        // the rendered 200-char summary window.
+        //
+        // The key: the question sections come first in the content, and the
+        // Failure mode body replicates the gold answer text so that it appears
+        // as a substring of the rendered payload.
+        //
+        // Prevention body = "Lock the slot before dispatch."
+        // Recovery body   = "Restart with --reset-sessions."
+        // Gold answer     = "Lock the slot before dispatch.\n\nRestart with --reset-sessions."
+        //
+        // Failure mode body contains the same text → matches in rendered summary
+        let content = "\
+## Trigger / smell\n\n\
+Slot crashes.\n\n\
+## Failure mode\n\n\
+Lock the slot before dispatch.\n\n\
+Restart with --reset-sessions.\n\n\
+## Observable symptoms\n\n\
+Exit 137.\n\n\
+## Prevention\n\n\
+Lock the slot before dispatch.\n\n\
+## Recovery\n\n\
+Restart with --reset-sessions.\n\n\
+## Related\n\n\
+- x";
 
         let note = CorpusNoteRow {
             permalink: "pitfalls/short-answer-note".to_string(),
             title: "Short answer pitfall".to_string(),
-            content: short_content,
+            content: content.to_string(),
             note_type: "pitfall".to_string(),
             folder: "pitfalls".to_string(),
             status: "active".to_string(),
@@ -636,22 +695,15 @@ When adjusting decay functions, always tier the curve so the long tail is preser
 
         let record = &output.records[0];
 
-        // The gold answer is "slot.status() guard helper" which is 26 chars.
-        // The content starts with "Slot guard violation trigger.\n\n..."
-        // and the gold_snippet appears in the "Failure mode" section body.
-        // For a high-confidence note, the rendered summary uses the first 200
-        // chars of content. The gold answer text ("slot.status() guard helper")
-        // appears in both the Failure mode section body AND the Prevention
-        // section body. Since it's near the start of content, it should be
-        // within the 200-char summary window.
-        //
-        // However, the gold_answer is constructed from Prevention + Recovery
-        // section bodies only, not the Failure mode body. So the gold_answer
-        // for this QA pair is "slot.status() guard helper\n\nRecovery text."
-        // which includes the snippet. Let's verify it's present.
+        // The gold answer "Lock the slot before dispatch.\n\nRestart with
+        // --reset-sessions." appears in the Failure mode section body, which
+        // is within the first 200 chars of the short content. The rendered
+        // summary (content[..200] for high-confidence notes) therefore
+        // contains the gold answer text, making context_recall true.
         assert!(
-            record.context_recall || !record.result_permalinks.is_empty(),
-            "at minimum, search should return results. Record: {:?}",
+            record.context_recall,
+            "context_recall should be true when the exact gold answer text is \
+             present in the rendered 2000-char payload. record: {:?}",
             record
         );
     }
