@@ -25,7 +25,12 @@ use crate::tools::proposal_ops::{
     ProposalDispositionSummary, ProposalModel, ProposalReconcileObsoleteEpicResponse,
     ProposalSingleResponse,
 };
-use djinn_db::{EpicRepository, ProjectRepository, ProposalRepository, TaskRepository};
+use djinn_core::events::DjinnEventEnvelope;
+use djinn_db::repositories::task::apply_parent_disposition_tx;
+use djinn_db::{
+    DispositionPlan, DispositionScope, EpicRepository, ProjectRepository, ProposalRepository,
+    TaskRepository,
+};
 
 use super::{err_single, evaluate_composed_gate, proposal_not_found_error};
 
@@ -413,138 +418,49 @@ impl DjinnMcpServer {
 impl DjinnMcpServer {
     /// Tear down a graduated build and revert the proposal to `approved`.
     ///
-    /// Composes the existing teardown primitives, all idempotent and
-    /// best-effort on side-effects: kill the running worker (pool), force-close
-    /// each open task (`ForceClose` is exempt from the blocker guard, so order
-    /// is irrelevant) and clean its branch/PR, close each graduated epic, unlink
-    /// them so a re-graduation starts clean, and revert the proposal to
-    /// `approved`. A `preview` returns the blast radius without mutating.
+    /// One proposal-terminal scope covers every currently linked epic. The
+    /// shared disposition primitive locks, classifies, changes, and audits its
+    /// child tasks in the same transaction as the parent writes below.
     async fn abort_proposal_build(
         &self,
         repo: &ProposalRepository,
         proposal: &djinn_core::models::Proposal,
-        reason: &str,
+        _reason: &str,
         preview: bool,
     ) -> Json<ProposalStopBuildResponse> {
-        use djinn_core::models::TransitionAction;
-
-        let abort_err = |msg: String| {
-            Json(ProposalStopBuildResponse {
-                ok: false,
-                mode: "abort".to_string(),
-                proposal_id: Some(proposal.id.clone()),
-                status: None,
-                preview: false,
-                epics_closed: 0,
-                tasks_closed: 0,
-                sessions_killed: 0,
-                disposition: ProposalDispositionSummary::default(),
-                error: Some(msg),
-            })
-        };
-
+        let abort_err = |msg: String| Json(ProposalStopBuildResponse {
+            ok: false, mode: "abort".to_string(), proposal_id: Some(proposal.id.clone()),
+            status: None, preview: false, epics_closed: 0, tasks_closed: 0,
+            sessions_killed: 0, disposition: ProposalDispositionSummary::default(), error: Some(msg),
+        });
+        let graduated = match repo.graduated_epics(&proposal.id).await { Ok(v) => v, Err(e) => return abort_err(e.to_string()) };
+        let scope = DispositionScope::for_proposal_abort(&proposal.id, graduated.iter().map(|(id, _)| id.clone()).collect());
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
-        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
-        let pool = self.state.pool().await;
-
-        let graduated = match repo.graduated_epics(&proposal.id).await {
-            Ok(v) => v,
-            Err(e) => return abort_err(e.to_string()),
-        };
-
-        // Every non-closed task across the graduated epics, plus the breakdown
-        // task (which has no epic, so it is not in proposal_epics).
-        let mut open_tasks: Vec<djinn_core::models::Task> = Vec::new();
-        for (epic_id, _project_id) in &graduated {
-            if let Ok(tasks) = task_repo.list_by_epic(epic_id).await {
-                open_tasks.extend(tasks.into_iter().filter(|t| t.status != "closed"));
-            }
-        }
-        if let Some(breakdown_id) = &proposal.build_breakdown_task_id
-            && let Ok(Some(task)) = task_repo.resolve(breakdown_id).await
-            && task.status != "closed"
-        {
-            open_tasks.push(task);
-        }
-
-        // Count live worker sessions (used by both preview and the kill count).
-        let mut live_sessions = 0i64;
-        if let Some(pool) = pool.as_ref() {
-            for t in &open_tasks {
-                if pool.has_session(&t.id).await.unwrap_or(false) {
-                    live_sessions += 1;
-                }
-            }
-        }
-
         if preview {
+            let plan = match task_repo.classify_parent_disposition(&scope).await { Ok(plan) => plan, Err(e) => return abort_err(e.to_string()) };
             return Json(ProposalStopBuildResponse {
-                ok: true,
-                mode: "abort".to_string(),
-                proposal_id: Some(proposal.id.clone()),
-                status: Some(proposal.status.clone()),
-                preview: true,
-                epics_closed: graduated.len() as i64,
-                tasks_closed: open_tasks.len() as i64,
-                sessions_killed: live_sessions,
-                disposition: ProposalDispositionSummary::default(),
-                error: None,
+                ok: true, mode: "abort".to_string(), proposal_id: Some(proposal.id.clone()),
+                status: Some(proposal.status.clone()), preview: true, epics_closed: graduated.len() as i64,
+                tasks_closed: plan.counts.close as i64, sessions_killed: 0,
+                disposition: proposal_disposition_summary(&plan), error: None,
             });
         }
-
-        // Act. Kill the live worker (graceful), force-close the task, clean its
-        // branch/PR. Best-effort throughout: a failed kill/cleanup is logged by
-        // the underlying primitive and the next reaper backstops it.
-        let mut sessions_killed = 0i64;
-        let mut tasks_closed = 0i64;
-        for t in &open_tasks {
-            if let Some(pool) = pool.as_ref()
-                && pool.has_session(&t.id).await.unwrap_or(false)
-            {
-                let _ = pool.kill_session(&t.id).await;
-                sessions_killed += 1;
-            }
-            if task_repo
-                .transition(
-                    &t.id,
-                    TransitionAction::ForceClose,
-                    "system",
-                    "system",
-                    Some(reason),
-                    None,
-                )
-                .await
-                .is_ok()
-            {
-                tasks_closed += 1;
-                self.state.cleanup_task_branches(&t.id).await;
-            }
+        let mut tx = match self.state.db().pool().begin().await { Ok(tx) => tx, Err(e) => return abort_err(e.to_string()) };
+        let plan = match apply_parent_disposition_tx(&mut tx, &scope).await { Ok(plan) => plan, Err(e) => return abort_err(e.to_string()) };
+        let epic_ids = scope.epic_ids.clone();
+        if let Err(e) = sqlx::query("UPDATE epics SET status = 'closed', closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = ANY($1)").bind(&epic_ids).execute(&mut *tx).await { return abort_err(e.to_string()); }
+        if let Err(e) = sqlx::query("DELETE FROM proposal_epics WHERE proposal_id = $1").bind(&proposal.id).execute(&mut *tx).await { return abort_err(e.to_string()); }
+        if let Err(e) = sqlx::query("UPDATE proposals SET status = 'approved', build_owner_user_id = NULL, build_breakdown_task_id = NULL, build_frozen = false, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1").bind(&proposal.id).execute(&mut *tx).await { return abort_err(e.to_string()); }
+        if let Err(e) = tx.commit().await { return abort_err(e.to_string()); }
+        self.emit_disposition_events(&plan, &epic_ids).await;
+        if let Ok(Some(updated)) = repo.get(&proposal.id).await {
+            self.state.event_bus().send(DjinnEventEnvelope::proposal_updated(&updated));
         }
-
-        let mut epics_closed = 0i64;
-        for (epic_id, _project_id) in &graduated {
-            if epic_repo.close(epic_id).await.is_ok() {
-                epics_closed += 1;
-            }
-        }
-
-        let _ = repo.unlink_epics(&proposal.id).await;
-        let status = match repo.revert_to_approved(&proposal.id).await {
-            Ok(updated) => updated.status,
-            Err(e) => return abort_err(e.to_string()),
-        };
-
         Json(ProposalStopBuildResponse {
-            ok: true,
-            mode: "abort".to_string(),
-            proposal_id: Some(proposal.id.clone()),
-            status: Some(status),
-            preview: false,
-            epics_closed,
-            tasks_closed,
-            sessions_killed,
-            disposition: ProposalDispositionSummary::default(),
-            error: None,
+            ok: true, mode: "abort".to_string(), proposal_id: Some(proposal.id.clone()),
+            status: Some("approved".to_string()), preview: false, epics_closed: epic_ids.len() as i64,
+            tasks_closed: plan.counts.close as i64, sessions_killed: 0,
+            disposition: proposal_disposition_summary(&plan), error: None,
         })
     }
 
@@ -559,11 +475,9 @@ impl DjinnMcpServer {
         repo: &ProposalRepository,
         proposal: &djinn_core::models::Proposal,
         epic_id: &str,
-        reason: &str,
+        _reason: &str,
         preview: bool,
     ) -> Json<ProposalReconcileObsoleteEpicResponse> {
-        use djinn_core::models::TransitionAction;
-
         let scoped_err = |msg: String| {
             Json(ProposalReconcileObsoleteEpicResponse {
                 ok: false,
@@ -601,8 +515,6 @@ impl DjinnMcpServer {
         }
 
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
-        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
-        let pool = self.state.pool().await;
 
         let all_tasks = match task_repo.list_by_epic(epic_id).await {
             Ok(tasks) => tasks,
@@ -658,88 +570,54 @@ impl DjinnMcpServer {
             });
         }
 
-        let open_tasks: Vec<_> = all_tasks
-            .into_iter()
-            .filter(|t| t.status != "closed")
-            .collect();
-
-        let mut live_sessions = 0i64;
-        if let Some(pool) = pool.as_ref() {
-            for t in &open_tasks {
-                if pool.has_session(&t.id).await.unwrap_or(false) {
-                    live_sessions += 1;
-                }
-            }
-        }
-
+        let scope = DispositionScope::for_proposal_obsolete_epic_reconcile(&proposal.id, epic_id);
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         if preview {
+            let plan = match task_repo.classify_parent_disposition(&scope).await { Ok(plan) => plan, Err(e) => return scoped_err(e.to_string()) };
             return Json(ProposalReconcileObsoleteEpicResponse {
-                ok: true,
-                proposal_id: Some(proposal.id.clone()),
-                epic_id: Some(epic_id.to_string()),
-                preview: true,
-                blocked: false,
-                blocked_feedback_id: None,
-                blocked_feedback_body: None,
-                merged_tasks: Vec::new(),
-                epics_closed: 1,
-                tasks_closed: open_tasks.len() as i64,
-                sessions_killed: live_sessions,
-                disposition: ProposalDispositionSummary::default(),
-                error: None,
+                ok: true, proposal_id: Some(proposal.id.clone()), epic_id: Some(epic_id.to_string()), preview: true,
+                blocked: false, blocked_feedback_id: None, blocked_feedback_body: None, merged_tasks: Vec::new(),
+                epics_closed: 1, tasks_closed: plan.counts.close as i64, sessions_killed: 0,
+                disposition: proposal_disposition_summary(&plan), error: None,
             });
         }
-
-        let mut sessions_killed = 0i64;
-        let mut tasks_closed = 0i64;
-        for t in &open_tasks {
-            if let Some(pool) = pool.as_ref()
-                && pool.has_session(&t.id).await.unwrap_or(false)
-            {
-                let _ = pool.kill_session(&t.id).await;
-                sessions_killed += 1;
-            }
-            if task_repo
-                .transition(
-                    &t.id,
-                    TransitionAction::ForceClose,
-                    "system",
-                    "system",
-                    Some(reason),
-                    None,
-                )
-                .await
-                .is_ok()
-            {
-                tasks_closed += 1;
-                self.state.cleanup_task_branches(&t.id).await;
-            }
-        }
-
-        let epics_closed = if epic_repo.close(epic_id).await.is_ok() {
-            1
-        } else {
-            0
-        };
-        if let Err(e) = repo.unlink_epic(&proposal.id, epic_id).await {
-            return scoped_err(e.to_string());
-        }
-
+        let mut tx = match self.state.db().pool().begin().await { Ok(tx) => tx, Err(e) => return scoped_err(e.to_string()) };
+        let plan = match apply_parent_disposition_tx(&mut tx, &scope).await { Ok(plan) => plan, Err(e) => return scoped_err(e.to_string()) };
+        if let Err(e) = sqlx::query("UPDATE epics SET status = 'closed', closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1").bind(epic_id).execute(&mut *tx).await { return scoped_err(e.to_string()); }
+        if let Err(e) = sqlx::query("DELETE FROM proposal_epics WHERE proposal_id = $1 AND epic_id = $2").bind(&proposal.id).bind(epic_id).execute(&mut *tx).await { return scoped_err(e.to_string()); }
+        if let Err(e) = tx.commit().await { return scoped_err(e.to_string()); }
+        self.emit_disposition_events(&plan, &[epic_id.to_string()]).await;
         Json(ProposalReconcileObsoleteEpicResponse {
-            ok: true,
-            proposal_id: Some(proposal.id.clone()),
-            epic_id: Some(epic_id.to_string()),
-            preview: false,
-            blocked: false,
-            blocked_feedback_id: None,
-            blocked_feedback_body: None,
-            merged_tasks: Vec::new(),
-            epics_closed,
-            tasks_closed,
-            sessions_killed,
-            disposition: ProposalDispositionSummary::default(),
-            error: None,
+            ok: true, proposal_id: Some(proposal.id.clone()), epic_id: Some(epic_id.to_string()), preview: false,
+            blocked: false, blocked_feedback_id: None, blocked_feedback_body: None, merged_tasks: Vec::new(),
+            epics_closed: 1, tasks_closed: plan.counts.close as i64, sessions_killed: 0,
+            disposition: proposal_disposition_summary(&plan), error: None,
         })
+    }
+
+    async fn emit_disposition_events(&self, plan: &DispositionPlan, epic_ids: &[String]) {
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
+        for finding in plan.findings.iter().filter(|finding| finding.disposition.applies_change()) {
+            if let Ok(Some(task)) = task_repo.get(&finding.task_id).await {
+                self.state.event_bus().send(DjinnEventEnvelope::task_updated(&task, false));
+            }
+        }
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        for epic_id in epic_ids {
+            if let Ok(Some(epic)) = epic_repo.get(epic_id).await {
+                self.state.event_bus().send(DjinnEventEnvelope::epic_updated(&epic));
+            }
+        }
+    }
+}
+
+fn proposal_disposition_summary(plan: &DispositionPlan) -> ProposalDispositionSummary {
+    ProposalDispositionSummary {
+        disposed: plan.counts.close as i64,
+        parked: plan.counts.park as i64,
+        retained_other_parent: plan.counts.retained_other_parent as i64,
+        retained_external_dependent: plan.counts.retained_external_dependent as i64,
+        retained_already_terminal: plan.counts.retained_already_terminal as i64,
     }
 }
 
@@ -906,7 +784,7 @@ mod stop_build_tests {
         assert!(r.ok);
         assert!(r.preview);
         assert_eq!(r.epics_closed, 1);
-        assert_eq!(r.tasks_closed, 3, "2 worker tasks + 1 breakdown task");
+        assert_eq!(r.tasks_closed, 2, "only linked-epic children are disposed");
 
         // Nothing was mutated.
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
@@ -1152,7 +1030,7 @@ mod stop_build_tests {
         assert!(r.ok, "abort failed: {:?}", r.error);
         assert_eq!(r.status.as_deref(), Some("approved"));
         assert_eq!(r.epics_closed, 1);
-        assert_eq!(r.tasks_closed, 3);
+        assert_eq!(r.tasks_closed, 2);
 
         let bus = EventBus::noop();
         let prepo = ProposalRepository::new(db.clone(), bus.clone());
@@ -1170,10 +1048,11 @@ mod stop_build_tests {
         assert_eq!(epic.status, "closed");
 
         let trepo = TaskRepository::new(db.clone(), bus.clone());
-        for tid in task_ids.iter().chain(std::iter::once(&breakdown_id)) {
+        for tid in &task_ids {
             let t = trepo.get(tid).await.unwrap().unwrap();
-            assert_eq!(t.status, "closed", "task {tid} should be force-closed");
+            assert_eq!(t.status, "closed", "linked task {tid} should be disposed");
         }
+        assert_eq!(trepo.get(&breakdown_id).await.unwrap().unwrap().status, "open");
 
         // A second abort is rejected — the proposal is no longer building.
         let r2 = server
