@@ -74,7 +74,21 @@ impl TaskRepository {
                         ELSE to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                     END,
                     head_sha = EXCLUDED.head_sha,
-                    ci_status = EXCLUDED.ci_status,
+                    -- Downgrade guard: a later `unknown` observation (empty
+                    -- check-runs — GitHub data momentarily unavailable, or a
+                    -- no-CI repo re-observed on the review path) must NOT clobber
+                    -- an established `passing` for the SAME head SHA. Without this
+                    -- the CI merge gate reads the downgraded `unknown` and holds
+                    -- the merge forever on vanilla (no-CI) repos. Failing/pending
+                    -- may still overwrite passing (real state changes); only the
+                    -- passing→unknown transition on an unchanged head is blocked.
+                    ci_status = CASE
+                        WHEN COALESCE(task_pr_ci_snapshots.head_sha, '') = COALESCE(EXCLUDED.head_sha, '')
+                         AND task_pr_ci_snapshots.ci_status = 'passing'
+                         AND EXCLUDED.ci_status = 'unknown'
+                        THEN task_pr_ci_snapshots.ci_status
+                        ELSE EXCLUDED.ci_status
+                    END,
                     blocking_required_check_names = EXCLUDED.blocking_required_check_names,
                     failure_fingerprint = EXCLUDED.failure_fingerprint,
                     last_seen_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
