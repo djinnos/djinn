@@ -33,15 +33,16 @@ use super::*;
 
 /// Which terminal event triggered the disposition.
 ///
-/// Only [`DispositionEntryPoint::EpicClose`] is wired today; sibling epic
-/// `xc29` will add proposal-abort variants that reuse the same scope/result
-/// shapes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DispositionEntryPoint {
     /// `EpicRepository::close` is the terminal trigger. The closing scope is a
     /// single epic id; `proposal_id` is `None` (direct epic close is not
     /// scoped to any particular proposal even when one graduated the epic).
     EpicClose,
+    /// A proposal is being aborted; all of its linked epics are in scope.
+    ProposalAbort,
+    /// A proposal reconciliation marks one linked epic obsolete.
+    ProposalObsoleteEpicReconcile,
 }
 
 /// The scope of a parent-terminal disposition request.
@@ -66,6 +67,25 @@ impl DispositionScope {
             entry_point: DispositionEntryPoint::EpicClose,
             epic_ids: vec![closing_epic_id.to_owned()],
             proposal_id: None,
+        }
+    }
+
+    /// Build the canonical scope for aborting a proposal and its linked epics.
+    /// The scoped proposal is terminal for the other-open-parent guard.
+    pub fn for_proposal_abort(proposal_id: &str, epic_ids: Vec<String>) -> Self {
+        Self {
+            entry_point: DispositionEntryPoint::ProposalAbort,
+            epic_ids,
+            proposal_id: Some(proposal_id.to_owned()),
+        }
+    }
+
+    /// Build the canonical scope for reconciling one obsolete proposal epic.
+    pub fn for_proposal_obsolete_epic_reconcile(proposal_id: &str, epic_id: &str) -> Self {
+        Self {
+            entry_point: DispositionEntryPoint::ProposalObsoleteEpicReconcile,
+            epic_ids: vec![epic_id.to_owned()],
+            proposal_id: Some(proposal_id.to_owned()),
         }
     }
 }
@@ -548,6 +568,95 @@ pub async fn classify_child_tx(
 
     // Unknown / unmapped status: retain conservatively rather than guess.
     Ok(ChildDisposition::RetainedAlreadyTerminal)
+}
+
+/// Apply parent-terminal child disposition inside an existing transaction.
+///
+/// Candidate rows are selected and individually locked before being classified
+/// and mutated, so callers can safely combine this with their own parent state
+/// transition. Retained children are recorded in the returned plan and never
+/// cause the transaction to fail merely because a guard applied.
+pub async fn apply_parent_disposition_tx(
+    conn: &mut sqlx::PgConnection,
+    scope: &DispositionScope,
+) -> Result<DispositionPlan> {
+    let echo = DispositionScopeEcho::from(scope);
+    let child_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM tasks WHERE epic_id = ANY($1) ORDER BY created_at",
+    )
+    .bind(&scope.epic_ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut findings = Vec::with_capacity(child_ids.len());
+    let entry_point = match scope.entry_point {
+        DispositionEntryPoint::EpicClose => "epic_close",
+        DispositionEntryPoint::ProposalAbort => "proposal_abort",
+        DispositionEntryPoint::ProposalObsoleteEpicReconcile => "proposal_obsolete_epic_reconcile",
+    };
+    let parent_kind = if scope.proposal_id.is_some() { "proposal" } else { "epic" };
+    let parent_id = scope
+        .proposal_id
+        .as_deref()
+        .or_else(|| scope.epic_ids.first().map(String::as_str))
+        .unwrap_or_default();
+
+    for task_id in child_ids {
+        let child: Option<CandidateChild> = sqlx::query_as(
+            "SELECT id AS task_id, short_id, title, status, epic_id FROM tasks WHERE id = $1 FOR UPDATE",
+        )
+        .bind(&task_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(child) = child else { continue };
+        let disposition = classify_child_tx(conn, &child.task_id, &child.status, scope).await?;
+        let guard_reason = guard_reason_for_disposition(&disposition);
+
+        match disposition {
+            ChildDisposition::Close => {
+                sqlx::query(r#"UPDATE tasks SET status = 'closed',
+                    closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    close_reason = 'parent_closed',
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#)
+                    .bind(&child.task_id).execute(&mut *conn).await?;
+                insert_disposition_activities(conn, &child.task_id, &child.status, "closed", "parent_closed", "parent_child_disposed", parent_kind, parent_id, entry_point).await?;
+            }
+            ChildDisposition::Park => {
+                let reason = park_reason_for_status(&child.status);
+                sqlx::query(r#"UPDATE tasks SET status = 'needs_lead_intervention',
+                    intervention_count = intervention_count + 1,
+                    last_intervention_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    close_reason = NULL,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#)
+                    .bind(&child.task_id).execute(&mut *conn).await?;
+                insert_disposition_activities(conn, &child.task_id, &child.status, "needs_lead_intervention", reason, "parent_child_parked", parent_kind, parent_id, entry_point).await?;
+            }
+            _ => {}
+        }
+        findings.push(DispositionFinding {
+            task_id: child.task_id, short_id: child.short_id, title: child.title,
+            status: child.status, guard_reason, disposition, scope: echo.clone(),
+        });
+    }
+    let counts = tally(&findings);
+    Ok(DispositionPlan { scope: echo, findings, counts })
+}
+
+async fn insert_disposition_activities(
+    conn: &mut sqlx::PgConnection, task_id: &str, from_status: &str, to_status: &str,
+    reason: &str, event_type: &str, parent_kind: &str, parent_id: &str, entry_point: &str,
+) -> Result<()> {
+    let status_payload = serde_json::json!({"from_status": from_status, "to_status": to_status, "reason": reason});
+    let disposition_payload = serde_json::json!({"parent_kind": parent_kind, "parent_id": parent_id, "entry_point": entry_point, "from_status": from_status, "to_status": to_status, "reason": reason});
+    for (event_type, payload) in [("status_changed", status_payload), (event_type, disposition_payload)] {
+        sqlx::query("INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) VALUES ($1, $2, 'system', 'system', $3, $4)")
+            .bind(uuid::Uuid::now_v7().to_string()).bind(task_id).bind(event_type).bind(payload)
+            .execute(&mut *conn).await?;
+    }
+    Ok(())
+}
+
+fn park_reason_for_status(status: &str) -> &'static str {
+    match status { "approved" | "pr_draft" | "pr_review" => "parent_closed_pr_active", _ => "parent_closed_in_flight" }
 }
 
 // ── Internal row + helpers ───────────────────────────────────────────────────
