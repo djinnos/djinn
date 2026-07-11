@@ -632,8 +632,19 @@ mod tests {
         );
         // Defaults pin the documented values. Memory limit bumped 4Gi → 6Gi to
         // cover the added test-compile warm pass (--all-targets test codegen).
-        assert_eq!(cfg.warm_cpu_request, "1");
+        // CPU request bumped 1 → 4 to match the limit: cgroup cpu.weight
+        // derives from the REQUEST, so a `1` request starved the warm under
+        // host contention and timed the Rust SCIP pass out on every run.
+        assert_eq!(cfg.warm_cpu_request, "4");
         assert_eq!(cfg.warm_cpu_limit, "4");
+        // The warm's CPU request must equal its limit so the kubelet gives it a
+        // cgroup CFS share proportional to what it actually uses — graph
+        // freshness is user-facing and must not be starved by neighbouring
+        // task-run Pods on a contended node.
+        assert_eq!(
+            cfg.warm_cpu_request, cfg.warm_cpu_limit,
+            "warm CPU request must equal limit so cpu.weight reflects real need"
+        );
         assert_eq!(cfg.warm_memory_request, "2Gi");
         assert_eq!(cfg.warm_memory_limit, "6Gi");
     }
