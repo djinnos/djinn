@@ -9758,6 +9758,13 @@ expression: signatures
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "additional_recommended_model_ids": {
+          "description": "Fully-qualified `provider/model-id` entries to add to the recommended set.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "blocked_subscriptions": {
           "description": "The blocked subscription provider ids (subset of `subscriptions`).",
           "items": {
@@ -9768,6 +9775,13 @@ expression: signatures
         "default_lanes": {
           "$ref": "#/$defs/OrgDefaultLanesPayload",
           "description": "Org-default per-role lanes new members inherit when they have none."
+        },
+        "demoted_recommended_model_ids": {
+          "description": "Fully-qualified `provider/model-id` entries to demote from the recommended set.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "error": {
           "type": [
@@ -9795,7 +9809,9 @@ expression: signatures
         "subscriptions",
         "blocked_subscriptions",
         "default_lanes",
-        "lock_level"
+        "lock_level",
+        "additional_recommended_model_ids",
+        "demoted_recommended_model_ids"
       ],
       "type": "object"
     }
@@ -9843,6 +9859,17 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "additional_recommended_model_ids": {
+          "default": null,
+          "description": "Fully-qualified `provider/model-id` entries to add to the recommended\nset on top of the baseline. Omit to keep the current value; pass an\nempty list to clear.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "blocked_subscriptions": {
           "default": null,
           "description": "Replacement set of blocked subscription provider ids. Only subscription\nproviders are honored; any non-subscription id is ignored. Omit to keep\nthe current value.",
@@ -9865,6 +9892,17 @@ expression: signatures
           ],
           "default": null,
           "description": "Org-default per-role lanes new members inherit. Pass all-empty to clear.\nOmit to keep the current value."
+        },
+        "demoted_recommended_model_ids": {
+          "default": null,
+          "description": "Fully-qualified `provider/model-id` entries to demote from the\nrecommended set. Omit to keep the current value; pass an empty list to\nclear.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "lock_level": {
           "default": null,
@@ -9912,6 +9950,12 @@ expression: signatures
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "additional_recommended_model_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "applied": {
           "type": "boolean"
         },
@@ -9923,6 +9967,12 @@ expression: signatures
         },
         "default_lanes": {
           "$ref": "#/$defs/OrgDefaultLanesPayload"
+        },
+        "demoted_recommended_model_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "error": {
           "type": [
@@ -9942,7 +9992,9 @@ expression: signatures
         "applied",
         "blocked_subscriptions",
         "default_lanes",
-        "lock_level"
+        "lock_level",
+        "additional_recommended_model_ids",
+        "demoted_recommended_model_ids"
       ],
       "type": "object"
     }
