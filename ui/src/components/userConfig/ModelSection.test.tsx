@@ -4,7 +4,14 @@ import type { UserModel } from "@/api/userConfig";
 import { render, screen } from "@/test/test-utils";
 
 import { ModelSection } from "./ModelSection";
-import { pickableModels, stripProviderPrefix } from "./modelPicker";
+import {
+  allModelsSorted,
+  groupModelsByProvider,
+  pickableModels,
+  providerDefaultModels,
+  sortModels,
+  stripProviderPrefix,
+} from "./modelPicker";
 
 function um(id: string, opts: Partial<UserModel> = {}): UserModel {
   return {
@@ -92,6 +99,183 @@ describe("pickableModels", () => {
     expect(offered.has("openai/gpt-5.3")).toBe(false);
     expect(offered.has("local/x")).toBe(true);
     expect(offered.has("local/y")).toBe(true);
+  });
+});
+
+describe("providerDefaultModels", () => {
+  it("preserves recommended-only default for providers with recommendations", () => {
+    const models = [
+      um("openai/gpt-5.5", { recommended: true, name: "GPT-5.5" }),
+      um("openai/gpt-5.3", { name: "GPT-5.3" }),
+      um("openai/o3", { name: "o3" }),
+    ];
+    const defaults = providerDefaultModels(models);
+    expect(defaults.map((m) => m.id)).toEqual(["openai/gpt-5.5"]);
+  });
+
+  it("falls back to ALL models when no provider has recommendations", () => {
+    const models = [um("local/a", { name: "A" }), um("local/b", { name: "B" })];
+    const defaults = providerDefaultModels(models);
+    expect(defaults.map((m) => m.id)).toEqual(["local/a", "local/b"]);
+  });
+
+  it("returns recommended for curated provider + all for uncurated in one pass", () => {
+    const models = [
+      um("openai/gpt-5.5", { recommended: true, name: "GPT-5.5" }),
+      um("openai/gpt-5.3", { name: "GPT-5.3" }),
+      um("local/x", { name: "X" }),
+      um("local/y", { name: "Y" }),
+    ];
+    const defaults = providerDefaultModels(models);
+    const ids = defaults.map((m) => m.id);
+    expect(ids).toContain("openai/gpt-5.5");
+    expect(ids).not.toContain("openai/gpt-5.3");
+    expect(ids).toContain("local/x");
+    expect(ids).toContain("local/y");
+  });
+});
+
+describe("allModelsSorted", () => {
+  it("retains every model including non-recommended", () => {
+    const models = [
+      um("openai/gpt-5.5", { recommended: true, name: "GPT-5.5" }),
+      um("openai/gpt-5.3", { name: "GPT-5.3" }),
+      um("openai/o3", { name: "o3" }),
+      um("local/x", { name: "X" }),
+    ];
+    const all = allModelsSorted(models);
+    expect(all).toHaveLength(4);
+    const ids = all.map((m) => m.id);
+    expect(ids).toContain("openai/gpt-5.5");
+    expect(ids).toContain("openai/gpt-5.3");
+    expect(ids).toContain("openai/o3");
+    expect(ids).toContain("local/x");
+  });
+
+  it("sorts recommended first, then by name", () => {
+    const models = [
+      um("p/b", { name: "B" }),
+      um("p/a", { recommended: true, name: "A" }),
+      um("p/c", { name: "C" }),
+    ];
+    const sorted = allModelsSorted(models);
+    expect(sorted[0]!.id).toBe("p/a"); // recommended first
+    expect(sorted[1]!.id).toBe("p/b"); // name B < C
+    expect(sorted[2]!.id).toBe("p/c");
+  });
+});
+
+describe("sortModels", () => {
+  it("sorts recommended first, then by name (case-insensitive), then by id", () => {
+    const models = [
+      um("p/z", { recommended: true, name: "Zebra" }),
+      um("p/a", { recommended: true, name: "alpha" }),
+      um("p/m", { name: "Mango" }),
+      um("p/b", { name: "banana" }),
+    ];
+    const sorted = sortModels(models).map((m) => m.id);
+    expect(sorted).toEqual(["p/a", "p/z", "p/b", "p/m"]);
+  });
+
+  it("uses full id as tie-breaker when names match", () => {
+    const models = [
+      um("provider/b-model", { name: "Same" }),
+      um("provider/a-model", { name: "Same" }),
+    ];
+    const sorted = sortModels(models).map((m) => m.id);
+    expect(sorted).toEqual(["provider/a-model", "provider/b-model"]);
+  });
+
+  it("does not mutate the input array", () => {
+    const models = [um("p/b", { name: "B" }), um("p/a", { name: "A" })];
+    const original = [...models];
+    sortModels(models);
+    expect(models.map((m) => m.id)).toEqual(original.map((m) => m.id));
+  });
+});
+
+describe("groupModelsByProvider", () => {
+  it("groups models by provider_id with alphabetical provider ordering", () => {
+    const models = [
+      um("openai/gpt-5", { name: "GPT-5" }),
+      um("anthropic/claude", { name: "Claude" }),
+      um("openai/o3", { name: "o3" }),
+    ];
+    const groups = groupModelsByProvider(models);
+    expect(groups).toHaveLength(2);
+    expect(groups[0]!.providerId).toBe("anthropic");
+    expect(groups[0]!.models.map((m) => m.id)).toEqual(["anthropic/claude"]);
+    expect(groups[1]!.providerId).toBe("openai");
+    expect(groups[1]!.models.map((m) => m.id)).toEqual(["openai/gpt-5", "openai/o3"]);
+  });
+
+  it("sorts recommended first within each provider group", () => {
+    const models = [
+      um("openai/o3", { name: "o3" }),
+      um("openai/gpt-5", { recommended: true, name: "GPT-5" }),
+    ];
+    const groups = groupModelsByProvider(models);
+    expect(groups[0]!.providerId).toBe("openai");
+    expect(groups[0]!.models[0]!.id).toBe("openai/gpt-5"); // recommended first
+    expect(groups[0]!.models[1]!.id).toBe("openai/o3");
+  });
+
+  it("uses 'unknown' for models without provider_id", () => {
+    const model = um("custom-model", { provider_id: undefined as any });
+    const groups = groupModelsByProvider([model]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.providerId).toBe("unknown");
+  });
+
+  it("produces deterministic output regardless of input order", () => {
+    const models = [
+      um("zeta/b", { name: "B" }),
+      um("alpha/c", { name: "C" }),
+      um("alpha/a", { name: "A" }),
+      um("zeta/a", { name: "A" }),
+    ];
+    const g1 = groupModelsByProvider(models);
+    const g2 = groupModelsByProvider([...models].reverse());
+    expect(g1.map((g) => g.providerId)).toEqual(g2.map((g) => g.providerId));
+    expect(g1.flatMap((g) => g.models.map((m) => m.id))).toEqual(
+      g2.flatMap((g) => g.models.map((m) => m.id)),
+    );
+  });
+});
+
+describe("multi-segment full id preservation", () => {
+  it("preserves multi-segment provider-local ids exactly", () => {
+    const fullId = "fireworks/accounts/fireworks/models/mimo-v2.5-pro";
+    const model = um(fullId, {
+      provider_id: "fireworks",
+      name: "MiMo v2.5 Pro",
+    });
+    const sorted = allModelsSorted([model]);
+    expect(sorted[0]!.id).toBe(fullId);
+  });
+
+  it("preserves multi-segment ids in groups", () => {
+    const fullId = "fireworks/accounts/fireworks/models/mimo-v2.5-pro";
+    const model = um(fullId, {
+      provider_id: "fireworks",
+      name: "MiMo v2.5 Pro",
+    });
+    const groups = groupModelsByProvider([model]);
+    expect(groups[0]!.models[0]!.id).toBe(fullId);
+  });
+
+  it("uses full multi-segment id as tie-breaker", () => {
+    const m1 = um("fireworks/accounts/z-model", {
+      provider_id: "fireworks",
+      name: "Same",
+    });
+    const m2 = um("fireworks/accounts/a-model", {
+      provider_id: "fireworks",
+      name: "Same",
+    });
+    const sorted = sortModels([m1, m2]);
+    expect(sorted[0]!.id).toBe("fireworks/accounts/a-model");
+    expect(sorted[1]!.id).toBe("fireworks/accounts/z-model");
   });
 });
 
