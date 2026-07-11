@@ -599,7 +599,14 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         .tempdir_in(&temp_base)
         .map_err(|e| format!("create canonical-graph tempdir: {e}"))?;
     let output_dir = output_temp.path().to_path_buf();
-    let target_dir = handle.target_dir().to_path_buf();
+    // In the K8s warm-Pod path this resolves to `None` when the Pod already
+    // routes `CARGO_TARGET_DIR` at the warmed per-project base
+    // (`/cache/cargo-target/<project>`), so the indexer inherits that
+    // pre-warmed target instead of recompiling into the Pod's ephemeral
+    // `_index-target` every warm. In the in-process (dev/peer) path it
+    // resolves to `Some(<_index-target>)` and the CargoTargetDirGuard isolates
+    // the indexer build from the host server's own target dir as before.
+    let target_dir = handle.indexer_target_dir_override();
 
     // Phase 3 PR 8: ask the DB for the detected stack and filter the SCIP
     // indexer set to languages the project actually uses. Falls back to
@@ -608,18 +615,27 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let stack_filter = resolve_stack_indexer_filter(ctx, project_id).await;
     let declared_workspaces = resolve_declared_workspaces(ctx, project_id).await;
 
+    // Feed persisted per-(workspace, indexer) timings into the budget so heavy
+    // workspaces that timed out on a prior warm get an adapted (larger) cap
+    // this time instead of timing out identically and dropping from the graph.
+    let timing_priors = load_indexer_timing_priors(ctx, project_id).await;
+
     let clock = SystemClock::new();
     let t_indexers = clock.now_instant();
     let run = crate::scip_indexer::run_indexers_already_locked(
         handle.path(),
         &output_dir,
-        Some(&target_dir),
+        target_dir.as_deref(),
         stack_filter.as_deref(),
         declared_workspaces.as_deref(),
+        Some(&timing_priors),
     )
     .await
     .map_err(|e| format!("run_indexers: {e}"))?;
     let indexers_ms = t_indexers.elapsed().as_millis() as u64;
+
+    // Record this run's elapsed timings for the next warm's adaptive budget.
+    persist_indexer_timings_best_effort(ctx, project_id, &run.timings).await;
 
     let output_dir_for_blocking = output_dir.clone();
     let artifacts = run.artifacts;
@@ -1107,6 +1123,82 @@ async fn ingest_coupling_best_effort<C: WarmContext>(
     }
 }
 
+/// Load persisted per-(workspace, indexer) timing evidence for this project
+/// into the budget's prior-timing map. Best-effort: a DB error yields an empty
+/// map, so the warm falls back to the static-cap budget (today's behaviour).
+async fn load_indexer_timing_priors<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+) -> crate::scip_indexer::PriorTimingMap {
+    use djinn_db::ScipIndexerTimingRepository;
+
+    let mut map = crate::scip_indexer::PriorTimingMap::new();
+    let repo = ScipIndexerTimingRepository::new(ctx.db().clone());
+    match repo.list_for_project(project_id).await {
+        Ok(rows) => {
+            for row in rows {
+                // Ignore rows for retired / unknown indexer keys.
+                let Some(indexer) =
+                    crate::scip_indexer::SupportedIndexer::from_language_key(&row.indexer)
+                else {
+                    continue;
+                };
+                map.insert(
+                    (row.workspace_slug, indexer),
+                    crate::scip_indexer::IndexerPriorTiming {
+                        last_success_ms: row.success_elapsed_ms.and_then(|v| u64::try_from(v).ok()),
+                        last_timed_out_ms: row
+                            .timed_out_elapsed_ms
+                            .and_then(|v| u64::try_from(v).ok()),
+                    },
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %e,
+                "ensure_canonical_graph: failed to load scip_indexer_timing priors; using static budget"
+            );
+        }
+    }
+    map
+}
+
+/// Persist this run's per-invocation timings so the NEXT warm can adapt its
+/// budget. Best-effort telemetry — a failure never fails the warm.
+async fn persist_indexer_timings_best_effort<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+    timings: &[crate::scip_indexer::IndexerTimingObservation],
+) {
+    if timings.is_empty() {
+        return;
+    }
+    use djinn_db::{ScipIndexerTimingObservation, ScipIndexerTimingRepository};
+
+    let rows: Vec<ScipIndexerTimingObservation<'_>> = timings
+        .iter()
+        .map(|t| ScipIndexerTimingObservation {
+            project_id,
+            workspace_slug: &t.workspace_slug,
+            indexer: t.indexer.language(),
+            status: t.outcome.as_str(),
+            elapsed_ms: i64::try_from(t.elapsed_ms).unwrap_or(i64::MAX),
+        })
+        .collect();
+
+    let repo = ScipIndexerTimingRepository::new(ctx.db().clone());
+    if let Err(e) = repo.record_many(&rows).await {
+        tracing::warn!(
+            project_id = %project_id,
+            row_count = rows.len(),
+            error = %e,
+            "ensure_canonical_graph: failed to persist scip_indexer_timing observations"
+        );
+    }
+}
+
 fn distinct_workspace_slugs(graph: &crate::repo_graph::RepoDependencyGraph) -> Vec<String> {
     let mut slugs = std::collections::BTreeSet::new();
     for node in graph.graph().node_weights() {
@@ -1137,9 +1229,7 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
     graph: &crate::repo_graph::RepoDependencyGraph,
     workspace_statuses: &[crate::scip_indexer::WorkspaceWarmStatus],
 ) {
-    use djinn_db::{
-        CODELESS_WORKSPACE_SLUG, ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,
-    };
+    use djinn_db::{ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert};
 
     let workspaces = distinct_workspace_slugs(graph);
     if workspaces.is_empty() {
@@ -1187,24 +1277,21 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
 
     let workspace_count = rows.len();
     let repo = ProjectWorkspaceGraphRepository::new(ctx.db().clone());
-    if let Err(e) = repo.upsert_many(&rows).await {
+    // Persist as a *replace-set*, not a blind upsert: this run's rows are the
+    // full truth for the project, so any slug it no longer emits (a vanished
+    // folder, a pre-per-workspace `root` stamp, or the code-less sentinel — none
+    // of which are in `rows`) is pruned in the same transaction. Plain
+    // `upsert_many` could only ever write, leaving ghost rows that the
+    // `code_graph workspaces` op kept surfacing forever. Timed-out/failed
+    // workspaces are already in `rows`, so they keep their row and are not
+    // pruned.
+    if let Err(e) = repo.replace_for_project(project_id, &rows).await {
         tracing::warn!(
             project_id = %project_id,
             commit_sha = %commit_sha,
             workspace_count,
             error = %e,
             "ensure_canonical_graph: failed to persist project_workspace_graph freshness rows"
-        );
-    }
-
-    // A successful warm with real workspaces contradicts any lingering
-    // code-less sentinel (e.g. stamped while the warm gate misfired on a
-    // catalog-image project). Retire it so freshness derives from real rows.
-    if let Err(e) = repo.delete(project_id, CODELESS_WORKSPACE_SLUG).await {
-        tracing::warn!(
-            project_id = %project_id,
-            error = %e,
-            "ensure_canonical_graph: failed to delete code-less sentinel row"
         );
     }
 }
@@ -2604,6 +2691,7 @@ edition = "2024"
             None,
             None,
             Some(&declared),
+            None,
         )
         .await;
         // An empty tree with no indexers on PATH plans zero indexers
@@ -2727,6 +2815,7 @@ edition = "2024"
             None,
             None,
             Some(&declared),
+            None,
         )
         .await;
         assert!(

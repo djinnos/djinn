@@ -406,10 +406,8 @@ async fn handle_rpc(
             let _ = (task_id, action, reason);
             ServiceRpcResponse::TransitionTask(Ok(()))
         }
-        ServiceRpcRequest::RunArbiterPreapprovalGate { .. } => {
-            ServiceRpcResponse::RunArbiterPreapprovalGate(Ok(
-                djinn_supervisor::ArbiterGateResult::Pass,
-            ))
+        ServiceRpcRequest::ReservedRemovedArbiterGate => {
+            ServiceRpcResponse::ReservedRemovedArbiterGate(Err("removed".into()))
         }
         ServiceRpcRequest::RecordArbiterDecision { .. } => {
             ServiceRpcResponse::RecordArbiterDecision(Ok(()))

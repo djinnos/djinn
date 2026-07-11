@@ -44,23 +44,43 @@ pub async fn output(mut cmd: Command) -> io::Result<Output> {
 }
 
 /// Like [`output`], but aborts if the command does not finish within `timeout`.
-/// Returns `io::ErrorKind::TimedOut` on expiry.
+/// Returns `io::ErrorKind::TimedOut` **only** when the deadline actually expired.
 ///
 /// Unlike the old implementation (which wrapped [`output`] in
 /// `tokio::time::timeout` and leaked the still-running child + blocking thread
 /// on expiry), this delegates to [`output_with_kill`], which performs the
 /// timeout *inside* the blocking closure and actually reaps the child's process
 /// group before returning.
+///
+/// The `TimedOut` classification is driven by the in-closure "did we fire the
+/// deadline kill?" flag, NOT by inspecting the child's exit signal. Re-deriving
+/// it from `SIGTERM`/`SIGKILL` conflated our own timeout kill with an EXTERNAL
+/// signal — most dangerously the kernel OOM killer's `SIGKILL`, which can reap
+/// the child *before* the deadline. Reporting an OOM as `TimedOut` makes the
+/// `timed_out` status untrustworthy for callers that treat "the tool hung"
+/// differently from "the tool died". A child killed by a signal we did not send
+/// (before the deadline) instead surfaces as a distinct non-timeout failure.
 pub async fn output_with_timeout(cmd: Command, timeout: Duration) -> io::Result<Output> {
-    let out = output_with_kill(cmd, timeout).await?;
-    // Preserve the historical contract: a timed-out command surfaces as
-    // `TimedOut` rather than a non-zero exit status, so callers that
-    // distinguish "the tool failed" from "the tool hung" keep working.
     #[cfg(unix)]
-    if timed_out_status(&out.status) {
-        return Err(io::Error::new(io::ErrorKind::TimedOut, "process timed out"));
+    {
+        let (out, deadline_fired) = output_with_kill_inner(cmd, timeout).await?;
+        if deadline_fired {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "process timed out"));
+        }
+        // Deadline did NOT fire, so we never signalled the child ourselves. Any
+        // signal death here is external (e.g. OOM killer) — surface it as a
+        // distinct failure so it is never miscounted as a timeout.
+        if let Some(sig) = killed_by_signal(&out.status) {
+            return Err(io::Error::other(format!(
+                "process killed by signal {sig} before its deadline"
+            )));
+        }
+        Ok(out)
     }
-    Ok(out)
+    #[cfg(not(unix))]
+    {
+        output_with_kill(cmd, timeout).await
+    }
 }
 
 /// Run a pre-configured `std::process::Command` on a blocking thread and return
@@ -72,12 +92,14 @@ pub async fn status(mut cmd: Command) -> io::Result<std::process::ExitStatus> {
         .map_err(io::Error::other)?
 }
 
-/// True if `status` reflects a process killed by SIGTERM/SIGKILL (i.e. the
-/// timeout path fired) rather than a normal exit.
+/// The signal number that killed the process, if it was terminated by a signal
+/// rather than exiting normally. Used to distinguish an externally-signalled
+/// death (e.g. the OOM killer) from a clean exit; the caller separately tracks
+/// whether *our* deadline kill fired.
 #[cfg(unix)]
-fn timed_out_status(status: &std::process::ExitStatus) -> bool {
+fn killed_by_signal(status: &std::process::ExitStatus) -> Option<i32> {
     use std::os::unix::process::ExitStatusExt;
-    matches!(status.signal(), Some(libc::SIGTERM) | Some(libc::SIGKILL))
+    status.signal()
 }
 
 #[cfg(unix)]
@@ -148,7 +170,20 @@ fn signal_process_group(pgid: i32, signal: libc::c_int) -> io::Result<()> {
 /// blocking-pool thread always returns rather than leaking when the caller's
 /// future is dropped.
 #[cfg(unix)]
-pub async fn output_with_kill(mut cmd: Command, timeout: Duration) -> io::Result<Output> {
+pub async fn output_with_kill(cmd: Command, timeout: Duration) -> io::Result<Output> {
+    output_with_kill_inner(cmd, timeout)
+        .await
+        .map(|(out, _timed_out)| out)
+}
+
+/// Inner form of [`output_with_kill`] that also reports whether *our* deadline
+/// kill fired. `true` means the timeout expired and we signalled the child's
+/// process group; `false` means the child exited (cleanly or via an external
+/// signal) on its own. [`output_with_timeout`] relies on this flag rather than
+/// on the child's exit signal so an OOM-killer `SIGKILL` before the deadline is
+/// not misreported as a timeout.
+#[cfg(unix)]
+async fn output_with_kill_inner(mut cmd: Command, timeout: Duration) -> io::Result<(Output, bool)> {
     // The caller's `Command` may not have piped stdio (e.g. SCIP indexer plans
     // build a bare `Command`).  We take the pipes ourselves, so force them.
     cmd.stdout(std::process::Stdio::piped())
@@ -201,11 +236,14 @@ pub async fn output_with_kill(mut cmd: Command, timeout: Duration) -> io::Result
         let stdout_bytes = join_with_timeout(stdout_handle, drain_deadline);
         let stderr_bytes = join_with_timeout(stderr_handle, drain_deadline);
 
-        Ok(Output {
-            status,
-            stdout: stdout_bytes,
-            stderr: stderr_bytes,
-        })
+        Ok((
+            Output {
+                status,
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+            },
+            timed_out,
+        ))
     })
     .await
     .map_err(io::Error::other)?
@@ -261,7 +299,7 @@ mod tests {
 
         // Killed by signal => not a clean success.
         assert!(!out.status.success());
-        assert!(timed_out_status(&out.status));
+        assert!(killed_by_signal(&out.status).is_some());
 
         let pgid: i32 = String::from_utf8_lossy(&out.stdout)
             .lines()
@@ -283,6 +321,32 @@ mod tests {
             io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH),
             "expected the killed process group to be fully gone"
+        );
+    }
+
+    /// A child killed by an EXTERNAL signal (modelling the kernel OOM killer)
+    /// *before* the deadline must NOT be reported as a timeout — otherwise the
+    /// `timed_out` status becomes untrustworthy. It surfaces as a distinct
+    /// non-timeout failure instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_signal_before_deadline_is_not_a_timeout() {
+        // The shell SIGKILLs itself immediately, well within the generous
+        // 30s deadline, so our timeout-kill path never fires.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("kill -9 $$");
+
+        let err = output_with_timeout(cmd, Duration::from_secs(30))
+            .await
+            .expect_err("a signal-killed child must surface as an error");
+
+        assert_ne!(
+            err.kind(),
+            io::ErrorKind::TimedOut,
+            "an external SIGKILL before the deadline must not be reported as a timeout"
+        );
+        assert!(
+            err.to_string().contains("signal"),
+            "expected a distinct signal-death message, got: {err}"
         );
     }
 
