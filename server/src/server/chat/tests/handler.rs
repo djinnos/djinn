@@ -126,3 +126,18 @@ async fn completions_rejects_unsupported_role_after_request_parsing() {
     assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
     assert!(body.contains("unsupported role: moderator"));
 }
+
+#[test]
+fn chat_successful_tool_results_stay_on_per_result_stash_chokepoint() {
+    let handler_src = include_str!("../handler.rs");
+
+    assert!(handler_src.contains("djinn_agent::output_stash::render_tool_result"));
+    assert!(
+        !handler_src.contains("externalize_rendered_tool_result"),
+        "chat must not call the turn-budget externalization helper directly"
+    );
+    assert!(
+        !handler_src.contains("externalize_rendered_result"),
+        "chat must not perform the v9ie per-turn budget group post-pass"
+    );
+}

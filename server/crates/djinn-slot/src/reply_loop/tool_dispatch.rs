@@ -458,6 +458,11 @@ pub(super) async fn collect_tool_results(
     tool_metadata: &ToolRuntimeMetadataMap,
     ctx: &ToolDispatchContext<'_>,
 ) -> Vec<ContentBlock> {
+    // rdx6 only introduced the host seam for externalizing an already-rendered
+    // result. It intentionally does not apply that seam here: collect_tool_results
+    // remains a per-result dispatcher with no per-turn inline-budget group pass.
+    // The v9ie epic owns any future batch-selection policy that calls
+    // SlotToolDispatcher::externalize_rendered_result after a parallel batch.
     let (indexed_tool_calls, batches) =
         build_tool_batches(turn_tool_calls, streaming_dispatched, tool_metadata);
     let total_tools = turn_tool_calls
