@@ -1132,4 +1132,67 @@ mod tests {
             "Moonshot must produce items: {coords}"
         );
     }
+
+    // ─── Provider-internal thinking block skip guards for OpenAI format ───────
+    // Anthropic signed thinking, redacted thinking, and unknown passthrough
+    // blocks must not leak into OpenAI-style request serialization as empty text
+    // or any other representation. (Native Anthropic replay is owned by `xw13`.)
+
+    #[test]
+    fn test_build_request_drops_anthropic_thinking_and_unknown_blocks() {
+        let provider = OpenAIProvider::new(test_openai_config());
+        let mut conv = Conversation::new();
+        conv.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "internal reasoning".to_string(),
+                    signature: Some("sig_abc".to_string()),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "opaque_data_blob".to_string(),
+                },
+                ContentBlock::Unknown {
+                    content_type: "custom_provider_block".to_string(),
+                    extra: {
+                        let mut m = serde_json::Map::new();
+                        m.insert("foo".to_string(), json!("bar"));
+                        m
+                    },
+                },
+                ContentBlock::text("visible output"),
+            ],
+            metadata: None,
+        });
+
+        let req = provider.build_request(&conv, &[], None);
+        let messages = req["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 1);
+        // OpenAI chat-completions collapses a single visible text block into a string.
+        assert_eq!(messages[0]["content"], "visible output");
+    }
+
+    #[test]
+    fn test_build_request_all_internal_blocks_dropped_with_empty_assistant() {
+        let provider = OpenAIProvider::new(test_openai_config());
+        let mut conv = Conversation::new();
+        conv.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "internal reasoning".to_string(),
+                    signature: Some("sig_abc".to_string()),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "opaque".to_string(),
+                },
+            ],
+            metadata: None,
+        });
+
+        let req = provider.build_request(&conv, &[], None);
+        let content = &req["messages"][0]["content"];
+        assert_eq!(content.as_array().map(|a| a.len()).unwrap_or(usize::MAX), 0);
+        assert!(content.as_str() != Some(""));
+    }
 }

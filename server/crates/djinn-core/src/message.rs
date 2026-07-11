@@ -942,8 +942,10 @@ fn content_block_to_anthropic(block: &ContentBlock) -> Option<serde_json::Value>
             content,
             is_error,
         } => {
-            let inner: Vec<serde_json::Value> =
-                content.iter().filter_map(content_block_to_anthropic).collect();
+            let inner: Vec<serde_json::Value> = content
+                .iter()
+                .filter_map(content_block_to_anthropic)
+                .collect();
             Some(json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -2071,9 +2073,16 @@ Second rule."
         let content = msgs[0]["content"].as_array().unwrap();
         // Only the text block should appear; the thinking block is skipped.
         assert_eq!(content.len(), 1);
-        assert_eq!(content[0], json!({"type": "text", "text": "visible output"}));
+        assert_eq!(
+            content[0],
+            json!({"type": "text", "text": "visible output"})
+        );
         // Must not contain an empty-text placeholder.
-        assert!(!content.iter().any(|b| b["type"] == "text" && b["text"] == ""));
+        assert!(
+            !content
+                .iter()
+                .any(|b| b["type"] == "text" && b["text"] == "")
+        );
     }
 
     #[test]
@@ -2093,8 +2102,15 @@ Second rule."
         let (_, msgs) = c.to_anthropic_messages();
         let content = msgs[0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
-        assert_eq!(content[0], json!({"type": "text", "text": "visible output"}));
-        assert!(!content.iter().any(|b| b["type"] == "text" && b["text"] == ""));
+        assert_eq!(
+            content[0],
+            json!({"type": "text", "text": "visible output"})
+        );
+        assert!(
+            !content
+                .iter()
+                .any(|b| b["type"] == "text" && b["text"] == "")
+        );
     }
 
     #[test]
@@ -2117,8 +2133,15 @@ Second rule."
         let (_, msgs) = c.to_anthropic_messages();
         let content = msgs[0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
-        assert_eq!(content[0], json!({"type": "text", "text": "visible output"}));
-        assert!(!content.iter().any(|b| b["type"] == "text" && b["text"] == ""));
+        assert_eq!(
+            content[0],
+            json!({"type": "text", "text": "visible output"})
+        );
+        assert!(
+            !content
+                .iter()
+                .any(|b| b["type"] == "text" && b["text"] == "")
+        );
     }
 
     #[test]
@@ -2141,8 +2164,15 @@ Second rule."
         let (_, msgs) = c.to_anthropic_messages();
         let content = msgs[0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
-        assert_eq!(content[0], json!({"type": "text", "text": "visible output"}));
-        assert!(!content.iter().any(|b| b["type"] == "text" && b["text"] == ""));
+        assert_eq!(
+            content[0],
+            json!({"type": "text", "text": "visible output"})
+        );
+        assert!(
+            !content
+                .iter()
+                .any(|b| b["type"] == "text" && b["text"] == "")
+        );
     }
 
     /// When ALL content blocks are provider-internal, the Anthropic

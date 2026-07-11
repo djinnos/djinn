@@ -351,3 +351,126 @@ fn test_populated_segments_unchanged() {
         json!({"type": "ephemeral"})
     );
 }
+
+// ─── Provider-internal thinking block skip guards ─────────────────────────
+// These tests verify that shared ContentBlock provider-state variants (signed
+// Thinking, RedactedThinking, Unknown passthrough) do not silently become
+// empty text placeholders in Anthropic request assembly. Native Anthropic
+// signed-thinking replay serialization is intentionally out of scope here and is
+// owned by sibling epic `xw13`.
+
+#[test]
+fn test_build_request_skips_signed_thinking_block() {
+    let provider = test_provider();
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message {
+        role: djinn_core::message::Role::Assistant,
+        content: vec![
+            ContentBlock::Thinking {
+                thinking: "internal reasoning".to_string(),
+                signature: Some("sig_abc".to_string()),
+            },
+            ContentBlock::text("visible output"),
+        ],
+        metadata: None,
+    });
+
+    let req = provider.build_request(&conv, &[], None);
+    let messages = req["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 1);
+    let content = messages[0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1);
+    assert_eq!(
+        content[0],
+        json!({"type": "text", "text": "visible output"})
+    );
+    assert!(
+        !content
+            .iter()
+            .any(|b| b["type"] == "text" && b["text"] == "")
+    );
+}
+
+#[test]
+fn test_build_request_skips_redacted_thinking_block() {
+    let provider = test_provider();
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message {
+        role: djinn_core::message::Role::Assistant,
+        content: vec![
+            ContentBlock::RedactedThinking {
+                data: "opaque_data_blob".to_string(),
+            },
+            ContentBlock::text("visible output"),
+        ],
+        metadata: None,
+    });
+
+    let req = provider.build_request(&conv, &[], None);
+    let content = req["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1);
+    assert_eq!(
+        content[0],
+        json!({"type": "text", "text": "visible output"})
+    );
+    assert!(
+        !content
+            .iter()
+            .any(|b| b["type"] == "text" && b["text"] == "")
+    );
+}
+
+#[test]
+fn test_build_request_skips_unknown_passthrough_block() {
+    let provider = test_provider();
+    let mut extra = serde_json::Map::new();
+    extra.insert("foo".to_string(), json!("bar"));
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message {
+        role: djinn_core::message::Role::Assistant,
+        content: vec![
+            ContentBlock::Unknown {
+                content_type: "custom_provider_block".to_string(),
+                extra,
+            },
+            ContentBlock::text("visible output"),
+        ],
+        metadata: None,
+    });
+
+    let req = provider.build_request(&conv, &[], None);
+    let content = req["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1);
+    assert_eq!(
+        content[0],
+        json!({"type": "text", "text": "visible output"})
+    );
+    assert!(
+        !content
+            .iter()
+            .any(|b| b["type"] == "text" && b["text"] == "")
+    );
+}
+
+#[test]
+fn test_build_request_all_internal_blocks_yield_empty_content() {
+    let provider = test_provider();
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message {
+        role: djinn_core::message::Role::Assistant,
+        content: vec![
+            ContentBlock::Thinking {
+                thinking: "internal reasoning".to_string(),
+                signature: Some("sig_abc".to_string()),
+            },
+            ContentBlock::RedactedThinking {
+                data: "opaque".to_string(),
+            },
+        ],
+        metadata: None,
+    });
+
+    let req = provider.build_request(&conv, &[], None);
+    let content = req["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 0);
+}
