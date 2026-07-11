@@ -4,6 +4,7 @@ mod fixtures;
 mod loader;
 mod metrics;
 pub mod qa;
+pub mod qa_run;
 mod report;
 mod run;
 
@@ -34,6 +35,11 @@ enum Commands {
     /// Validate committed fixtures and baseline without running the pipeline.
     /// No LLM calls or external network required.
     ValidateFixtures,
+    /// Run the Phase 2 QA execution: extract QA pairs from pitfall/case
+    /// notes, run each question through real NoteRepository::search with
+    /// top-k 10, render results through format_knowledge_notes(2000), and
+    /// record retrieval hit, gold rank, context recall, and age bucket.
+    QaRun,
 }
 
 #[tokio::main]
@@ -58,5 +64,6 @@ async fn main() -> anyhow::Result<()> {
         Commands::MineMemoryRefs => commands::not_yet_implemented("mine-memory-refs", "qmzw"),
         Commands::RefreshBaseline => commands::cmd_refresh_baseline(&crate_root).await,
         Commands::ValidateFixtures => commands::cmd_validate_fixtures(&crate_root),
+        Commands::QaRun => commands::cmd_qa_run(&crate_root).await,
     }
 }

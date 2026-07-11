@@ -23,6 +23,7 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v7"] }
 djinn-db = { path = "../djinn-db" }
 djinn-memory = { path = "../djinn-memory" }
+djinn-slot = { path = "../djinn-slot" }
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
 djinn-git = { path = "../djinn-git" }
 workspace-hack.workspace = true
