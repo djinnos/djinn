@@ -285,5 +285,6 @@ pub fn coordinator_context_from_db(
         rpc_registry: None,
         default_project_id: None,
         reconciliation_sweep: crate::context::ReconciliationSweepConfig::default(),
+        cache_cleanup: crate::context::CacheCleanupConfig::default(),
     }
 }
