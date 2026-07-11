@@ -2,6 +2,18 @@
 //!
 //! See the original `djinn-agent::extension::handlers::jit_pitfalls` for the
 //! full design rationale. This module operates through [`crate::ExtensionContext`].
+//!
+//! ## Inactive extraction mirror
+//!
+//! This handler is compiled as part of the incremental extension extraction,
+//! but it is not an MCP dispatch entry point: `dispatch.rs` deliberately does
+//! not route JIT post-write enrichment through `ExtensionContext`. The live
+//! write/edit/apply-patch hook remains
+//! `djinn-agent::extension::handlers::workspace::maybe_append_pitfall_hint`,
+//! which invokes the agent-local JIT handler. Keep retrieval-trace
+//! instrumentation there; adding it here would create unreachable duplicate
+//! traces. `inactive_mirror_is_not_registered_with_extension_dispatch` guards
+//! this boundary until the post-write hook is migrated.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -348,4 +360,26 @@ fn render_pitfall_block(notes: &[djinn_memory::Note]) -> String {
     }
     out.push_str("</relevant-pitfalls>");
     out
+}
+
+#[cfg(test)]
+mod inactive_mirror_tests {
+    /// The extension dispatcher does not own post-write enrichment. This is a
+    /// deliberate extraction boundary: registering this mirror would make it a
+    /// second JIT dispatch injection entry point and require trace parity.
+    #[test]
+    fn inactive_mirror_is_not_registered_with_extension_dispatch() {
+        let dispatch_source = include_str!("../dispatch.rs");
+
+        assert!(
+            !dispatch_source.contains("jit_pitfalls"),
+            "registering the mirror with extension dispatch requires activating \
+             retrieval-trace instrumentation and parity coverage"
+        );
+        assert!(
+            dispatch_source.contains("DispatchResult::Unhandled"),
+            "the extension must preserve the agent facade's ownership of \
+             post-write enrichment until that hook is explicitly migrated"
+        );
+    }
 }
