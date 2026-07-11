@@ -65,10 +65,33 @@ pub enum ContentBlock {
 
     /// Model reasoning/thinking content (extended thinking, chain-of-thought).
     ///
-    /// Stored for display but stripped when serializing back to provider APIs
-    /// (providers that need round-tripping, like Anthropic extended thinking
-    /// with signatures, are not yet supported).
-    Thinking { thinking: String },
+    /// The optional `signature` preserves Anthropic extended-thinking signatures
+    /// so signed thinking blocks can round-trip through shared storage for later
+    /// replay. Old stored JSON that lacks `signature` deserializes as `None`.
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+
+    /// Anthropic redacted thinking content.
+    ///
+    /// When the safety filter redacts a thinking block, Anthropic replaces it
+    /// with an opaque base64 `data` blob that must be replayed verbatim on
+    /// subsequent turns. This variant preserves that `data` through serde.
+    RedactedThinking { data: String },
+
+    /// Opaque passthrough for provider-owned content blocks whose schema is not
+    /// fully modeled by the shared representation.
+    ///
+    /// The original `"type"` discriminant is captured in `content_type` and any
+    /// additional raw fields are preserved in `extra` so the block can survive a
+    /// serde write/read cycle through shared storage without data loss.
+    Unknown {
+        content_type: String,
+        #[serde(flatten)]
+        extra: serde_json::Map<String, Value>,
+    },
 
     /// OpenAI Responses reasoning item used to preserve stateless reasoning
     /// context across tool-call turns when `store=false`.
@@ -282,7 +305,9 @@ impl Conversation {
                     .sum(),
                 ContentBlock::Image { data, .. } => data.len(),
                 ContentBlock::Document { data, .. } => data.len(),
-                ContentBlock::Thinking { thinking } => thinking.len(),
+                ContentBlock::Thinking { thinking, .. } => thinking.len(),
+                ContentBlock::RedactedThinking { data } => data.len(),
+                ContentBlock::Unknown { extra, .. } => extra.len(),
                 ContentBlock::OpenAIReasoning {
                     encrypted_content, ..
                 } => encrypted_content.len(),
@@ -526,6 +551,14 @@ impl Conversation {
                             }
                             ContentBlock::Thinking { .. } => {
                                 // Thinking blocks are display-only; skip for Google.
+                                vec![]
+                            }
+                            ContentBlock::RedactedThinking { .. } => {
+                                // Redacted thinking is provider-internal; skip for Google.
+                                vec![]
+                            }
+                            ContentBlock::Unknown { .. } => {
+                                // Unknown provider blocks are passthrough-only; skip for Google.
                                 vec![]
                             }
                             ContentBlock::OpenAIReasoning { .. } => {
@@ -928,7 +961,10 @@ fn content_block_to_anthropic(block: &ContentBlock) -> serde_json::Value {
             block
         }
         // Thinking blocks are display-only; skip when serializing for the API.
+        // (Signed/redacted thinking replay is owned by the provider-format layer.)
         ContentBlock::Thinking { .. } => json!({"type": "text", "text": ""}),
+        ContentBlock::RedactedThinking { .. } => json!({"type": "text", "text": ""}),
+        ContentBlock::Unknown { .. } => json!({"type": "text", "text": ""}),
         ContentBlock::OpenAIReasoning { .. } => json!({"type": "text", "text": ""}),
     }
 }
@@ -938,7 +974,10 @@ fn content_block_to_anthropic(block: &ContentBlock) -> serde_json::Value {
 fn is_provider_internal(block: &ContentBlock) -> bool {
     matches!(
         block,
-        ContentBlock::Thinking { .. } | ContentBlock::OpenAIReasoning { .. }
+        ContentBlock::Thinking { .. }
+            | ContentBlock::RedactedThinking { .. }
+            | ContentBlock::Unknown { .. }
+            | ContentBlock::OpenAIReasoning { .. }
     )
 }
 
@@ -1890,5 +1929,100 @@ Second rule."
         let user_turns: Vec<_> = msgs.iter().filter(|m| m["role"] == "user").collect();
         assert_eq!(user_turns.len(), 1);
         assert_eq!(user_turns[0]["content"][0]["type"], "tool_result");
+    }
+
+    // ── Thinking signature / redacted / passthrough serde ─────────────────────
+
+    #[test]
+    fn old_unsigned_thinking_deserializes_with_none_signature() {
+        let json = json!({"type": "thinking", "thinking": "hello world"});
+        let block: ContentBlock = serde_json::from_value(json).unwrap();
+        match block {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "hello world");
+                assert_eq!(signature, None);
+            }
+            _ => panic!("expected Thinking variant"),
+        }
+    }
+
+    #[test]
+    fn signed_thinking_round_trips_through_serde() {
+        let block = ContentBlock::Thinking {
+            thinking: "secret reasoning".into(),
+            signature: Some("sig_abc123".into()),
+        };
+        let serialized = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            serialized,
+            json!({
+                "type": "thinking",
+                "thinking": "secret reasoning",
+                "signature": "sig_abc123"
+            })
+        );
+        let deserialized: ContentBlock = serde_json::from_value(serialized).unwrap();
+        assert_eq!(block, deserialized);
+    }
+
+    #[test]
+    fn unsigned_thinking_omits_signature_on_serialize() {
+        let block = ContentBlock::Thinking {
+            thinking: "no sig".into(),
+            signature: None,
+        };
+        let serialized = serde_json::to_value(&block).unwrap();
+        assert!(serialized.get("signature").is_none());
+        assert_eq!(serialized["thinking"], "no sig");
+    }
+
+    #[test]
+    fn redacted_thinking_round_trips_preserving_data() {
+        let block = ContentBlock::RedactedThinking {
+            data: "opaque_base64_blob==".into(),
+        };
+        let serialized = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            serialized,
+            json!({
+                "type": "redacted_thinking",
+                "data": "opaque_base64_blob=="
+            })
+        );
+        let deserialized: ContentBlock = serde_json::from_value(serialized).unwrap();
+        assert_eq!(block, deserialized);
+    }
+
+    #[test]
+    fn unknown_passthrough_round_trips_preserving_extra_fields() {
+        let mut extra = serde_json::Map::new();
+        extra.insert("foo".into(), json!("bar"));
+        extra.insert("num".into(), json!(42));
+        let block = ContentBlock::Unknown {
+            content_type: "custom_provider_block".into(),
+            extra,
+        };
+        let serialized = serde_json::to_value(&block).unwrap();
+        assert_eq!(serialized["type"], "unknown");
+        assert_eq!(serialized["foo"], "bar");
+        assert_eq!(serialized["num"], 42);
+        let deserialized: ContentBlock = serde_json::from_value(serialized).unwrap();
+        assert_eq!(block, deserialized);
+    }
+
+    #[test]
+    fn unknown_passthrough_preserves_nested_json_in_extra() {
+        let mut extra = serde_json::Map::new();
+        extra.insert("nested".into(), json!({"a": [1, 2, {"b": true}]}));
+        let block = ContentBlock::Unknown {
+            content_type: "complex".into(),
+            extra,
+        };
+        let serialized = serde_json::to_value(&block).unwrap();
+        let deserialized: ContentBlock = serde_json::from_value(serialized).unwrap();
+        assert_eq!(block, deserialized);
     }
 }

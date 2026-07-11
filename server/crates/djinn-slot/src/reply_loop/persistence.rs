@@ -249,6 +249,7 @@ pub(super) async fn flush_in_flight_turn(
     if !stream_state.turn_thinking.is_empty() {
         assistant_content.push(ContentBlock::Thinking {
             thinking: stream_state.turn_thinking.clone(),
+            signature: None,
         });
     }
     if !stream_state.turn_text.is_empty() {
