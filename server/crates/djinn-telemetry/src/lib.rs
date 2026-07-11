@@ -83,6 +83,14 @@ const PROMPT_CONTEXT_LATENCY_SECONDS: &str = "djinn_prompt_context_latency_secon
 const PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS: &str =
     "djinn_prompt_context_child_span_latency_seconds";
 
+// ─── Cache cleanup observability ────────────────────────────────────
+const CACHE_CLEANUP_TOTAL: &str = "djinn_cache_cleanup_total";
+const CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL: &str = "djinn_cache_cleanup_reclaimed_bytes_total";
+const CACHE_CLEANUP_CANDIDATES_TOTAL: &str = "djinn_cache_cleanup_candidates_total";
+const CACHE_CLEANUP_COMPONENTS: [&str; 2] = ["sccache", "cargo_target_runs"];
+const CACHE_CLEANUP_OUTCOMES: [&str; 5] = ["deleted", "skipped", "retained", "error", "dry_run"];
+const CACHE_CLEANUP_MODES: [&str; 2] = ["dry_run", "delete"];
+
 // ─── Arbiter rollout hardening metrics ──────────────────────────────────
 const ARBITER_DECISION_TOTAL: &str = "djinn_arbiter_decision_total";
 const ARBITER_PARK_TOTAL: &str = "djinn_arbiter_park_total";
@@ -803,6 +811,52 @@ fn register_metrics() {
         ARBITER_TIME_IN_ARBITRATION_SECONDS,
         "Wall-clock time a task spent in arbitration from dispatch to decision/park/termination."
     );
+    // ─── Cache cleanup observability ────────────────────────────────
+    metrics::describe_counter!(
+        CACHE_CLEANUP_TOTAL,
+        "Cache cleanup outcomes partitioned by bounded component, outcome, and mode labels."
+    );
+    for component in CACHE_CLEANUP_COMPONENTS {
+        for outcome in CACHE_CLEANUP_OUTCOMES {
+            for mode in CACHE_CLEANUP_MODES {
+                metrics::counter!(
+                    CACHE_CLEANUP_TOTAL,
+                    "component" => component,
+                    "outcome" => outcome,
+                    "mode" => mode,
+                )
+                .absolute(0);
+            }
+        }
+    }
+    metrics::describe_counter!(
+        CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL,
+        "Cumulative bytes reclaimed by cache cleanup operations, partitioned by component and mode."
+    );
+    for component in CACHE_CLEANUP_COMPONENTS {
+        for mode in CACHE_CLEANUP_MODES {
+            metrics::counter!(
+                CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL,
+                "component" => component,
+                "mode" => mode,
+            )
+            .absolute(0);
+        }
+    }
+    metrics::describe_counter!(
+        CACHE_CLEANUP_CANDIDATES_TOTAL,
+        "Number of entries examined as cleanup candidates, partitioned by component and mode."
+    );
+    for component in CACHE_CLEANUP_COMPONENTS {
+        for mode in CACHE_CLEANUP_MODES {
+            metrics::counter!(
+                CACHE_CLEANUP_CANDIDATES_TOTAL,
+                "component" => component,
+                "mode" => mode,
+            )
+            .absolute(0);
+        }
+    }
 }
 
 pub mod dispatch {
@@ -1391,6 +1445,105 @@ pub mod arbiter {
     }
 }
 
+/// Cache cleanup observability metrics.
+///
+/// These counters track cleanup operations across shared cache paths
+/// (sccache, cargo-target-runs debris). Labels are intentionally bounded
+/// to keep Prometheus cardinality under control:
+///
+/// - `component` — which cache path (`sccache` or `cargo_target_runs`).
+/// - `outcome` — cleanup result (`deleted`, `skipped`, `retained`, `error`,
+///   `dry_run`).
+/// - `mode` — global cleanup mode (`dry_run` or `delete`).
+///
+/// High-cardinality dimensions (absolute filesystem paths, project ids,
+/// individual entry names) belong in structured tracing fields emitted at
+/// the cleanup call site, not in Prometheus labels.
+pub mod cache_cleanup {
+    /// Stable component labels.
+    pub const COMPONENT_SCCACHE: &str = "sccache";
+    pub const COMPONENT_CARGO_TARGET_RUNS: &str = "cargo_target_runs";
+
+    /// Stable outcome labels for `djinn_cache_cleanup_total`.
+    pub const OUTCOME_DELETED: &str = "deleted";
+    pub const OUTCOME_SKIPPED: &str = "skipped";
+    pub const OUTCOME_RETAINED: &str = "retained";
+    pub const OUTCOME_ERROR: &str = "error";
+    pub const OUTCOME_DRY_RUN: &str = "dry_run";
+
+    /// Stable mode labels.
+    pub const MODE_DRY_RUN: &str = "dry_run";
+    pub const MODE_DELETE: &str = "delete";
+
+    /// All bounded component labels — used for registration seeding.
+    #[cfg(test)]
+    pub(crate) const ALL_COMPONENTS: [&str; 2] = [COMPONENT_SCCACHE, COMPONENT_CARGO_TARGET_RUNS];
+
+    /// All bounded outcome labels — used for registration seeding.
+    #[cfg(test)]
+    pub(crate) const ALL_OUTCOMES: [&str; 5] = [
+        OUTCOME_DELETED,
+        OUTCOME_SKIPPED,
+        OUTCOME_RETAINED,
+        OUTCOME_ERROR,
+        OUTCOME_DRY_RUN,
+    ];
+
+    /// All bounded mode labels — used for registration seeding.
+    #[cfg(test)]
+    pub(crate) const ALL_MODES: [&str; 2] = [MODE_DRY_RUN, MODE_DELETE];
+
+    /// Increment the cache cleanup counter for a `(component, outcome, mode)` bucket.
+    ///
+    /// `component` MUST be one of `COMPONENT_SCCACHE` or `COMPONENT_CARGO_TARGET_RUNS`.
+    /// `outcome` MUST be one of the `OUTCOME_*` constants.
+    /// `mode` MUST be one of `MODE_DRY_RUN` or `MODE_DELETE`.
+    ///
+    /// This is intentionally synchronous and non-async so cleanup paths
+    /// never need to hold any application lock across an await to emit
+    /// telemetry.
+    pub fn increment_cleanup_total(
+        component: &'static str,
+        outcome: &'static str,
+        mode: &'static str,
+    ) {
+        metrics::counter!(
+            super::CACHE_CLEANUP_TOTAL,
+            "component" => component,
+            "outcome" => outcome,
+            "mode" => mode,
+        )
+        .increment(1);
+    }
+
+    /// Record reclaimed bytes for a `(component, mode)` bucket.
+    ///
+    /// Callers pass the number of bytes reclaimed by a cleanup pass.
+    /// This is a monotonic counter so dashboard queries can compute rates.
+    pub fn record_reclaimed_bytes(component: &'static str, mode: &'static str, bytes: u64) {
+        metrics::counter!(
+            super::CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL,
+            "component" => component,
+            "mode" => mode,
+        )
+        .increment(bytes);
+    }
+
+    /// Increment the cleanup candidates counter by `count` for a `(component, mode)` bucket.
+    ///
+    /// Callers pass the number of entries that were *candidates* for cleanup
+    /// (i.e. matched age/retention criteria), regardless of whether they were
+    /// actually deleted or retained.
+    pub fn increment_candidates(component: &'static str, mode: &'static str, count: u64) {
+        metrics::counter!(
+            super::CACHE_CLEANUP_CANDIDATES_TOTAL,
+            "component" => component,
+            "mode" => mode,
+        )
+        .increment(count);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1582,6 +1735,27 @@ mod tests {
         assert_sync_unit(inline_cleanup::increment_pr_closed);
         assert_sync_unit(inline_cleanup::increment_branch_deleted);
         assert_sync_unit(|| inline_cleanup::increment_skipped(inline_cleanup::REASON_DRY_RUN));
+        assert_sync_unit(|| {
+            cache_cleanup::increment_cleanup_total(
+                cache_cleanup::COMPONENT_SCCACHE,
+                cache_cleanup::OUTCOME_DELETED,
+                cache_cleanup::MODE_DELETE,
+            );
+        });
+        assert_sync_unit(|| {
+            cache_cleanup::record_reclaimed_bytes(
+                cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                cache_cleanup::MODE_DRY_RUN,
+                1024,
+            );
+        });
+        assert_sync_unit(|| {
+            cache_cleanup::increment_candidates(
+                cache_cleanup::COMPONENT_SCCACHE,
+                cache_cleanup::MODE_DRY_RUN,
+                5,
+            );
+        });
     }
 
     #[test]
@@ -2860,6 +3034,210 @@ mod tests {
                 assert!(
                     !line.contains(forbidden),
                     "arbiter metric must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
+        }
+    }
+
+    // ── Cache cleanup telemetry tests ────────────────────────────────
+
+    #[test]
+    fn cache_cleanup_helpers_are_synchronous_unit_functions() {
+        let _guard = test_guard();
+
+        fn assert_sync_unit<F: FnOnce()>(f: F) {
+            f();
+        }
+
+        init().unwrap();
+        assert_sync_unit(|| {
+            cache_cleanup::increment_cleanup_total(
+                cache_cleanup::COMPONENT_SCCACHE,
+                cache_cleanup::OUTCOME_DELETED,
+                cache_cleanup::MODE_DELETE,
+            );
+        });
+        assert_sync_unit(|| {
+            cache_cleanup::record_reclaimed_bytes(
+                cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                cache_cleanup::MODE_DRY_RUN,
+                1024,
+            );
+        });
+        assert_sync_unit(|| {
+            cache_cleanup::increment_candidates(
+                cache_cleanup::COMPONENT_SCCACHE,
+                cache_cleanup::MODE_DRY_RUN,
+                5,
+            );
+        });
+    }
+
+    #[test]
+    fn cache_cleanup_registered_labels_render_at_zero_on_init() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let rendered = render().unwrap();
+        for component in cache_cleanup::ALL_COMPONENTS {
+            for outcome in cache_cleanup::ALL_OUTCOMES {
+                for mode in cache_cleanup::ALL_MODES {
+                    rendered_sample(
+                        &rendered,
+                        CACHE_CLEANUP_TOTAL,
+                        &[
+                            ("component", component),
+                            ("outcome", outcome),
+                            ("mode", mode),
+                        ],
+                    );
+                }
+            }
+        }
+        for component in cache_cleanup::ALL_COMPONENTS {
+            for mode in cache_cleanup::ALL_MODES {
+                rendered_sample(
+                    &rendered,
+                    CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL,
+                    &[("component", component), ("mode", mode)],
+                );
+                rendered_sample(
+                    &rendered,
+                    CACHE_CLEANUP_CANDIDATES_TOTAL,
+                    &[("component", component), ("mode", mode)],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cache_cleanup_total_counter_renders_bounded_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        cache_cleanup::increment_cleanup_total(
+            cache_cleanup::COMPONENT_SCCACHE,
+            cache_cleanup::OUTCOME_DELETED,
+            cache_cleanup::MODE_DELETE,
+        );
+        cache_cleanup::increment_cleanup_total(
+            cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+            cache_cleanup::OUTCOME_DRY_RUN,
+            cache_cleanup::MODE_DRY_RUN,
+        );
+
+        let rendered = render().unwrap();
+        assert!(
+            labeled_sample_value(
+                &rendered,
+                CACHE_CLEANUP_TOTAL,
+                &[
+                    ("component", "sccache"),
+                    ("outcome", "deleted"),
+                    ("mode", "delete"),
+                ]
+            ) >= 1.0,
+            "sccache/delete/deleted should be >= 1"
+        );
+        assert!(
+            labeled_sample_value(
+                &rendered,
+                CACHE_CLEANUP_TOTAL,
+                &[
+                    ("component", "cargo_target_runs"),
+                    ("outcome", "dry_run"),
+                    ("mode", "dry_run"),
+                ]
+            ) >= 1.0,
+            "cargo_target_runs/dry_run/dry_run should be >= 1"
+        );
+    }
+
+    #[test]
+    fn cache_cleanup_reclaimed_bytes_renders_component_mode() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        cache_cleanup::record_reclaimed_bytes(
+            cache_cleanup::COMPONENT_SCCACHE,
+            cache_cleanup::MODE_DELETE,
+            4096,
+        );
+
+        let rendered = render().unwrap();
+        let sample = rendered_sample(
+            &rendered,
+            CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL,
+            &[("component", "sccache"), ("mode", "delete")],
+        );
+        assert!(
+            sample.contains("4096"),
+            "reclaimed bytes sample should contain 4096: {sample}"
+        );
+    }
+
+    #[test]
+    fn cache_cleanup_candidates_renders_component_mode() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let before = render().unwrap();
+        let before_sample = rendered_sample(
+            &before,
+            CACHE_CLEANUP_CANDIDATES_TOTAL,
+            &[("component", "cargo_target_runs"), ("mode", "dry_run")],
+        );
+        let before_val = sample_value(before_sample);
+
+        cache_cleanup::increment_candidates(
+            cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+            cache_cleanup::MODE_DRY_RUN,
+            10,
+        );
+
+        let after = render().unwrap();
+        let after_sample = rendered_sample(
+            &after,
+            CACHE_CLEANUP_CANDIDATES_TOTAL,
+            &[("component", "cargo_target_runs"), ("mode", "dry_run")],
+        );
+        assert_eq!(
+            sample_value(after_sample),
+            before_val + 10.0,
+            "cargo_target_runs/dry_run candidates should increment by 10: {after_sample}"
+        );
+    }
+
+    #[test]
+    fn cache_cleanup_no_high_cardinality_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        cache_cleanup::increment_cleanup_total(
+            cache_cleanup::COMPONENT_SCCACHE,
+            cache_cleanup::OUTCOME_DELETED,
+            cache_cleanup::MODE_DELETE,
+        );
+        cache_cleanup::record_reclaimed_bytes(
+            cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+            cache_cleanup::MODE_DRY_RUN,
+            2048,
+        );
+        cache_cleanup::increment_candidates(
+            cache_cleanup::COMPONENT_SCCACHE,
+            cache_cleanup::MODE_DRY_RUN,
+            3,
+        );
+
+        let rendered = render().unwrap();
+        for forbidden in ["path=", "project_id=", "task_id=", "session_id=", "entry="] {
+            for line in rendered.lines() {
+                if !line.starts_with("djinn_cache_cleanup_") {
+                    continue;
+                }
+                assert!(
+                    !line.contains(forbidden),
+                    "cache cleanup metric must not carry high-cardinality label {forbidden}: {line}",
                 );
             }
         }
