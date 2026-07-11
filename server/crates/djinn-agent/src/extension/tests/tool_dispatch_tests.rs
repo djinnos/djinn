@@ -881,6 +881,50 @@ async fn read_budget_truncated_records_truncated_coverage() {
 /// env tests in `helpers.rs`.
 static JIT_PITFALLS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+const JIT_PITFALL_OUTCOMES: [&str; 7] = [
+    "disabled_default_off",
+    "disabled_kill_switch",
+    "non_first_modification",
+    "eligible_search",
+    "injected",
+    "empty",
+    "error",
+];
+
+fn jit_pitfall_outcome_snapshot() -> Vec<(&'static str, u64)> {
+    let rendered = djinn_telemetry::render().expect("install Prometheus recorder");
+    JIT_PITFALL_OUTCOMES
+        .into_iter()
+        .map(|outcome| {
+            let sample = format!("djinn_jit_pitfall_hints_total{{outcome=\"{outcome}\"}}");
+            let line = rendered
+                .lines()
+                .find(|line| line.starts_with(&sample))
+                .unwrap();
+            let value = line.rsplit_once(' ').unwrap().1.parse::<u64>().unwrap();
+            (outcome, value)
+        })
+        .collect()
+}
+
+fn assert_jit_pitfall_outcome_deltas(before: &[(&str, u64)], expected: &[(&str, u64)]) {
+    for ((outcome, before_value), (after_outcome, after_value)) in
+        before.iter().zip(jit_pitfall_outcome_snapshot())
+    {
+        assert_eq!(outcome, &after_outcome);
+        let expected_delta = expected
+            .iter()
+            .find(|(label, _)| label == outcome)
+            .map(|(_, delta)| *delta)
+            .unwrap_or(0);
+        assert_eq!(
+            after_value - before_value,
+            expected_delta,
+            "unexpected JIT Prometheus delta for {outcome}"
+        );
+    }
+}
+
 /// Seed a `pitfall` note scoped to `scope_path` for `project_id`. Default
 /// confidence (1.0) clears the 0.3 floor in `query_by_scope_overlap`. The
 /// rendered hint falls back to the note body when no overview/abstract is
@@ -949,7 +993,12 @@ async fn jit_pitfalls_trace_preserves_top_two_output_and_candidate_outcomes() {
     let third = seed_pitfall(&db, pid, "Trace Third", "third body", "src").await;
     let below = seed_pitfall(&db, pid, "Trace Below", "below body", "src").await;
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
-    for (id, confidence) in [(&first, 0.95), (&second, 0.90), (&third, 0.85), (&below, 0.10)] {
+    for (id, confidence) in [
+        (&first, 0.95),
+        (&second, 0.90),
+        (&third, 0.85),
+        (&below, 0.10),
+    ] {
         note_repo
             .set_confidence(id, confidence)
             .await
@@ -957,6 +1006,7 @@ async fn jit_pitfalls_trace_preserves_top_two_output_and_candidate_outcomes() {
     }
 
     let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let telemetry_before = jit_pitfall_outcome_snapshot();
     let args = Some(
         serde_json::json!({ "path": "src/a.rs", "content": "// trace\n" })
             .as_object()
@@ -977,20 +1027,35 @@ async fn jit_pitfalls_trace_preserves_top_two_output_and_candidate_outcomes() {
     assert!(trace.estimated_injected_tokens > 0);
     assert!(trace.durations_ms.get("search_elapsed_ms").is_some());
     assert!(trace.durations_ms.get("trace_search_elapsed_ms").is_some());
-    let trigger = trace.trigger.expect("trigger metadata");
+    let trigger = trace.trigger.as_ref().expect("trigger metadata");
     assert_eq!(trigger["rollout_mode"], "cohort");
     assert_eq!(trigger["rendered_note_count"], 2);
     assert_eq!(trigger["production_limit"], 8);
 
     let candidates = trace.candidates_typed();
-    let candidate = |id: &str| candidates.iter().find(|c| c.note_id == id).expect("traced note");
+    let candidate = |id: &str| {
+        candidates
+            .iter()
+            .find(|c| c.note_id == id)
+            .expect("traced note")
+    };
     for id in [&first, &second] {
         assert_eq!(candidate(id).outcome, CandidateOutcome::Injected);
         assert_eq!(candidate(id).skipped_reason, None);
     }
     assert_eq!(candidate(&third).outcome, CandidateOutcome::Skipped);
-    assert_eq!(candidate(&third).skipped_reason, Some(SkippedReason::NotTopK));
-    assert_eq!(candidate(&below).skipped_reason, Some(SkippedReason::MinConfidence));
+    assert_eq!(
+        candidate(&third).skipped_reason,
+        Some(SkippedReason::NotTopK)
+    );
+    assert_eq!(
+        candidate(&below).skipped_reason,
+        Some(SkippedReason::MinConfidence)
+    );
+    assert_jit_pitfall_outcome_deltas(
+        &telemetry_before,
+        &[("eligible_search", 1), ("injected", 1)],
+    );
 
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
@@ -1018,6 +1083,7 @@ async fn jit_pitfalls_trace_insert_failure_is_fail_open_for_rendered_hint() {
     djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
 
     let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let telemetry_before = jit_pitfall_outcome_snapshot();
     let args = Some(
         serde_json::json!({ "path": "src/a.rs", "content": "// x\n" })
             .as_object()
@@ -1027,10 +1093,67 @@ async fn jit_pitfalls_trace_insert_failure_is_fail_open_for_rendered_hint() {
     let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
         .await
         .expect("trace insert failure must not fail write");
-    assert!(response["jit_pitfalls"]
-        .as_str()
-        .expect("hint remains present")
-        .contains("Insert Failure Pitfall"));
+    assert_eq!(
+        response["jit_pitfalls"],
+        "<relevant-pitfalls>\n- [Pitfall] Insert Failure Pitfall: still rendered\n</relevant-pitfalls>"
+    );
+    assert_jit_pitfall_outcome_deltas(
+        &telemetry_before,
+        &[("eligible_search", 1), ("injected", 1)],
+    );
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
+    }
+}
+
+/// A forced candidate-serialization failure is equally observational: the
+/// normal rendered hint and its exact Prometheus outcome pair remain intact.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_trace_serialization_failure_is_fail_open() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "enabled");
+    }
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-trace-serialize-fail-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+    seed_pitfall(
+        &db,
+        pid,
+        "Serialization Failure Pitfall",
+        "still rendered",
+        "src",
+    )
+    .await;
+    let state = crate::test_helpers::agent_context_from_db(db, CancellationToken::new());
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// x\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+
+    let telemetry_before = jit_pitfall_outcome_snapshot();
+    crate::extension::handlers::force_trace_candidate_serialization_failure_for_test(true);
+    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
+        .await
+        .expect("serialization failure must not fail write");
+    crate::extension::handlers::force_trace_candidate_serialization_failure_for_test(false);
+    assert_eq!(
+        response["jit_pitfalls"],
+        "<relevant-pitfalls>\n- [Pitfall] Serialization Failure Pitfall: still rendered\n</relevant-pitfalls>"
+    );
+    assert_jit_pitfall_outcome_deltas(
+        &telemetry_before,
+        &[("eligible_search", 1), ("injected", 1)],
+    );
 
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");

@@ -48,6 +48,8 @@
 mod trace;
 
 use std::collections::{BTreeSet, HashSet};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -62,6 +64,28 @@ use trace::{
 };
 
 const TELEMETRY_TARGET: &str = "djinn_agent::jit_pitfalls";
+
+/// Test-only failpoint at the candidate JSON serialization boundary. It avoids
+/// manufacturing invalid persisted notes while exercising the real fail-open
+/// branch that protects the caller-visible hint and telemetry contract.
+#[cfg(test)]
+static FORCE_TRACE_CANDIDATE_SERIALIZATION_FAILURE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn force_trace_candidate_serialization_failure_for_test(enabled: bool) {
+    FORCE_TRACE_CANDIDATE_SERIALIZATION_FAILURE.store(enabled, Ordering::SeqCst);
+}
+
+fn serialize_trace_candidates(
+    candidates: &[djinn_db::repositories::retrieval_trace::TraceCandidate],
+) -> Result<serde_json::Value, String> {
+    #[cfg(test)]
+    if FORCE_TRACE_CANDIDATE_SERIALIZATION_FAILURE.load(Ordering::SeqCst) {
+        return Err("forced trace candidate serialization failure".to_owned());
+    }
+
+    serde_json::to_value(candidates).map_err(|error| error.to_string())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JitPitfallOutcome {
@@ -464,7 +488,7 @@ pub(super) async fn maybe_pitfall_hint(
                      skipping trace persistence (fail-open)",
                 );
             } else {
-                match serde_json::to_value(&trace_candidates) {
+                match serialize_trace_candidates(&trace_candidates) {
                     Ok(json) => {
                         let candidate_count = trace_candidates.len();
                         let trace_universe_count = scope_candidates.len();
