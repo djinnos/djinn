@@ -1,3 +1,4 @@
+// djinn:allow-oversize — lifecycle configuration DTOs and regression coverage exceed the size guard; split when touched substantively.
 use serde::{Deserialize, Serialize};
 
 /// Coordinator-side durable-progress lifecycle configuration.
