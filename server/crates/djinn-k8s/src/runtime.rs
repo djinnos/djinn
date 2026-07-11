@@ -2042,13 +2042,6 @@ mod tests {
             ) -> Result<(), String> {
                 unimplemented!()
             }
-            async fn run_arbiter_preapproval_gate(
-                &self,
-                _: &djinn_core::models::Task,
-            ) -> Result<djinn_supervisor::ArbiterGateResult, String> {
-                unimplemented!()
-            }
-
             async fn record_arbiter_decision(
                 &self,
                 _task_id: String,

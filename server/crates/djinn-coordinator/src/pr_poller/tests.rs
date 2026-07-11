@@ -2,14 +2,15 @@
 use super::{
     AutoMergeFastPathState, AutoMergeTickDecision, CiMergeGateVerdict, PrDraftCiAction,
     SameSignatureEscalationRoute, SameSignatureReproContext, Task, advisory_checks_section,
-    blocking_failed_checks, build_ci_failure_sections, build_generic_same_signature_reason,
-    build_reproduction_plan_same_signature_reason, build_unreproducible_same_signature_reason,
-    ci_merge_gate_verdict, classify_same_signature_escalation, compute_ci_failure_fingerprint,
+    allowed_merge_methods, blocking_failed_checks, build_ci_failure_sections,
+    build_generic_same_signature_reason, build_reproduction_plan_same_signature_reason,
+    build_unreproducible_same_signature_reason, ci_merge_gate_verdict,
+    classify_same_signature_escalation, compute_ci_failure_fingerprint,
     count_consecutive_identical, decide_auto_merge_tick, decide_pr_draft_ci_action,
     dequeue_reason_is_failure, dequeue_requires_rework, detect_scope_inversion,
     effective_review_decision, extract_crate_name, extract_crate_names, is_advisory_check_name,
-    is_conversation_resolution_block, is_merge_queue_405, is_racing_unmerged_status,
-    parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
+    is_conversation_resolution_block, is_merge_method_not_allowed, is_merge_queue_405,
+    is_racing_unmerged_status, parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
     pr_transition_increments_reopen_count, record_auto_merge_decision_metrics,
     record_pr_transition_reopen_metric, rollout_policy_publication_marker,
     should_auto_resolve_conversations,
@@ -21,9 +22,10 @@ use djinn_db::{
     CreateTaskAttemptParams, Database, EpicRepository, TaskAttemptRepository, TaskRepository,
 };
 use djinn_provider::github_api::{
-    ActionsJob, ActionsJobStep, CheckRun, DequeueEvent, GitHubApiError, GitHubUser, PrReview,
-    ReproductionJob, ReproductionSetupStep, ReproductionStep, RequiredCheckReproductionContext,
-    RequiredCheckUnreproducible, RequiredCheckUnreproducibleReason,
+    ActionsJob, ActionsJobStep, CheckRun, DequeueEvent, GitHubApiError, GitHubUser, MergeMethod,
+    PrReview, RepoMergeConfig, ReproductionJob, ReproductionSetupStep, ReproductionStep,
+    RequiredCheckReproductionContext, RequiredCheckUnreproducible,
+    RequiredCheckUnreproducibleReason,
 };
 use reqwest::StatusCode;
 use std::collections::HashMap;
@@ -734,6 +736,129 @@ fn github_http_error(
 
 fn github_graphql_error(method: &'static str, body: &str) -> GitHubApiError {
     GitHubApiError::graphql(method, "/graphql".to_string(), body.to_string())
+}
+
+// ── Merge-method selection + not-allowed detection (vanilla-repo fixes) ──────
+
+#[test]
+fn is_merge_method_not_allowed_matches_squash_disallowed_405() {
+    let err = github_http_error(
+        "PUT",
+        "/repos/acme/portal/pulls/7/merge",
+        StatusCode::METHOD_NOT_ALLOWED,
+        r#"{\"message\":\"Squash merges are not allowed on this repository.\"}"#,
+    );
+    assert!(is_merge_method_not_allowed(&err));
+}
+
+#[test]
+fn is_merge_method_not_allowed_matches_merge_commit_disallowed_422() {
+    let err = github_http_error(
+        "PUT",
+        "/repos/acme/portal/pulls/7/merge",
+        StatusCode::UNPROCESSABLE_ENTITY,
+        r#"{\"message\":\"Merge commits are not allowed on this repository.\"}"#,
+    );
+    assert!(is_merge_method_not_allowed(&err));
+}
+
+#[test]
+fn is_merge_method_not_allowed_ignores_merge_queue_405() {
+    // The merge-queue 405 is a delegated-to-GitHub signal, never a disallowed
+    // merge method — it must route to enqueue, not the escalation path.
+    let err = github_http_error(
+        "PUT",
+        "/repos/acme/portal/pulls/7/merge",
+        StatusCode::METHOD_NOT_ALLOWED,
+        r#"{\"message\":\"Pull Request is in the merge queue.\"}"#,
+    );
+    assert!(!is_merge_method_not_allowed(&err));
+    // And the merge-queue detector still fires for it.
+    assert!(is_merge_queue_405(&err));
+}
+
+#[test]
+fn is_merge_method_not_allowed_ignores_conversation_resolution_405() {
+    let err = github_http_error(
+        "PUT",
+        "/repos/acme/portal/pulls/7/merge",
+        StatusCode::METHOD_NOT_ALLOWED,
+        r#"{\"message\":\"At least 1 approving review is required; conversation must be resolved.\"}"#,
+    );
+    assert!(!is_merge_method_not_allowed(&err));
+}
+
+#[test]
+fn is_merge_method_not_allowed_ignores_auto_merge_graphql_phrasing() {
+    // GitHub's auto-merge GraphQL rejection reads "Auto merge IS not allowed"
+    // (singular) — distinct from the PUT /merge "…merges ARE not allowed"
+    // per-method rejection. The method-not-allowed detector must not match it.
+    let err = github_graphql_error(
+        "POST",
+        r#"[{\"type\":\"UNPROCESSABLE\",\"message\":\"Pull request Auto merge is not allowed on this repository\"}]"#,
+    );
+    assert!(!is_merge_method_not_allowed(&err));
+}
+
+#[test]
+fn allowed_merge_methods_prefers_squash_when_all_enabled() {
+    let cfg = RepoMergeConfig {
+        allow_squash_merge: true,
+        allow_merge_commit: true,
+        allow_rebase_merge: true,
+    };
+    assert_eq!(
+        allowed_merge_methods(&cfg),
+        vec![MergeMethod::Squash, MergeMethod::Merge, MergeMethod::Rebase]
+    );
+}
+
+#[test]
+fn allowed_merge_methods_squash_disabled_falls_back_to_merge_commit() {
+    // The squash-only-disallowed repo: chosen method becomes merge commit,
+    // with rebase as the remaining fallback.
+    let cfg = RepoMergeConfig {
+        allow_squash_merge: false,
+        allow_merge_commit: true,
+        allow_rebase_merge: true,
+    };
+    let methods = allowed_merge_methods(&cfg);
+    assert_eq!(methods, vec![MergeMethod::Merge, MergeMethod::Rebase]);
+    assert_eq!(methods.first(), Some(&MergeMethod::Merge));
+}
+
+#[test]
+fn allowed_merge_methods_rebase_only() {
+    let cfg = RepoMergeConfig {
+        allow_squash_merge: false,
+        allow_merge_commit: false,
+        allow_rebase_merge: true,
+    };
+    assert_eq!(allowed_merge_methods(&cfg), vec![MergeMethod::Rebase]);
+}
+
+#[test]
+fn allowed_merge_methods_all_disabled_defaults_to_squash() {
+    // Pathological config (every method disabled) still yields one attempt so
+    // the caller escalates via the method-not-allowed path rather than silently
+    // doing nothing.
+    let cfg = RepoMergeConfig {
+        allow_squash_merge: false,
+        allow_merge_commit: false,
+        allow_rebase_merge: false,
+    };
+    assert_eq!(allowed_merge_methods(&cfg), vec![MergeMethod::Squash]);
+}
+
+#[test]
+fn repo_merge_config_defaults_and_missing_fields_are_permissive() {
+    // Missing fields in the GET /repos payload must default to `true` so a
+    // partial response degrades to the legacy permissive assumption.
+    let cfg: RepoMergeConfig = serde_json::from_str("{}").unwrap();
+    assert!(cfg.allow_squash_merge);
+    assert!(cfg.allow_merge_commit);
+    assert!(cfg.allow_rebase_merge);
+    assert_eq!(cfg, RepoMergeConfig::default());
 }
 
 fn assert_structured_rendered_error(rendered: &str, prefix: &str, method: &str, path: &str) {

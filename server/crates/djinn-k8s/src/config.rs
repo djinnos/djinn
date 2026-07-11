@@ -92,7 +92,14 @@ pub struct KubernetesConfig {
     /// signal and the Pod can be evicted under contention. Default `1`.
     pub warm_cpu_request: String,
     /// CPU limit on the warm Pod container. Caps the indexer subprocesses
-    /// so they don't starve neighbours on the same node. Default `2`.
+    /// so they don't starve neighbours on the same node. Default `4`.
+    ///
+    /// Bumped `2` → `4`: `rust-analyzer scip` derives `CARGO_BUILD_JOBS` from
+    /// the cgroup-visible CPU quota (see djinn-graph `cargo_build_jobs`), and
+    /// runs concurrently with the scip-typescript indexers. A `2` limit
+    /// throttled the Rust workspace so hard it hit its wall-clock cap on every
+    /// warm; `4` gives the derived job count room to match without letting a
+    /// single warm Pod monopolise a node.
     pub warm_cpu_limit: String,
     /// Memory request on the warm Pod container. SCIP index buffers for a
     /// medium-sized Rust workspace already crest 1 GiB; reserving 2 GiB
@@ -139,7 +146,10 @@ impl KubernetesConfig {
             task_run_active_deadline_seconds: 10800,
             task_run_termination_grace_period_seconds: 60,
             warm_cpu_request: "1".into(),
-            warm_cpu_limit: "2".into(),
+            // Bumped limit 2 → 4 so the cgroup-aware `CARGO_BUILD_JOBS` in the
+            // Rust SCIP indexer has real CPU to use; a 2-CPU cap starved the
+            // warm and timed the Rust workspace out on every run.
+            warm_cpu_limit: "4".into(),
             // Bumped limit 4Gi → 6Gi: compiling test binaries with --all-targets
             // links more codegen units at once than clippy alone.
             warm_memory_request: "2Gi".into(),
@@ -177,7 +187,7 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS` | `task_run_active_deadline_seconds` | `10800` (parsed as `u64`) |
     /// | `DJINN_K8S_TASK_RUN_TERMINATION_GRACE_PERIOD_SECONDS` | `task_run_termination_grace_period_seconds` | `60` (parsed as `i64`) |
     /// | `DJINN_K8S_WARM_CPU_REQUEST` | `warm_cpu_request` | `1` |
-    /// | `DJINN_K8S_WARM_CPU_LIMIT` | `warm_cpu_limit` | `2` |
+    /// | `DJINN_K8S_WARM_CPU_LIMIT` | `warm_cpu_limit` | `4` |
     /// | `DJINN_K8S_WARM_MEMORY_REQUEST` | `warm_memory_request` | `2Gi` |
     /// | `DJINN_K8S_WARM_MEMORY_LIMIT` | `warm_memory_limit` | `6Gi` |
     /// | `DJINN_K8S_NODE_SELECTOR` | `node_selector` | `{}` (parsed as a JSON object of string→string) |
