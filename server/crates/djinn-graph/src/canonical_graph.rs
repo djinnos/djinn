@@ -1705,8 +1705,16 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::{ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository};
 
-    static OUT_OF_CORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    static CACHE_REUSE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // All four env-mutating pipeline tests below (out-of-core parity,
+    // out-of-core warm, cache-reuse warm) share ONE process-global lock.
+    // They each mutate overlapping process-wide env vars — the two warm
+    // tests both rewrite `PATH` + `DJINN_TEST_SCIP_FIXTURE` to point at the
+    // fake `rust-analyzer`, and the out-of-core tests share
+    // `DJINN_GRAPH_OUT_OF_CORE*`. Separate per-family locks let them run
+    // concurrently on Cargo's test threads and clobber each other's env,
+    // which is the root cause of the intermittent "no index produced"
+    // flake. Route every one through `test_helpers::lock_pipeline_env`.
+    use crate::test_helpers::lock_pipeline_env;
 
     struct EnvVarGuard {
         key: &'static str,
@@ -2018,7 +2026,7 @@ edition = "2024"
 
     #[test]
     fn test_out_of_core_graph_parity_with_in_memory() {
-        let _guard = OUT_OF_CORE_ENV_LOCK.lock().unwrap();
+        let _env_lock = lock_pipeline_env();
         let tmp = workspace_tempdir("ooc-graph-parity-");
         let store_path = tmp.path().join("store");
 
@@ -2051,7 +2059,7 @@ edition = "2024"
 
     #[test]
     fn test_out_of_core_graph_diverges_on_file_change() {
-        let _guard = OUT_OF_CORE_ENV_LOCK.lock().unwrap();
+        let _env_lock = lock_pipeline_env();
         let tmp = workspace_tempdir("ooc-graph-diverge-");
         let store_path = tmp.path().join("store");
 
@@ -2988,7 +2996,7 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn out_of_core_warm_produces_identical_graph_blob() {
-        let _env_lock = OUT_OF_CORE_ENV_LOCK.lock().unwrap();
+        let _env_lock = lock_pipeline_env();
         let _ooc_flag = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE");
         let _ooc_min_nodes = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
         let _ooc_path = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE_PATH");
@@ -3127,7 +3135,7 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn cache_reuse_produces_identical_graph_blob() {
-        let _env_lock = CACHE_REUSE_ENV_LOCK.lock().unwrap();
+        let _env_lock = lock_pipeline_env();
 
         // Remove any pre-existing cache-reuse env var.
         unsafe {
