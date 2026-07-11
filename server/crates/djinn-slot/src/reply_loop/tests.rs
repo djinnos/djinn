@@ -186,6 +186,20 @@ async fn make_context() -> (
     String,
     CancellationToken,
 ) {
+    let (ctx, project_path, task_id, session_id, cancel, _task) = make_context_with_task().await;
+    (ctx, project_path, task_id, session_id, cancel)
+}
+
+/// Extended `make_context` that also returns the `Task` model so callers can
+/// pass it to `render_prompt_for_role` for realistic prompt rendering.
+async fn make_context_with_task() -> (
+    crate::host::SlotContext,
+    String,
+    String,
+    String,
+    CancellationToken,
+    djinn_core::models::Task,
+) {
     let cancel = CancellationToken::new();
     let db = test_helpers::create_test_db();
     let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
@@ -210,7 +224,9 @@ async fn make_context() -> (
     let project_path = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
         .to_string_lossy()
         .into_owned();
-    (ctx, project_path, task.id, session.id, cancel)
+    let task_id = task.id.clone();
+    let session_id = session.id.clone();
+    (ctx, project_path, task_id, session_id, cancel, task)
 }
 
 /// Holds common test state for reply-loop tests, eliminating the repeated
@@ -232,6 +248,61 @@ impl ReplyLoopHarness {
         let mut conv = Conversation::new();
         conv.push(Message::system("You are a worker."));
         conv.push(Message::user("Do the task."));
+        Self {
+            slot_ctx,
+            project_path,
+            task_id,
+            session_id,
+            cancel,
+            conv,
+        }
+    }
+
+    /// Build a harness with the **real** post-wzz6 worker prompt surface:
+    /// the actual rendered role prompt with `format_tools_section` applied to
+    /// the real canonical tool schemas.  This is the harness used by the
+    /// provider-tool preservation regression tests so that a regression in
+    /// prompt rendering or canonical tool schema generation would be caught.
+    async fn new_with_worker_prompt() -> Self {
+        let (slot_ctx, project_path, task_id, session_id, cancel, task) =
+            make_context_with_task().await;
+        let tool_schemas_fn = djinn_mcp_extension::tool_defs::tool_schemas_worker;
+        let role_config = djinn_roles::config::config_for(djinn_roles::AgentType::Worker);
+        let task_ctx = djinn_roles::prompts::TaskContext {
+            project_path: project_path.clone(),
+            workspace_path: "/tmp".to_string(),
+            diff: None,
+            commits: None,
+            start_commit: None,
+            end_commit: None,
+            conflict_files: None,
+            merge_base_branch: None,
+            merge_target_branch: None,
+            merge_failure_context: None,
+            setup_commands: None,
+            activity: None,
+            worker_summary: None,
+            worker_concerns: None,
+            epic_context: None,
+            knowledge_context: None,
+            code_graph_context: None,
+            reviewer_diff_context: None,
+            ci_blocking_directive: None,
+            worker_resume_note: None,
+            arbiter_directive: None,
+        };
+        let system_prompt = djinn_roles::prompts::render_prompt_for_role(
+            role_config,
+            tool_schemas_fn,
+            &task,
+            &task_ctx,
+        );
+        let mut conv = Conversation::new();
+        conv.push(Message::system(system_prompt));
+        conv.push(Message::user(format!(
+            "Implement task {}: {}",
+            task.short_id, task.title
+        )));
         Self {
             slot_ctx,
             project_path,
@@ -4366,4 +4437,607 @@ async fn codex_empty_turn_error_is_empty_completion_throttle() {
         .downcast_ref::<ProviderError>()
         .expect("must carry EmptyCompletion");
     assert_eq!(*typed, ProviderError::EmptyCompletion);
+}
+
+// ── Provider-tool preservation regression (proposal wzz6) ──────────────────
+//
+// After prompt-side tool-description deduplication and canonical description
+// trimming, the provider request passed to `.stream(...)` must still carry
+// full tool schemas with `name`, `description`, and `inputSchema`.  At least
+// one provider-declared tool invocation must complete through the existing
+// dispatch path.  These tests are the regression gate for that contract.
+
+/// Fetch the real canonical worker tool schemas from `djinn-mcp-extension`.
+///
+/// These are the same schemas that the production reply loop passes to
+/// `.stream(...)` — sourced from `tool_schemas_worker()` via the
+/// `djinn-roles` tool-schema registry.  Using the real schemas (rather
+/// than hand-written facsimiles) ensures the regression tests catch any
+/// change to the canonical schema surface (e.g. dropping `description`
+/// or renaming `inputSchema`).
+///
+/// The schemas use the native format with top-level `name`, `description`,
+/// and `inputSchema` keys — matching the wire format seen by
+/// `RecordingProvider::stream()`.
+fn real_worker_tool_schemas() -> Vec<serde_json::Value> {
+    djinn_mcp_extension::tool_defs::tool_schemas_worker()
+}
+
+/// LlmProvider wrapper that records every `tools` slice received by
+/// `.stream()` so the test can assert schema field preservation.
+struct RecordingProvider {
+    recorded_tools: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
+    inner: MockProvider,
+}
+
+impl RecordingProvider {
+    fn new(inner: MockProvider) -> Self {
+        Self {
+            recorded_tools: Arc::new(Mutex::new(Vec::new())),
+            inner,
+        }
+    }
+    fn captured_tools(&self) -> Vec<Vec<serde_json::Value>> {
+        self.recorded_tools.lock().unwrap().clone()
+    }
+}
+
+impl LlmProvider for RecordingProvider {
+    fn name(&self) -> &str {
+        "recording"
+    }
+    fn stream<'a>(
+        &'a self,
+        conversation: &'a Conversation,
+        tools: &'a [serde_json::Value],
+        tool_choice: Option<ToolChoice>,
+    ) -> Pin<
+        Box<
+            dyn futures::Future<
+                    Output = anyhow::Result<
+                        Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        self.recorded_tools.lock().unwrap().push(tools.to_vec());
+        self.inner.stream(conversation, tools, tool_choice)
+    }
+}
+
+/// Regression test: the provider request must still carry every tool schema
+/// with `name`, `description`, and `inputSchema` (native format).
+///
+/// After prompt-side deduplication the role prompt no longer repeats tool
+/// descriptions, so the provider request is the *only* place the model sees
+/// them.  This test captures the exact `tools` array received by `.stream()`
+/// and asserts each entry has all three required fields.
+#[tokio::test]
+async fn provider_tool_schemas_preserve_name_description_and_input_schema() {
+    let schemas = real_worker_tool_schemas();
+
+    // Turn 1: model calls `shell` → dispatches through MockToolDispatcher.
+    // Turn 2: model calls `submit_work` → session finalizes.
+    let inner = MockProvider::new(vec![
+        MockResponse::tool_call_with_input(
+            "tc_shell",
+            "shell",
+            serde_json::json!({"command": "echo hello"}),
+            200,
+        ),
+        MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin1".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({
+                    "task_id": "t1",
+                    "commit_title": "done",
+                    "summary": "completed"
+                }),
+            }],
+            input_tokens: 150,
+            output_tokens: 10,
+            _error: None,
+        },
+    ]);
+    let provider = RecordingProvider::new(inner);
+    let mut h = ReplyLoopHarness::new_with_worker_prompt().await;
+
+    // ── Prompt-side assertion: the rendered system prompt must be
+    // signature-only — tool description bodies must NOT appear on the
+    // tool-signature lines in the system prompt.  Capture before run()
+    // so compaction cannot alter the system message. ──
+    let system_prompt_text = h.conv.messages[0].text_content();
+    for schema in &schemas {
+        let name = schema
+            .get("name")
+            .and_then(|v| v.as_str())
+            .expect("schema has name");
+        let desc = schema
+            .get("description")
+            .and_then(|v| v.as_str())
+            .expect("schema has description");
+
+        // The tools section must contain a signature-only line like
+        //   - `shell(command, timeout_ms?)`
+        let has_sig_line = system_prompt_text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with(&format!("- `{name}("))
+        });
+        assert!(
+            has_sig_line,
+            "rendered worker prompt must contain signature-only tool line \
+             for {name}; this indicates format_tools_section regression"
+        );
+
+        // That same line must NOT carry the old description-extended format
+        //   - `shell(command, timeout_ms?)` — Execute shell commands…
+        // If this assertion fails, format_tools_section is duplicating
+        // provider descriptions in the prompt again.
+        let desc_on_sig_line = system_prompt_text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with(&format!("- `{name}(")) && trimmed.contains(&format!(" — {desc}"))
+        });
+        assert!(
+            !desc_on_sig_line,
+            "rendered worker prompt tool line for {name} must NOT include \
+             description body (' — {desc}'); format_tools_section is \
+             duplicating provider descriptions in the prompt"
+        );
+    }
+
+    let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
+
+    // Session must complete successfully.
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+    assert!(
+        output.finalize_payload.is_some(),
+        "finalize payload should be captured after shell dispatch"
+    );
+
+    // The provider's .stream() was called at least once.
+    let captures = provider.captured_tools();
+    assert!(
+        !captures.is_empty(),
+        "RecordingProvider should have captured at least one tools slice"
+    );
+
+    // Every captured tools array must carry every schema field unchanged.
+    // Real schemas use native format: top-level `name`, `description`,
+    // `inputSchema` (not wrapped in `{"type":"function","function":{…}}`).
+    for (turn_idx, captured) in captures.iter().enumerate() {
+        assert_eq!(
+            captured.len(),
+            schemas.len(),
+            "turn {turn_idx}: captured tools count must match input"
+        );
+        for (i, tool) in captured.iter().enumerate() {
+            // `name` must be present and non-empty at the top level.
+            let name = tool
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: name missing"));
+            assert!(
+                !name.is_empty(),
+                "turn {turn_idx}, tool {i}: name must not be empty"
+            );
+            // `description` must be present and non-empty at the top level.
+            let desc = tool
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: description missing"));
+            assert!(
+                !desc.is_empty(),
+                "turn {turn_idx}, tool {i}: description must not be empty"
+            );
+            // `inputSchema` must be present and be an object.
+            let input_schema = tool
+                .get("inputSchema")
+                .unwrap_or_else(|| panic!("turn {turn_idx}, tool {i}: inputSchema missing"));
+            assert!(
+                input_schema.is_object(),
+                "turn {turn_idx}, tool {i}: inputSchema must be an object"
+            );
+        }
+    }
+}
+
+/// Regression test: at least one provider-declared tool invocation completes
+/// through the existing dispatch path after prompt-side deduplication.
+///
+/// The `shell` tool is a provider-declared extension tool whose schema
+/// carries `name`, `description`, and `inputSchema`.  The `MockToolDispatcher`
+/// handles it and returns a successful result.  This test proves the
+/// dispatch→execute→result round-trip is intact.
+#[tokio::test]
+async fn provider_declared_tool_dispatch_completes_successfully() {
+    let schemas = real_worker_tool_schemas();
+    let inner = MockProvider::new(vec![
+        // Turn 1: model calls `shell` (provider-declared extension tool).
+        MockResponse::tool_call_with_input(
+            "tc1",
+            "shell",
+            serde_json::json!({"command": "echo dispatched"}),
+            200,
+        ),
+        // Turn 2: model calls `read` (second provider-declared tool).
+        MockResponse::tool_call_with_input(
+            "tc2",
+            "read",
+            serde_json::json!({"file_path": "/tmp/test.txt"}),
+            250,
+        ),
+        // Turn 3: finalize.
+        MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin1".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({
+                    "task_id": "t1",
+                    "commit_title": "done",
+                    "summary": "dispatched shell and read"
+                }),
+            }],
+            input_tokens: 200,
+            output_tokens: 10,
+            _error: None,
+        },
+    ]);
+    let provider = RecordingProvider::new(inner);
+    let mut h = ReplyLoopHarness::new_with_worker_prompt().await;
+    let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
+
+    // Session completes — both tool dispatches succeeded.
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+    assert!(
+        output.finalize_payload.is_some(),
+        "finalize should be captured after two successful tool dispatches"
+    );
+
+    // Verify tool results flowed back into the conversation (proof dispatch
+    // executed and returned content to the model).
+    let tool_result_blocks: Vec<_> = h
+        .conv
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        .collect();
+    assert!(
+        tool_result_blocks.len() >= 2,
+        "expected at least 2 tool results (shell + read), got {}",
+        tool_result_blocks.len()
+    );
+
+    // The shell tool result must contain mock output (not an error).
+    let has_shell_result = h.conv.messages.iter().any(|m| {
+        m.content.iter().any(|b| match b {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } => tool_use_id == "tc1" && !is_error,
+            _ => false,
+        })
+    });
+    assert!(
+        has_shell_result,
+        "shell tool result should be present and successful (is_error=false)"
+    );
+
+    // Schema preservation: captured tools must carry full schemas.
+    // Real schemas use native format: top-level `name`, `description`,
+    // `inputSchema` (not nested under `function`).
+    let captures = provider.captured_tools();
+    for (turn_idx, captured) in captures.iter().enumerate() {
+        for (i, tool) in captured.iter().enumerate() {
+            assert!(
+                tool.get("name").is_some(),
+                "turn {turn_idx}, tool {i}: name preserved"
+            );
+            assert!(
+                tool.get("description").is_some(),
+                "turn {turn_idx}, tool {i}: description preserved"
+            );
+            assert!(
+                tool.get("inputSchema").is_some(),
+                "turn {turn_idx}, tool {i}: inputSchema preserved"
+            );
+        }
+    }
+}
+
+/// Regression test: dispatch/execution semantics and schema fields are
+/// unchanged except for intended canonical description text shortening and
+/// prompt-side description removal.
+///
+/// This test constructs tool schemas that represent the *post-wzz6* surface
+/// (shortened descriptions, no prompt-side duplication) and asserts:
+/// - Runtime metadata (`readOnly`, `concurrent_safe`, etc.) parses correctly
+///   from the provider schemas.
+/// - The `shell` tool dispatches as a non-stash, non-MCP extension tool.
+/// - Finalize tool semantics are unchanged.
+/// - Description text is still meaningful (not empty, not accidentally
+///   replaced with signature-only text).
+#[tokio::test]
+async fn dispatch_semantics_unchanged_after_description_shortening() {
+    let schemas = real_worker_tool_schemas();
+
+    // Runtime metadata must parse correctly from the provider schemas.
+    let metadata = crate::reply_loop::tool_dispatch::tool_runtime_metadata(&schemas);
+    assert_eq!(
+        metadata["shell"],
+        crate::reply_loop::tool_dispatch::ToolRuntimeMetadata {
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            open_world: false,
+            concurrent_safe: false,
+        },
+        "shell metadata unchanged (real tool_shell uses destructive())"
+    );
+    assert_eq!(
+        metadata["read"],
+        crate::reply_loop::tool_dispatch::ToolRuntimeMetadata {
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+            open_world: false,
+            concurrent_safe: true,
+        },
+        "read metadata unchanged (concurrent_safe=true)"
+    );
+
+    // Description text is still substantive after shortening — not empty
+    // and not replaced with signature-only text.
+    // Real schemas use native format: description at top level (not nested
+    // under "function").
+    for schema in &schemas {
+        let desc = schema
+            .get("description")
+            .and_then(|v| v.as_str())
+            .expect("description present at top level");
+        let name = schema
+            .get("name")
+            .and_then(|v| v.as_str())
+            .expect("name present at top level");
+        assert!(
+            desc.len() > 10,
+            "description for {name} should be substantive after shortening, got: {desc:?}"
+        );
+        // Description should not accidentally be the parameter signature
+        // (which would mean prompt-side deduplication leaked into provider schemas).
+        assert!(
+            !desc.starts_with('(') && !desc.contains("required:"),
+            "description for {name} should not be a parameter signature: {desc:?}"
+        );
+    }
+
+    // Drive a full dispatch cycle: shell → dispatches as extension tool → ok.
+    let inner = MockProvider::new(vec![
+        MockResponse::tool_call_with_input(
+            "tc1",
+            "shell",
+            serde_json::json!({"command": "pwd"}),
+            300,
+        ),
+        MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin1".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({
+                    "task_id": "t1",
+                    "commit_title": "done",
+                    "summary": "executed shell, semantics unchanged"
+                }),
+            }],
+            input_tokens: 250,
+            output_tokens: 10,
+            _error: None,
+        },
+    ]);
+    let provider = RecordingProvider::new(inner);
+    let mut h = ReplyLoopHarness::new_with_worker_prompt().await;
+    let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+    assert!(output.finalize_payload.is_some());
+
+    // Shell dispatch returned a successful result (mock output present).
+    let tool_results: Vec<_> = h
+        .conv
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Some((tool_use_id.as_str(), content, *is_error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 1, "exactly one tool result (shell)");
+    assert_eq!(tool_results[0].0, "tc1");
+    assert!(!tool_results[0].2, "shell result must not be an error");
+    // The mock dispatcher returns JSON with "ok": true.
+    let result_text = tool_results[0]
+        .1
+        .iter()
+        .filter_map(|b| b.as_text())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        result_text.contains("\"ok\""),
+        "shell result should contain mock dispatch output, got: {result_text:?}"
+    );
+}
+
+/// Standalone regression test: the rendered worker system prompt must use
+/// signature-only tool lines (no provider description bodies), while
+/// provider-declared tool schemas still carry full `description` fields.
+///
+/// This test does NOT run the reply loop — it inspects the prompt and schemas
+/// directly so it catches regressions in `format_tools_section` rendering
+/// independently of dispatch/stream behaviour.
+#[tokio::test]
+async fn rendered_worker_prompt_uses_signature_only_tool_section() {
+    let schemas = real_worker_tool_schemas();
+
+    // Build the real post-wzz6 worker prompt surface using a minimal Task
+    // constructed directly — no database dependency, so the test runs in
+    // any environment (CI sidecar, local dev) without needing the Postgres
+    // test template.
+    let tool_schemas_fn = djinn_mcp_extension::tool_defs::tool_schemas_worker;
+    let role_config = djinn_roles::config::config_for(djinn_roles::AgentType::Worker);
+    let task = djinn_core::models::Task {
+        id: "test-task-id".to_string(),
+        project_id: "test-project-id".to_string(),
+        short_id: "t-wzz6".to_string(),
+        epic_id: None,
+        title: "wzz6 regression probe".to_string(),
+        description: "Verify prompt-side tool-description deduplication.".to_string(),
+        design: String::new(),
+        issue_type: "task".to_string(),
+        status: "in_progress".to_string(),
+        priority: 1,
+        owner: "test-owner".to_string(),
+        labels: "[]".to_string(),
+        acceptance_criteria: "[]".to_string(),
+        reopen_count: 0,
+        continuation_count: 0,
+        total_reopen_count: 0,
+        intervention_count: 0,
+        last_intervention_at: None,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        closed_at: None,
+        close_reason: None,
+        merge_commit_sha: None,
+        pr_url: None,
+        merge_conflict_metadata: None,
+        memory_refs: "[]".to_string(),
+        agent_type: None,
+        created_by_user_id: None,
+        ci_status: "unknown".to_string(),
+        ci_head_sha: None,
+        ci_pr_number: None,
+        ci_blocking_required_check_names: "[]".to_string(),
+        ci_failure_fingerprint: None,
+        ci_first_seen_at: None,
+        ci_last_seen_at: None,
+        ci_same_signature_count: 0,
+        ci_last_remediation_base_sha: None,
+        ci_mirror_head_sha: None,
+        ci_github_head_sha: None,
+        ci_heads_diverged: None,
+        ci_head_observation_error: None,
+        unresolved_blocker_count: 0,
+    };
+    let task_ctx = djinn_roles::prompts::TaskContext {
+        project_path: "/tmp/project".to_string(),
+        workspace_path: "/tmp/workspace".to_string(),
+        diff: None,
+        commits: None,
+        start_commit: None,
+        end_commit: None,
+        conflict_files: None,
+        merge_base_branch: None,
+        merge_target_branch: None,
+        merge_failure_context: None,
+        setup_commands: None,
+        activity: None,
+        worker_summary: None,
+        worker_concerns: None,
+        epic_context: None,
+        knowledge_context: None,
+        code_graph_context: None,
+        reviewer_diff_context: None,
+        ci_blocking_directive: None,
+        worker_resume_note: None,
+        arbiter_directive: None,
+    };
+    let system_prompt = djinn_roles::prompts::render_prompt_for_role(
+        role_config,
+        tool_schemas_fn,
+        &task,
+        &task_ctx,
+    );
+
+    // ── Provider schemas: every schema must carry `name`, `description`,
+    // and `inputSchema` (the canonical three-field contract). ──
+    for schema in &schemas {
+        let name = schema
+            .get("name")
+            .and_then(|v| v.as_str())
+            .expect("provider schema must have top-level `name`");
+        let desc = schema
+            .get("description")
+            .and_then(|v| v.as_str())
+            .expect("provider schema must have top-level `description`");
+        assert!(
+            !desc.is_empty(),
+            "provider schema description for {name} must not be empty"
+        );
+        let input_schema = schema
+            .get("inputSchema")
+            .expect("provider schema must have top-level `inputSchema`");
+        assert!(
+            input_schema.is_object(),
+            "provider schema inputSchema for {name} must be an object"
+        );
+    }
+
+    // ── Prompt-side: the rendered system prompt must contain
+    // signature-only tool lines.  For each tool, verify:
+    //   1. A line matching `- `name(` exists (the signature).
+    //   2. That line does NOT contain ` — ` followed by the description
+    //      (the old format_tool_line_with_description format).
+    //
+    // If assertion #2 fails, format_tools_section is duplicating provider
+    // description bodies in the system prompt — a direct regression of the
+    // wzz6 prompt-side deduplication. ──
+    for schema in &schemas {
+        let name = schema
+            .get("name")
+            .and_then(|v| v.as_str())
+            .expect("schema has name");
+        let desc = schema
+            .get("description")
+            .and_then(|v| v.as_str())
+            .expect("schema has description");
+
+        // Find the signature-only line for this tool.
+        let sig_line = system_prompt.lines().find(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with(&format!("- `{name}("))
+        });
+
+        assert!(
+            sig_line.is_some(),
+            "rendered worker prompt must contain signature-only tool line \
+             for {name} (format: '- `{name}(...)`'); prompt may be missing \
+             the tools section entirely"
+        );
+
+        let sig_line = sig_line.unwrap();
+        assert!(
+            !sig_line.contains(&format!(" — {desc}")),
+            "rendered worker prompt tool line for {name} contains provider \
+             description body after ' — ' separator (got: {sig_line:?}); \
+             format_tools_section must emit signature-only lines"
+        );
+        // Also verify the line ends with `)` (or `)``) — just the signature,
+        // no trailing description prose.
+        let trimmed = sig_line.trim();
+        assert!(
+            trimmed.ends_with('`') || trimmed.ends_with(')'),
+            "rendered worker prompt tool line for {name} should end with \
+             closing backtick/paren, got: {trimmed:?}"
+        );
+    }
 }

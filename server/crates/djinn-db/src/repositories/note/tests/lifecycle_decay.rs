@@ -139,8 +139,15 @@ async fn decay_ineligibility_recently_accessed_unchanged() {
         .create(&project_id, "Fresh Case", "body", "case", "[]")
         .await
         .unwrap();
-    // Accessed 5 days ago — well within the 30-day window.
-    patch_note(&db, &case.id, "2026-06-11T00:00:00.000Z", 0.5, None).await;
+    // Accessed 5 days ago — well within the 30-day window. Compute from the DB
+    // clock so this test is immune to wall-clock date drift.
+    let recent: String = sqlx::query_scalar(
+        "SELECT to_char((now() at time zone 'utc') - interval '5 days', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    patch_note(&db, &case.id, &recent, 0.5, None).await;
 
     let decayed = repo
         .decay_stale_extracted_notes(&project_id, TEST_WINDOW_DAYS)
