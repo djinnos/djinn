@@ -70,7 +70,12 @@ service:
 resources:
   server:
     requests:
-      cpu: "500m"
+      # CPU requests are the CFS weight under contention. At 250m-500m the
+      # server lost enough CPU during compile storms (a full worker fleet
+      # linking at once) to fail its readiness probe — transient 521s observed
+      # in production. Pin the request to 1 full core so the long-lived
+      # controller keeps a guaranteed share while task-run pods burst.
+      cpu: "1"
       memory: "512Mi"
     limits:
       cpu: "2"
@@ -94,7 +99,13 @@ resources:
       cpu: "1"
       memory: "2Gi"
     limits:
-      cpu: "6"
+      # CARGO_BUILD_JOBS / NEXTEST_TEST_THREADS derive from this CPU limit
+      # (PR #1896), so it bounds per-pod compile parallelism. At limit 6 a full
+      # fleet of 8 workers compiling simultaneously drove load 55-68 on 12
+      # cores and starved the readiness probes; at limit 4 the plateau is ~39,
+      # which the node tolerates. Keep memory high — a cargo link burst still
+      # needs the headroom.
+      cpu: "4"
       memory: "22Gi"
     # Pod scheduling for both task-run and warm Jobs. Warm Pods pre-warm the
     # graph cache that task-runs later adopt, so they MUST land on the same
@@ -131,7 +142,12 @@ resources:
       cpu: "2"
       memory: "2Gi"
     limits:
-      cpu: "6"
+      # Same per-pod compile-parallelism bound as `taskrun` above: warm passes
+      # compile the workspace too, and CARGO_BUILD_JOBS / NEXTEST_TEST_THREADS
+      # derive from this limit (PR #1896). Limit 4 keeps a warm-plus-worker
+      # fleet under the ~39 plateau the 12-core node tolerates instead of the
+      # 55-68 spike seen at limit 6.
+      cpu: "4"
       memory: "16Gi"
     # Max wall-clock seconds a warm Job may run before the kubelet terminates
     # it (activeDeadlineSeconds), surfaced as DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS.
@@ -294,7 +310,11 @@ postgres:
     maxConnections: 200
   resources:
     requests:
-      cpu: "500m"
+      # CPU request is the CFS weight under contention. At 500m the bundled
+      # Postgres lost CPU during compile storms and pg_isready probes timed
+      # out; pin to 1 full core so SQL stays responsive while task-run pods
+      # burst. Keep limits as-is.
+      cpu: "1"
       memory: "2Gi"
     limits:
       cpu: "2"
