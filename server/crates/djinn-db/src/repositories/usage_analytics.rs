@@ -66,6 +66,26 @@ pub struct ModelEffectivenessRow {
     pub success_rate: Option<f64>,
     /// Average total_reopen_count across closed tasks attributed to this model.
     pub avg_reopens: Option<f64>,
+    /// First-pass rejection rate: fraction of this model's worker sessions that
+    /// were superseded by a later worker session on a task that was reopened at
+    /// least once — i.e. the pass this session produced did not land and the
+    /// task went back for rework. This discriminates first-pass quality that
+    /// shared-credit success_rate hides: a model whose first passes are
+    /// routinely reworked by another model still inherits shared success credit.
+    /// `None` when the model ran no worker sessions.
+    pub first_pass_rejection_rate: Option<f64>,
+    /// Final-pass share: fraction of this model's shared-credit completed tasks
+    /// where THIS model ran the *last* worker session before the task closed —
+    /// i.e. who actually landed the merged result. Low final-pass share with
+    /// high shared-credit success means the model rarely closes tasks itself.
+    /// `None` when the model has no completed-task credits.
+    pub final_pass_share: Option<f64>,
+    /// Count of this model's worker sessions that were superseded on a reopened
+    /// task (numerator of `first_pass_rejection_rate`). Surfaced for tooltips.
+    pub first_pass_rejected_session_count: i64,
+    /// Count of completed tasks where this model ran the last worker session
+    /// (numerator of `final_pass_share`). Surfaced for tooltips.
+    pub final_pass_completed_task_count: i64,
     /// Actual cost per completed task. `None` when no completed tasks or
     /// no actual-basis sessions.
     pub actual_cost_per_completed_task: Option<f64>,
@@ -674,10 +694,30 @@ impl UsageAnalyticsRepository {
         let sql = format!(
             "WITH filtered_sessions AS ( \
                 SELECT \
+                    s.id AS session_id, s.started_at, \
                     s.model_id, s.task_id, s.cost_usd, s.cost_basis, s.tokens_in, s.tokens_out, \
                     s.cache_read_tokens, \
                     t.status, t.close_reason, t.total_reopen_count \
                 {from_clause} {where_clause} \
+             ), \
+             session_order AS ( \
+                SELECT \
+                    model_id, task_id, status, close_reason, total_reopen_count, started_at, \
+                    MAX(started_at) OVER (PARTITION BY task_id) AS last_started \
+                FROM filtered_sessions \
+             ), \
+             outcome_agg AS ( \
+                SELECT \
+                    model_id, \
+                    COUNT(*) FILTER ( \
+                        WHERE started_at < last_started AND total_reopen_count > 0 \
+                    ) AS first_pass_rejected_session_count, \
+                    COUNT(DISTINCT CASE \
+                        WHEN started_at = last_started \
+                             AND status = 'closed' AND close_reason = 'completed' \
+                        THEN task_id END) AS final_pass_completed_task_count \
+                FROM session_order \
+                GROUP BY model_id \
              ), \
              session_agg AS ( \
                 SELECT \
@@ -723,9 +763,22 @@ impl UsageAnalyticsRepository {
                  CASE WHEN ta.closed_count > 0 \
                       THEN ta.completed_count::DOUBLE PRECISION / ta.closed_count::DOUBLE PRECISION \
                       END                        AS success_rate, \
-                 ta.avg_reopens                  AS avg_reopens \
+                 ta.avg_reopens                  AS avg_reopens, \
+                 COALESCE(oa.first_pass_rejected_session_count, 0) \
+                                                 AS first_pass_rejected_session_count, \
+                 COALESCE(oa.final_pass_completed_task_count, 0) \
+                                                 AS final_pass_completed_task_count, \
+                 CASE WHEN sa.sessions > 0 \
+                      THEN COALESCE(oa.first_pass_rejected_session_count, 0)::DOUBLE PRECISION \
+                           / sa.sessions::DOUBLE PRECISION \
+                      END                        AS first_pass_rejection_rate, \
+                 CASE WHEN COALESCE(ta.completed_count, 0) > 0 \
+                      THEN COALESCE(oa.final_pass_completed_task_count, 0)::DOUBLE PRECISION \
+                           / ta.completed_count::DOUBLE PRECISION \
+                      END                        AS final_pass_share \
              FROM session_agg sa \
              LEFT JOIN task_agg ta ON ta.model_id = sa.model_id \
+             LEFT JOIN outcome_agg oa ON oa.model_id = sa.model_id \
              ORDER BY sa.model_id"
         );
 
@@ -773,6 +826,10 @@ impl UsageAnalyticsRepository {
                     shared_credit_completed_task_count: completed,
                     success_rate: r.get("success_rate"),
                     avg_reopens: r.get("avg_reopens"),
+                    first_pass_rejection_rate: r.get("first_pass_rejection_rate"),
+                    final_pass_share: r.get("final_pass_share"),
+                    first_pass_rejected_session_count: r.get("first_pass_rejected_session_count"),
+                    final_pass_completed_task_count: r.get("final_pass_completed_task_count"),
                     actual_cost_per_completed_task,
                     list_price_cost_per_completed_task,
                     tokens_per_task,
@@ -1018,6 +1075,10 @@ mod tests {
             shared_credit_completed_task_count: 3,
             success_rate: Some(0.67),
             avg_reopens: Some(0.5),
+            first_pass_rejection_rate: Some(0.4),
+            final_pass_share: Some(0.6),
+            first_pass_rejected_session_count: 2,
+            final_pass_completed_task_count: 2,
             actual_cost_per_completed_task: Some(0.26),
             list_price_cost_per_completed_task: Some(0.41),
             tokens_per_task: Some(50.0),
