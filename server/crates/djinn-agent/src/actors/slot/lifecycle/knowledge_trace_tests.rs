@@ -612,3 +612,78 @@ async fn production_search_error_returns_none_fail_open() {
         "production search error must return None (fail-open)"
     );
 }
+
+// ── Rendered output unchanged by trace instrumentation ─────────────────────
+//
+// The knowledge-context rendered by `load_knowledge_context` (which includes
+// trace instrumentation) must produce byte-identical text to
+// `pack_knowledge_notes` for the same production note set. This pins AC:
+// "Tests or helper assertions prove rendered knowledge context [...] output
+// are unchanged by trace instrumentation."
+
+#[tokio::test]
+async fn load_knowledge_context_rendered_matches_pack_knowledge_notes() {
+    use crate::actors::slot::helpers::pack_knowledge_notes;
+
+    let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Match epic", "Match task").await;
+    let project_id = task.project_id.clone();
+
+    // Seed two global notes with different confidence levels so the rendered
+    // text uses different summary paths (L1 overview for high confidence,
+    // L0 abstract for lower confidence).
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+    let high_note = note_repo
+        .create(
+            &project_id,
+            "High Confidence Note",
+            "high body",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    set_note_confidence(&db, &high_note.id, 0.95).await;
+
+    let low_note = note_repo
+        .create(
+            &project_id,
+            "Low Confidence Note",
+            "low body",
+            "pitfall",
+            "[]",
+        )
+        .await
+        .unwrap();
+    set_note_confidence(&db, &low_note.id, 0.5).await;
+
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let rendered = load_knowledge_context(&task, None, &app_state)
+        .await
+        .expect("knowledge context should be Some");
+
+    // Fetch the same notes via the production query to compare.
+    let notes = note_repo
+        .query_by_scope_overlap(
+            &project_id,
+            &derive_task_scope_paths(&task, None),
+            KNOWLEDGE_NOTE_TYPES,
+            KNOWLEDGE_MIN_CONFIDENCE,
+            KNOWLEDGE_INJECTION_LIMIT,
+        )
+        .await
+        .expect("production query");
+
+    let expected = pack_knowledge_notes(&notes, KNOWLEDGE_BUDGET_CHARS).rendered;
+
+    assert_eq!(
+        rendered, expected,
+        "load_knowledge_context rendered output must match pack_knowledge_notes byte-for-byte"
+    );
+
+    // Both note titles must appear in the rendered text.
+    assert!(rendered.contains("High Confidence Note"));
+    assert!(rendered.contains("Low Confidence Note"));
+}
