@@ -20,12 +20,11 @@ use super::test_support::create_project_epic_task;
 
 /// Set confidence and updated_at on a note row for deterministic ordering.
 async fn set_note_confidence(db: &djinn_db::Database, note_id: &str, confidence: f64) {
-    sqlx::query("UPDATE notes SET confidence = $1 WHERE id = $2")
-        .bind(confidence)
-        .bind(note_id)
-        .execute(db.pool())
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    note_repo
+        .set_confidence(note_id, confidence)
         .await
-        .unwrap();
+        .expect("set_confidence");
 }
 
 /// Create a scoped pattern note that overlaps the given task paths.
@@ -350,10 +349,7 @@ async fn trace_persistence_failure_does_not_change_prompt_output() {
 
     // Drop the retrieval_traces table to force a persistence error.
     // The prompt output should still be correct.
-    sqlx::query("DROP TABLE IF EXISTS retrieval_traces")
-        .execute(db.pool())
-        .await
-        .unwrap();
+    djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
 
     let result = load_knowledge_context(&task, None, &app_state).await;
 
