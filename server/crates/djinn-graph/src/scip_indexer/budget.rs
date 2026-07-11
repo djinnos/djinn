@@ -10,7 +10,10 @@
 //! 2. Add size scale: `ceil(files / 250) * 30s` + `ceil(bytes / 25 MiB) * 30s`,
 //!    capped by a per-indexer maximum.
 //! 3. If prior p95/last-success exists, raise to `max(formula, p95 * 2,
-//!    last_success * 2)`, still capped by the indexer max.
+//!    last_success * 2)`, still capped by the indexer max. A success whose
+//!    elapsed *exceeded* the static max_cap additionally raises the budget to
+//!    ~1.25x that proven cost (bounded by the adaptive ceiling), so a cost we
+//!    already paid for is never forgotten when the timed-out high-water resets.
 //! 4. Clamp to active deadline: `usable = max_runtime - elapsed - reserve`.
 //!    If `usable == 0`, return a zero budget so the caller can skip with a
 //!    `deadline_exhausted` status detail. Otherwise `total = min(formula,
@@ -46,6 +49,19 @@ const MIN_PER_PARTITION: Duration = Duration::from_secs(10);
 /// identical too-small cap.
 const TIMEOUT_HEADROOM_NUMERATOR: u32 = 3;
 const TIMEOUT_HEADROOM_DENOMINATOR: u32 = 2;
+
+/// Multiplier applied to a PROVEN success whose observed elapsed exceeded the
+/// static `max_cap`, to derive the next invocation's budget. A success is hard
+/// evidence of the *actual* cost (unlike a timeout, which only proves the cap
+/// was too small), so we add a smaller variance cushion — ~1.25x the proven
+/// elapsed — than the 1.5x timeout-growth factor. This keeps the budget above a
+/// cost we have already paid for, so a heavy workspace that succeeded above
+/// `max_cap` is never re-run at the too-small static cap. Like the timeout
+/// path, this is allowed to climb above `max_cap`, bounded by the adaptive
+/// ceiling. Successes *under* `max_cap` stay handled by [`prior_based_budget`]
+/// (clamped to `max_cap`), so no-history / under-cap behaviour is unchanged.
+const SUCCESS_HEADROOM_NUMERATOR: u32 = 5;
+const SUCCESS_HEADROOM_DENOMINATOR: u32 = 4;
 
 /// Absolute ceiling multiplier for the ADAPTIVE (prior-timing-driven) path,
 /// applied to the per-indexer static `max_cap`. Normal size-scaling and
@@ -292,6 +308,32 @@ fn timeout_headroom_budget(prior: &PriorIndexerTiming, ceiling: Duration) -> Dur
     .min(ceiling)
 }
 
+/// Headroom budget derived from a PROVEN success whose observed elapsed exceeded
+/// the static `max_cap`. A success above the cap is hard evidence of the real
+/// cost, so the next budget must stay above it (with a ~1.25x variance cushion,
+/// see [`SUCCESS_HEADROOM_NUMERATOR`]) — otherwise clearing the timed-out
+/// high-water on success would let the budget snap back to the too-small
+/// `max_cap` and the workspace would oscillate kill→grow→success→kill.
+///
+/// Returns `Duration::ZERO` when there is no success evidence or the success
+/// elapsed is within `max_cap` (those stay handled by [`prior_based_budget`],
+/// preserving byte-identical under-cap behaviour). Like
+/// [`timeout_headroom_budget`], the result may exceed `max_cap`, bounded by the
+/// adaptive `ceiling`.
+fn success_headroom_budget(
+    prior: &PriorIndexerTiming,
+    max_cap: Duration,
+    ceiling: Duration,
+) -> Duration {
+    match prior.last_success_ms {
+        Some(ms) if Duration::from_millis(ms) > max_cap => (Duration::from_millis(ms)
+            .saturating_mul(SUCCESS_HEADROOM_NUMERATOR)
+            / SUCCESS_HEADROOM_DENOMINATOR)
+            .min(ceiling),
+        _ => Duration::ZERO,
+    }
+}
+
 /// Formula-based budget (baseline + size scaling), capped by the indexer max.
 fn scaled_budget(indexer: SupportedIndexer, size: &WorkspaceSizeHint) -> (Duration, usize, u64) {
     let base = baseline(indexer);
@@ -351,6 +393,21 @@ fn budget_for_indexer_at(
             reason_parts.push(format!(
                 "timed-out headroom raised to {:?} (ceiling {:?})",
                 headroom, ceiling
+            ));
+        }
+
+        // 3c: proven-success headroom — a success whose elapsed exceeded the
+        // static `max_cap` is hard evidence of the true cost. Keep the budget
+        // above it (≈1.25x) so clearing the timed-out high-water on success
+        // can't snap the budget back to the too-small `max_cap` and restart the
+        // kill→grow→success→kill oscillation. Also allowed above `max_cap`,
+        // bounded by the same adaptive ceiling.
+        let success_headroom = success_headroom_budget(prior, cap, ceiling);
+        if success_headroom > total {
+            total = success_headroom;
+            reason_parts.push(format!(
+                "over-cap success headroom raised to {:?} (ceiling {:?})",
+                success_headroom, ceiling
             ));
         }
     }
@@ -623,6 +680,67 @@ mod tests {
         assert_eq!(budget.per_invocation, Duration::from_secs(1800));
         assert!(budget.total > max_cap(SupportedIndexer::RustAnalyzer));
         assert!(budget.reason.contains("timed-out headroom raised"));
+    }
+
+    #[test]
+    fn over_cap_success_keeps_budget_above_proven_cost() {
+        // The exact production oscillation (PR #1891 follow-up): the Rust
+        // `server` workspace succeeds at 2390s, ABOVE the static 1200s cap.
+        // The DB clears the timed-out high-water on success, so only
+        // `last_success_ms` carries the cost. The next budget must stay above
+        // 2390s (≈1.25x = 2987s), NOT snap back to the 1200s cap and get killed.
+        let size = WorkspaceSizeHint::default();
+        let prior = PriorIndexerTiming {
+            // High-water reset on the success, exactly as the repository writes.
+            last_success_ms: Some(2_390_000),
+            last_timed_out_ms: None,
+            ..Default::default()
+        };
+        let budget = budget_for_indexer(SupportedIndexer::RustAnalyzer, &size, Some(&prior), None);
+        // 2390s * 5 / 4 = 2987.5s (Duration keeps sub-second precision).
+        assert_eq!(budget.total, Duration::from_millis(2_987_500));
+        assert_eq!(budget.per_invocation, Duration::from_millis(2_987_500));
+        assert!(
+            budget.total >= Duration::from_secs(2390),
+            "budget must never forget a proven 2390s success cost"
+        );
+        assert!(budget.total > max_cap(SupportedIndexer::RustAnalyzer));
+        assert!(budget.total <= adaptive_ceiling(SupportedIndexer::RustAnalyzer));
+        assert!(budget.reason.contains("over-cap success headroom raised"));
+    }
+
+    #[test]
+    fn under_cap_success_stays_at_static_cap() {
+        // A success comfortably under the static cap must NOT trigger the
+        // over-cap headroom path — it stays clamped at the static max_cap
+        // (via prior_based_budget's ×2 → clamp), never growing above it and
+        // never shrinking below the default.
+        let size = WorkspaceSizeHint::default();
+        let prior = PriorIndexerTiming {
+            last_success_ms: Some(800_000), // under the 1200s cap
+            ..Default::default()
+        };
+        let budget = budget_for_indexer(SupportedIndexer::RustAnalyzer, &size, Some(&prior), None);
+        assert_eq!(budget.total, max_cap(SupportedIndexer::RustAnalyzer));
+        assert_eq!(budget.total, Duration::from_secs(1200));
+        assert!(!budget.reason.contains("over-cap success headroom raised"));
+    }
+
+    #[test]
+    fn over_cap_success_headroom_bounded_by_adaptive_ceiling() {
+        // A proven success cost so large its 1.25x cushion exceeds the ceiling
+        // is still bounded by max_cap * 3 (Rust 3600s).
+        let size = WorkspaceSizeHint::default();
+        let prior = PriorIndexerTiming {
+            last_success_ms: Some(10_000_000), // 1.25x = 12500s, over ceiling
+            ..Default::default()
+        };
+        let budget = budget_for_indexer(SupportedIndexer::RustAnalyzer, &size, Some(&prior), None);
+        assert_eq!(budget.total, Duration::from_secs(3600));
+        assert_eq!(
+            budget.total,
+            adaptive_ceiling(SupportedIndexer::RustAnalyzer)
+        );
     }
 
     #[test]

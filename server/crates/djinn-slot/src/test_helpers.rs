@@ -264,6 +264,24 @@ pub fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Opti
     Some(out)
 }
 
+/// Slot-local copy of the agent's output-stash header escaping so mock
+/// dispatchers emit the same canonical, parseable header without depending on
+/// `djinn-agent`.
+fn escape_stash_header_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 /// Slot-local mock of the agent's `externalize_rendered_tool_result`.
 ///
 /// Test dispatchers (`MockToolDispatcher`, `ConfigurableToolDispatcher`) share
@@ -289,7 +307,11 @@ pub fn mock_externalize_rendered_result(
     let preview_body_chars = preview_body.chars().count();
 
     let header = format!(
-        "[djinn-output-stash tool_use_id=\"{tool_use_id}\" tool_name=\"{tool_name}\" reason=\"turn_budget\" full_chars=\"{full_chars}\" preview_chars=\"{preview_body_chars}\"]"
+        "[djinn-output-stash tool_use_id=\"{}\" tool_name=\"{}\" reason=\"turn_budget\" full_chars=\"{}\" preview_chars=\"{}\"]",
+        escape_stash_header_value(tool_use_id),
+        escape_stash_header_value(tool_name),
+        full_chars,
+        preview_body_chars,
     );
 
     let stub =
@@ -333,6 +355,19 @@ mod externalization_seam_tests {
         let output = dispatcher.externalize_rendered_result("call-small-1", "read", rendered, 4);
 
         assert_eq!(output, rendered);
+    }
+
+    #[test]
+    fn mock_externalize_escapes_header_values() {
+        let dispatcher: Arc<dyn SlotToolDispatcher> = Arc::new(MockToolDispatcher);
+        let rendered = "0123456789".repeat(80);
+
+        let stub =
+            dispatcher.externalize_rendered_result("call-\\\"é", "tool-\\\"name", &rendered, 12);
+
+        assert!(stub.starts_with(
+            "[djinn-output-stash tool_use_id=\"call-\\\\\\\"é\" tool_name=\"tool-\\\\\\\"name\" reason=\"turn_budget\""
+        ));
     }
 }
 
