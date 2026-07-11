@@ -1229,9 +1229,7 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
     graph: &crate::repo_graph::RepoDependencyGraph,
     workspace_statuses: &[crate::scip_indexer::WorkspaceWarmStatus],
 ) {
-    use djinn_db::{
-        CODELESS_WORKSPACE_SLUG, ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,
-    };
+    use djinn_db::{ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert};
 
     let workspaces = distinct_workspace_slugs(graph);
     if workspaces.is_empty() {
@@ -1279,24 +1277,21 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
 
     let workspace_count = rows.len();
     let repo = ProjectWorkspaceGraphRepository::new(ctx.db().clone());
-    if let Err(e) = repo.upsert_many(&rows).await {
+    // Persist as a *replace-set*, not a blind upsert: this run's rows are the
+    // full truth for the project, so any slug it no longer emits (a vanished
+    // folder, a pre-per-workspace `root` stamp, or the code-less sentinel — none
+    // of which are in `rows`) is pruned in the same transaction. Plain
+    // `upsert_many` could only ever write, leaving ghost rows that the
+    // `code_graph workspaces` op kept surfacing forever. Timed-out/failed
+    // workspaces are already in `rows`, so they keep their row and are not
+    // pruned.
+    if let Err(e) = repo.replace_for_project(project_id, &rows).await {
         tracing::warn!(
             project_id = %project_id,
             commit_sha = %commit_sha,
             workspace_count,
             error = %e,
             "ensure_canonical_graph: failed to persist project_workspace_graph freshness rows"
-        );
-    }
-
-    // A successful warm with real workspaces contradicts any lingering
-    // code-less sentinel (e.g. stamped while the warm gate misfired on a
-    // catalog-image project). Retire it so freshness derives from real rows.
-    if let Err(e) = repo.delete(project_id, CODELESS_WORKSPACE_SLUG).await {
-        tracing::warn!(
-            project_id = %project_id,
-            error = %e,
-            "ensure_canonical_graph: failed to delete code-less sentinel row"
         );
     }
 }
