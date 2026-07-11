@@ -26,6 +26,12 @@ CREATE TABLE IF NOT EXISTS org_ai_policy (
     default_lanes          TEXT        NOT NULL DEFAULT '{}',
     -- 'flexible' (members may override) | 'locked' (org assignment authoritative).
     lock_level             VARCHAR(16) NOT NULL DEFAULT 'flexible',
+    -- JSON array of fully-qualified "provider/model-id" entries to ADD to the
+    -- recommended set on top of the baseline RECOMMENDED_MODELS list.
+    additional_recommended_model_ids  TEXT NOT NULL DEFAULT '[]',
+    -- JSON array of fully-qualified "provider/model-id" entries to REMOVE from
+    -- the recommended set (demotion wins over addition).
+    demoted_recommended_model_ids     TEXT NOT NULL DEFAULT '[]',
     updated_at             VARCHAR(64) NOT NULL DEFAULT '',
     CONSTRAINT org_ai_policy_singleton CHECK (id = 1),
     CONSTRAINT org_ai_policy_lock_level_check CHECK (lock_level IN ('flexible', 'locked'))

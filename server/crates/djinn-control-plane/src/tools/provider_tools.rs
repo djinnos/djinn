@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user;
 use crate::tools::tool_error::{ErrorClass, ToolError};
-use djinn_core::models::{Model, Provider};
+use djinn_core::models::{Model, OrgAiPolicy, Provider};
 use djinn_provider::catalog::builtin;
 use djinn_provider::catalog::health::ModelHealth;
 use djinn_provider::catalog::validate::{self, ValidationRequest};
@@ -31,6 +31,29 @@ fn is_blocked_subscription(provider_id: &str, blocked: &HashSet<String>) -> bool
     }
     builtin::is_subscription_provider(provider_id)
         && blocked.contains(&provider_id.to_ascii_lowercase())
+}
+
+/// Compute the effective `recommended` flag for a model using the org policy
+/// override lists plus the built-in baseline. Priority: demotion wins over
+/// addition; addition wins over the `builtin::is_recommended_model` baseline.
+/// `surfaced_model_id` is the fully qualified `provider/model-id` as it will
+/// appear in the API output (after any merged-child re-namespacing).
+fn effective_recommended(provider_id: &str, surfaced_model_id: &str, policy: &OrgAiPolicy) -> bool {
+    if policy
+        .demoted_recommended_model_ids
+        .iter()
+        .any(|id| id == surfaced_model_id)
+    {
+        return false;
+    }
+    if policy
+        .additional_recommended_model_ids
+        .iter()
+        .any(|id| id == surfaced_model_id)
+    {
+        return true;
+    }
+    builtin::is_recommended_model(provider_id, surfaced_model_id)
 }
 
 fn model_to_output(m: &Model) -> ProviderModelOutput {
@@ -778,6 +801,34 @@ impl DjinnMcpServer {
         let connected_set = self.state.catalog().connected_provider_ids(&credentials);
         let blocked_subscriptions = self.state.blocked_subscription_ids().await;
 
+        // Load org policy for recommended-model overrides once.
+        let org_policy = self.state.org_ai_policy().await;
+
+        // Log a warning for any legacy/corrupt overlap between additions and
+        // demotions. Demotion wins at runtime (effective_recommended checks
+        // demotions first), but persisted data should be clean.
+        {
+            let additional_set: HashSet<String> = org_policy
+                .additional_recommended_model_ids
+                .iter()
+                .cloned()
+                .collect();
+            let demoted_set: HashSet<String> = org_policy
+                .demoted_recommended_model_ids
+                .iter()
+                .cloned()
+                .collect();
+            let overlap: Vec<&String> = additional_set.intersection(&demoted_set).collect();
+            if !overlap.is_empty() {
+                tracing::warn!(
+                    overlap = ?overlap,
+                    "org_ai_policy: same model id(s) appear in both \
+                     additional_recommended_model_ids and \
+                     demoted_recommended_model_ids; treating as demoted"
+                );
+            }
+        }
+
         // Collect connected provider IDs including merged children. Org-policy-
         // blocked subscriptions (parent or merged child) are skipped so their
         // models never reach a member.
@@ -803,6 +854,7 @@ impl DjinnMcpServer {
             }
         }
 
+        let org_policy_ref = &org_policy;
         let mut seen_ids: HashSet<String> = HashSet::new();
         let models: Vec<ProviderModelOutput> = connected_provider_ids
             .iter()
@@ -835,12 +887,13 @@ impl DjinnMcpServer {
                                 .unwrap_or(&out.id)
                                 .to_string();
                             out.id = format!("{display_pid}/{rest}");
-                            // Recompute `recommended` under the parent namespace
-                            // so a merged child's flagship (e.g. a chatgpt_codex
-                            // model re-tagged to openai) is still marked.
-                            out.recommended =
-                                builtin::is_recommended_model(&out.provider_id, &out.id);
                         }
+                        // Apply effective recommended policy (demotion →
+                        // addition → builtin baseline) for every output row.
+                        // For merged children this runs after re-namespacing so
+                        // the surfaced id is used.
+                        out.recommended =
+                            effective_recommended(&out.provider_id, &out.id, org_policy_ref);
                         out
                     })
             })
