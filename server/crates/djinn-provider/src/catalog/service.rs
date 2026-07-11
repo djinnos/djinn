@@ -12,6 +12,11 @@ use crate::catalog::builtin::{BUILTIN_PROVIDERS, BuiltinProvider};
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Default freshness window used when computing the source tier for structured
+/// log fields inside `refresh()`.  This is intentionally a service-local default
+/// for log context only — the health endpoint and callers own the real policy.
+const REFRESH_LOG_MAX_AGE: Duration = Duration::from_secs(60 * 60); // 1 hour
+
 fn has_nonzero_pricing(pricing: &Pricing) -> bool {
     pricing.input_per_million != 0.0
         || pricing.output_per_million != 0.0
@@ -113,6 +118,24 @@ pub enum RefreshStatus {
     Error,
 }
 
+/// Freshness tier of the currently served catalog data, derived from the last
+/// successful live fetch.  Exposed for downstream observability (the health
+/// endpoint) so consumers can distinguish "serving fresh live data" from
+/// "serving stale or embedded data while refresh attempts are failing".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SourceTier {
+    /// Only embedded/seeded data is served — no live refresh has succeeded yet.
+    #[default]
+    Embedded,
+    /// Live `models.dev` data is served and the last successful fetch is within
+    /// the freshness window.
+    Live,
+    /// A live fetch previously succeeded but the data is now older than the
+    /// freshness window (the most recent refreshes may be failing while the
+    /// previous catalog is still being served unchanged).
+    Stale,
+}
+
 #[derive(Default)]
 struct CatalogData {
     providers: Vec<Provider>,
@@ -129,6 +152,24 @@ struct CatalogData {
     /// Human-readable error string from the most recent failed refresh.  Cleared
     /// on a successful refresh.  `None` while `last_refresh_status == Never`.
     last_refresh_error: Option<String>,
+}
+
+/// Compute the source tier from the raw `CatalogData` state without going through
+/// the public `CatalogService::source_tier` accessor (which would require a
+/// second read lock while the caller already holds a write lock).
+fn source_tier_from_data(data: &CatalogData, max_age: Duration) -> SourceTier {
+    let Some(fetched_at) = data.fetched_at else {
+        return SourceTier::Embedded;
+    };
+    if SystemClock::new()
+        .now_instant()
+        .saturating_duration_since(fetched_at)
+        <= max_age
+    {
+        SourceTier::Live
+    } else {
+        SourceTier::Stale
+    }
 }
 
 /// Fetches, caches, and serves LLM provider and model data from models.dev.
@@ -188,7 +229,10 @@ impl CatalogService {
                     data.last_refresh_error =
                         Some("models.dev normalized payload had zero providers".to_string());
                     tracing::warn!(
+                        status = ?data.last_refresh_status,
+                        source_tier = ?source_tier_from_data(&data, REFRESH_LOG_MAX_AGE),
                         providers = data.providers.len(),
+                        error = "models.dev normalized payload had zero providers",
                         "catalog refresh rejected zero-provider payload — keeping active catalog"
                     );
                     return;
@@ -204,6 +248,8 @@ impl CatalogService {
                 data.last_refresh_status = RefreshStatus::Success;
                 data.last_refresh_error = None;
                 tracing::info!(
+                    status = ?data.last_refresh_status,
+                    source_tier = ?SourceTier::Live,
                     providers = provider_count,
                     models = model_count,
                     "provider catalog refreshed from models.dev"
@@ -213,7 +259,13 @@ impl CatalogService {
                 let mut data = self.inner.write();
                 data.last_refresh_status = RefreshStatus::Error;
                 data.last_refresh_error = Some(e.clone());
-                tracing::warn!(error = %e, "catalog refresh failed — using cached/embedded data");
+                tracing::warn!(
+                    status = ?data.last_refresh_status,
+                    source_tier = ?source_tier_from_data(&data, REFRESH_LOG_MAX_AGE),
+                    providers = data.providers.len(),
+                    error = %e,
+                    "catalog refresh failed — using cached/embedded data"
+                );
             }
         }
     }
@@ -314,6 +366,43 @@ impl CatalogService {
     /// `None` if the last refresh succeeded or no refresh has been attempted.
     pub fn last_refresh_error(&self) -> Option<String> {
         self.inner.read().last_refresh_error.clone()
+    }
+
+    /// Elapsed time since the last successful live `models.dev` fetch, or `None`
+    /// when no live fetch has ever succeeded (only embedded/seeded data is
+    /// served).  Uses the monotonic clock so the value is stable across wall-clock
+    /// adjustments.
+    ///
+    /// Exposed for downstream observability (the health endpoint) and as the
+    /// building block for [`CatalogService::source_tier`].
+    pub fn last_successful_fetch_age(&self) -> Option<Duration> {
+        self.inner.read().fetched_at.map(|t| {
+            SystemClock::new()
+                .now_instant()
+                .saturating_duration_since(t)
+        })
+    }
+
+    /// Compute the freshness tier of the currently served catalog data given a
+    /// maximum age for "live" data.
+    ///
+    /// - [`SourceTier::Embedded`] — no live fetch has ever succeeded.
+    /// - [`SourceTier::Live`] — the last successful fetch is within `max_age`.
+    /// - [`SourceTier::Stale`] — a fetch previously succeeded but the data is
+    ///   now older than `max_age` (recent refreshes may be failing while the
+    ///   previous catalog is still served unchanged).
+    ///
+    /// The `max_age` boundary is caller-supplied so the refresh loop (or health
+    /// endpoint) owns the freshness policy rather than the catalog service.
+    pub fn source_tier(&self, max_age: Duration) -> SourceTier {
+        let Some(age) = self.last_successful_fetch_age() else {
+            return SourceTier::Embedded;
+        };
+        if age <= max_age {
+            SourceTier::Live
+        } else {
+            SourceTier::Stale
+        }
     }
 
     // ── Write accessors ───────────────────────────────────────────────────────
