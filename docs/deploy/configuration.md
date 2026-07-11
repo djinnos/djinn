@@ -218,6 +218,17 @@ Two ways in, freely mixed:
 Model selection precedence is **user → project → global**, from a live
 [models.dev](https://models.dev) catalog.
 
+## Provider catalog refresh
+
+The server refreshes its models.dev provider catalog in one background task. Set
+`DJINN_PROVIDER_CATALOG_REFRESH_INTERVAL_SECS` through `extraEnv` to control the
+steady refresh cadence. It defaults to `3600` seconds and accepts values from
+`60` through `86400` seconds inclusive. Missing values use the default silently;
+non-numeric, zero, negative, and out-of-range values log a warning and also use
+the default. There is no disable value: a temporarily unavailable upstream is
+retried with capped exponential backoff while the embedded or last successful
+catalog remains available.
+
 ## Resources & scheduling
 
 ```yaml
