@@ -338,6 +338,16 @@ async fn org_policy_get_reports_jurisdiction_and_lock_default() {
         .expect("org_policy_get dispatch");
     assert!(result["ok"].as_bool().unwrap_or(false));
     assert_eq!(result["lock_level"], "flexible");
+    assert_eq!(
+        result["additional_recommended_model_ids"],
+        json!([]),
+        "fresh org policy should expose an empty additional-recommended override list"
+    );
+    assert_eq!(
+        result["demoted_recommended_model_ids"],
+        json!([]),
+        "fresh org policy should expose an empty demoted-recommended override list"
+    );
     // The subscription table carries a jurisdiction per row.
     if let Some(first) = result["subscriptions"].as_array().and_then(|a| a.first()) {
         let j = first["jurisdiction"].as_str().unwrap_or("");
@@ -346,6 +356,86 @@ async fn org_policy_get_reports_jurisdiction_and_lock_default() {
             "jurisdiction must be one of the known buckets, got {j}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn org_policy_set_round_trips_recommended_model_overrides_and_preserves_omitted_fields() {
+    let harness = McpTestHarness::new().await;
+
+    let set = harness
+        .call_tool(
+            "org_policy_set",
+            json!({
+                "additional_recommended_model_ids": [
+                    "anthropic/claude-sonnet-test-override",
+                    "fireworks-ai/accounts/fireworks/models/test-recommended"
+                ],
+                "demoted_recommended_model_ids": ["openai/gpt-5.5"],
+            }),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(set["ok"].as_bool().unwrap_or(false), "org_policy_set ok");
+    assert_eq!(
+        set["additional_recommended_model_ids"],
+        json!([
+            "anthropic/claude-sonnet-test-override",
+            "fireworks-ai/accounts/fireworks/models/test-recommended"
+        ]),
+        "additional overrides should persist on set"
+    );
+    assert_eq!(
+        set["demoted_recommended_model_ids"],
+        json!(["openai/gpt-5.5"]),
+        "demoted overrides should persist on set"
+    );
+
+    let get = harness
+        .call_tool("org_policy_get", json!({}))
+        .await
+        .expect("org_policy_get dispatch");
+    assert!(get["ok"].as_bool().unwrap_or(false), "org_policy_get ok");
+    assert_eq!(
+        get["additional_recommended_model_ids"], set["additional_recommended_model_ids"],
+        "additional overrides should round-trip through org_policy_get"
+    );
+    assert_eq!(
+        get["demoted_recommended_model_ids"], set["demoted_recommended_model_ids"],
+        "demoted overrides should round-trip through org_policy_get"
+    );
+
+    let patch_without_overrides = harness
+        .call_tool("org_policy_set", json!({"lock_level": "locked"}))
+        .await
+        .expect("org_policy_set patch dispatch");
+    assert!(
+        patch_without_overrides["ok"].as_bool().unwrap_or(false),
+        "org_policy_set patch ok"
+    );
+    assert_eq!(
+        patch_without_overrides["additional_recommended_model_ids"],
+        set["additional_recommended_model_ids"],
+        "omitting additional_recommended_model_ids should preserve the saved list"
+    );
+    assert_eq!(
+        patch_without_overrides["demoted_recommended_model_ids"],
+        set["demoted_recommended_model_ids"],
+        "omitting demoted_recommended_model_ids should preserve the saved list"
+    );
+
+    let get_after_patch = harness
+        .call_tool("org_policy_get", json!({}))
+        .await
+        .expect("org_policy_get after patch dispatch");
+    assert_eq!(
+        get_after_patch["additional_recommended_model_ids"],
+        set["additional_recommended_model_ids"],
+        "preserved additional overrides should remain visible after patch"
+    );
+    assert_eq!(
+        get_after_patch["demoted_recommended_model_ids"], set["demoted_recommended_model_ids"],
+        "preserved demoted overrides should remain visible after patch"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
