@@ -178,6 +178,7 @@ fn known_provider_ids(server: &DjinnMcpServer) -> HashSet<String> {
 ///   `fireworks-ai/accounts/fireworks/models/glm-5p2`).
 ///
 /// Rejects:
+/// - Empty or whitespace-only entries.
 /// - Raw local ids (no `/` separator).
 /// - Malformed qualified ids (empty provider or empty model id).
 /// - Provider ids unknown to the deployment.
@@ -195,7 +196,9 @@ fn validate_model_override_list(
     for raw in raw_ids {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            continue;
+            return Err(format!(
+                "{list_label}: model id `{raw}` is malformed — empty or whitespace-only entries are not allowed"
+            ));
         }
 
         // Must have at least one `/` separating provider from model id.
