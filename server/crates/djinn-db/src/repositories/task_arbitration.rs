@@ -367,7 +367,7 @@ impl TaskArbitrationRepository {
 
     /// Mark a monitored-reopen attempt as complete.  Called on any terminal
     /// outcome of the monitored worker attempt: worker submit, reviewer
-    /// rejection, CI/preapproval failure, worker failure, or no-eligible-model.
+    /// rejection, CI failure, worker failure, or no-eligible-model.
     /// This transitions the arbitration row to `consumed` (terminal for this
     /// hold cycle) so re-entry cannot trigger a second arbiter or worker retry.
     ///
