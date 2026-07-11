@@ -732,12 +732,140 @@ impl CoordinatorActor {
         self.apply_pr_transition(task_id, TransitionAction::ParkForRemediation, Some(reason))
             .await;
     }
+
+    /// Resolve the merge methods this repository actually permits, in Djinn's
+    /// preference order (squash → merge commit → rebase). The first entry is
+    /// the method to attempt first; the rest are fallbacks.
+    ///
+    /// Reads `GET /repos` (`allow_squash_merge` / `allow_merge_commit` /
+    /// `allow_rebase_merge`). On a fetch failure we degrade to trying all three
+    /// methods by trial in preference order, so the merge attempt loop can still
+    /// discover a permitted method even when the config read was transiently
+    /// unavailable — never falling back to a squash-only assumption that would
+    /// re-wedge a squash-disabled repo.
+    pub(crate) async fn resolve_allowed_merge_methods(
+        &self,
+        gh_client: &GitHubApiClient,
+        owner: &str,
+        repo: &str,
+    ) -> Vec<MergeMethod> {
+        match gh_client.get_repo_merge_config(owner, repo).await {
+            Ok(cfg) => allowed_merge_methods(&cfg),
+            Err(e) => {
+                tracing::info!(
+                    owner,
+                    repo,
+                    error = %e,
+                    "PR poller: could not read repo merge config — trying squash→merge→rebase by trial"
+                );
+                vec![MergeMethod::Squash, MergeMethod::Merge, MergeMethod::Rebase]
+            }
+        }
+    }
+
+    /// Attempt to merge a PR, trying each allowed method in preference order and
+    /// falling back ONLY when GitHub rejects the attempted method as "not
+    /// allowed on this repository" (see [`is_merge_method_not_allowed`]).
+    ///
+    /// Any other error — the merge-queue 405, a conversation-resolution block, a
+    /// transient/5xx, an approval-required rejection — is returned immediately so
+    /// the caller's existing specialised handlers deal with it. When every
+    /// allowed method is rejected as not-allowed, the last such error is returned
+    /// (which the caller detects with `is_merge_method_not_allowed` and routes to
+    /// escalation instead of an infinite retry loop).
+    pub(crate) async fn merge_pr_with_fallback(
+        &self,
+        gh_client: &GitHubApiClient,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+        commit_title: &str,
+        methods: &[MergeMethod],
+    ) -> std::result::Result<serde_json::Value, anyhow::Error> {
+        let mut last_not_allowed: Option<anyhow::Error> = None;
+        for (idx, method) in methods.iter().enumerate() {
+            match gh_client
+                .merge_pull_request(owner, repo, pull_number, *method, commit_title)
+                .await
+            {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    let e: anyhow::Error = e.into();
+                    if is_merge_method_not_allowed(&e) {
+                        tracing::info!(
+                            owner,
+                            repo,
+                            pr = pull_number,
+                            method = ?method,
+                            fallbacks_remaining = methods.len().saturating_sub(idx + 1),
+                            "PR poller: merge method rejected as not allowed — trying next allowed method"
+                        );
+                        last_not_allowed = Some(e);
+                        continue;
+                    }
+                    // Non-method error (merge queue, conversation block,
+                    // transient) — surface immediately for the caller's
+                    // specialised handling.
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_not_allowed
+            .unwrap_or_else(|| anyhow::anyhow!("no merge methods available to attempt")))
+    }
 }
 pub(crate) fn is_merge_queue_405(
     err: &(impl crate::github_error_render::GithubWriteError + ?Sized),
 ) -> bool {
     crate::github_error_render::github_write_status_is(err, 405)
         && crate::github_error_render::github_write_body_contains(err, "merge queue")
+}
+
+/// Detect GitHub's "this merge method is disabled on the repository" rejection.
+///
+/// The PUT `/merge` endpoint returns a 405 (occasionally 422) whose body reads
+/// "Squash merges are not allowed on this repository." (likewise "Merge commits
+/// are not allowed…", "Rebase merges are not allowed…") when the chosen
+/// [`MergeMethod`] is disabled in the repo's settings. This is distinct from the
+/// merge-queue 405 (body contains "merge queue", checked first) and the
+/// conversation-resolution block — retrying the same method can never succeed,
+/// so callers fall back to another allowed method and ultimately escalate.
+pub(crate) fn is_merge_method_not_allowed(
+    err: &(impl crate::github_error_render::GithubWriteError + ?Sized),
+) -> bool {
+    // Never confuse the merge-queue 405 (a delegated-to-GitHub signal) for a
+    // disallowed merge method.
+    if is_merge_queue_405(err) {
+        return false;
+    }
+    let status_matches = crate::github_error_render::github_write_status_is(err, 405)
+        || crate::github_error_render::github_write_status_is(err, 422);
+    status_matches && crate::github_error_render::github_write_body_contains(err, "are not allowed")
+}
+
+/// The repository's allowed merge methods in Djinn's preference order:
+/// squash → merge commit → rebase. The first element is the method Djinn will
+/// attempt first; the remainder are fallbacks used when GitHub rejects the
+/// chosen method as "not allowed" (a stale-cache / race guard).
+///
+/// Never returns empty: a pathological config with every method disabled still
+/// yields `[Squash]` so the caller makes one attempt and then escalates via the
+/// method-not-allowed path rather than silently doing nothing.
+pub(crate) fn allowed_merge_methods(cfg: &RepoMergeConfig) -> Vec<MergeMethod> {
+    let mut methods = Vec::with_capacity(3);
+    if cfg.allow_squash_merge {
+        methods.push(MergeMethod::Squash);
+    }
+    if cfg.allow_merge_commit {
+        methods.push(MergeMethod::Merge);
+    }
+    if cfg.allow_rebase_merge {
+        methods.push(MergeMethod::Rebase);
+    }
+    if methods.is_empty() {
+        methods.push(MergeMethod::Squash);
+    }
+    methods
 }
 
 /// Detect the `enqueuePullRequest` UNPROCESSABLE rejection whose message is

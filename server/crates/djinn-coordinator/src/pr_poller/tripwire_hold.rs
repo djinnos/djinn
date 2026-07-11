@@ -151,6 +151,16 @@ impl CoordinatorActor {
         tripwire_result: &super::tripwire_gate::TripwireGateResult,
         head_sha: &str,
     ) {
+        // TODO(per-project-policy): load the org/project tripwire policy for
+        // `task.project_id` and fall back to `TripwirePolicy::default()` only
+        // when none is published. The SHIPPED default is intentionally
+        // ecosystem-generic (no `Tiltfile`/`Makefile`/`deploy/**`/
+        // boundary-script globs, empty allowlist source) so foreign repos do
+        // not trip false-positive holds. djinn's OWN repo therefore loses its
+        // Tiltfile/deploy/capability-boundary tripwires until this load-with-
+        // fallback lands and an org policy re-adds those repo-specific globs.
+        // No persisted tripwire-policy surface exists yet (org_ai_policy is
+        // model-lane only), so wiring it is a separate epic.
         self.create_tripwire_hold_with_policy(
             task,
             tripwire_result,
