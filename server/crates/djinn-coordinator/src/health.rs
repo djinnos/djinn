@@ -62,7 +62,12 @@ pub(super) async fn sweep_stale_resources(
     reap_orphaned_pending_attempts(db).await;
     reap_orphaned_taskrun_jobs(db, app_state, "periodic").await;
     sweep_orphan_worker_sessions(db).await;
-    sweep_orphaned_cargo_target_run_dirs(db, app_state.cargo_target_runs_root.as_deref()).await;
+    sweep_orphaned_cargo_target_run_dirs(
+        db,
+        app_state.cargo_target_runs_root.as_deref(),
+        &app_state.cache_cleanup,
+    )
+    .await;
     sweep_durable_output_stash(db).await;
     sweep_cargo_health().await;
     sweep_sccache_guard(&app_state.cache_cleanup).await;
@@ -1646,6 +1651,7 @@ mod sccache_guard_tests {
 #[derive(Default)]
 pub(super) struct CargoTargetRunDirSweepStats {
     pub(super) scanned: usize,
+    /// UUID orphan dirs deleted (existing behaviour, unchanged).
     pub(super) deleted: usize,
     pub(super) retained: usize,
     pub(super) errors: usize,
@@ -1653,9 +1659,28 @@ pub(super) struct CargoTargetRunDirSweepStats {
     pub(super) cap_trimmed: usize,
     /// Per-entry errors during the hard-cap trim.
     pub(super) cap_errors: usize,
+    // ── Debris / age-sweep counters (n5cp) ──────────────────────────────
+    /// Non-UUID directories older than the retention window that were
+    /// deleted (or counted as dry-run candidates).
+    pub(super) malformed_dir_deleted: usize,
+    /// Loose files (any non-directory) older than the retention window
+    /// that were deleted (or counted as dry-run candidates).
+    pub(super) loose_file_deleted: usize,
+    /// Fresh malformed entries (dirs or files) whose mtime is within the
+    /// retention window — retained with a warning.
+    pub(super) retained_fresh_malformed: usize,
+    /// Non-UTF8 entry names — always retained (unsafe to delete via
+    /// lossy name conversion).
+    pub(super) retained_non_utf8: usize,
+    /// Total bytes reclaimed by debris deletion (dirs + files).
+    pub(super) debris_bytes_deleted: u64,
 }
 
-async fn sweep_orphaned_cargo_target_run_dirs(db: &djinn_db::Database, root: Option<&Path>) {
+async fn sweep_orphaned_cargo_target_run_dirs(
+    db: &djinn_db::Database,
+    root: Option<&Path>,
+    config: &crate::context::CacheCleanupConfig,
+) {
     // Production wiring sets `cargo_target_runs_root` explicitly (the server pod
     // mounts the shared cache PVC at `$DJINN_HOME/cache`, NOT the Job-pod
     // `/cache` path the [`CARGO_TARGET_RUNS_ROOT`] constant names). The
@@ -1664,12 +1689,13 @@ async fn sweep_orphaned_cargo_target_run_dirs(db: &djinn_db::Database, root: Opt
         Some(root) => root,
         None => Path::new(CARGO_TARGET_RUNS_ROOT),
     };
-    sweep_orphaned_cargo_target_run_dirs_under(db, root).await;
+    sweep_orphaned_cargo_target_run_dirs_under(db, root, config).await;
 }
 
 pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
     db: &djinn_db::Database,
     root: &Path,
+    config: &crate::context::CacheCleanupConfig,
 ) -> CargoTargetRunDirSweepStats {
     let protected = match protected_cargo_target_run_ids(db).await {
         Ok(ids) => ids,
@@ -1709,6 +1735,21 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
     };
 
     let mut stats = CargoTargetRunDirSweepStats::default();
+
+    // Debris age-gate: non-UUID entries and loose files older than this
+    // threshold become cleanup candidates.  None disables debris cleanup
+    // (cargo_debris_enabled=false or zero retention).
+    let debris_threshold_secs: Option<u64> =
+        if config.cargo_debris_enabled && config.cargo_debris_max_age_days > 0 {
+            Some(config.cargo_debris_max_age_days * 86400)
+        } else {
+            None
+        };
+    let mode_label = if config.mode.is_delete() {
+        djinn_telemetry::cache_cleanup::MODE_DELETE
+    } else {
+        djinn_telemetry::cache_cleanup::MODE_DRY_RUN
+    };
     loop {
         let entry = match entries.next_entry().await {
             Ok(Some(entry)) => entry,
@@ -1727,32 +1768,25 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
         let path = entry.path();
         stats.scanned += 1;
 
+        // ── Non-UTF8 entry name: always retained ─────────────────────
         let Some(task_run_id) = entry.file_name().to_str().map(ToOwned::to_owned) else {
             stats.retained += 1;
-            tracing::debug!(
+            stats.retained_non_utf8 += 1;
+            tracing::warn!(
                 path = %path.display(),
-                "CoordinatorActor: cargo target run-dir sweep ignored non-UTF8 entry name"
+                "CoordinatorActor: cargo target run-dir sweep retained non-UTF8 entry name \
+                 (cannot safely compare for age-gate deletion)"
             );
             continue;
         };
 
-        if uuid::Uuid::parse_str(&task_run_id).is_err() {
-            stats.retained += 1;
-            tracing::debug!(
-                task_run_id = %task_run_id,
-                path = %path.display(),
-                "CoordinatorActor: cargo target run-dir sweep ignored malformed task_run_id entry"
-            );
-            continue;
-        }
-
+        // ── Get file type early for age-gate decisions ───────────────
         let file_type = match entry.file_type().await {
-            Ok(file_type) => file_type,
+            Ok(ft) => ft,
             Err(e) => {
                 stats.errors += 1;
                 tracing::warn!(
                     error = %e,
-                    task_run_id = %task_run_id,
                     path = %path.display(),
                     "CoordinatorActor: cargo target run-dir sweep failed to inspect entry; continuing"
                 );
@@ -1760,49 +1794,219 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
             }
         };
 
-        if !file_type.is_dir() {
-            stats.retained += 1;
-            tracing::debug!(
-                task_run_id = %task_run_id,
-                path = %path.display(),
-                "CoordinatorActor: cargo target run-dir sweep ignored non-directory entry"
-            );
-            continue;
-        }
+        let is_uuid = uuid::Uuid::parse_str(&task_run_id).is_ok();
 
-        if protected.contains(&task_run_id) {
-            stats.retained += 1;
-            tracing::debug!(
-                task_run_id = %task_run_id,
-                path = %path.display(),
-                "CoordinatorActor: cargo target run-dir sweep retained live task-run directory"
-            );
-            continue;
-        }
-
-        match tokio::fs::remove_dir_all(&path).await {
-            Ok(()) => {
-                stats.deleted += 1;
-                tracing::info!(
+        if is_uuid && file_type.is_dir() {
+            // ── UUID directory: existing behaviour, unchanged ─────────
+            if protected.contains(&task_run_id) {
+                stats.retained += 1;
+                tracing::debug!(
                     task_run_id = %task_run_id,
                     path = %path.display(),
-                    cleanup_outcome = "removed",
-                    deleted_count = 1_u64,
-                    error_count = 0_u64,
-                    "CoordinatorActor: deleted orphaned cargo target run-dir"
+                    "CoordinatorActor: cargo target run-dir sweep retained live task-run directory"
                 );
+                continue;
             }
+
+            match tokio::fs::remove_dir_all(&path).await {
+                Ok(()) => {
+                    stats.deleted += 1;
+                    tracing::info!(
+                        task_run_id = %task_run_id,
+                        path = %path.display(),
+                        cleanup_outcome = "uuid_orphan_deleted",
+                        "CoordinatorActor: deleted orphaned cargo target run-dir"
+                    );
+                }
+                Err(e) => {
+                    stats.errors += 1;
+                    tracing::warn!(
+                        error = %e,
+                        task_run_id = %task_run_id,
+                        path = %path.display(),
+                        cleanup_outcome = "failed",
+                        "CoordinatorActor: failed to delete orphaned cargo target run-dir; continuing"
+                    );
+                }
+            }
+            continue;
+        }
+
+        // ── Non-UUID entry OR UUID loose file: age-gated debris ──────
+        // Both malformed dirs and loose files (UUID or non-UUID named)
+        // are age-gated when cargo_debris_enabled.
+        let Some(threshold_secs) = debris_threshold_secs else {
+            // Debris cleanup disabled — retain everything (legacy behaviour).
+            stats.retained += 1;
+            tracing::debug!(
+                path = %path.display(),
+                "CoordinatorActor: cargo target run-dir sweep retained entry (debris cleanup disabled)"
+            );
+            continue;
+        };
+
+        // Check mtime against the age threshold.
+        let entry_mtime_secs = match entry.metadata().await {
+            Ok(meta) => meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()),
             Err(e) => {
                 stats.errors += 1;
                 tracing::warn!(
                     error = %e,
-                    task_run_id = %task_run_id,
                     path = %path.display(),
-                    cleanup_outcome = "failed",
-                    deleted_count = 0_u64,
-                    error_count = 1_u64,
-                    "CoordinatorActor: failed to delete orphaned cargo target run-dir; continuing"
+                    "CoordinatorActor: cargo target run-dir sweep failed to read entry metadata; continuing"
                 );
+                continue;
+            }
+        };
+
+        let now_secs: u64 = time::OffsetDateTime::now_utc()
+            .unix_timestamp()
+            .try_into()
+            .unwrap_or(0_u64);
+
+        let is_stale = match entry_mtime_secs {
+            Some(mtime) => now_secs.saturating_sub(mtime) >= threshold_secs,
+            // Metadata mtime unreadable — treat as stale (conservative toward
+            // cleanup, matching the sccache guard behaviour).
+            None => true,
+        };
+
+        if !is_stale {
+            // Fresh entry — retain with warning.
+            stats.retained += 1;
+            stats.retained_fresh_malformed += 1;
+            let entry_kind = if file_type.is_dir() { "dir" } else { "file" };
+            tracing::warn!(
+                path = %path.display(),
+                entry_kind,
+                age_secs = ?entry_mtime_secs.map(|m| now_secs.saturating_sub(m)),
+                threshold_secs,
+                "CoordinatorActor: cargo target run-dir sweep retaining fresh malformed \
+                 entry — an accidental new writer may have created it"
+            );
+            continue;
+        }
+
+        // Entry is stale — compute size and delete/report.
+        let entry_bytes: u64 = if file_type.is_dir() {
+            dir_size_recursive(&path).await
+        } else {
+            tokio::fs::metadata(&path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
+
+        djinn_telemetry::cache_cleanup::increment_candidates(
+            djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+            mode_label,
+            1,
+        );
+
+        if !config.mode.is_delete() {
+            // Dry-run: report but don't delete.
+            let entry_kind = if file_type.is_dir() {
+                stats.malformed_dir_deleted += 1;
+                "malformed_dir"
+            } else {
+                stats.loose_file_deleted += 1;
+                "loose_file"
+            };
+            tracing::info!(
+                path = %path.display(),
+                entry_kind,
+                size_bytes = entry_bytes,
+                age_secs = ?entry_mtime_secs.map(|m| now_secs.saturating_sub(m)),
+                mode = "dry_run",
+                cleanup_outcome = if file_type.is_dir() { "malformed_dir_deleted" } else { "loose_file_deleted" },
+                "CoordinatorActor: cargo target run-dir sweep dry-run — would delete stale entry"
+            );
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                djinn_telemetry::cache_cleanup::OUTCOME_DRY_RUN,
+                mode_label,
+            );
+            continue;
+        }
+
+        // Destructive mode: actually delete.
+        if file_type.is_dir() {
+            match tokio::fs::remove_dir_all(&path).await {
+                Ok(()) => {
+                    stats.malformed_dir_deleted += 1;
+                    stats.debris_bytes_deleted += entry_bytes;
+                    tracing::info!(
+                        path = %path.display(),
+                        size_bytes = entry_bytes,
+                        cleanup_outcome = "malformed_dir_deleted",
+                        "CoordinatorActor: deleted stale malformed cargo target run-dir"
+                    );
+                    djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                        djinn_telemetry::cache_cleanup::OUTCOME_DELETED,
+                        mode_label,
+                    );
+                    djinn_telemetry::cache_cleanup::record_reclaimed_bytes(
+                        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                        mode_label,
+                        entry_bytes,
+                    );
+                }
+                Err(e) => {
+                    stats.errors += 1;
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        cleanup_outcome = "error",
+                        "CoordinatorActor: failed to delete stale malformed cargo target run-dir; continuing"
+                    );
+                    djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                        djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+                        mode_label,
+                    );
+                }
+            }
+        } else {
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {
+                    stats.loose_file_deleted += 1;
+                    stats.debris_bytes_deleted += entry_bytes;
+                    tracing::info!(
+                        path = %path.display(),
+                        size_bytes = entry_bytes,
+                        cleanup_outcome = "loose_file_deleted",
+                        "CoordinatorActor: deleted stale loose file from cargo target runs"
+                    );
+                    djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                        djinn_telemetry::cache_cleanup::OUTCOME_DELETED,
+                        mode_label,
+                    );
+                    djinn_telemetry::cache_cleanup::record_reclaimed_bytes(
+                        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                        mode_label,
+                        entry_bytes,
+                    );
+                }
+                Err(e) => {
+                    stats.errors += 1;
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        cleanup_outcome = "error",
+                        "CoordinatorActor: failed to delete stale loose file from cargo target runs; continuing"
+                    );
+                    djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                        djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+                        mode_label,
+                    );
+                }
             }
         }
     }
@@ -1865,6 +2069,14 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
         errors = stats.errors,
         cap_trimmed = stats.cap_trimmed,
         cap_errors = stats.cap_errors,
+        malformed_dir_deleted = stats.malformed_dir_deleted,
+        loose_file_deleted = stats.loose_file_deleted,
+        retained_fresh_malformed = stats.retained_fresh_malformed,
+        retained_non_utf8 = stats.retained_non_utf8,
+        debris_bytes_deleted = stats.debris_bytes_deleted,
+        mode = %config.mode.as_metric_label(),
+        cargo_debris_enabled = config.cargo_debris_enabled,
+        cargo_debris_max_age_days = config.cargo_debris_max_age_days,
         cleanup_outcome = if stats.errors == 0 && stats.cap_errors == 0 {
             "completed"
         } else {

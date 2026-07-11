@@ -839,22 +839,200 @@ async fn cargo_target_run_dir_sweep_retains_live_and_deletes_orphans() {
     std::fs::create_dir(root.path().join("not-a-task-run-id")).unwrap();
     std::fs::write(root.path().join(new_task_run_uuid()), b"not a directory").unwrap();
 
-    let stats = health::sweep_orphaned_cargo_target_run_dirs_under(&db, root.path()).await;
+    let config = crate::context::CacheCleanupConfig::default();
+    let stats = health::sweep_orphaned_cargo_target_run_dirs_under(&db, root.path(), &config).await;
 
     assert!(root.path().join(&live_run_id).is_dir());
     assert!(root.path().join(&live_session_guard_run_id).is_dir());
     assert!(!root.path().join(&terminal_run_id).exists());
     assert!(!root.path().join(&unknown_run_id).exists());
+    // Fresh malformed entries are retained (just created).
     assert!(root.path().join("not-a-task-run-id").is_dir());
     assert_eq!(stats.scanned, 6);
     assert_eq!(stats.deleted, 2);
     assert_eq!(stats.retained, 4);
     assert_eq!(stats.errors, 0);
+    // Fresh malformed dir + fresh loose UUID file are both retained_fresh_malformed.
+    assert_eq!(stats.retained_fresh_malformed, 2);
+    assert_eq!(stats.retained_non_utf8, 0);
+    assert_eq!(stats.malformed_dir_deleted, 0);
+    assert_eq!(stats.loose_file_deleted, 0);
+    assert_eq!(stats.debris_bytes_deleted, 0);
     // The default cap (64) never trims our handful — the orphan sweep above did
     // all the work. The hard-cap LRU-trim itself is unit-tested in
     // `djinn_core::cargo_target_runs::trim_keeps_newest_and_removes_oldest_beyond_cap`.
     assert_eq!(stats.cap_trimmed, 0);
     assert_eq!(stats.cap_errors, 0);
+}
+
+/// Age-sweep deletes old malformed directories and loose files while
+/// preserving fresh ones and unchanged UUID live/orphan behaviour.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cargo_target_run_dir_sweep_deletes_old_malformed_and_loose() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "debris-age-sweep").await;
+    let root = temp_cargo_target_runs_root();
+
+    // ── UUID dirs: existing behaviour ───────────────────────────────────
+    let live_run_id = new_task_run_uuid();
+    seed_task_run(&db, &task, &live_run_id, "running").await;
+
+    let terminal_run_id = new_task_run_uuid();
+    seed_task_run(&db, &task, &terminal_run_id, "completed").await;
+
+    for run_id in [live_run_id.as_str(), terminal_run_id.as_str()] {
+        std::fs::create_dir(root.path().join(run_id)).unwrap();
+    }
+
+    // ── Malformed dirs ─────────────────────────────────────────────────
+    // Fresh malformed dir (just created — mtime is now).
+    std::fs::create_dir(root.path().join("fresh-malformed-dir")).unwrap();
+
+    // Old malformed dir: create then backdate mtime to 30 days ago.
+    let old_malformed = root.path().join("old-malformed-dir");
+    std::fs::create_dir(&old_malformed).unwrap();
+    set_mtime_to_days_ago(&old_malformed, 30);
+
+    // ── Loose files ────────────────────────────────────────────────────
+    // Fresh loose file with a UUID name.
+    let fresh_loose_uuid = new_task_run_uuid();
+    std::fs::write(root.path().join(&fresh_loose_uuid), b"fresh data").unwrap();
+
+    // Old loose file with a UUID name.
+    let old_loose_uuid = new_task_run_uuid();
+    let old_loose_path = root.path().join(&old_loose_uuid);
+    std::fs::write(&old_loose_path, b"old data").unwrap();
+    set_mtime_to_days_ago(&old_loose_path, 30);
+
+    // Old loose file with a non-UUID name.
+    let old_loose_malformed = root.path().join("old-loose-junk.txt");
+    std::fs::write(&old_loose_malformed, b"old junk").unwrap();
+    set_mtime_to_days_ago(&old_loose_malformed, 30);
+
+    let config = crate::context::CacheCleanupConfig {
+        mode: crate::context::CacheCleanupMode::Delete,
+        ..Default::default()
+    };
+    let stats = health::sweep_orphaned_cargo_target_run_dirs_under(&db, root.path(), &config).await;
+
+    // UUID dirs: live retained, terminal deleted (unchanged behaviour).
+    assert!(root.path().join(&live_run_id).is_dir());
+    assert!(!root.path().join(&terminal_run_id).exists());
+
+    // Fresh malformed dir retained.
+    assert!(root.path().join("fresh-malformed-dir").is_dir());
+    // Old malformed dir deleted.
+    assert!(!old_malformed.exists());
+
+    // Fresh loose UUID file retained.
+    assert!(root.path().join(&fresh_loose_uuid).exists());
+    // Old loose UUID file deleted.
+    assert!(!old_loose_path.exists());
+    // Old loose malformed file deleted.
+    assert!(!old_loose_malformed.exists());
+
+    assert_eq!(stats.scanned, 7);
+    assert_eq!(stats.deleted, 1); // terminal UUID dir
+    assert_eq!(stats.malformed_dir_deleted, 1); // old-malformed-dir
+    assert_eq!(stats.loose_file_deleted, 2); // old UUID file + old loose malformed
+    assert_eq!(stats.retained_fresh_malformed, 2); // fresh dir + fresh UUID file
+    assert_eq!(stats.retained_non_utf8, 0);
+    assert_eq!(stats.errors, 0);
+    assert!(stats.debris_bytes_deleted > 0);
+}
+
+/// Dry-run mode reports candidates without actually deleting them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cargo_target_run_dir_sweep_dry_run_retains_all() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "debris-dry-run").await;
+    let root = temp_cargo_target_runs_root();
+
+    // UUID orphan dir.
+    let terminal_run_id = new_task_run_uuid();
+    seed_task_run(&db, &task, &terminal_run_id, "completed").await;
+    std::fs::create_dir(root.path().join(&terminal_run_id)).unwrap();
+
+    // Old malformed dir.
+    let old_malformed = root.path().join("old-malformed");
+    std::fs::create_dir(&old_malformed).unwrap();
+    set_mtime_to_days_ago(&old_malformed, 30);
+
+    // Old loose file.
+    let old_loose = root.path().join("old-loose-file.bin");
+    std::fs::write(&old_loose, b"data").unwrap();
+    set_mtime_to_days_ago(&old_loose, 30);
+
+    let config = crate::context::CacheCleanupConfig {
+        mode: crate::context::CacheCleanupMode::DryRun, // dry-run
+        ..Default::default()
+    };
+    let stats = health::sweep_orphaned_cargo_target_run_dirs_under(&db, root.path(), &config).await;
+
+    // UUID orphan deletion runs regardless of mode (unchanged behaviour).
+    assert!(!root.path().join(&terminal_run_id).exists());
+    // Debris entries are retained in dry-run mode — only reported.
+    assert!(old_malformed.is_dir());
+    assert!(old_loose.exists());
+
+    // Debris counters count dry-run candidates.
+    assert_eq!(stats.malformed_dir_deleted, 1); // counted as candidate
+    assert_eq!(stats.loose_file_deleted, 1); // counted as candidate
+    assert_eq!(stats.errors, 0);
+    assert_eq!(stats.debris_bytes_deleted, 0); // nothing actually reclaimed
+}
+
+/// When cargo_debris_enabled is false, malformed entries are retained
+/// (legacy behaviour).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cargo_target_run_dir_sweep_retains_when_debris_disabled() {
+    let db = test_helpers::create_test_db();
+    let root = temp_cargo_target_runs_root();
+
+    // Old malformed dir.
+    let old_malformed = root.path().join("old-malformed");
+    std::fs::create_dir(&old_malformed).unwrap();
+    set_mtime_to_days_ago(&old_malformed, 30);
+
+    // Old loose file.
+    let old_loose = root.path().join("old-loose.bin");
+    std::fs::write(&old_loose, b"data").unwrap();
+    set_mtime_to_days_ago(&old_loose, 30);
+
+    let config = crate::context::CacheCleanupConfig {
+        mode: crate::context::CacheCleanupMode::Delete,
+        cargo_debris_enabled: false, // disabled
+        ..Default::default()
+    };
+    let stats = health::sweep_orphaned_cargo_target_run_dirs_under(&db, root.path(), &config).await;
+
+    // Both retained because debris cleanup is disabled.
+    assert!(old_malformed.is_dir());
+    assert!(old_loose.exists());
+    assert_eq!(stats.scanned, 2);
+    assert_eq!(stats.retained, 2);
+    assert_eq!(stats.malformed_dir_deleted, 0);
+    assert_eq!(stats.loose_file_deleted, 0);
+    assert_eq!(stats.retained_fresh_malformed, 0);
+}
+
+/// Helper: backdate an entry's mtime to N days ago.
+///
+/// Uses `touch -d` for portability across file/directory entries on Linux
+/// (opening a directory for write fails with `EISDIR`).
+fn set_mtime_to_days_ago(path: &std::path::Path, days: u64) {
+    let spec = format!("{days} days ago");
+    assert!(
+        std::process::Command::new("touch")
+            .args(["-d", &spec, path.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success(),
+        "touch -d failed for {}",
+        path.display()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
