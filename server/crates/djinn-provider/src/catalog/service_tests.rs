@@ -621,10 +621,9 @@ fn add_custom_provider_normalizes_seed_model_ids_end_to_end() {
 
 // ── Refresh compose/swap tests ────────────────────────────────────────────
 //
-// The live `refresh()` path calls the network, so these tests exercise the
-// pure composition helpers (`compose_catalog`) and the status/rejection
-// transitions directly over a `CatalogData`, mirroring exactly what
-// `refresh()` does after a fetch resolves.
+// These tests exercise the pure composition helper (`compose_catalog`) and the
+// status/rejection transitions directly over a `CatalogData`, mirroring
+// `refresh()` without calling the network.
 
 /// Build an empty `CatalogData` populated with a couple of retained custom
 /// providers so the refresh-composition tests start from a realistic state.
@@ -708,12 +707,8 @@ fn refresh_composition_retains_custom_providers() {
         "retained custom-two seed models survive"
     );
 
-    // Builtin injection ran: chatgpt_codex (mapped from openai via the
-    // "codex" prefix) is absent here because no openai model contains
-    // "codex", but a mapped builtin with a broad prefix still resolves.
-    // gcp_vertex_ai maps from google-vertex (absent), so it gets injected as
-    // a provider with no model list.  Verify at least one non-upstream,
-    // non-custom builtin was injected.
+    // Builtin injection ran during composition.  Verify at least one
+    // non-upstream, non-custom builtin provider was injected.
     let builtin_added = data
         .providers
         .iter()
