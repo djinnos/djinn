@@ -354,7 +354,17 @@ jobs:
           workspaces: server
           shared-key: server-aarch64-check
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # This job is gated OFF `push` (it runs only on pull_request /
+          # merge_group / workflow_dispatch), so a `github.ref == 'refs/heads/main'`
+          # save-if is NEVER true here and the aarch64 cache was permanently cold
+          # — every sandbox-touching run paid the full ~400s cross-compile from
+          # scratch (PR #1590 finding). Unlike the x86 jobs, there is no
+          # main-push warm-cache job priming this key, so the authoritative place
+          # to SAVE is the merge_group run: it is the last build of the change
+          # before it lands, and its saved cache warms the NEXT sandbox-touching
+          # PR/queue run. pull_request runs still read-only (save-if false) so a
+          # cold PR build never overwrites the good queue-primed cache.
+          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: cargo check (aarch64)
         run: cargo check -p djinn-sandbox --all-targets --target aarch64-unknown-linux-gnu
@@ -543,8 +553,21 @@ jobs:
     # rarely fails on the rebase, so the far more common case is paying that
     # 112s for nothing. A red clippy still fails the Quality Gate; the only
     # cost of parallelizing is occasionally burning shards on a doomed run.
+    #
+    # PR-HEAD REPRESENTATIVENESS: this DB-backed suite now runs on `pull_request`
+    # as well, not just the merge queue. When it was merge_group-only, a PR went
+    # green on lint alone while the authoritative test suite ran for the first
+    # time inside the merge queue — so a test that would reject the change only
+    # surfaced AFTER the PR looked mergeable, ejecting it from the queue and
+    # forcing rework. The draft-PR-gated agent flow reads the PR-head checks as
+    # the readiness signal, so the suite that can reject in the queue must also
+    # execute on the PR head. The `server` change-filter still short-circuits
+    # docs-only PRs (they skip here AND in the queue, so no queue rejection is
+    # possible), preserving that economy. Cache is still saved on main only
+    # (save-if below), so PR/merge_group runs read the warm cache without
+    # writing divergent entries.
     needs: changes
-    if: needs.changes.outputs.server == 'true' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
+    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
