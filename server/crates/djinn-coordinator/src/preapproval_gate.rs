@@ -88,19 +88,37 @@ pub(crate) struct PreApprovalCheck {
     pub name: &'static str,
     /// Exact shell command, run from the worktree root.
     pub command: &'static str,
+    /// Whether this check needs a Cargo build and/or a live database.
+    ///
+    /// * `true` — the expensive checks (clippy, the sqlx offline-cache verify,
+    ///   the test-target compile). These are deferred to the verification pod
+    ///   unless inline execution is explicitly enabled.
+    /// * `false` — pure shell/grep/git guards (the Size Guard, the Migrations
+    ///   Guard, the Raw-SQL Boundary, the capability boundaries) that finish in
+    ///   milliseconds against the worktree. These run inline **even in shadow
+    ///   mode** so the deterministic merge-queue offenders are caught before a
+    ///   PR is opened rather than post-approval in the merge queue.
+    pub requires_build: bool,
 }
 
 /// The PR-level `server`-scope Quality-Gate check set.
 ///
 /// Mirrors `.github/workflows/quality-gate.yml`: `server-clippy`,
-/// `server-size-guard`, `server-raw-sql-boundary`, `server-capability-boundaries`,
-/// `server-sqlx-cache`, and a test-target build (the `warm-cache-test` /
-/// merge-queue `server-test` compile). `SQLX_OFFLINE=true` matches the workflow's
-/// offline consumers.
+/// `server-size-guard`, `server-migrations-guard`, `server-raw-sql-boundary`,
+/// `server-capability-boundaries`, `server-sqlx-cache`, and a test-target build
+/// (the `warm-cache-test` / merge-queue `server-test` compile).
+/// `SQLX_OFFLINE=true` matches the workflow's offline consumers.
+///
+/// `requires_build` splits the set into the no-compile deterministic guards
+/// (always run inline, even in shadow mode) and the compile/DB-heavy checks
+/// (deferred to the verification pod unless inline execution is enabled). The
+/// repo-provided `scripts/premerge-gates.sh` runs the same no-compile subset for
+/// local reproduction; a drift-guard test keeps the two in lockstep.
 pub(crate) const SERVER_CHECK_SET: &[PreApprovalCheck] = &[
     PreApprovalCheck {
         name: "clippy_all_targets",
         command: "cd server && SQLX_OFFLINE=true cargo clippy --all-targets --features qdrant -- -D warnings",
+        requires_build: true,
     },
     PreApprovalCheck {
         name: "size_guard",
@@ -108,10 +126,24 @@ pub(crate) const SERVER_CHECK_SET: &[PreApprovalCheck] = &[
         // base SHA is resolved from the merge-base against origin/main (then
         // main) with a HEAD fallback, mirroring the workflow's BASE_SHA logic.
         command: "BASE=$(git merge-base origin/main HEAD 2>/dev/null || git merge-base main HEAD 2>/dev/null || git rev-parse HEAD); git diff --name-only --diff-filter=AMR \"$BASE\"...HEAD | ./scripts/check-file-size.sh --files-from-stdin",
+        requires_build: false,
+    },
+    PreApprovalCheck {
+        name: "migrations_guard",
+        // Applied sqlx migrations are immutable — editing/renaming/deleting one
+        // that exists on the base ref breaks the migrate init container on every
+        // existing database, so it passes a fresh CI DB and only detonates in
+        // the merge queue. Mirrors the workflow's server-migrations-guard job.
+        // BASE_SHA is resolved with the same merge-base + HEAD fallback as the
+        // size guard, so a base-less checkout diffs HEAD...HEAD (empty) and never
+        // false-blocks.
+        command: "BASE=$(git merge-base origin/main HEAD 2>/dev/null || git merge-base main HEAD 2>/dev/null || git rev-parse HEAD); BASE_SHA=\"$BASE\" ./scripts/check-migrations-immutable.sh",
+        requires_build: false,
     },
     PreApprovalCheck {
         name: "raw_sql_boundary",
         command: "./scripts/check-raw-sql-boundary.sh",
+        requires_build: false,
     },
     PreApprovalCheck {
         name: "capability_boundaries",
@@ -121,16 +153,32 @@ pub(crate) const SERVER_CHECK_SET: &[PreApprovalCheck] = &[
         // No BASE_SHA is injected here; the scripts fall back to origin/main for
         // the diff, keeping the command deterministic and repository-local.
         command: "./scripts/test-capability-boundaries.sh && ./scripts/check-git-boundary.sh && ./scripts/check-http-boundary.sh && ./scripts/check-k8s-boundary.sh",
+        requires_build: false,
     },
     PreApprovalCheck {
         name: "sqlx_offline_cache",
         command: "make sqlx-verify",
+        requires_build: true,
     },
     PreApprovalCheck {
         name: "test_target_build",
         command: "cd server && SQLX_OFFLINE=true cargo nextest run --workspace --all-targets --features qdrant --no-run",
+        requires_build: true,
     },
 ];
+
+/// The no-compile deterministic guards from [`SERVER_CHECK_SET`] — the Size
+/// Guard, Migrations Guard, Raw-SQL Boundary, and capability boundaries. These
+/// need no Cargo build and no database, so the gate runs them inline even when
+/// inline execution is disabled (shadow mode) to catch the deterministic
+/// merge-queue offenders before a PR is opened.
+pub(crate) fn no_build_checks() -> Vec<PreApprovalCheck> {
+    SERVER_CHECK_SET
+        .iter()
+        .filter(|c| !c.requires_build)
+        .copied()
+        .collect()
+}
 
 /// Check names required for a cached green verdict to be considered complete
 /// coverage.
@@ -246,14 +294,31 @@ pub(crate) struct CheckOutcome {
     pub output: String,
 }
 
-/// Run the full server check set in `workdir`, stopping-nothing (all checks run
-/// so feedback lists every failure, matching CI's `fail-fast: false`).
-pub(crate) async fn run_check_set(
+/// Whether the worktree has a diff base the changed-file guards can resolve
+/// (`origin/main` or `main`). The no-compile guards diff against it; if neither
+/// ref exists we must not run them (they would error on "no base" and be
+/// misread as a violation), so the caller defers instead of false-blocking.
+pub(crate) async fn base_ref_resolvable(runner: &dyn CiReproductionRunner, workdir: &Path) -> bool {
+    runner
+        .run(
+            "git rev-parse --verify origin/main >/dev/null 2>&1 || git rev-parse --verify main >/dev/null 2>&1",
+            workdir,
+            Duration::from_secs(30),
+        )
+        .await
+        .map(|o| o.exit_code == 0)
+        .unwrap_or(false)
+}
+
+/// Run an explicit list of checks in `workdir`, stopping-nothing (all run so
+/// feedback lists every failure, matching CI's `fail-fast: false`).
+pub(crate) async fn run_checks(
     runner: &dyn CiReproductionRunner,
     workdir: &Path,
+    checks: &[PreApprovalCheck],
 ) -> Vec<CheckOutcome> {
-    let mut outcomes = Vec::with_capacity(SERVER_CHECK_SET.len());
-    for check in SERVER_CHECK_SET {
+    let mut outcomes = Vec::with_capacity(checks.len());
+    for check in checks {
         let outcome = match runner.run(check.command, workdir, CHECK_TIMEOUT).await {
             Ok(out) if out.exit_code == 0 => CheckOutcome {
                 name: check.name.to_string(),
@@ -487,20 +552,47 @@ pub(crate) async fn evaluate_and_enforce(
         }
     }
 
-    if !inline_exec {
-        // Inline compile is disabled — enforcement of a fresh verdict is
-        // deferred to the verification pod. Record-only / shadow: proceed.
+    // Select the checks to run. When inline execution is enabled we run the
+    // full set. In shadow mode (inline exec off) we still run the no-compile
+    // deterministic guards inline — they are exactly the deterministic
+    // merge-queue offenders (Size Guard, Migrations Guard, Raw-SQL Boundary,
+    // capability boundaries) and cost milliseconds — but defer the compile/DB
+    // heavy checks (clippy, sqlx cache, test build) to the verification pod.
+    let checks_to_run: Vec<PreApprovalCheck> = if inline_exec {
+        SERVER_CHECK_SET.to_vec()
+    } else {
+        // The no-compile guards diff against origin/main; if the worktree has no
+        // resolvable base they cannot run without being misread as violations,
+        // so fall back to the historical deferral instead of false-blocking.
+        if !base_ref_resolvable(runner, &workdir).await {
+            tracing::debug!(
+                task_id = %task.short_id,
+                fingerprint = %digest,
+                "preapproval gate: no cached verdict, inline exec off, and no resolvable diff base; deferring to verification pod"
+            );
+            return PreApprovalGateOutcome::DeferredNoVerdict;
+        }
+        no_build_checks()
+    };
+
+    // Run the selected checks and persist the verdict.
+    let outcomes = run_checks(runner, &workdir, &checks_to_run).await;
+    let all_pass = outcomes.iter().all(|o| o.passed);
+
+    // Shadow mode + green no-compile subset: the deterministic guards passed but
+    // the compile/DB checks were NOT run, so we must not persist a green run
+    // (that would falsely satisfy the (task, fingerprint) cache and let a
+    // build-failing resubmission through). Defer the remaining checks to the
+    // verification pod and proceed, exactly as before.
+    if all_pass && !inline_exec {
         tracing::debug!(
             task_id = %task.short_id,
             fingerprint = %digest,
-            "preapproval gate: no cached verdict and inline exec disabled; deferring to verification pod"
+            "preapproval gate: no-compile guards passed in shadow mode; deferring compile/DB checks to verification pod"
         );
         return PreApprovalGateOutcome::DeferredNoVerdict;
     }
 
-    // Run the check set inline and persist the verdict.
-    let outcomes = run_check_set(runner, &workdir).await;
-    let all_pass = outcomes.iter().all(|o| o.passed);
     let coverage = check_coverage_json(&outcomes);
     let completed_at = now_rfc3339();
     let result = if all_pass {
@@ -707,17 +799,37 @@ async fn evaluate_arbiter_gate(
         }
     }
 
-    if !inline_exec {
+    // Same split as the reviewer gate: the no-compile deterministic guards run
+    // inline even in shadow mode; the compile/DB checks defer to the
+    // verification pod unless inline execution is enabled.
+    let checks_to_run: Vec<PreApprovalCheck> = if inline_exec {
+        SERVER_CHECK_SET.to_vec()
+    } else {
+        if !base_ref_resolvable(runner, &workdir).await {
+            tracing::debug!(
+                task_id = %task.short_id,
+                fingerprint = %digest,
+                "arbiter preapproval gate: no cached verdict, inline exec off, and no resolvable diff base; deferring to verification pod"
+            );
+            return djinn_supervisor::ArbiterGateResult::Pass;
+        }
+        no_build_checks()
+    };
+
+    let outcomes = run_checks(runner, &workdir, &checks_to_run).await;
+    let all_pass = outcomes.iter().all(|o| o.passed);
+
+    // Shadow mode + green no-compile subset: defer the compile/DB checks (do not
+    // persist a partial-green run that would falsely satisfy the cache).
+    if all_pass && !inline_exec {
         tracing::debug!(
             task_id = %task.short_id,
             fingerprint = %digest,
-            "arbiter preapproval gate: no cached verdict and inline exec disabled; deferring to verification pod"
+            "arbiter preapproval gate: no-compile guards passed in shadow mode; deferring compile/DB checks to verification pod"
         );
         return djinn_supervisor::ArbiterGateResult::Pass;
     }
 
-    let outcomes = run_check_set(runner, &workdir).await;
-    let all_pass = outcomes.iter().all(|o| o.passed);
     let coverage = check_coverage_json(&outcomes);
     let completed_at = now_rfc3339();
     let result = if all_pass {
@@ -897,12 +1009,14 @@ mod tests {
             .join("..");
         for rel in [
             "scripts/check-file-size.sh",
+            "scripts/check-migrations-immutable.sh",
             "scripts/check-raw-sql-boundary.sh",
             ".github/workflows/quality-gate.yml",
             "scripts/test-capability-boundaries.sh",
             "scripts/check-git-boundary.sh",
             "scripts/check-http-boundary.sh",
             "scripts/check-k8s-boundary.sh",
+            "scripts/premerge-gates.sh",
         ] {
             assert!(
                 repo_root.join(rel).exists(),
@@ -923,12 +1037,62 @@ mod tests {
             vec![
                 "clippy_all_targets",
                 "size_guard",
+                "migrations_guard",
                 "raw_sql_boundary",
                 "capability_boundaries",
                 "sqlx_offline_cache",
                 "test_target_build"
             ]
         );
+    }
+
+    #[test]
+    fn no_build_subset_is_the_deterministic_guards() {
+        // The no-compile subset must be exactly the deterministic merge-queue
+        // guards — the ones the gate can safely run inline in shadow mode.
+        let names: Vec<&str> = no_build_checks().iter().map(|c| c.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "size_guard",
+                "migrations_guard",
+                "raw_sql_boundary",
+                "capability_boundaries",
+            ]
+        );
+        // Every no-build check is flagged accordingly, and every build check is
+        // excluded from the subset.
+        assert!(no_build_checks().iter().all(|c| !c.requires_build));
+        for build_check in [
+            "clippy_all_targets",
+            "sqlx_offline_cache",
+            "test_target_build",
+        ] {
+            assert!(
+                !no_build_checks().iter().any(|c| c.name == build_check),
+                "{build_check} must not be in the no-build subset"
+            );
+        }
+    }
+
+    #[test]
+    fn premerge_gates_script_covers_no_build_subset() {
+        // Drift guard: scripts/premerge-gates.sh must run every no-compile
+        // deterministic guard the Rust gate enforces, so the local reproduction
+        // and the coordinator gate never diverge.
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..");
+        let script = std::fs::read_to_string(repo_root.join("scripts/premerge-gates.sh"))
+            .expect("read scripts/premerge-gates.sh");
+        for check in no_build_checks() {
+            assert!(
+                script.contains(&format!("run_gate \"{}\"", check.name)),
+                "premerge-gates.sh must run the '{}' gate",
+                check.name
+            );
+        }
     }
 
     // ── Fake runner ──────────────────────────────────────────────────────────
@@ -952,10 +1116,20 @@ mod tests {
     impl CiReproductionRunner for FakeRunner {
         async fn run(
             &self,
-            _command: &str,
+            command: &str,
             _workdir: &Path,
             _timeout: Duration,
         ) -> Result<RunnerOutput, std::io::Error> {
+            // The base-resolvability probe is infra, not a gate — always report a
+            // resolvable base so the no-compile subset actually runs. It is not
+            // counted as a check invocation.
+            if command.contains("git rev-parse --verify origin/main") {
+                return Ok(RunnerOutput {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(RunnerOutput {
                 exit_code: self.exit,
@@ -973,13 +1147,13 @@ mod tests {
     async fn run_check_set_all_pass_and_all_fail() {
         let dir = tempfile::tempdir().unwrap();
         let pass = FakeRunner::new(0);
-        let outcomes = run_check_set(&pass, dir.path()).await;
+        let outcomes = run_checks(&pass, dir.path(), SERVER_CHECK_SET).await;
         assert_eq!(outcomes.len(), SERVER_CHECK_SET.len());
         assert!(outcomes.iter().all(|o| o.passed));
         assert_eq!(pass.calls.load(Ordering::SeqCst), SERVER_CHECK_SET.len());
 
         let fail = FakeRunner::new(1);
-        let outcomes = run_check_set(&fail, dir.path()).await;
+        let outcomes = run_checks(&fail, dir.path(), SERVER_CHECK_SET).await;
         assert!(outcomes.iter().all(|o| !o.passed));
         let feedback = format_gate_feedback(&outcomes);
         assert!(feedback.contains("clippy_all_targets"));
@@ -1190,18 +1364,119 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cache_miss_without_inline_exec_defers() {
+    async fn cache_miss_shadow_mode_green_no_build_defers() {
+        let db = test_db();
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let wt = worktree_with_untracked("server/crates/djinn-x/src/lib.rs");
+        let (task_id, run_id) = create_approved_task_with_run(&db, wt.path()).await;
+        let task = repo.get(&task_id).await.unwrap().unwrap();
+
+        // inline_exec = false, no cached verdict, no-compile guards all green →
+        // defer the compile/DB checks to the verification pod (proceed).
+        let runner = FakeRunner::new(0);
+        let outcome = evaluate_and_enforce(&db, &repo, &task, true, false, &runner).await;
+        assert_eq!(outcome, PreApprovalGateOutcome::DeferredNoVerdict);
+        assert!(!outcome.should_block());
+        // The no-compile subset ran inline (the base probe is not counted).
+        assert_eq!(runner.calls.load(Ordering::SeqCst), no_build_checks().len());
+        // A green no-compile subset must NOT persist a (partial) green run.
+        let runs = VerifyRunRepository::new(db.clone())
+            .list_for_task_run(&run_id)
+            .await
+            .unwrap();
+        assert!(
+            runs.is_empty(),
+            "shadow-mode green no-compile subset must not persist a verify_run"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cache_miss_shadow_mode_red_no_build_blocks_strike_free() {
+        let db = test_db();
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let wt = worktree_with_untracked("server/crates/djinn-x/src/lib.rs");
+        let (task_id, run_id) = create_approved_task_with_run(&db, wt.path()).await;
+        let task = repo.get(&task_id).await.unwrap().unwrap();
+
+        // inline_exec = false, no cached verdict, a no-compile guard fails → the
+        // deterministic merge-queue offender is caught BEFORE the PR opens, even
+        // in shadow mode. Strike-free: task returns to a worker round.
+        let runner = FakeRunner::new(1);
+        let outcome = evaluate_and_enforce(&db, &repo, &task, true, false, &runner).await;
+        assert!(
+            matches!(outcome, PreApprovalGateOutcome::Blocked { .. }),
+            "red no-compile guard must block in shadow mode, got {outcome:?}"
+        );
+        // Only the no-compile subset ran (the compile/DB checks stay deferred).
+        assert_eq!(runner.calls.load(Ordering::SeqCst), no_build_checks().len());
+
+        let after = repo.get(&task_id).await.unwrap().unwrap();
+        assert_eq!(
+            TaskStatus::parse(&after.status).unwrap(),
+            TaskStatus::Open,
+            "blocked task returns to open (worker round)"
+        );
+        assert_eq!(after.reopen_count, 0, "no reopen strike");
+        assert_eq!(after.total_reopen_count, 0, "no total reopen strike");
+        assert_eq!(after.intervention_count, 0, "no intervention counted");
+
+        // A red verify_run row is persisted for the (task, fingerprint) cache.
+        let runs = VerifyRunRepository::new(db.clone())
+            .list_for_task_run(&run_id)
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].result, VerifyResult::Fail.as_str());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cache_miss_shadow_mode_no_base_defers() {
         let db = test_db();
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
         let wt = worktree_with_untracked("server/crates/djinn-x/src/lib.rs");
         let (task_id, _run_id) = create_approved_task_with_run(&db, wt.path()).await;
         let task = repo.get(&task_id).await.unwrap().unwrap();
 
-        let runner = FakeRunner::new(1);
-        // inline_exec = false, no cached verdict → defer (proceed), do not block.
+        // A runner whose base probe reports NO resolvable base must fall back to
+        // deferral, never running the changed-file guards (they would error on a
+        // missing base and be misread as violations).
+        struct NoBaseRunner {
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl CiReproductionRunner for NoBaseRunner {
+            async fn run(
+                &self,
+                command: &str,
+                _workdir: &Path,
+                _timeout: Duration,
+            ) -> Result<RunnerOutput, std::io::Error> {
+                if command.contains("git rev-parse --verify origin/main") {
+                    // No base resolvable.
+                    return Ok(RunnerOutput {
+                        exit_code: 1,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    });
+                }
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(RunnerOutput {
+                    exit_code: 1,
+                    stdout: "should not run".into(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let runner = NoBaseRunner {
+            calls: AtomicUsize::new(0),
+        };
         let outcome = evaluate_and_enforce(&db, &repo, &task, true, false, &runner).await;
         assert_eq!(outcome, PreApprovalGateOutcome::DeferredNoVerdict);
-        assert!(!outcome.should_block());
-        assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            0,
+            "no gate may run when the diff base is unresolvable"
+        );
     }
 }
