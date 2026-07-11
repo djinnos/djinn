@@ -321,6 +321,10 @@ pub const PROPOSAL_REVIEW_TITLE_PREFIX: &str = "Review proposal";
 
 /// Natural task completion (Close / PrMerge transitions).
 pub const CLOSE_REASON_COMPLETED: &str = "completed";
+/// Task closed because its parent epic/proposal was closed. Set by the
+/// parent-disposition cascade (proposal n6vq / epic f0ba). Does NOT count as
+/// merged work: a `parent_closed` task has no merge commit / completed PR.
+pub const CLOSE_REASON_PARENT_CLOSED: &str = "parent_closed";
 /// Force-close (ForceClose / UserOverride → Closed transitions).
 pub const CLOSE_REASON_FORCE_CLOSED: &str = "force_closed";
 /// Planner force-closed this task as part of a board reshape.  Auto-dispatch

@@ -13,6 +13,7 @@ mod activity;
 mod blockers;
 mod board_health;
 mod ci;
+mod parent_disposition;
 mod queries;
 mod reads;
 mod status;
