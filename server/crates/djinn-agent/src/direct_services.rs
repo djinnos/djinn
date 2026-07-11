@@ -1133,19 +1133,6 @@ impl SupervisorServices for DirectServices {
         }
     }
 
-    async fn run_arbiter_preapproval_gate(
-        &self,
-        task: &Task,
-    ) -> Result<djinn_supervisor::ArbiterGateResult, String> {
-        let db = &self.callbacks.agent_context.db;
-        let task_repo = djinn_db::TaskRepository::new(
-            db.clone(),
-            self.callbacks.agent_context.event_bus.clone(),
-        );
-        let outcome = djinn_coordinator::run_arbiter_preapproval_gate(db, &task_repo, task).await;
-        Ok(outcome)
-    }
-
     /// Persist the arbiter decision (approve / approve_conflict) and its
     /// evidence on the current unconsumed arbitration row, then emit an
     /// `arbiter_decision` activity event.  Non-fatal on any individual

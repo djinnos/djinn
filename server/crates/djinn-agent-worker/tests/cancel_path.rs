@@ -332,10 +332,8 @@ async fn start_fake_server(
                         ServiceRpcRequest::TransitionTask { .. } => {
                             ServiceRpcResponse::TransitionTask(Ok(()))
                         }
-                        ServiceRpcRequest::RunArbiterPreapprovalGate { .. } => {
-                            ServiceRpcResponse::RunArbiterPreapprovalGate(Ok(
-                                djinn_supervisor::ArbiterGateResult::Pass,
-                            ))
+                        ServiceRpcRequest::ReservedRemovedArbiterGate => {
+                            ServiceRpcResponse::ReservedRemovedArbiterGate(Err("removed".into()))
                         }
                         ServiceRpcRequest::RecordArbiterDecision { .. } => {
                             ServiceRpcResponse::RecordArbiterDecision(Ok(()))
