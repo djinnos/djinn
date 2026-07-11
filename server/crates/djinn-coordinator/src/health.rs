@@ -28,12 +28,19 @@ const STARTUP_TASK_RUN_THRESHOLD_SECS: i64 = 10;
 /// (`starting`/`running`) `task_run` and no `running` session for its task —
 /// before the orphaned-attempt reaper finalizes it to `crashed`.
 ///
-/// Conservative: dispatch-start → session/run creation is seconds, so a
-/// 15-minute-old pending attempt with nothing executing behind it can never
-/// be advanced by the normal lifecycle paths. Left un-reaped it hard-blocks
-/// the respawn guard for its (task, role) pair forever (the guard defers any
-/// dispatch while a `pending`/`submitted` attempt exists).
-const ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS: i64 = 15 * 60;
+/// Conservative but responsive: dispatch-start → session/run creation is
+/// seconds, and even across a server rolling restart the worker's connect
+/// budget (`CONNECT_BACKOFF_MS` in djinn-supervisor, ~90s) means a
+/// legitimately-starting attempt registers a live `task_run`/session well
+/// within 2 minutes. The reaper is already gated on there being no live
+/// (`starting`/`running`) `task_run` and no `running` session for the task,
+/// so a 5-minute-old `pending` attempt with nothing executing behind it can
+/// never be advanced by the normal lifecycle paths. Left un-reaped it
+/// hard-blocks the respawn guard for its (task, role) pair (the guard defers
+/// any dispatch while a `pending`/`submitted` attempt exists), so a 5-minute
+/// threshold cuts the worst-case post-deploy dispatch wedge from 15 min to 5
+/// while staying safely clear of any real starting attempt.
+const ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS: i64 = 5 * 60;
 
 const CARGO_TARGET_RUNS_ROOT: &str = djinn_supervisor::CARGO_TARGET_RUNS_ROOT;
 

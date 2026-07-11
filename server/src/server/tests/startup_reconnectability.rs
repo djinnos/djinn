@@ -155,6 +155,12 @@ async fn connected_worker_has_numerator_one_before_startup_interruption() {
         !measurement.startup_instance_id.is_empty(),
         "startup_instance_id must be a non-empty UUID v7"
     );
+    assert!(
+        measurement
+            .reconnectable_task_run_ids()
+            .contains(task_run_id),
+        "the exact connected task_run_id must be exposed for startup mutation"
+    );
 
     // Verify the session was NOT mutated by the measurement — it is still running.
     let running_after = session_repo
@@ -170,6 +176,52 @@ async fn connected_worker_has_numerator_one_before_startup_interruption() {
         running_after[0].task_run_id.as_deref(),
         Some(task_run_id),
         "the running session must retain its task_run_id"
+    );
+}
+
+/// Verify reconnectability is derived from unique task-run identities rather
+/// than incrementing once per running session row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_running_sessions_for_one_task_run_count_once() {
+    let db = create_test_db();
+    let events = test_events();
+    let task_run_id = "test-run-connected-duplicate";
+
+    let project_id = seed_running_session_with_task_run(&db, &events, task_run_id).await;
+    let session_repo = SessionRepository::new(db.clone(), events.clone());
+    session_repo
+        .create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: None,
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(task_run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("create duplicate running session for task run");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let state = AppState::new(db.clone(), cancel);
+    state
+        .rpc_registry()
+        .register_connected_for_test(task_run_id)
+        .await;
+
+    let measurement = state.measure_startup_reconnectability(&session_repo).await;
+
+    assert_eq!(measurement.running_sessions, 2);
+    assert_eq!(
+        measurement.connected_or_reconnectable_sessions, 1,
+        "one connected task_run_id must only contribute one reconnectable identity"
+    );
+    assert_eq!(measurement.reconnectable_task_run_ids().len(), 1);
+    assert!(
+        measurement
+            .reconnectable_task_run_ids()
+            .contains(task_run_id)
     );
 }
 

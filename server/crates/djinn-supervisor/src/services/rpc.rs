@@ -89,6 +89,24 @@ fn io_other(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
 }
 
+/// Per-attempt backoff (in milliseconds) for [`RpcServices::connect_tcp`]'s
+/// dial-retry loop. There is one sleep entry per retry, so the total connect
+/// budget is `CONNECT_BACKOFF_MS.iter().sum()` and the attempt count is
+/// `CONNECT_BACKOFF_MS.len() + 1` (the initial dial plus one per entry).
+///
+/// Sized to survive a rolling restart of djinn-server. A `helm upgrade` roll
+/// of the server takes ~20-30s, during which its RPC listener is briefly
+/// unreachable. Any task-run pod that starts inside that window must keep
+/// dialing rather than exit 1 — an early exit strands a `pending`
+/// task_attempt that blocks the (task, role) dispatch until the orphan reaper
+/// fires (observed twice in production). The schedule ramps quickly for the
+/// common launcher-boot race (sub-second), then holds at a 10s cap for the
+/// long tail; the entries below sum to ~88.7s, covering a server roll with
+/// comfortable margin.
+const CONNECT_BACKOFF_MS: &[u64] = &[
+    100, 200, 400, 1000, 2000, 5000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+];
+
 // ── Real RPC client ──────────────────────────────────────────────────────────
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<ServiceRpcResponse>>>>;
@@ -202,14 +220,20 @@ impl RpcServices {
         cancel: CancellationToken,
     ) -> Result<(Arc<Self>, RpcBackgroundTasks), ConnectTcpError> {
         // Retry the TCP dial with exponential backoff so the worker tolerates
-        // launcher races: the dispatch path can create the worker Job within
-        // milliseconds of the launcher boot, before the launcher's TCP
-        // listener on :8443 has bound. Without retry, a single
-        // "Connection refused" kills the task-run (Job backoff_limit=0 means
-        // no K8s-level retry). Total budget: ~30s across 7 attempts at
-        // 100ms / 200ms / 400ms / 1s / 2s / 5s / 10s.
+        // launcher races AND a server rolling restart: the dispatch path can
+        // create the worker Job within milliseconds of the launcher boot,
+        // before the launcher's TCP listener on :8443 has bound, and a
+        // `helm upgrade` roll of djinn-server (~20-30s) makes the RPC listener
+        // transiently unreachable for any pod that starts inside that window.
+        // Without a budget that spans the roll, a single "Connection refused"
+        // kills the task-run (Job backoff_limit=0 means no K8s-level retry)
+        // and strands a `pending` task_attempt that blocks (task, role)
+        // dispatch until the orphan reaper fires. See [`CONNECT_BACKOFF_MS`]
+        // for the schedule and the ~88.7s total budget.
         let mut stream = {
-            let backoff_ms: [u64; 7] = [100, 200, 400, 1000, 2000, 5000, 10000];
+            let backoff_ms = CONNECT_BACKOFF_MS;
+            let total_attempts = backoff_ms.len() + 1;
+            let budget_secs = backoff_ms.iter().sum::<u64>() / 1000;
             let mut attempt = 0usize;
             loop {
                 tokio::select! {
@@ -227,9 +251,7 @@ impl RpcServices {
                             => {
                             if attempt >= backoff_ms.len() {
                                 return Err(ConnectTcpError::Io(io_other(format!(
-                                    "connect_tcp: launcher unreachable after {} attempts ({}s budget): {e}",
-                                    backoff_ms.len() + 1,
-                                    backoff_ms.iter().sum::<u64>() / 1000,
+                                    "connect_tcp: launcher unreachable after {total_attempts} attempts ({budget_secs}s budget): {e}",
                                 ))));
                             }
                             let delay = backoff_ms[attempt];
@@ -237,9 +259,11 @@ impl RpcServices {
                             tracing::warn!(
                                 %addr,
                                 attempt,
+                                total_attempts,
+                                budget_secs,
                                 next_retry_ms = delay,
                                 error = %e,
-                                "connect_tcp: launcher not yet listening; retrying",
+                                "connect_tcp: launcher not yet listening; retrying (tolerates a server roll)",
                             );
                             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                         }
@@ -1318,6 +1342,33 @@ impl SupervisorServices for UnimplementedRpcServices {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// The connect-retry budget must span a server rolling restart. A
+    /// `helm upgrade` roll of djinn-server takes ~20-30s during which its RPC
+    /// listener is unreachable; a task-run pod that starts in that window has
+    /// to keep dialing rather than exit and strand a `pending` attempt. Assert
+    /// the total budget clears the roll with margin and that the tail holds at
+    /// a 10s cap (fast ramp for the launcher-boot race, patient tail for a
+    /// roll).
+    #[test]
+    fn connect_backoff_budget_covers_a_server_roll() {
+        let total_ms: u64 = CONNECT_BACKOFF_MS.iter().sum();
+        // A server roll is ~20-30s; require >=60s so a pod that starts at the
+        // very beginning of the roll still outlasts it comfortably.
+        assert!(
+            total_ms >= 60_000,
+            "connect budget {total_ms}ms must exceed a ~30s server roll with margin",
+        );
+        // The tail must be capped so we keep retrying at a steady cadence
+        // instead of ballooning to minute-long sleeps.
+        let cap = *CONNECT_BACKOFF_MS.iter().max().expect("non-empty schedule");
+        assert_eq!(cap, 10_000, "backoff tail should hold at a 10s cap");
+        assert_eq!(
+            *CONNECT_BACKOFF_MS.last().expect("non-empty schedule"),
+            10_000,
+            "final backoff entry should sit at the 10s cap",
+        );
+    }
 
     /// The stub satisfies the trait (compile-time) and can be stored behind
     /// `Arc<dyn SupervisorServices>` (the supervisor's dispatch shape).
