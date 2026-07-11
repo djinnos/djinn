@@ -13,7 +13,12 @@
 //! be proven pullable, preflight **fails closed** — returns an `Err` and does
 //! NOT proceed.
 
-use crate::retention::{self, CATALOG_REPO_PREFIX, RetentionPlan, SelectedImage, ZotRepository};
+use crate::retention::{
+    self, CATALOG_REPO_PREFIX, RetentionPlan, SelectedImage, ZotRepository, ZotTag,
+};
+use reqwest::header;
+use serde::Deserialize;
+use std::time::Duration;
 
 /// A mockable source of Zot repository/tag state.
 ///
@@ -32,6 +37,260 @@ pub enum ZotStateError {
     Fetch(String),
     #[error("zot state parse error: {0}")]
     Parse(String),
+    #[error("zot transport failure during {operation}: {message}")]
+    Transport {
+        operation: &'static str,
+        message: String,
+    },
+    #[error("zot returned HTTP {status} during {operation}")]
+    Status {
+        operation: &'static str,
+        status: u16,
+    },
+    #[error("zot returned incomplete state for {repo}:{tag}: missing {field}")]
+    Incomplete {
+        repo: String,
+        tag: String,
+        field: &'static str,
+    },
+}
+
+/// Explicit authentication for Zot API requests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ZotHttpAuth {
+    None,
+    Basic { username: String, password: String },
+    Bearer(String),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZotHttpConfig {
+    pub endpoint: String,
+    pub auth: ZotHttpAuth,
+    pub request_timeout: Duration,
+}
+impl ZotHttpConfig {
+    pub fn new(endpoint: impl Into<String>, auth: ZotHttpAuth) -> Self {
+        Self {
+            endpoint: endpoint.into().trim_end_matches('/').to_owned(),
+            auth,
+            request_timeout: Duration::from_secs(15),
+        }
+    }
+}
+/// Production Zot Distribution client; it maps only `djinn-image-*` repos.
+#[derive(Clone)]
+pub struct ZotHttpStateSource {
+    config: ZotHttpConfig,
+    client: reqwest::Client,
+}
+impl ZotHttpStateSource {
+    pub fn new(config: ZotHttpConfig) -> Result<Self, ZotStateError> {
+        let client = reqwest::Client::builder()
+            .timeout(config.request_timeout)
+            .build()
+            .map_err(|e| ZotStateError::Transport {
+                operation: "client construction",
+                message: e.to_string(),
+            })?;
+        Ok(Self { config, client })
+    }
+    fn request(&self, url: &str) -> reqwest::RequestBuilder {
+        let request = self
+            .client
+            .get(url)
+            .header(header::ACCEPT, "application/vnd.oci.image.manifest.v1+json");
+        match &self.config.auth {
+            ZotHttpAuth::None => request,
+            ZotHttpAuth::Basic { username, password } => {
+                request.basic_auth(username, Some(password))
+            }
+            ZotHttpAuth::Bearer(token) => request.bearer_auth(token),
+        }
+    }
+    async fn response(
+        &self,
+        url: &str,
+        op: &'static str,
+    ) -> Result<reqwest::Response, ZotStateError> {
+        let response = self
+            .request(url)
+            .send()
+            .await
+            .map_err(|e| ZotStateError::Transport {
+                operation: op,
+                message: e.to_string(),
+            })?;
+        if !response.status().is_success() {
+            return Err(ZotStateError::Status {
+                operation: op,
+                status: response.status().as_u16(),
+            });
+        }
+        Ok(response)
+    }
+    async fn names(
+        &self,
+        mut next: Option<String>,
+        op: &'static str,
+        key: &'static str,
+    ) -> Result<Vec<String>, ZotStateError> {
+        let mut names = Vec::new();
+        while let Some(url) = next.take() {
+            let response = self.response(&url, op).await?;
+            let link = response
+                .headers()
+                .get(header::LINK)
+                .and_then(|v| v.to_str().ok())
+                .and_then(next_link)
+                .map(str::to_owned);
+            let body: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| ZotStateError::Parse(e.to_string()))?;
+            let entries = body
+                .get(key)
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| ZotStateError::Parse(format!("missing array field {key}")))?;
+            for value in entries {
+                names.push(
+                    value
+                        .as_str()
+                        .ok_or_else(|| ZotStateError::Parse(format!("non-string {key}")))?
+                        .to_owned(),
+                );
+            }
+            next = link.map(|url| {
+                if url.starts_with("http") {
+                    url
+                } else {
+                    format!("{}{}", self.config.endpoint, url)
+                }
+            });
+        }
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+    async fn tag(&self, repo: &str, tag: &str) -> Result<ZotTag, ZotStateError> {
+        let response = self
+            .response(
+                &format!("{}/v2/{repo}/manifests/{tag}", self.config.endpoint),
+                "manifest",
+            )
+            .await?;
+        let digest = response
+            .headers()
+            .get("Docker-Content-Digest")
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| ZotStateError::Incomplete {
+                repo: repo.into(),
+                tag: tag.into(),
+                field: "Docker-Content-Digest",
+            })?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| ZotStateError::Transport {
+                operation: "manifest body",
+                message: e.to_string(),
+            })?;
+        let manifest: Manifest =
+            serde_json::from_slice(&bytes).map_err(|e| ZotStateError::Parse(e.to_string()))?;
+        let config = manifest.config.ok_or_else(|| ZotStateError::Incomplete {
+            repo: repo.into(),
+            tag: tag.into(),
+            field: "manifest config",
+        })?;
+        let image_config: ImageConfig = self
+            .response(
+                &format!("{}/v2/{repo}/blobs/{}", self.config.endpoint, config.digest),
+                "image config",
+            )
+            .await?
+            .json()
+            .await
+            .map_err(|e| ZotStateError::Parse(e.to_string()))?;
+        let pushed_at = image_config
+            .created
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| ZotStateError::Incomplete {
+                repo: repo.into(),
+                tag: tag.into(),
+                field: "config created timestamp",
+            })?;
+        let layers = manifest.layers.ok_or_else(|| ZotStateError::Incomplete {
+            repo: repo.into(),
+            tag: tag.into(),
+            field: "manifest layers",
+        })?;
+        Ok(ZotTag {
+            tag: tag.into(),
+            digest,
+            size_bytes: bytes.len() as u64
+                + config.size
+                + layers.into_iter().map(|l| l.size).sum::<u64>(),
+            pushed_at,
+        })
+    }
+}
+#[async_trait::async_trait]
+impl ZotStateSource for ZotHttpStateSource {
+    async fn fetch_repositories(&self) -> Result<Vec<ZotRepository>, ZotStateError> {
+        let repositories = self
+            .names(
+                Some(format!("{}/v2/_catalog?n=100", self.config.endpoint)),
+                "catalog",
+                "repositories",
+            )
+            .await?;
+        let mut result = Vec::new();
+        for name in repositories
+            .into_iter()
+            .filter(|name| name.starts_with(CATALOG_REPO_PREFIX))
+        {
+            let names = self
+                .names(
+                    Some(format!(
+                        "{}/v2/{name}/tags/list?n=100",
+                        self.config.endpoint
+                    )),
+                    "tag list",
+                    "tags",
+                )
+                .await?;
+            let mut tags = Vec::new();
+            for tag in names {
+                tags.push(self.tag(&name, &tag).await?);
+            }
+            result.push(ZotRepository { name, tags });
+        }
+        Ok(result)
+    }
+}
+fn next_link(value: &str) -> Option<&str> {
+    let part = value
+        .split(',')
+        .find(|part| part.contains("rel=\"next\""))?;
+    let start = part.find('<')? + 1;
+    let end = part[start..].find('>')? + start;
+    Some(&part[start..end])
+}
+#[derive(Deserialize)]
+struct Manifest {
+    config: Option<Descriptor>,
+    layers: Option<Vec<Descriptor>>,
+}
+#[derive(Deserialize)]
+struct Descriptor {
+    digest: String,
+    #[serde(default)]
+    size: u64,
+}
+#[derive(Deserialize)]
+struct ImageConfig {
+    created: Option<String>,
 }
 
 /// Preflight configuration for retention gating.
