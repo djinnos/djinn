@@ -84,8 +84,12 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
               Compares models using worker sessions/results only. Completed
               tasks are attributed to every model that ran a worker session on
               them, so task counts use shared credit rather than exclusive
-              ownership. Actual API spend and projected subscription-equivalent
-              cost are shown separately.
+              ownership. Because shared credit can flatter a model whose first
+              passes are reworked by another, the <em>First-pass rejections</em>{" "}
+              and <em>Final-pass share</em> columns discriminate who produced
+              rejected passes from who actually landed the merge. Actual API
+              spend and projected subscription-equivalent cost are shown
+              separately.
             </p>
           </div>
           <Badge variant="outline" className="text-muted-foreground">
@@ -95,7 +99,7 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[1140px] text-left text-sm">
+        <table className="w-full min-w-[1360px] text-left text-sm">
           <thead className="border-b border-border text-xs text-muted-foreground">
             <tr>
               <th className="px-4 py-3 font-medium">Model</th>
@@ -104,6 +108,18 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
                   {metric.label}
                 </th>
               ))}
+              <th
+                className="px-4 py-3 font-medium"
+                title="Share of this model's worker sessions whose pass did not land: a later worker session reworked the task after it was reopened. High values mean weak first passes that shared-credit success rate hides. Lower is better."
+              >
+                First-pass rejections
+              </th>
+              <th
+                className="px-4 py-3 font-medium"
+                title="Share of this model's completed-task credits where it ran the LAST worker session before the task closed — i.e. it actually landed the merge (vs. inheriting shared credit for a task another model finished). Higher is better."
+              >
+                Final-pass share
+              </th>
               <th className="px-4 py-3 font-medium">Tasks</th>
               <th className="px-4 py-3 font-medium">Sessions</th>
               <th className="px-4 py-3 font-medium">Tokens</th>
@@ -137,6 +153,36 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
                       stats={stats[metric.key]}
                     />
                   ))}
+                  <td
+                    className="px-4 py-3 tabular-nums text-foreground"
+                    title={
+                      row.first_pass_rejected_session_count != null &&
+                      row.session_count != null
+                        ? `${formatInteger(
+                            row.first_pass_rejected_session_count,
+                          )} of ${formatInteger(
+                            row.session_count,
+                          )} worker sessions reworked after reopen`
+                        : undefined
+                    }
+                  >
+                    {formatPercent(row.first_pass_rejection_rate)}
+                  </td>
+                  <td
+                    className="px-4 py-3 tabular-nums text-foreground"
+                    title={
+                      row.final_pass_completed_task_count != null &&
+                      row.completed_task_count != null
+                        ? `landed ${formatInteger(
+                            row.final_pass_completed_task_count,
+                          )} of ${formatInteger(
+                            row.completed_task_count,
+                          )} credited completed tasks`
+                        : undefined
+                    }
+                  >
+                    {formatPercent(row.final_pass_share)}
+                  </td>
                   <td className="px-4 py-3 tabular-nums text-foreground">
                     <div>{formatInteger(row.task_count)}</div>
                     {row.completed_task_count !== undefined && (

@@ -246,6 +246,35 @@ spec:
                         (include "djinn.fullname" .)
                         (include "djinn.namespace" .)
                         (.Values.service.rpcPort | int) | quote }}
+            # Resource sizing the controller stamps onto the task-run + warm
+            # Job PodSpecs it dispatches. These size the EPHEMERAL worker/warm
+            # Pods djinn-server spawns, NOT this long-lived server Pod (that's
+            # `resources.server` on the container below). Sourced from
+            # `resources.taskrun` / `resources.warm` in values.yaml.
+            #
+            # Emitted BEFORE the `extraEnv` include at the end of this env list
+            # on purpose: Kubernetes resolves a duplicate env name to the LAST
+            # entry, so an operator who also sets any of these via `extraEnv`
+            # still wins. Keep new sizing vars above the `extraEnv` block to
+            # preserve that override property.
+            - name: DJINN_K8S_CPU_REQUEST
+              value: {{ .Values.resources.taskrun.requests.cpu | quote }}
+            - name: DJINN_K8S_CPU_LIMIT
+              value: {{ .Values.resources.taskrun.limits.cpu | quote }}
+            - name: DJINN_K8S_MEMORY_REQUEST
+              value: {{ .Values.resources.taskrun.requests.memory | quote }}
+            - name: DJINN_K8S_MEMORY_LIMIT
+              value: {{ .Values.resources.taskrun.limits.memory | quote }}
+            - name: DJINN_K8S_WARM_CPU_REQUEST
+              value: {{ .Values.resources.warm.requests.cpu | quote }}
+            - name: DJINN_K8S_WARM_CPU_LIMIT
+              value: {{ .Values.resources.warm.limits.cpu | quote }}
+            - name: DJINN_K8S_WARM_MEMORY_REQUEST
+              value: {{ .Values.resources.warm.requests.memory | quote }}
+            - name: DJINN_K8S_WARM_MEMORY_LIMIT
+              value: {{ .Values.resources.warm.limits.memory | quote }}
+            - name: DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS
+              value: {{ .Values.resources.warm.jobTimeoutSeconds | quote }}
             # Pod scheduling for task-run + warm Jobs. JSON-encoded so the
             # controller can deserialize directly into k8s_openapi types
             # without bringing a YAML parser into the dispatch path. The
