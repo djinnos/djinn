@@ -10,9 +10,14 @@
 //! - **Org default lanes + lock level.** An org-default per-role lane
 //!   assignment new members inherit when they have none, plus whether members
 //!   may override it (`flexible`) or not (`locked`).
+//! - **Recommended-model overrides.** Admin-curated additions and demotions
+//!   from the baseline `RECOMMENDED_MODELS` set, each a fully-qualified
+//!   `provider/model-id`.
 //!
 //! Both the read and the write are admin-gated. Non-admins receive the
 //! enforced/filtered results elsewhere but can neither see nor edit the policy.
+
+use std::collections::HashSet;
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
@@ -86,6 +91,10 @@ pub struct OrgPolicyGetResponse {
     pub default_lanes: OrgDefaultLanesPayload,
     /// `flexible` (members may override) | `locked` (org assignment authoritative).
     pub lock_level: String,
+    /// Fully-qualified `provider/model-id` entries to add to the recommended set.
+    pub additional_recommended_model_ids: Vec<String>,
+    /// Fully-qualified `provider/model-id` entries to demote from the recommended set.
+    pub demoted_recommended_model_ids: Vec<String>,
     pub error: Option<String>,
 }
 
@@ -104,6 +113,16 @@ pub struct OrgPolicySetParams {
     /// Lane lock level: `flexible` or `locked`. Omit to keep the current value.
     #[serde(default)]
     pub lock_level: Option<String>,
+    /// Fully-qualified `provider/model-id` entries to add to the recommended
+    /// set on top of the baseline. Omit to keep the current value; pass an
+    /// empty list to clear.
+    #[serde(default)]
+    pub additional_recommended_model_ids: Option<Vec<String>>,
+    /// Fully-qualified `provider/model-id` entries to demote from the
+    /// recommended set. Omit to keep the current value; pass an empty list to
+    /// clear.
+    #[serde(default)]
+    pub demoted_recommended_model_ids: Option<Vec<String>>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -113,6 +132,8 @@ pub struct OrgPolicySetResponse {
     pub blocked_subscriptions: Vec<String>,
     pub default_lanes: OrgDefaultLanesPayload,
     pub lock_level: String,
+    pub additional_recommended_model_ids: Vec<String>,
+    pub demoted_recommended_model_ids: Vec<String>,
     pub error: Option<String>,
 }
 
@@ -135,6 +156,104 @@ fn canonical_sub_key(id: &str) -> String {
         .collect()
 }
 
+/// Build the set of all known provider ids from the builtin registry plus the
+/// live catalog (so dynamically-discovered models.dev providers are accepted).
+/// This is used to validate recommended-model override entries: known providers
+/// are accepted even when not currently connected, enabling admins to pre-stage
+/// policy.
+fn known_provider_ids(server: &DjinnMcpServer) -> HashSet<String> {
+    let mut ids: HashSet<String> = builtin::builtin_provider_ids();
+    for p in server.state.catalog().list_providers() {
+        ids.insert(p.id);
+    }
+    ids
+}
+
+/// Validate and canonicalize a list of recommended-model override ids.
+///
+/// Each entry must be a fully-qualified `provider/model-id` where:
+/// - The provider prefix is non-empty and known to the deployment.
+/// - The model id (everything after the first `/`) is non-empty.
+/// - Model ids may contain additional `/` path segments (e.g.
+///   `fireworks-ai/accounts/fireworks/models/glm-5p2`).
+///
+/// Rejects:
+/// - Empty or whitespace-only entries.
+/// - Raw local ids (no `/` separator).
+/// - Malformed qualified ids (empty provider or empty model id).
+/// - Provider ids unknown to the deployment.
+/// - Duplicate ids within the list.
+///
+/// On success returns the deduplicated, sorted list.
+fn validate_model_override_list(
+    raw_ids: &[String],
+    known: &HashSet<String>,
+    list_label: &str,
+) -> Result<Vec<String>, String> {
+    let mut validated: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for raw in raw_ids {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(format!(
+                "{list_label}: model id `{raw}` is malformed — empty or whitespace-only entries are not allowed"
+            ));
+        }
+
+        // Must have at least one `/` separating provider from model id.
+        let (provider, model_rest) = match trimmed.split_once('/') {
+            Some((p, m)) => (p, m),
+            None => {
+                return Err(format!(
+                    "{list_label}: model id `{trimmed}` is not fully qualified — \
+                     expected `provider/model-id` but found no `/` separator"
+                ));
+            }
+        };
+
+        if provider.is_empty() {
+            return Err(format!(
+                "{list_label}: model id `{trimmed}` has an empty provider prefix"
+            ));
+        }
+        if model_rest.is_empty() {
+            return Err(format!(
+                "{list_label}: model id `{trimmed}` has an empty model id after the provider prefix"
+            ));
+        }
+
+        // Provider must be known to the deployment (builtin or catalog).
+        if !known.contains(provider) {
+            return Err(format!(
+                "{list_label}: provider `{provider}` in model id `{trimmed}` \
+                 is not a known provider in this deployment"
+            ));
+        }
+
+        // Check for duplicates (case-sensitive — model ids are canonical).
+        if !seen.insert(trimmed.to_string()) {
+            return Err(format!("{list_label}: duplicate model id `{trimmed}`"));
+        }
+
+        validated.push(trimmed.to_string());
+    }
+
+    validated.sort();
+    Ok(validated)
+}
+
+/// Detect model ids present in both the addition and demotion lists.
+fn detect_cross_list_overlap(additional: &[String], demoted: &[String]) -> Option<String> {
+    let demoted_set: HashSet<&String> = demoted.iter().collect();
+    for id in additional {
+        if demoted_set.contains(id) {
+            return Some(id.clone());
+        }
+    }
+    None
+}
+
 /// The de-duplicated universe of **governable subscriptions** for the admin
 /// allow/block table: each supported subscription provider once, paired with a
 /// display name. Drawn from the live catalog (so newly-surfaced models.dev
@@ -145,8 +264,6 @@ fn canonical_sub_key(id: &str) -> String {
 ///
 /// Each entry is `(id, display_name)` where `id` is the stored/blocklist form.
 fn subscription_universe(server: &DjinnMcpServer) -> Vec<(String, String)> {
-    use std::collections::HashSet;
-
     let merged = builtin::merged_provider_ids();
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<(String, String)> = Vec::new();
@@ -179,6 +296,21 @@ fn subscription_universe(server: &DjinnMcpServer) -> Vec<(String, String)> {
     out
 }
 
+/// Build a default/empty error response for `org_policy_set`, populating every
+/// field with safe defaults.
+fn default_set_error_response(msg: String) -> OrgPolicySetResponse {
+    OrgPolicySetResponse {
+        ok: false,
+        applied: false,
+        blocked_subscriptions: vec![],
+        default_lanes: OrgDefaultLanesPayload::default(),
+        lock_level: LockLevel::Flexible.as_db().to_string(),
+        additional_recommended_model_ids: vec![],
+        demoted_recommended_model_ids: vec![],
+        error: Some(msg),
+    }
+}
+
 fn build_get_response(server: &DjinnMcpServer, policy: &OrgAiPolicy) -> OrgPolicyGetResponse {
     let subscriptions = subscription_universe(server)
         .into_iter()
@@ -199,6 +331,8 @@ fn build_get_response(server: &DjinnMcpServer, policy: &OrgAiPolicy) -> OrgPolic
         blocked_subscriptions: policy.blocked_subscriptions.clone(),
         default_lanes: policy.default_lanes.clone().into(),
         lock_level: policy.lock_level.as_db().to_string(),
+        additional_recommended_model_ids: policy.additional_recommended_model_ids.clone(),
+        demoted_recommended_model_ids: policy.demoted_recommended_model_ids.clone(),
         error: None,
     }
 }
@@ -208,7 +342,8 @@ impl DjinnMcpServer {
     #[tool(
         description = "Admin-only: read the org AI policy — the subscription \
         allow/block table (with data-residency jurisdiction per provider), the \
-        org-default per-role model lanes, and the lane lock level.",
+        org-default per-role model lanes, the lane lock level, and the \
+        recommended-model override lists (additional/demoted).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -227,6 +362,8 @@ impl DjinnMcpServer {
                 blocked_subscriptions: vec![],
                 default_lanes: OrgDefaultLanesPayload::default(),
                 lock_level: LockLevel::Flexible.as_db().to_string(),
+                additional_recommended_model_ids: vec![],
+                demoted_recommended_model_ids: vec![],
                 error: Some(error),
             });
         }
@@ -237,23 +374,15 @@ impl DjinnMcpServer {
     #[tool(
         description = "Admin-only: update the org AI policy. Patch the blocked \
         subscription set (only subscription providers are honored; admin API \
-        keys are never blocked), the org-default per-role lanes, and/or the \
-        lane lock level. Omitted fields keep their current value."
+        keys are never blocked), the org-default per-role lanes, the lane lock \
+        level, and/or the recommended-model override lists (additional/demoted). \
+        Omitted fields keep their current value."
     )]
     pub async fn org_policy_set(
         &self,
         Parameters(p): Parameters<OrgPolicySetParams>,
     ) -> Json<OrgPolicySetResponse> {
-        let err = |msg: String| {
-            Json(OrgPolicySetResponse {
-                ok: false,
-                applied: false,
-                blocked_subscriptions: vec![],
-                default_lanes: OrgDefaultLanesPayload::default(),
-                lock_level: LockLevel::Flexible.as_db().to_string(),
-                error: Some(msg),
-            })
-        };
+        let err = |msg: String| Json(default_set_error_response(msg));
 
         if let Err(error) = require_admin(self.state.db()).await {
             return err(error);
@@ -298,6 +427,54 @@ impl DjinnMcpServer {
             applied = true;
         }
 
+        // ── Recommended-model override lists ──────────────────────────────
+        let known = known_provider_ids(self);
+
+        let mut additional_changed = false;
+        if let Some(raw_additional) = p.additional_recommended_model_ids {
+            match validate_model_override_list(
+                &raw_additional,
+                &known,
+                "additional_recommended_model_ids",
+            ) {
+                Ok(validated) => {
+                    policy.additional_recommended_model_ids = validated;
+                    additional_changed = true;
+                }
+                Err(e) => return err(e),
+            }
+        }
+
+        if let Some(raw_demoted) = p.demoted_recommended_model_ids {
+            match validate_model_override_list(
+                &raw_demoted,
+                &known,
+                "demoted_recommended_model_ids",
+            ) {
+                Ok(validated) => {
+                    policy.demoted_recommended_model_ids = validated;
+                    applied = true;
+                }
+                Err(e) => return err(e),
+            }
+        }
+        if additional_changed {
+            applied = true;
+        }
+
+        // Cross-list overlap: reject if the same id appears in both lists.
+        if let Some(overlap) = detect_cross_list_overlap(
+            &policy.additional_recommended_model_ids,
+            &policy.demoted_recommended_model_ids,
+        ) {
+            return err(format!(
+                "model id `{overlap}` appears in both \
+                 additional_recommended_model_ids and \
+                 demoted_recommended_model_ids — an id cannot be both \
+                 added and demoted"
+            ));
+        }
+
         let saved = match repo.set(&policy).await {
             Ok(s) => s,
             Err(e) => return err(e.to_string()),
@@ -314,6 +491,8 @@ impl DjinnMcpServer {
             blocked_subscriptions: saved.blocked_subscriptions,
             default_lanes: saved.default_lanes.into(),
             lock_level: saved.lock_level.as_db().to_string(),
+            additional_recommended_model_ids: saved.additional_recommended_model_ids,
+            demoted_recommended_model_ids: saved.demoted_recommended_model_ids,
             error: None,
         })
     }
