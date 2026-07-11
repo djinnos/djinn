@@ -21,7 +21,7 @@ use djinn_db::{
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{ImageBuildWatcher, ImageController, ImageControllerConfig};
-use djinn_k8s::{K8sGraphWarmer, KubernetesConfig, TokenReviewer};
+use djinn_k8s::{K8sGraphWarmer, KubernetesConfig, TokenReviewer, WarmCompletionSink};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::embeddings::{EmbeddingService, default_embedding_cache_dir};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
@@ -43,6 +43,30 @@ use canonical_graph_refresh_planner::{
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
+
+/// Production [`WarmCompletionSink`]: converge the server's in-memory
+/// canonical-graph slot after an *out-of-pod* warm Job succeeds.
+///
+/// The K8s warm Job writes a fresh blob to `repo_graph_cache` from a separate
+/// pod and cannot reach this process's `djinn_graph::canonical_graph::GRAPH_CACHE`
+/// slot, so `code_graph` queries would keep serving the pre-warm graph until a
+/// restart. Clearing the slot here makes the next query reload the fresh blob
+/// within seconds of the warm completing. Wired at this composition root
+/// because it is the only place both `djinn-k8s` (the warmer) and `djinn-graph`
+/// (the cache) are in scope — `djinn-k8s` deliberately does not depend on
+/// `djinn-graph`.
+struct CanonicalGraphInvalidationSink;
+
+#[async_trait::async_trait]
+impl WarmCompletionSink for CanonicalGraphInvalidationSink {
+    async fn on_warm_succeeded(&self, project_id: &str) {
+        djinn_graph::canonical_graph::invalidate_canonical_graph_cache().await;
+        tracing::info!(
+            project_id,
+            "graph_warmer: warm Job succeeded; invalidated in-memory canonical-graph slot for reload"
+        );
+    }
+}
 
 /// Default startup grace window (ms) used for the reconnectability probe.
 /// During this window the measurement checks whether a running session's
@@ -544,8 +568,9 @@ impl AppState {
                         namespace = %config.namespace,
                         "graph_warmer: wiring K8sGraphWarmer"
                     );
-                    Arc::new(K8sGraphWarmer::new(client, config, self.db().clone()))
-                        as Arc<dyn GraphWarmerService>
+                    let warmer = K8sGraphWarmer::new(client, config, self.db().clone())
+                        .with_completion_sink(Arc::new(CanonicalGraphInvalidationSink));
+                    Arc::new(warmer) as Arc<dyn GraphWarmerService>
                 }
                 Err(e) => {
                     tracing::info!(
