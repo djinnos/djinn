@@ -716,6 +716,36 @@ impl AuditSamplerRepository {
         Ok(count)
     }
 
+    /// Project-scoped variant of [`list_unmaterialized_selections`].
+    ///
+    /// Returns only unmaterialized selections whose underlying merged change
+    /// belongs to the given project.
+    pub async fn list_unmaterialized_selections_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<UnmaterializedSelection>> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as::<_, UnmaterializedSelection>(UNMATERIALIZED_SELECTIONS_FOR_PROJECT)
+                .bind(project_id)
+                .fetch_all(self.db.pool())
+                .await?,
+        )
+    }
+
+    /// Project-scoped variant of [`count_open_audit_tasks`].
+    ///
+    /// Returns the count of open audit tasks whose underlying merged change
+    /// belongs to the given project.
+    pub async fn count_open_audit_tasks_for_project(&self, project_id: &str) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        let count: i64 = sqlx::query_scalar(COUNT_OPEN_AUDIT_TASKS_FOR_PROJECT)
+            .bind(project_id)
+            .fetch_one(self.db.pool())
+            .await?;
+        Ok(count)
+    }
+
     /// Return the creation timestamp for the most recently materialized audit
     /// task, based only on persisted selection/task state.
     ///
@@ -932,6 +962,49 @@ const COUNT_OPEN_AUDIT_TASKS: &str = r#"
     JOIN tasks t ON t.id = asel.audit_task_id
     WHERE asel.audit_task_id IS NOT NULL
       AND t.closed_at IS NULL
+"#;
+
+const UNMATERIALIZED_SELECTIONS_FOR_PROJECT: &str = r#"
+    SELECT
+        asel.id AS selection_id,
+        asel.frame_id,
+        asel.merged_change_id,
+        asel.stratum,
+        asel.selected_position,
+        asel.algorithm,
+        asel.seed_commitment,
+        asel.seed_reveal,
+        asel.replay_data,
+        asel.created_at AS selection_created_at,
+        amc.project_id,
+        amc.task_id,
+        amc.pr_number,
+        amc.head_sha,
+        amc.merge_commit_sha,
+        amc.gate_outcome,
+        amc.gate_provenance,
+        amc.release_provenance,
+        sf.window_start,
+        sf.window_end,
+        sf.revision AS frame_revision,
+        sf.policy_id AS frame_policy_id
+    FROM audit_selections asel
+    JOIN audit_merged_changes amc ON amc.id = asel.merged_change_id
+    JOIN audit_sample_frames sf ON sf.id = asel.frame_id
+    WHERE asel.audit_task_id IS NULL
+      AND sf.superseded_by_id IS NULL
+      AND amc.project_id = $1
+    ORDER BY asel.created_at ASC
+"#;
+
+const COUNT_OPEN_AUDIT_TASKS_FOR_PROJECT: &str = r#"
+    SELECT COUNT(*)::bigint
+    FROM audit_selections asel
+    JOIN tasks t ON t.id = asel.audit_task_id
+    JOIN audit_merged_changes amc ON amc.id = asel.merged_change_id
+    WHERE asel.audit_task_id IS NOT NULL
+      AND t.closed_at IS NULL
+      AND amc.project_id = $1
 "#;
 
 const LATEST_AUDIT_MATERIALIZED_AT: &str = r#"
