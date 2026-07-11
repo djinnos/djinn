@@ -717,4 +717,33 @@ mod tests {
             "empty-path classification must satisfy TraceCandidate invariants",
         );
     }
+
+    /// AC5: the default candidate cap is shared between the static
+    /// `load_knowledge_context` and JIT `jit_pitfalls` entry points. Both use
+    /// `DEFAULT_CANDIDATE_CAP` from the 5wdh data-layer foundation. This test
+    /// pins the value and confirms the trigger builder embeds it as
+    /// `candidate_cap` with the source label `"DEFAULT_CANDIDATE_CAP"`.
+    #[test]
+    fn default_candidate_cap_is_consistent_across_entry_points() {
+        use djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP;
+
+        // The foundation constant is 50 (documented in the 5wdh roadmap).
+        assert_eq!(DEFAULT_CANDIDATE_CAP, 50);
+
+        // The JIT trigger builder embeds DEFAULT_CANDIDATE_CAP as the cap value.
+        let trigger = build_trace_trigger(
+            JitPitfallRolloutMode::Enabled,
+            &["src/a.rs".to_string()],
+            1,
+            1,
+            JIT_TRACE_PROD_MIN_CONFIDENCE,
+            JIT_TRACE_PROD_QUERY_LIMIT,
+            None,
+        );
+        assert_eq!(trigger["candidate_cap"], DEFAULT_CANDIDATE_CAP);
+        assert_eq!(
+            trigger["candidate_cap_source"], "DEFAULT_CANDIDATE_CAP",
+            "the cap source label must be the foundation constant name"
+        );
+    }
 }
