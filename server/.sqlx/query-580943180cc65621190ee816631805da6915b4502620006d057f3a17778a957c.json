@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT blocked_subscriptions, default_lanes, lock_level,\n                      additional_recommended_model_ids,\n                      demoted_recommended_model_ids,\n                      updated_at\n               FROM org_ai_policy WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "blocked_subscriptions",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "default_lanes",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "lock_level",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "additional_recommended_model_ids",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "demoted_recommended_model_ids",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "580943180cc65621190ee816631805da6915b4502620006d057f3a17778a957c"
+}

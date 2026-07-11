@@ -70,6 +70,10 @@ impl OrgDefaultLanes {
 /// - **Org default lanes + lock** (`default_lanes`, `lock_level`): the
 ///   org-default per-role model assignment new members inherit, and whether
 ///   members may override it.
+/// - **Recommended-model overrides** (`additional_recommended_model_ids`,
+///   `demoted_recommended_model_ids`): admin-curated additions and removals
+///   from the baseline `RECOMMENDED_MODELS` set. Each entry is a fully
+///   qualified `provider/model-id`. Demotion wins over addition at runtime.
 ///
 /// Persisted as a single singleton row (`org_ai_policy`, migration 79).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +90,16 @@ pub struct OrgAiPolicy {
     /// members may override (`Flexible`).
     #[serde(default)]
     pub lock_level: LockLevel,
+    /// Fully-qualified `provider/model-id` entries the admin wants marked
+    /// recommended on top of the baseline `RECOMMENDED_MODELS` set. Stored
+    /// deduplicated and sorted.
+    #[serde(default)]
+    pub additional_recommended_model_ids: Vec<String>,
+    /// Fully-qualified `provider/model-id` entries the admin wants removed
+    /// from the recommended set (including baseline entries). Demotion wins
+    /// over addition. Stored deduplicated and sorted.
+    #[serde(default)]
+    pub demoted_recommended_model_ids: Vec<String>,
     pub updated_at: String,
 }
 
