@@ -4520,10 +4520,18 @@ export type OrgPolicyGetInput = OrgPolicyGetInputSchema.OrgPolicyGetInput;
 export namespace OrgPolicyGetOutputSchema {
   export interface OrgPolicyGetOutput {
   /**
+   * Fully-qualified `provider/model-id` entries to add to the recommended set.
+   */
+  additional_recommended_model_ids: string[]
+  /**
    * The blocked subscription provider ids (subset of `subscriptions`).
    */
   blocked_subscriptions: string[]
   default_lanes: OrgDefaultLanesPayload
+  /**
+   * Fully-qualified `provider/model-id` entries to demote from the recommended set.
+   */
+  demoted_recommended_model_ids: string[]
   error?: string
   /**
    * `flexible` (members may override) | `locked` (org assignment authoritative).
@@ -4579,6 +4587,12 @@ export type OrgPolicyGetOutput = OrgPolicyGetOutputSchema.OrgPolicyGetOutput;
 export namespace OrgPolicySetInputSchema {
   export interface OrgPolicySetInput {
   /**
+   * Fully-qualified `provider/model-id` entries to add to the recommended
+   * set on top of the baseline. Omit to keep the current value; pass an
+   * empty list to clear.
+   */
+  additional_recommended_model_ids?: string[]
+  /**
    * Replacement set of blocked subscription provider ids. Only subscription
    * providers are honored; any non-subscription id is ignored. Omit to keep
    * the current value.
@@ -4589,6 +4603,12 @@ export namespace OrgPolicySetInputSchema {
    * Omit to keep the current value.
    */
   default_lanes?: (OrgDefaultLanesPayload | null)
+  /**
+   * Fully-qualified `provider/model-id` entries to demote from the
+   * recommended set. Omit to keep the current value; pass an empty list to
+   * clear.
+   */
+  demoted_recommended_model_ids?: string[]
   /**
    * Lane lock level: `flexible` or `locked`. Omit to keep the current value.
    */
@@ -4617,9 +4637,17 @@ export namespace OrgPolicySetInputSchema {
 export type OrgPolicySetInput = OrgPolicySetInputSchema.OrgPolicySetInput;
 export namespace OrgPolicySetOutputSchema {
   export interface OrgPolicySetOutput {
+  /**
+   * Fully-qualified `provider/model-id` entries to add to the recommended set.
+   */
+  additional_recommended_model_ids: string[]
   applied: boolean
   blocked_subscriptions: string[]
   default_lanes: OrgDefaultLanesPayload
+  /**
+   * Fully-qualified `provider/model-id` entries to demote from the recommended set.
+   */
+  demoted_recommended_model_ids: string[]
   error?: string
   lock_level: string
   ok: boolean
