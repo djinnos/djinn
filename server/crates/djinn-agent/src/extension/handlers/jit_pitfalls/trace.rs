@@ -227,12 +227,9 @@ pub(super) async fn persist_jit_trace(
     match inserted {
         Ok(row) => {
             let persisted_durations_ms = with_persist_elapsed_ms(durations_ms, persist_elapsed_ms);
-            if let Err(e) =
-                sqlx::query("UPDATE retrieval_traces SET durations_ms = $2 WHERE id = $1")
-                    .bind(&row.id)
-                    .bind(&persisted_durations_ms)
-                    .execute(db.pool())
-                    .await
+            if let Err(e) = trace_repo
+                .update_durations_ms(&row.id, &persisted_durations_ms)
+                .await
             {
                 tracing::warn!(
                     target: TELEMETRY_TARGET,
