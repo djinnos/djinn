@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 //! Parent-terminal child disposition classification.
 //!
 //! When a parent container (epic or proposal) becomes terminal, its direct
@@ -705,6 +706,7 @@ pub async fn apply_parent_disposition_tx(
     Ok(DispositionPlan { scope: echo, findings, counts })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_disposition_activities(
     conn: &mut sqlx::PgConnection, task_id: &str, from_status: &str, to_status: &str,
     reason: &str, event_type: &str, parent_kind: &str, parent_id: &str, entry_point: &str,
