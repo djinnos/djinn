@@ -37,7 +37,12 @@ import { showToast } from "@/lib/toast";
 
 import { userConfigKeys } from "./userConfigKeys";
 import { formatProvider } from "./providerDisplay";
-import { pickableModels, stripProviderPrefix } from "./modelPicker";
+import {
+  formatModelMetadata,
+  groupModelsByProvider,
+  providerDefaultModels,
+  stripProviderPrefix,
+} from "./modelPicker";
 import { cn } from "@/lib/utils";
 
 /**
@@ -113,11 +118,11 @@ export function ModelSection({ targetId }: { targetId: string }) {
     return map;
   }, [connectedModels.data]);
 
-  // The curated picker offers only recommended flagships (with a per-provider
-  // fallback to all models when nothing is curated). Already-selected non-
-  // flagship picks still render from `modelsById` — this only limits OFFERS.
-  const pickable = useMemo(
-    () => pickableModels(connectedModels.data ?? []),
+  // The default picker view offers recommended flagships (with a per-provider
+  // fallback to all models when nothing is curated). The full connected list is
+  // still passed into each lane picker for Browse all + search.
+  const defaultPickable = useMemo(
+    () => providerDefaultModels(connectedModels.data ?? []),
     [connectedModels.data],
   );
 
@@ -279,7 +284,10 @@ export function ModelSection({ targetId }: { targetId: string }) {
               order={lanes[lane]}
               modelsById={modelsById}
               caps={caps}
-              availableToAdd={pickable.filter(
+              availableToAdd={defaultPickable.filter(
+                (model) => !lanes[lane].includes(model.id),
+              )}
+              allAvailableToAdd={(connectedModels.data ?? []).filter(
                 (model) => !lanes[lane].includes(model.id),
               )}
               onAdd={(model) => addModel(lane, model)}
@@ -431,6 +439,7 @@ function LaneEditor({
   modelsById,
   caps,
   availableToAdd,
+  allAvailableToAdd,
   onAdd,
   onRemove,
   onReorder,
@@ -441,6 +450,7 @@ function LaneEditor({
   modelsById: Map<string, UserModel>;
   caps: Record<string, number>;
   availableToAdd: UserModel[];
+  allAvailableToAdd: UserModel[];
   onAdd: (model: UserModel) => void;
   onRemove: (id: string) => void;
   onReorder: (next: string[]) => void;
@@ -454,7 +464,11 @@ function LaneEditor({
           <h4 className="text-sm font-semibold text-foreground">{meta.title}</h4>
           <p className="text-xs text-muted-foreground/70">{meta.roles}</p>
         </div>
-        <AddModelButton models={availableToAdd} onSelect={onAdd} />
+        <AddModelButton
+          models={availableToAdd}
+          allModels={allAvailableToAdd}
+          onSelect={onAdd}
+        />
       </div>
       {order.length === 0 ? (
         <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -562,52 +576,106 @@ export function ModelRow({
 
 export function AddModelButton({
   models,
+  allModels,
   onSelect,
 }: {
   models: UserModel[];
+  allModels?: UserModel[];
   onSelect: (model: UserModel) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(() => new Set());
+
+  const defaultModelIds = useMemo(
+    () => new Set(models.map((model) => model.id)),
+    [models],
+  );
+  const searchableModels = allModels ?? models;
+  const normalizedSearch = search.trim().toLowerCase();
 
   const groups = useMemo(() => {
-    const map = new Map<string, UserModel[]>();
-    for (const model of models) {
-      const providerId = model.provider_id ?? "unknown";
-      if (!map.has(providerId)) map.set(providerId, []);
-      map.get(providerId)!.push(model);
-    }
-    return Array.from(map.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([provider, items]) => ({
-        provider,
-        items: items.slice().sort((a, b) => a.name.localeCompare(b.name)),
-      }));
-  }, [models]);
+    const source = normalizedSearch
+      ? searchableModels.filter((model) => modelMatchesSearch(model, normalizedSearch))
+      : searchableModels;
+
+    return groupModelsByProvider(source)
+      .map((group) => {
+        const hiddenCount = group.models.filter(
+          (model) => !defaultModelIds.has(model.id),
+        ).length;
+        const expanded = expandedProviders.has(group.providerId);
+        const items = normalizedSearch || expanded
+          ? group.models
+          : group.models.filter((model) => defaultModelIds.has(model.id));
+        return { ...group, hiddenCount, items };
+      })
+      .filter((group) => group.items.length > 0 || group.hiddenCount > 0);
+  }, [defaultModelIds, expandedProviders, normalizedSearch, searchableModels]);
 
   return (
-    <ModelSelector open={open} onOpenChange={setOpen}>
+    <ModelSelector
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (!nextOpen) {
+          setSearch("");
+          setExpandedProviders(new Set());
+        }
+      }}
+    >
       <ModelSelectorTrigger render={<Button variant="default" size="sm" />}>
         Add model
       </ModelSelectorTrigger>
       <ModelSelectorContent title="Add a model">
-        <ModelSelectorInput placeholder="Search models…" />
+        <ModelSelectorInput
+          placeholder="Search models…"
+          onInputCapture={(event) => setSearch(event.currentTarget.value)}
+        />
         <ModelSelectorList>
           <ModelSelectorEmpty>No connected models available.</ModelSelectorEmpty>
           {groups.map((group, index) => (
-            <ModelSelectorGroup key={group.provider} heading={formatProvider(group.provider)}>
+            <ModelSelectorGroup key={group.providerId} heading={formatProvider(group.providerId)}>
               {group.items.map((model) => (
                 <ModelSelectorItem
                   key={model.id}
-                  searchValue={model.name}
+                  searchValue={modelSearchValue(model)}
                   onSelect={() => {
                     onSelect(model);
                     setOpen(false);
+                    setSearch("");
+                    setExpandedProviders(new Set());
                   }}
                 >
-                  <ModelSelectorLogo provider={group.provider} />
-                  <ModelSelectorName>{model.name}</ModelSelectorName>
+                  <ModelSelectorLogo provider={group.providerId} />
+                  <ModelSelectorName>{model.name || stripProviderPrefix(model.id)}</ModelSelectorName>
+                  {model.recommended && (
+                    <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                      Recommended
+                    </span>
+                  )}
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    {formatModelMetadata(model)}
+                  </span>
                 </ModelSelectorItem>
               ))}
+              {!normalizedSearch &&
+                !expandedProviders.has(group.providerId) &&
+                group.hiddenCount > 0 && (
+                  <button
+                    type="button"
+                    className="w-full rounded-sm px-2 py-1.5 text-left text-xs font-medium text-primary hover:bg-accent"
+                    onClick={() =>
+                      setExpandedProviders((prev) => {
+                        const next = new Set(prev);
+                        next.add(group.providerId);
+                        return next;
+                      })
+                    }
+                  >
+                    Browse all {formatProvider(group.providerId)} models ({group.hiddenCount} more)
+                  </button>
+                )}
               {index < groups.length - 1 && <ModelSelectorSeparator />}
             </ModelSelectorGroup>
           ))}
@@ -615,4 +683,15 @@ export function AddModelButton({
       </ModelSelectorContent>
     </ModelSelector>
   );
+}
+
+function modelSearchValue(model: UserModel): string {
+  const providerId = model.provider_id ?? "unknown";
+  return [model.name, model.id, stripProviderPrefix(model.id), providerId, formatProvider(providerId)]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function modelMatchesSearch(model: UserModel, normalizedSearch: string): boolean {
+  return modelSearchValue(model).toLowerCase().includes(normalizedSearch);
 }
