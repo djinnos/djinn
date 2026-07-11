@@ -485,8 +485,13 @@ impl Conversation {
                     let content: Vec<serde_json::Value> = msg
                         .content
                         .iter()
-                        .filter(|b| !is_provider_internal(b))
-                        .map(content_block_to_anthropic)
+                        .filter_map(|b| {
+                            if is_provider_internal(b) {
+                                None
+                            } else {
+                                content_block_to_anthropic(b)
+                            }
+                        })
                         .collect();
                     msgs.push(json!({"role": "user", "content": content}));
                 }
@@ -494,8 +499,13 @@ impl Conversation {
                     let content: Vec<serde_json::Value> = msg
                         .content
                         .iter()
-                        .filter(|b| !is_provider_internal(b))
-                        .map(content_block_to_anthropic)
+                        .filter_map(|b| {
+                            if is_provider_internal(b) {
+                                None
+                            } else {
+                                content_block_to_anthropic(b)
+                            }
+                        })
                         .collect();
                     msgs.push(json!({"role": "assistant", "content": content}));
                 }
@@ -910,44 +920,51 @@ const INTERRUPTED_TOOL_RESULT: &str = "[tool execution interrupted before comple
 
 // ─── Anthropic content-block helpers ─────────────────────────────────────────
 
-fn content_block_to_anthropic(block: &ContentBlock) -> serde_json::Value {
+/// Convert a content block to Anthropic wire format.
+///
+/// Returns `None` for provider-internal blocks (thinking, redacted thinking,
+/// unknown passthrough, OpenAI reasoning) so callers can use `filter_map` to
+/// skip them rather than emitting empty-text placeholders. Native Anthropic
+/// replay serialization for signed/redacted thinking is owned by sibling
+/// epic `xw13`.
+fn content_block_to_anthropic(block: &ContentBlock) -> Option<serde_json::Value> {
     use serde_json::json;
     match block {
-        ContentBlock::Text { text } => json!({"type": "text", "text": text}),
-        ContentBlock::ToolUse { id, name, input } => json!({
+        ContentBlock::Text { text } => Some(json!({"type": "text", "text": text})),
+        ContentBlock::ToolUse { id, name, input } => Some(json!({
             "type": "tool_use",
             "id": id,
             "name": name,
             "input": input,
-        }),
+        })),
         ContentBlock::ToolResult {
             tool_use_id,
             content,
             is_error,
         } => {
             let inner: Vec<serde_json::Value> =
-                content.iter().map(content_block_to_anthropic).collect();
-            json!({
+                content.iter().filter_map(content_block_to_anthropic).collect();
+            Some(json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
                 "content": inner,
                 "is_error": is_error,
-            })
+            }))
         }
-        ContentBlock::Image { media_type, data } => json!({
+        ContentBlock::Image { media_type, data } => Some(json!({
             "type": "image",
             "source": {
                 "type": "base64",
                 "media_type": media_type,
                 "data": data,
             }
-        }),
+        })),
         ContentBlock::Document {
             media_type,
             data,
             filename,
         } => {
-            let mut block = json!({
+            let mut doc = json!({
                 "type": "document",
                 "source": {
                     "type": "base64",
@@ -956,16 +973,18 @@ fn content_block_to_anthropic(block: &ContentBlock) -> serde_json::Value {
                 }
             });
             if let Some(name) = filename {
-                block["title"] = json!(name);
+                doc["title"] = json!(name);
             }
-            block
+            Some(doc)
         }
-        // Thinking blocks are display-only; skip when serializing for the API.
-        // (Signed/redacted thinking replay is owned by the provider-format layer.)
-        ContentBlock::Thinking { .. } => json!({"type": "text", "text": ""}),
-        ContentBlock::RedactedThinking { .. } => json!({"type": "text", "text": ""}),
-        ContentBlock::Unknown { .. } => json!({"type": "text", "text": ""}),
-        ContentBlock::OpenAIReasoning { .. } => json!({"type": "text", "text": ""}),
+        // Provider-internal blocks must not be serialized as empty text
+        // placeholders. Skip them explicitly; native Anthropic replay
+        // serialization for signed/redacted thinking is owned by sibling
+        // epic xw13.
+        ContentBlock::Thinking { .. }
+        | ContentBlock::RedactedThinking { .. }
+        | ContentBlock::Unknown { .. }
+        | ContentBlock::OpenAIReasoning { .. } => None,
     }
 }
 
@@ -2024,5 +2043,299 @@ Second rule."
         let serialized = serde_json::to_value(&block).unwrap();
         let deserialized: ContentBlock = serde_json::from_value(serialized).unwrap();
         assert_eq!(block, deserialized);
+    }
+
+    // ── Provider-facing Anthropic conversion: skip guards ──────────────────
+
+    /// Provider-internal blocks (Thinking with signature, RedactedThinking,
+    /// Unknown, OpenAIReasoning) must be skipped by `to_anthropic_messages`
+    /// rather than serialized as empty-text placeholders.
+    #[test]
+    fn anthropic_conversion_skips_signed_thinking_block() {
+        let mut c = Conversation::new();
+        c.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "internal reasoning".into(),
+                    signature: Some("sig_abc".into()),
+                },
+                ContentBlock::text("visible output"),
+            ],
+            metadata: None,
+        });
+
+        let (_, msgs) = c.to_anthropic_messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "assistant");
+        let content = msgs[0]["content"].as_array().unwrap();
+        // Only the text block should appear; the thinking block is skipped.
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0], json!({"type": "text", "text": "visible output"}));
+        // Must not contain an empty-text placeholder.
+        assert!(!content.iter().any(|b| b["type"] == "text" && b["text"] == ""));
+    }
+
+    #[test]
+    fn anthropic_conversion_skips_redacted_thinking_block() {
+        let mut c = Conversation::new();
+        c.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::RedactedThinking {
+                    data: "opaque_data_blob".into(),
+                },
+                ContentBlock::text("visible output"),
+            ],
+            metadata: None,
+        });
+
+        let (_, msgs) = c.to_anthropic_messages();
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0], json!({"type": "text", "text": "visible output"}));
+        assert!(!content.iter().any(|b| b["type"] == "text" && b["text"] == ""));
+    }
+
+    #[test]
+    fn anthropic_conversion_skips_unknown_passthrough_block() {
+        let mut extra = serde_json::Map::new();
+        extra.insert("foo".into(), json!("bar"));
+        let mut c = Conversation::new();
+        c.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Unknown {
+                    content_type: "custom_block".into(),
+                    extra,
+                },
+                ContentBlock::text("visible output"),
+            ],
+            metadata: None,
+        });
+
+        let (_, msgs) = c.to_anthropic_messages();
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0], json!({"type": "text", "text": "visible output"}));
+        assert!(!content.iter().any(|b| b["type"] == "text" && b["text"] == ""));
+    }
+
+    #[test]
+    fn anthropic_conversion_skips_openai_reasoning_block() {
+        let mut c = Conversation::new();
+        c.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::OpenAIReasoning {
+                    id: Some("rs_1".into()),
+                    encrypted_content: "encrypted".into(),
+                    summary: Some(json!([])),
+                    status: Some("completed".into()),
+                },
+                ContentBlock::text("visible output"),
+            ],
+            metadata: None,
+        });
+
+        let (_, msgs) = c.to_anthropic_messages();
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0], json!({"type": "text", "text": "visible output"}));
+        assert!(!content.iter().any(|b| b["type"] == "text" && b["text"] == ""));
+    }
+
+    /// When ALL content blocks are provider-internal, the Anthropic
+    /// content array should be empty rather than full of empty-text
+    /// placeholders.
+    #[test]
+    fn anthropic_conversion_empty_content_when_all_blocks_are_internal() {
+        let mut c = Conversation::new();
+        c.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "deep thoughts".into(),
+                    signature: Some("sig".into()),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "redacted_data".into(),
+                },
+            ],
+            metadata: None,
+        });
+
+        let (_, msgs) = c.to_anthropic_messages();
+        let content = msgs[0]["content"].as_array().unwrap();
+        // Empty array, not two empty-text placeholders.
+        assert_eq!(content.len(), 0);
+    }
+
+    /// Mixed provider-internal and visible blocks: only visible blocks appear.
+    #[test]
+    fn anthropic_conversion_mixed_visible_and_internal_blocks() {
+        let mut c = Conversation::new();
+        c.push(Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::OpenAIReasoning {
+                    id: None,
+                    encrypted_content: "encrypted".into(),
+                    summary: None,
+                    status: None,
+                },
+                ContentBlock::text("user question"),
+                ContentBlock::Thinking {
+                    thinking: "thinking about user question".into(),
+                    signature: None,
+                },
+            ],
+            metadata: None,
+        });
+
+        let (_, msgs) = c.to_anthropic_messages();
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0], json!({"type": "text", "text": "user question"}));
+    }
+
+    // ── Non-Anthropic providers: do not emit thinking blocks ───────────────
+
+    /// OpenAI Chat Completions serialization must skip Thinking, RedactedThinking,
+    /// Unknown, and OpenAIReasoning provider-internal blocks.
+    #[test]
+    fn openai_serialization_skips_all_provider_internal_blocks() {
+        let mut c = Conversation::new();
+        c.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "reasoning".into(),
+                    signature: Some("sig".into()),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "redacted".into(),
+                },
+                ContentBlock::Unknown {
+                    content_type: "custom".into(),
+                    extra: serde_json::Map::new(),
+                },
+                ContentBlock::OpenAIReasoning {
+                    id: None,
+                    encrypted_content: "enc".into(),
+                    summary: None,
+                    status: None,
+                },
+                ContentBlock::text("visible"),
+            ],
+            metadata: None,
+        });
+
+        let msgs = c.to_openai_messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "assistant");
+        // Only the text content should be present.
+        assert_eq!(msgs[0]["content"], "visible");
+    }
+
+    /// Google serialization also skips all provider-internal blocks.
+    #[test]
+    fn google_serialization_skips_all_provider_internal_blocks() {
+        let mut c = Conversation::new();
+        c.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "reasoning".into(),
+                    signature: Some("sig".into()),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "redacted".into(),
+                },
+                ContentBlock::Unknown {
+                    content_type: "custom".into(),
+                    extra: serde_json::Map::new(),
+                },
+                ContentBlock::OpenAIReasoning {
+                    id: None,
+                    encrypted_content: "enc".into(),
+                    summary: None,
+                    status: None,
+                },
+                ContentBlock::text("visible"),
+            ],
+            metadata: None,
+        });
+
+        let (_, contents) = c.to_google_contents();
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["text"], "visible");
+    }
+
+    // ── Existing text/tool/image/document behavior preserved ───────────────
+
+    /// Text, tool use, tool result, image, and document blocks continue to
+    /// serialize correctly through the Anthropic path after the skip guard
+    /// change. This is a regression guard for the acceptance criterion that
+    /// existing visible content behavior remains unchanged.
+    #[test]
+    fn anthropic_conversion_preserves_visible_content_blocks() {
+        let mut c = Conversation::new();
+        c.push(Message::user("hello"));
+        c.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::text("I'll read the file."),
+                ContentBlock::ToolUse {
+                    id: "tu_1".into(),
+                    name: "read".into(),
+                    input: json!({"path": "/tmp/x"}),
+                },
+            ],
+            metadata: None,
+        });
+        c.push(Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "tu_1".into(),
+                    content: vec![ContentBlock::text("file contents")],
+                    is_error: false,
+                },
+                ContentBlock::text("thanks"),
+            ],
+            metadata: None,
+        });
+        c.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "iVBOR...".into(),
+            }],
+            metadata: None,
+        });
+
+        let (_, msgs) = c.to_anthropic_messages();
+        assert_eq!(msgs.len(), 4);
+
+        // User text
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"][0]["type"], "text");
+
+        // Assistant text + tool_use
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"][0]["type"], "text");
+        assert_eq!(msgs[1]["content"][1]["type"], "tool_use");
+        assert_eq!(msgs[1]["content"][1]["id"], "tu_1");
+
+        // User tool_result + text
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
+        assert_eq!(msgs[2]["content"][1]["type"], "text");
+
+        // User image
+        assert_eq!(msgs[3]["role"], "user");
+        assert_eq!(msgs[3]["content"][0]["type"], "image");
     }
 }
