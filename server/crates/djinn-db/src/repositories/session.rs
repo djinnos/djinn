@@ -323,6 +323,68 @@ impl SessionRepository {
         Ok(result.rows_affected())
     }
 
+    /// Mark `running` sessions as `interrupted`, except those whose task-run
+    /// identity was proven reconnectable during startup reconciliation.
+    ///
+    /// Sessions without a task-run identity are deliberately included: a NULL
+    /// identity cannot provide reconnectability proof. An empty preservation
+    /// set retains the blanket-startup behavior exactly.
+    pub async fn interrupt_running_except_task_run_ids(
+        &self,
+        reconnectable_task_run_ids: &std::collections::HashSet<String>,
+    ) -> Result<u64> {
+        if reconnectable_task_run_ids.is_empty() {
+            return self.interrupt_all_running().await;
+        }
+
+        self.db.ensure_initialized().await?;
+        let reconnectable_task_run_ids: Vec<String> =
+            reconnectable_task_run_ids.iter().cloned().collect();
+
+        // Select before mutating so only rows actually transitioned emit
+        // session update events. The explicit NULL branch avoids PostgreSQL's
+        // three-valued comparison behavior for NULL = ANY(...).
+        let interrupted_sessions = sqlx::query_as::<_, SessionRecord>(
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                status, tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason,
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot,
+                cost_basis,
+                billing_source
+             FROM sessions
+             WHERE status = 'running'
+               AND (task_run_id IS NULL OR NOT (task_run_id = ANY($1)))"#,
+        )
+        .bind(&reconnectable_task_run_ids)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        if interrupted_sessions.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query(
+            r#"UPDATE sessions
+             SET status = 'interrupted',
+                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE status = 'running'
+               AND (task_run_id IS NULL OR NOT (task_run_id = ANY($1)))"#,
+        )
+        .bind(&reconnectable_task_run_ids)
+        .execute(self.db.pool())
+        .await?;
+
+        for session in interrupted_sessions {
+            let _ = self.fetch_and_emit_update(&session.id).await?;
+        }
+
+        Ok(result.rows_affected())
+    }
+
     /// Mark all `running` sessions for a specific task as `interrupted`.
     /// Used by stuck-task recovery to clean up orphaned session records.
     pub async fn interrupt_running_for_task(&self, task_id: &str) -> Result<u64> {
@@ -2254,6 +2316,169 @@ mod tests {
         let other_after = repo.get(&other_task_running.id).await.unwrap().unwrap();
         assert_eq!(other_after.status, SessionStatus::Running.as_str());
         assert!(other_after.ended_at.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interrupt_running_except_task_run_ids_preserves_reconnectable_sessions() {
+        use crate::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
+
+        let db = test_db();
+        let (bus, captured) = capturing_bus();
+        let (project_id, task_id) = create_task(&db, bus.clone()).await;
+        let repo = SessionRepository::new(db.clone(), bus);
+        let runs = TaskRunRepository::new(db);
+        let connected_run_id = uuid::Uuid::now_v7().to_string();
+        let stale_run_id = uuid::Uuid::now_v7().to_string();
+        for run_id in [&connected_run_id, &stale_run_id] {
+            runs.create(CreateTaskRunParams {
+                id: run_id,
+                project_id: &project_id,
+                task_id: &task_id,
+                trigger_type: "manual",
+                status: Some("running"),
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        let connected = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: Some(&connected_run_id),
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        let stale = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: Some(&stale_run_id),
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        let unlinked = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        captured.lock().unwrap().clear();
+
+        let reconnectable = std::collections::HashSet::from([connected_run_id]);
+        assert_eq!(
+            repo.interrupt_running_except_task_run_ids(&reconnectable)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            repo.get(&connected.id).await.unwrap().unwrap().status,
+            SessionStatus::Running.as_str()
+        );
+        assert_eq!(
+            repo.get(&stale.id).await.unwrap().unwrap().status,
+            SessionStatus::Interrupted.as_str()
+        );
+        assert_eq!(
+            repo.get(&unlinked.id).await.unwrap().unwrap().status,
+            SessionStatus::Interrupted.as_str(),
+            "a NULL task_run_id has no reconnectability proof"
+        );
+
+        let interrupted_ids: std::collections::HashSet<String> = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.entity_type == "session" && event.action == "interrupted")
+            .map(|event| {
+                serde_json::from_value::<SessionRecord>(event.payload.clone())
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        assert_eq!(interrupted_ids.len(), 2);
+        assert!(interrupted_ids.contains(&stale.id));
+        assert!(interrupted_ids.contains(&unlinked.id));
+        assert!(!interrupted_ids.contains(&connected.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interrupt_running_except_task_run_ids_with_empty_set_is_blanket() {
+        let db = test_db();
+        let (bus, captured) = capturing_bus();
+        let (project_id, task_id) = create_task(&db, bus.clone()).await;
+        let repo = SessionRepository::new(db, bus);
+        let first = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        let second = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        captured.lock().unwrap().clear();
+
+        assert_eq!(
+            repo.interrupt_running_except_task_run_ids(&std::collections::HashSet::new())
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            repo.get(&first.id).await.unwrap().unwrap().status,
+            SessionStatus::Interrupted.as_str()
+        );
+        assert_eq!(
+            repo.get(&second.id).await.unwrap().unwrap().status,
+            SessionStatus::Interrupted.as_str()
+        );
+        assert_eq!(
+            captured
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.entity_type == "session" && event.action == "interrupted")
+                .count(),
+            2
+        );
     }
 
     /// Insert a task under a given existing epic.  Returns the task id.
