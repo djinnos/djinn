@@ -256,14 +256,21 @@ pub fn classify_cargo_target_path(relative_path: &Path) -> CloneAction {
         return CloneAction::Skip;
     }
 
-    // Cargo's per-profile build-directory lock file (`debug/.cargo-lock`,
-    // `release/.cargo-lock`, one per profile dir at any depth). File locks
-    // (flock) attach to the INODE, not the path, so a hardlinked lock file makes
-    // every seeded run's `cargo` serialize against the warm base's `cargo` — and
+    // Cargo's per-profile lock files (`debug/.cargo-lock`,
+    // `debug/.cargo-build-lock`, `debug/.cargo-artifact-lock`, and the `release/`
+    // equivalents — one set per profile dir at any depth). File locks (flock)
+    // attach to the INODE, not the path, so a hardlinked lock file makes every
+    // seeded run's `cargo` serialize against the warm base's `cargo` — and
     // against every sibling run seeded from the same base file — across pods via
-    // the shared PVC. Cargo recreates the lock on demand, so seeding it is
-    // pointless and hardlinking it is the bug. Never seed it.
-    if file_name_is(relative_path, ".cargo-lock") {
+    // the shared PVC. That is a platform-wide global build mutex: one incident
+    // showed 8 cargo processes across 7 task-run pods + the warm Job all queued
+    // (wchan=locks_lock_inode_wait) on a single inode with links=8. Cargo
+    // recreates these locks on demand, so seeding them is pointless and
+    // hardlinking them is the bug. Match by name at any depth: `.cargo` prefix +
+    // `lock` substring covers today's three variants and any future
+    // `.cargo-*-lock` cargo adds, while excluding in-place-rewritten `.cargo`
+    // metadata that is not a lock. Never seed a cargo lock.
+    if file_name_is_cargo_lock(relative_path) {
         return CloneAction::Skip;
     }
 
@@ -487,6 +494,19 @@ fn file_name_is(path: &Path, needle: &str) -> bool {
     path.file_name().is_some_and(|name| name == needle)
 }
 
+/// Match any of cargo's per-profile lock files by file name at any depth.
+///
+/// Covers `.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock` (empirically
+/// the full set emitted by the pinned toolchain) and any future `.cargo-*-lock`
+/// variant, while deliberately NOT matching in-place-rewritten `.cargo` metadata
+/// that is not a lock. Kept name-based so it fires regardless of profile dir or
+/// target-triple nesting.
+fn file_name_is_cargo_lock(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(".cargo") && name.contains("lock"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,24 +549,50 @@ mod tests {
 
     #[test]
     fn classifies_build_directory_lock_for_skip() {
-        // Cargo's per-profile lock file must never be hardlinked: flock attaches
+        // Cargo's per-profile lock files must never be hardlinked: flock attaches
         // to the inode, so a shared lock serializes `cargo` across every run and
-        // the warm base via the shared PVC.
-        assert_eq!(
-            classify_cargo_target_path(Path::new("debug/.cargo-lock")),
+        // the warm base via the shared PVC. All three variants emitted by the
+        // pinned toolchain (`.cargo-lock`, `.cargo-build-lock`,
+        // `.cargo-artifact-lock`) must be skipped in both `debug/` and `release/`.
+        for name in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
+            assert_eq!(
+                classify_cargo_target_path(Path::new(&format!("debug/{name}"))),
+                CloneAction::Skip,
+                "debug/{name} must be skipped"
+            );
+            assert_eq!(
+                classify_cargo_target_path(Path::new(&format!("release/{name}"))),
+                CloneAction::Skip,
+                "release/{name} must be skipped"
+            );
+            // Root-level and target-triple-nested variants are skipped by name.
+            assert_eq!(
+                classify_cargo_target_path(Path::new(name)),
+                CloneAction::Skip,
+                "root-level {name} must be skipped"
+            );
+            assert_eq!(
+                classify_cargo_target_path(Path::new(&format!(
+                    "x86_64-unknown-linux-gnu/debug/{name}"
+                ))),
+                CloneAction::Skip,
+                "target-triple-nested {name} must be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn cargo_lock_matcher_excludes_non_lock_cargo_metadata() {
+        // The matcher is `.cargo` prefix + `lock` substring, so `.cargo` files
+        // that are NOT locks (e.g. a hypothetical in-place-rewritten metadata
+        // file) must fall through to their normal classification rather than
+        // being wrongly skipped.
+        assert_ne!(
+            classify_cargo_target_path(Path::new("debug/.cargo-metadata.json")),
             CloneAction::Skip
         );
-        assert_eq!(
-            classify_cargo_target_path(Path::new("release/.cargo-lock")),
-            CloneAction::Skip
-        );
-        // Root-level and nested-profile variants are also skipped by file name.
-        assert_eq!(
-            classify_cargo_target_path(Path::new(".cargo-lock")),
-            CloneAction::Skip
-        );
-        assert_eq!(
-            classify_cargo_target_path(Path::new("x86_64-unknown-linux-gnu/debug/.cargo-lock")),
+        assert_ne!(
+            classify_cargo_target_path(Path::new(".rustc_info.json")),
             CloneAction::Skip
         );
     }
@@ -626,14 +672,24 @@ mod tests {
         let fingerprint = Path::new("debug/.fingerprint/foo-abc/invoked.timestamp");
         let dep_info = Path::new("debug/deps/foo.d");
         let incremental = Path::new("debug/incremental/foo-abc/s-cache.bin");
-        let build_lock = Path::new("debug/.cargo-lock");
+        // Every cargo lock variant, in both profile dirs, must be skipped.
+        let lock_files = [
+            Path::new("debug/.cargo-lock"),
+            Path::new("debug/.cargo-build-lock"),
+            Path::new("debug/.cargo-artifact-lock"),
+            Path::new("release/.cargo-lock"),
+            Path::new("release/.cargo-build-lock"),
+            Path::new("release/.cargo-artifact-lock"),
+        ];
         let rustc_info = Path::new(".rustc_info.json");
 
         write_base_file(&base, heavy, b"large immutable artifact");
         write_base_file(&base, fingerprint, b"fingerprint metadata");
         write_base_file(&base, dep_info, b"dep-info metadata");
         write_base_file(&base, incremental, b"incremental state");
-        write_base_file(&base, build_lock, b"");
+        for lock in lock_files {
+            write_base_file(&base, lock, b"");
+        }
         write_base_file(&base, rustc_info, b"rustc info cache");
 
         let result =
@@ -645,8 +701,8 @@ mod tests {
         // fingerprint + dep-info + .rustc_info.json are byte-copied.
         assert_eq!(result.copied_file_count, 3);
         assert!(
-            result.skipped_file_count >= 2,
-            "incremental state and the build-directory lock should be skipped"
+            result.skipped_file_count >= 1 + lock_files.len() as u64,
+            "incremental state and every cargo lock variant should be skipped"
         );
 
         assert_eq!(
@@ -669,10 +725,13 @@ mod tests {
             !run.join("debug/incremental").exists(),
             "incremental directories must be skipped before descent"
         );
-        assert!(
-            !run.join(build_lock).exists(),
-            "the build-directory lock file must not be seeded into the private run dir"
-        );
+        for lock in lock_files {
+            assert!(
+                !run.join(lock).exists(),
+                "cargo lock file {} must not be seeded into the private run dir",
+                lock.display()
+            );
+        }
         assert_eq!(
             fs::read(run.join(rustc_info)).expect("read copied rustc info"),
             b"rustc info cache"
@@ -683,14 +742,26 @@ mod tests {
             assert_same_inode(&base.join(heavy), &run.join(heavy));
             assert_different_inode(&base.join(fingerprint), &run.join(fingerprint));
             assert_different_inode(&base.join(dep_info), &run.join(dep_info));
-            // The seeded tree must NOT share the build-directory lock inode with
-            // the warm base: flock is inode-scoped, so a shared inode would make
-            // this run's `cargo` serialize against the base and every sibling.
-            // The lock is skipped entirely, so it must simply be absent.
-            assert!(
-                !run.join(build_lock).exists(),
-                "lock file must be absent, never inode-shared with the base"
-            );
+            // No seeded file may share an inode with ANY base file whose name
+            // matches the cargo lock pattern: flock is inode-scoped, so a shared
+            // inode would make this run's `cargo` serialize against the base and
+            // every sibling. Each lock is skipped entirely, so it must simply be
+            // absent from the run dir.
+            let base_lock_inodes: std::collections::HashSet<(u64, u64)> = lock_files
+                .iter()
+                .map(|lock| {
+                    let meta = fs::metadata(base.join(lock)).expect("base lock metadata");
+                    (meta.dev(), meta.ino())
+                })
+                .collect();
+            for entry in walk_files(&run) {
+                let meta = fs::metadata(&entry).expect("run file metadata");
+                assert!(
+                    !base_lock_inodes.contains(&(meta.dev(), meta.ino())),
+                    "seeded file {} shares an inode with a base cargo lock file",
+                    entry.display()
+                );
+            }
             // `.rustc_info.json` is copied, so the run owns a private inode and a
             // cargo rewrite cannot corrupt the shared warm base.
             assert_different_inode(&base.join(rustc_info), &run.join(rustc_info));
@@ -758,6 +829,28 @@ mod tests {
         let missing = teardown_run_dir(&run).expect("missing run dir should be non-fatal");
         assert_eq!(missing.outcome(), "already_absent");
         assert_eq!(missing.removed_count(), 0);
+    }
+
+    /// Recursively collect every regular file under `root` (test-only helper for
+    /// the inode-level lock-sharing assertion).
+    fn walk_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(read) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in read.flatten() {
+                let path = entry.path();
+                let meta = fs::symlink_metadata(&path).expect("entry metadata");
+                if meta.is_dir() {
+                    stack.push(path);
+                } else if meta.is_file() {
+                    files.push(path);
+                }
+            }
+        }
+        files
     }
 
     fn write_base_file(base: &Path, relative: &Path, contents: &[u8]) {
