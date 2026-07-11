@@ -994,7 +994,7 @@ pub async fn run_reply_loop(
             let mut assistant_content: Vec<ContentBlock> = Vec::new();
             assistant_content.extend(turn_provider_state);
             if !turn_thinking.is_empty() {
-                assistant_content.push(ContentBlock::Thinking { thinking: turn_thinking.clone() });
+                assistant_content.push(ContentBlock::Thinking { thinking: turn_thinking.clone(), signature: None });
             }
             if !turn_text.is_empty() {
                 push_fragment(&mut assistant_fragments, format!("text:{turn_text}"));
@@ -1945,7 +1945,7 @@ mod tests {
             assistant
                 .content
                 .iter()
-                .any(|b| matches!(b, ContentBlock::Thinking { thinking } if thinking.contains("Thinking about"))),
+                .any(|b| matches!(b, ContentBlock::Thinking { thinking, .. } if thinking.contains("Thinking about"))),
             "thinking content should be preserved in the assistant message"
         );
         // Tool use block should be present.

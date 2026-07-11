@@ -256,7 +256,9 @@ async fn drain_provider_turn(
             }
             Ok(StreamEvent::Delta(tool @ ContentBlock::ToolUse { .. })) => tool_calls.push(tool),
             Ok(StreamEvent::Delta(state @ ContentBlock::OpenAIReasoning { .. }))
-            | Ok(StreamEvent::Delta(state @ ContentBlock::Thinking { .. })) => {
+            | Ok(StreamEvent::Delta(state @ ContentBlock::Thinking { .. }))
+            | Ok(StreamEvent::Delta(state @ ContentBlock::RedactedThinking { .. }))
+            | Ok(StreamEvent::Delta(state @ ContentBlock::Unknown { .. })) => {
                 turn_provider_state.push(state);
             }
             Ok(StreamEvent::Done) => break,

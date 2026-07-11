@@ -160,7 +160,10 @@ impl BlockAccumulator {
                     "content": text
                 }));
             }
-            ContentBlock::Thinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
+            ContentBlock::Thinking { .. }
+            | ContentBlock::RedactedThinking { .. }
+            | ContentBlock::Unknown { .. }
+            | ContentBlock::OpenAIReasoning { .. } => {}
         }
     }
 }
