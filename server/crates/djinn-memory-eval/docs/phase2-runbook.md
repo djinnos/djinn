@@ -122,6 +122,8 @@ cargo run -p djinn-memory-eval -- qa-run
 
 # Dual-pass LLM judge (requires credentialed model slot)
 export DJINN_MEMORY_QA_JUDGE_MODEL="<provider>/<model>"
+# Export the matching provider credential env for that slot, e.g.
+# export ANTHROPIC_API_KEY="..." or OPENAI_API_KEY="..."
 export DJINN_TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5433/postgres"
 cargo run -p djinn-memory-eval -- qa-judge
 ```

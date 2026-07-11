@@ -49,9 +49,10 @@ jobs:
     # events; it only runs on schedule or manual dispatch.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     env:
-      # Optional model override from manual dispatch. When empty, the judge
-      # command uses the default configured memory QA judge model slot.
-      DJINN_MEMORY_QA_JUDGE_MODEL: ${{ github.event.inputs.judge_model || '' }}
+      # Optional manual override; scheduled runs use the explicit repository
+      # variable DJINN_MEMORY_QA_JUDGE_MODEL when configured. Empty means
+      # publish a credential-error artifact, never fall back anonymously.
+      DJINN_MEMORY_QA_JUDGE_MODEL: ${{ github.event.inputs.judge_model || vars.DJINN_MEMORY_QA_JUDGE_MODEL || '' }}
       DJINN_MEMORY_QA_SKIP_JUDGE: ${{ github.event.inputs.qa_run_only == 'true' && '1' || '' }}
     services:
       postgres:
@@ -123,9 +124,17 @@ jobs:
         env:
           DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
           # The judge command must use a credentialed model slot. Do NOT
-          # provide a default API key here; if the slot is not configured,
-          # the judge will fail with a clear error and the workflow will
-          # publish the failure as a non-gating nightly result.
+          # provide a default model or anonymous-owner fallback here; if the
+          # named slot's matching credential secret is absent, the judge fails
+          # with a clear error and publishes a non-gating nightly result.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          XIAOMI_API_KEY: ${{ secrets.XIAOMI_API_KEY }}
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
         run: cargo run -p djinn-memory-eval -- qa-judge
         # Continue on failure so the run remains non-gating and artifacts are
         # still uploaded even when the judge is unavailable.
