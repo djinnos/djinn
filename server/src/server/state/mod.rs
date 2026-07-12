@@ -23,7 +23,10 @@ use djinn_db::{
     QdrantCodeChunkVectorStore, QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
-use djinn_image_controller::{ImageBuildWatcher, ImageController, ImageControllerConfig};
+use djinn_image_controller::{
+    ImageBuildWatcher, ImageController, ImageControllerConfig, RetentionPreflightConfig,
+    ZotHttpAuth, ZotHttpConfig, ZotHttpStateSource, adapt_selected_images, run_preflight,
+};
 use djinn_k8s::{K8sGraphWarmer, KubernetesConfig, TokenReviewer, WarmCompletionSink};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::embeddings::{EmbeddingService, default_embedding_cache_dir};
@@ -519,6 +522,43 @@ impl AppState {
         );
         *self.inner.image_build_watcher.lock().await = Some(handle);
         tracing::info!("image_build_watcher: spawned");
+    }
+
+    async fn run_zot_retention_preflight(
+        &self,
+        config: &ImageControllerConfig,
+    ) -> anyhow::Result<()> {
+        let retention = &config.zot_retention;
+        if !retention.enabled {
+            return Ok(());
+        }
+        let selected_rows = djinn_db::ImageRepository::new(self.db().clone())
+            .list_selected_catalog_images()
+            .await
+            .map_err(|error: djinn_db::Error| {
+                anyhow::anyhow!("load selected catalog images for Zot retention preflight: {error}")
+            })?;
+        let auth = match (&retention.username, &retention.password) {
+            (Some(username), Some(password)) => ZotHttpAuth::Basic {
+                username: username.clone(),
+                password: password.clone(),
+            },
+            _ => ZotHttpAuth::None,
+        };
+        let source = ZotHttpStateSource::new(ZotHttpConfig::new(&retention.endpoint, auth))
+            .map_err(|error| anyhow::anyhow!("construct Zot retention state source: {error}"))?;
+        let outcome = run_preflight(
+            &source,
+            &adapt_selected_images(&selected_rows),
+            &RetentionPreflightConfig {
+                destructive_enabled: !retention.dry_run,
+                newest_tags: retention.newest_tags,
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("Zot retention preflight failed: {error}"))?;
+        tracing::info!(destructive = !retention.dry_run, newest_tags = retention.newest_tags, report = %outcome.report, "Zot catalog retention preflight report");
+        Ok(())
     }
 
     /// Abort + await the image-build watcher task if it was spawned.
@@ -1559,6 +1599,12 @@ impl AppState {
     /// plane (which `initialize()` sets up) serves on every pod regardless.
     pub async fn become_leader(&self) {
         tracing::info!("become_leader: starting active coordinator subsystems");
+
+        let retention_config = ImageControllerConfig::from_env();
+        if let Err(error) = self.run_zot_retention_preflight(&retention_config).await {
+            tracing::error!(%error, "Zot retention preflight failed; refusing leader startup");
+            std::process::exit(1);
+        }
 
         // Finalize any sessions left in `running` from a previous leader. Safe
         // now (and only now): we hold the lock, so the previous leader is gone
