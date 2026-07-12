@@ -3123,12 +3123,19 @@ async fn sweep_cargo_warm_base_guard(
     };
     let activity = gc::DbActivityGuard::new(db.clone());
     let planning_locks = gc::BaseLockPlanningAdapter::new(gc::FlockBaseLock);
+    let dry_run_planning_locks = gc::NoopLockGuard;
+    // Flock creates a lock file, so a dry-run must use the non-mutating
+    // availability policy and leave base mtimes untouched.
+    let planning_locks: &dyn gc::BaseLockGuard = match config.mode {
+        crate::context::CacheCleanupMode::DryRun => &dry_run_planning_locks,
+        crate::context::CacheCleanupMode::Delete => &planning_locks,
+    };
     let capacity = gc::StatvfsFilesystemCapacity;
     let plan = gc::plan_pressure_eviction(
         pressure_inventory,
         &activity,
         guard.as_ref(),
-        &planning_locks,
+        planning_locks,
         &capacity,
         config,
         &clock,
@@ -3153,12 +3160,14 @@ async fn sweep_cargo_warm_base_guard(
         Path::new(gc::CARGO_WARM_BASE_ROOT),
     )
     .await;
+    let retained_outcomes: Vec<_> = pressure.retained.iter().map(|(_, reason)| reason).collect();
     tracing::info!(
         component = metrics::COMPONENT_CARGO_WARM_BASE,
         mode = config.mode.as_metric_label(),
         deleted = pressure.deleted.len(),
         dry_run = pressure.dry_run.len(),
         retained = pressure.retained.len(),
+        retained_outcomes = ?retained_outcomes,
         reclaimed_bytes = pressure.reclaimed_bytes,
         projected_bytes = pressure.projected_bytes,
         reached_high_watermark = pressure.reached_high_watermark,

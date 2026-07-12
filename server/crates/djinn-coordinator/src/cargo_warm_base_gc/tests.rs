@@ -1451,3 +1451,216 @@ async fn pressure_execute_dry_run_reports_planner_prefix_without_locking() {
     assert!(base.exists());
     assert!(locks.attempts.lock().unwrap().is_empty());
 }
+
+struct SequenceCapacity(
+    std::sync::Mutex<std::collections::VecDeque<Result<CapacitySnapshot, String>>>,
+);
+impl FilesystemCapacity for SequenceCapacity {
+    fn capacity(&self, _: &Path) -> Result<CapacitySnapshot, String> {
+        self.0
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected capacity call")
+    }
+}
+
+fn pressure_candidate(entry: WarmBaseEntry) -> WarmBaseCandidate {
+    WarmBaseCandidate {
+        entry,
+        classification: BaseClassification::Registered,
+        latest_activity: None,
+        free_space_bytes: 0,
+    }
+}
+
+fn executable_pressure_config() -> crate::context::CacheCleanupConfig {
+    let mut config = pressure_config(0.15, 0.25);
+    config.warm_base_grace_period = Duration::ZERO;
+    config
+}
+
+#[test]
+fn dry_run_planning_lock_policy_does_not_create_lock_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000010");
+    // This is the concrete non-mutating policy selected by the production
+    // health sweep for CacheCleanupMode::DryRun.
+    assert_eq!(NoopLockGuard.try_lock(&base), LockOutcome::Available);
+    assert!(!base.join(WARM_BASE_GC_LOCK_FILE).exists());
+}
+
+#[tokio::test]
+async fn pressure_executor_remeasures_each_delete_and_stops_at_high() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000011");
+    let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000012");
+    let third = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000013");
+    std::fs::write(first.join("a"), b"abc").unwrap();
+    std::fs::write(second.join("b"), b"defg").unwrap();
+    std::fs::write(third.join("c"), b"ignored").unwrap();
+    let capacity = SequenceCapacity(std::sync::Mutex::new(std::collections::VecDeque::from([
+        Ok(CapacitySnapshot {
+            total_bytes: 1000,
+            available_bytes: 200,
+        }),
+        Ok(CapacitySnapshot {
+            total_bytes: 1000,
+            available_bytes: 250,
+        }),
+    ])));
+    let result = execute_pressure_eviction(
+        PressureEvictionPlan {
+            candidates: vec![
+                pressure_candidate(make_entry(&first)),
+                pressure_candidate(make_entry(&second)),
+                pressure_candidate(make_entry(&third)),
+            ],
+            retained: Vec::new(),
+            projected_bytes: 999,
+            target_bytes: 50,
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &TestClock::new(
+            SystemTime::now() + Duration::from_secs(1),
+            std::time::Instant::now(),
+        ),
+        crate::context::CacheCleanupMode::Delete,
+        temp.path(),
+    )
+    .await;
+    assert_eq!(result.deleted.len(), 2);
+    assert_eq!(result.reclaimed_bytes, 7);
+    assert_eq!(result.projected_bytes, 999);
+    assert!(result.reached_high_watermark);
+    assert!(!first.exists() && !second.exists() && third.exists());
+}
+
+#[tokio::test]
+async fn pressure_executor_retains_lock_recheck_and_delete_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000014");
+    let entry = make_entry(&base);
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 1000,
+        available_bytes: 100,
+    }));
+    let lock_retained = execute_pressure_eviction(
+        PressureEvictionPlan {
+            candidates: vec![pressure_candidate(entry.clone())],
+            retained: Vec::new(),
+            projected_bytes: 0,
+            target_bytes: 0,
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &RecordingBaseLock {
+            attempts: std::sync::Mutex::new(Vec::new()),
+            succeed: false,
+        },
+        &capacity,
+        &executable_pressure_config(),
+        &TestClock::new(
+            SystemTime::now() + Duration::from_secs(1),
+            std::time::Instant::now(),
+        ),
+        crate::context::CacheCleanupMode::Delete,
+        temp.path(),
+    )
+    .await;
+    assert_eq!(lock_retained.retained[0].1, PressureSkipReason::LockBusy);
+    let active_retained = execute_pressure_eviction(
+        PressureEvictionPlan {
+            candidates: vec![pressure_candidate(entry.clone())],
+            retained: Vec::new(),
+            projected_bytes: 0,
+            target_bytes: 0,
+        },
+        &Activity(Ok(ActivitySnapshot {
+            has_active_task_run: true,
+            ..snapshot()
+        })),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &TestClock::new(
+            SystemTime::now() + Duration::from_secs(1),
+            std::time::Instant::now(),
+        ),
+        crate::context::CacheCleanupMode::Delete,
+        temp.path(),
+    )
+    .await;
+    assert_eq!(
+        active_retained.retained[0].1,
+        PressureSkipReason::ActiveTaskRun
+    );
+    let delete_retained = execute_pressure_eviction(
+        PressureEvictionPlan {
+            candidates: vec![pressure_candidate(entry)],
+            retained: Vec::new(),
+            projected_bytes: 0,
+            target_bytes: 0,
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &TestClock::new(
+            SystemTime::now() + Duration::from_secs(1),
+            std::time::Instant::now(),
+        ),
+        crate::context::CacheCleanupMode::Delete,
+        Path::new("/outside-root"),
+    )
+    .await;
+    assert_eq!(
+        delete_retained.retained[0].1,
+        PressureSkipReason::DeleteError
+    );
+    assert!(base.exists());
+}
+
+#[tokio::test]
+async fn pressure_executor_preserves_planning_outcomes_and_stops_on_remeasurement_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000015");
+    std::fs::write(base.join("actual"), b"seven!!").unwrap();
+    let capacity = SequenceCapacity(std::sync::Mutex::new(std::collections::VecDeque::from([
+        Err("statvfs failed".into()),
+    ])));
+    let retained_id = "018f8b9a-0d70-7f0a-8000-000000000016".to_owned();
+    let result = execute_pressure_eviction(
+        PressureEvictionPlan {
+            candidates: vec![pressure_candidate(make_entry(&base))],
+            retained: vec![(retained_id.clone(), PressureSkipReason::MeasurementError)],
+            projected_bytes: 99,
+            target_bytes: 99,
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &TestClock::new(
+            SystemTime::now() + Duration::from_secs(1),
+            std::time::Instant::now(),
+        ),
+        crate::context::CacheCleanupMode::Delete,
+        temp.path(),
+    )
+    .await;
+    assert_eq!(
+        result.retained,
+        vec![(retained_id, PressureSkipReason::MeasurementError)]
+    );
+    assert_eq!(result.reclaimed_bytes, 7);
+    assert_eq!(result.projected_bytes, 99);
+    assert!(result.remeasurement_failed);
+}

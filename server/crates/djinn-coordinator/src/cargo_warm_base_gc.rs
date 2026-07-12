@@ -52,8 +52,14 @@ pub async fn execute_pressure_eviction(
 
     let mut result = PressureEvictionResult {
         projected_bytes: plan.projected_bytes,
+        retained: plan.retained.clone(),
         ..Default::default()
     };
+    // Planning failures are fail-closed too. Carry them into the result and
+    // emit bounded telemetry even when planning produced no executable prefix.
+    for (_, reason) in &plan.retained {
+        emit_pressure_metric(*reason, mode);
+    }
     if mode == CacheCleanupMode::DryRun {
         result.dry_run = plan
             .candidates
@@ -191,10 +197,24 @@ fn retain_pressure(
     reason: PressureSkipReason,
     mode: crate::context::CacheCleanupMode,
 ) {
+    result.retained.push((project_id.to_owned(), reason));
+    emit_pressure_metric(reason, mode);
+}
+
+fn emit_pressure_metric(reason: PressureSkipReason, mode: crate::context::CacheCleanupMode) {
     use djinn_telemetry::cache_cleanup as metrics;
 
-    result.retained.push((project_id.to_owned(), reason));
-    let outcome = match reason {
+    metrics::increment_cleanup_total(
+        metrics::COMPONENT_CARGO_WARM_BASE,
+        pressure_outcome(reason),
+        mode.as_metric_label(),
+    );
+}
+
+fn pressure_outcome(reason: PressureSkipReason) -> &'static str {
+    use djinn_telemetry::cache_cleanup as metrics;
+
+    match reason {
         PressureSkipReason::Young => metrics::OUTCOME_RETAINED_YOUNG,
         PressureSkipReason::ActiveTaskRun => metrics::OUTCOME_RETAINED_ACTIVE,
         PressureSkipReason::LockBusy => metrics::OUTCOME_RETAINED_LOCK_BUSY,
@@ -207,12 +227,7 @@ fn retain_pressure(
         | PressureSkipReason::LockError
         | PressureSkipReason::MeasurementError
         | PressureSkipReason::DeleteError => metrics::OUTCOME_ERROR,
-    };
-    metrics::increment_cleanup_total(
-        metrics::COMPONENT_CARGO_WARM_BASE,
-        outcome,
-        mode.as_metric_label(),
-    );
+    }
 }
 
 async fn recheck_pressure_after_lock(
