@@ -188,9 +188,7 @@ impl ClosedParentOpenChildrenSource for TaskRepositoryClosedParentOpenChildrenSo
     fn refresh_for_run(&self) {
         let source = self.clone();
         match tokio::runtime::Handle::try_current() {
-            Ok(handle)
-                if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
-            {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
                 tokio::task::block_in_place(|| handle.block_on(source.refresh()));
             }
             Ok(_) => {
@@ -211,6 +209,7 @@ impl ClosedParentOpenChildrenSource for TaskRepositoryClosedParentOpenChildrenSo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_core::doctor::{DoctorRegistry, doctor_run};
 
     fn snapshot(action: &str, status: &str, guard: &str) -> serde_json::Value {
         json!({"total": 1, "findings": [{
@@ -253,5 +252,28 @@ mod tests {
                 action != "retain"
             );
         }
+    }
+
+    #[test]
+    fn registered_check_runs_by_name_and_returns_serialized_evidence() {
+        let registry = DoctorRegistry::new();
+        let source = Arc::new(MemoryClosedParentOpenChildrenSource::new(snapshot(
+            "close",
+            "open",
+            "parent_closed",
+        )));
+        crate::doctor::register_closed_parent_open_children_check(&registry, source);
+
+        let results = doctor_run(&registry, Some(&[CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME]))
+            .expect("registered named check runs");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME);
+        let finding = results[0].1.first().expect("serialized finding");
+        assert_eq!(finding.entity_ids["task_id"], "task-1");
+        assert_eq!(finding.evidence["board_health_finding"]["id"], "task-1");
+        assert_eq!(
+            finding.evidence["selected_disposition"],
+            json!({"action":"close", "status":"closed", "guard":"parent_closed"})
+        );
     }
 }
