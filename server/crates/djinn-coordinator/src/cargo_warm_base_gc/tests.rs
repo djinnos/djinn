@@ -1408,3 +1408,5 @@ async fn pressure_lock_busy_and_error_retained() {
     assert_eq!(plan.retained[0].1, PressureSkipReason::LockBusy);
     assert_eq!(plan.retained[1].1, PressureSkipReason::LockError);
 }
+
+mod pressure_execution;
