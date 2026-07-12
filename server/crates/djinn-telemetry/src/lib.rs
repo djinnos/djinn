@@ -87,8 +87,8 @@ const PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS: &str =
 const CACHE_CLEANUP_TOTAL: &str = "djinn_cache_cleanup_total";
 const CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL: &str = "djinn_cache_cleanup_reclaimed_bytes_total";
 const CACHE_CLEANUP_CANDIDATES_TOTAL: &str = "djinn_cache_cleanup_candidates_total";
-const CACHE_CLEANUP_COMPONENTS: [&str; 2] = ["sccache", "cargo_target_runs"];
-const CACHE_CLEANUP_OUTCOMES: [&str; 10] = [
+const CACHE_CLEANUP_COMPONENTS: [&str; 3] = ["sccache", "cargo_target_runs", "cargo_warm_base"];
+const CACHE_CLEANUP_OUTCOMES: [&str; 13] = [
     "deleted",
     "skipped",
     "retained",
@@ -99,6 +99,9 @@ const CACHE_CLEANUP_OUTCOMES: [&str; 10] = [
     "loose_file_deleted",
     "retained_fresh_malformed",
     "retained_non_utf8",
+    "retained_young",
+    "retained_active",
+    "retained_lock_busy",
 ];
 const CACHE_CLEANUP_MODES: [&str; 2] = ["dry_run", "delete"];
 
@@ -1476,6 +1479,7 @@ pub mod cache_cleanup {
     /// Stable component labels.
     pub const COMPONENT_SCCACHE: &str = "sccache";
     pub const COMPONENT_CARGO_TARGET_RUNS: &str = "cargo_target_runs";
+    pub const COMPONENT_CARGO_WARM_BASE: &str = "cargo_warm_base";
 
     /// Stable outcome labels for `djinn_cache_cleanup_total`.
     pub const OUTCOME_DELETED: &str = "deleted";
@@ -1493,17 +1497,28 @@ pub mod cache_cleanup {
     pub const OUTCOME_RETAINED_FRESH_MALFORMED: &str = "retained_fresh_malformed";
     pub const OUTCOME_RETAINED_NON_UTF8: &str = "retained_non_utf8";
 
+    /// Warm-base idle eviction specific outcome labels. These are bounded and
+    /// distinguish the most common retention reasons without leaking
+    /// high-cardinality project or path labels into metrics.
+    pub const OUTCOME_RETAINED_YOUNG: &str = "retained_young";
+    pub const OUTCOME_RETAINED_ACTIVE: &str = "retained_active";
+    pub const OUTCOME_RETAINED_LOCK_BUSY: &str = "retained_lock_busy";
+
     /// Stable mode labels.
     pub const MODE_DRY_RUN: &str = "dry_run";
     pub const MODE_DELETE: &str = "delete";
 
     /// All bounded component labels — used for registration seeding.
     #[cfg(test)]
-    pub(crate) const ALL_COMPONENTS: [&str; 2] = [COMPONENT_SCCACHE, COMPONENT_CARGO_TARGET_RUNS];
+    pub(crate) const ALL_COMPONENTS: [&str; 3] = [
+        COMPONENT_SCCACHE,
+        COMPONENT_CARGO_TARGET_RUNS,
+        COMPONENT_CARGO_WARM_BASE,
+    ];
 
     /// All bounded outcome labels — used for registration seeding.
     #[cfg(test)]
-    pub(crate) const ALL_OUTCOMES: [&str; 10] = [
+    pub(crate) const ALL_OUTCOMES: [&str; 13] = [
         OUTCOME_DELETED,
         OUTCOME_SKIPPED,
         OUTCOME_RETAINED,
@@ -1514,6 +1529,9 @@ pub mod cache_cleanup {
         OUTCOME_LOOSE_FILE_DELETED,
         OUTCOME_RETAINED_FRESH_MALFORMED,
         OUTCOME_RETAINED_NON_UTF8,
+        OUTCOME_RETAINED_YOUNG,
+        OUTCOME_RETAINED_ACTIVE,
+        OUTCOME_RETAINED_LOCK_BUSY,
     ];
 
     /// All bounded mode labels — used for registration seeding.
@@ -1522,7 +1540,7 @@ pub mod cache_cleanup {
 
     /// Increment the cache cleanup counter for a `(component, outcome, mode)` bucket.
     ///
-    /// `component` MUST be one of `COMPONENT_SCCACHE` or `COMPONENT_CARGO_TARGET_RUNS`.
+    /// `component` MUST be one of the `COMPONENT_*` constants.
     /// `outcome` MUST be one of the `OUTCOME_*` constants.
     /// `mode` MUST be one of `MODE_DRY_RUN` or `MODE_DELETE`.
     ///

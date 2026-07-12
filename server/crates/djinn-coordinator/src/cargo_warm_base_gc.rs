@@ -1,16 +1,24 @@
-//! Conservative inventory and guard planning for Cargo warm bases.
+//! Conservative inventory and guard planning for Cargo warm bases, plus idle
+//! whole-base eviction.
 //!
-//! This module deliberately does not remove directories.  The idle and pressure
-//! evictors consume its candidates in later passes; keeping inventory and guard
-//! evaluation separate makes every unsafe/unknown condition retain the base.
+//! The inventory and guard-planning phase deliberately does not remove
+//! directories.  The idle evictor consumes guard-plan candidates and performs
+//! the destructive work only after re-checking every safety condition under a
+//! held per-base lock.
 
+use std::fs::File;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use djinn_core::clock::Clock;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 pub const CARGO_WARM_BASE_ROOT: &str = "/cache/cargo-target";
+pub const WARM_BASE_GC_LOCK_FILE: &str = ".djinn-gc.lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseClassification {
@@ -131,6 +139,17 @@ pub trait BaseLockGuard: Send + Sync {
     fn try_lock(&self, path: &Path) -> LockOutcome;
 }
 
+/// Owned lock guard returned by [`BaseLock`]. The guard holds the lock until it
+/// is dropped.
+pub trait LockGuard: Send {}
+
+/// Production-style lock acquisition that returns an owned guard. The guard
+/// must be held across any destructive operation and the post-lock safety
+/// recheck.
+pub trait BaseLock: Send + Sync {
+    fn try_lock(&self, path: &Path) -> Result<Option<Box<dyn LockGuard>>, String>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockOutcome {
     Available,
@@ -138,7 +157,7 @@ pub enum LockOutcome {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetainReason {
     ActivityError,
     ActiveTaskRun,
@@ -147,6 +166,8 @@ pub enum RetainReason {
     FreeSpaceError,
     LockBusy,
     LockError,
+    Young,
+    DeleteError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +344,7 @@ impl FreeSpaceGuard for StatvfsFreeSpaceGuard {
         Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
     }
 }
+
 pub struct NoopLockGuard;
 impl BaseLockGuard for NoopLockGuard {
     fn try_lock(&self, _: &Path) -> LockOutcome {
@@ -330,9 +352,446 @@ impl BaseLockGuard for NoopLockGuard {
     }
 }
 
+/// Per-base filesystem lock using a non-blocking exclusive `flock` on
+/// `<base>/.djinn-gc.lock`. The lock file is created if it does not exist.
+/// The lock is released when the returned guard is dropped.
+pub struct FlockBaseLock;
+
+struct FlockGuard {
+    _file: File,
+}
+
+impl LockGuard for FlockGuard {}
+
+impl BaseLock for FlockBaseLock {
+    fn try_lock(&self, path: &Path) -> Result<Option<Box<dyn LockGuard>>, String> {
+        let lock_path = path.join(WARM_BASE_GC_LOCK_FILE);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| format!("failed to open lock file {}: {error}", lock_path.display()))?;
+        let fd = file.as_raw_fd();
+        // SAFETY: fd is valid for the lifetime of `file`, and flock is async-signal-safe.
+        let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            Ok(Some(Box::new(FlockGuard { _file: file })))
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                Ok(None)
+            } else {
+                Err(error.to_string())
+            }
+        }
+    }
+}
+
+/// Adapter that lets a [`BaseLock`] implementation satisfy the planning-time
+/// [`BaseLockGuard`] trait. The lock is acquired and immediately released,
+/// which is safe because planning only tests availability; the actual deletion
+/// phase reacquires and holds the lock.
+pub struct BaseLockPlanningAdapter<L: BaseLock> {
+    inner: L,
+}
+
+impl<L: BaseLock> BaseLockPlanningAdapter<L> {
+    pub fn new(inner: L) -> Self {
+        Self { inner }
+    }
+}
+
+impl<L: BaseLock> BaseLockGuard for BaseLockPlanningAdapter<L> {
+    fn try_lock(&self, path: &Path) -> LockOutcome {
+        match self.inner.try_lock(path) {
+            Ok(Some(_guard)) => LockOutcome::Available,
+            Ok(None) => LockOutcome::Busy,
+            Err(_) => LockOutcome::Error,
+        }
+    }
+}
+
+/// Result of an idle whole-base eviction pass.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct IdleEvictionResult {
+    pub deleted: Vec<WarmBaseEntry>,
+    pub dry_run: Vec<WarmBaseEntry>,
+    pub retained: Vec<(String, RetainReason)>,
+    pub reclaimed_bytes: u64,
+    pub projected_bytes: u64,
+}
+
+/// Evict idle warm bases.  Both `DryRun` and `Delete` modes select candidates
+/// with the same DB-first activity derivation, retention, and grace-period
+/// checks.  In `DryRun` mode the candidate directories are left intact and
+/// `projected_bytes` is reported; in `Delete` mode they are removed after a
+/// non-blocking per-base lock is acquired and safety is rechecked.
+///
+/// Errors from activity, warm-job, lock, or filesystem checks retain the base
+/// (fail closed).  Directory deletion is refused if the path cannot be proven
+/// to lie under the configured root.
+#[allow(clippy::too_many_arguments)]
+pub async fn evict_idle_warm_bases(
+    inventory: WarmBaseInventory,
+    activity: &dyn ActivityGuard,
+    warm_jobs: &dyn WarmJobGuard,
+    locks: &dyn BaseLock,
+    config: &crate::context::CacheCleanupConfig,
+    clock: &dyn Clock,
+    mode: crate::context::CacheCleanupMode,
+    root: &Path,
+) -> IdleEvictionResult {
+    use crate::context::CacheCleanupMode;
+    use djinn_telemetry::cache_cleanup as metrics;
+
+    let mut result = IdleEvictionResult::default();
+    let retention = Duration::from_secs(config.warm_base_idle_retention_days * 24 * 60 * 60);
+    let grace = config.warm_base_grace_period;
+
+    for entry in inventory.entries {
+        let snapshot = match activity.activity(&entry.project_id).await {
+            Ok(value) => value,
+            Err(_) => {
+                result
+                    .retained
+                    .push((entry.project_id.clone(), RetainReason::ActivityError));
+                emit_idle_metric(
+                    &entry.project_id,
+                    RetainReason::ActivityError,
+                    mode,
+                    &mut result,
+                );
+                continue;
+            }
+        };
+
+        if snapshot.has_active_task_run {
+            result
+                .retained
+                .push((entry.project_id.clone(), RetainReason::ActiveTaskRun));
+            emit_idle_metric(
+                &entry.project_id,
+                RetainReason::ActiveTaskRun,
+                mode,
+                &mut result,
+            );
+            continue;
+        }
+
+        match warm_jobs.has_in_flight_warm(&entry.project_id).await {
+            Ok(true) => {
+                result
+                    .retained
+                    .push((entry.project_id.clone(), RetainReason::WarmJobInFlight));
+                emit_idle_metric(
+                    &entry.project_id,
+                    RetainReason::WarmJobInFlight,
+                    mode,
+                    &mut result,
+                );
+                continue;
+            }
+            Err(_) => {
+                result
+                    .retained
+                    .push((entry.project_id.clone(), RetainReason::WarmJobError));
+                emit_idle_metric(
+                    &entry.project_id,
+                    RetainReason::WarmJobError,
+                    mode,
+                    &mut result,
+                );
+                continue;
+            }
+            Ok(false) => {}
+        }
+
+        let (is_idle, cached_last_activity) = match is_idle_base(
+            snapshot.latest_activity.as_deref(),
+            &entry.path,
+            clock.now(),
+            retention,
+            grace,
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                result
+                    .retained
+                    .push((entry.project_id.clone(), RetainReason::ActivityError));
+                emit_idle_metric(
+                    &entry.project_id,
+                    RetainReason::ActivityError,
+                    mode,
+                    &mut result,
+                );
+                continue;
+            }
+        };
+        if !is_idle {
+            result
+                .retained
+                .push((entry.project_id.clone(), RetainReason::Young));
+            emit_idle_metric(
+                &entry.project_id,
+                RetainReason::Young,
+                mode,
+                &mut result,
+            );
+            continue;
+        }
+
+        // Acquire the per-base lock and recheck safety before any destructive
+        // work.  Fail closed if the lock cannot be acquired or the recheck
+        // changes the decision.
+        let guard = match locks.try_lock(&entry.path) {
+            Ok(Some(guard)) => guard,
+            Ok(None) => {
+                result
+                    .retained
+                    .push((entry.project_id.clone(), RetainReason::LockBusy));
+                emit_idle_metric(
+                    &entry.project_id,
+                    RetainReason::LockBusy,
+                    mode,
+                    &mut result,
+                );
+                continue;
+            }
+            Err(_) => {
+                result
+                    .retained
+                    .push((entry.project_id.clone(), RetainReason::LockError));
+                emit_idle_metric(
+                    &entry.project_id,
+                    RetainReason::LockError,
+                    mode,
+                    &mut result,
+                );
+                continue;
+            }
+        };
+
+        let post_lock_idle = match recheck_idle_after_lock(
+            &entry.project_id,
+            &entry.path,
+            activity,
+            warm_jobs,
+            clock.now(),
+            retention,
+            grace,
+            cached_last_activity,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(reason) => {
+                result.retained.push((entry.project_id.clone(), reason));
+                emit_idle_metric(&entry.project_id, reason, mode, &mut result);
+                continue;
+            }
+        };
+        if !post_lock_idle {
+            result
+                .retained
+                .push((entry.project_id.clone(), RetainReason::Young));
+            emit_idle_metric(
+                &entry.project_id,
+                RetainReason::Young,
+                mode,
+                &mut result,
+            );
+            continue;
+        }
+
+        match mode {
+            CacheCleanupMode::DryRun => {
+                result.dry_run.push(entry.clone());
+                result.projected_bytes = result.projected_bytes.saturating_add(entry.size_bytes);
+                tracing::info!(
+                    project_id = %entry.project_id,
+                    size_bytes = entry.size_bytes,
+                    mode = "dry_run",
+                    "warm-base idle GC would delete idle base"
+                );
+                metrics::increment_cleanup_total(
+                    metrics::COMPONENT_CARGO_WARM_BASE,
+                    metrics::OUTCOME_DRY_RUN,
+                    mode.as_metric_label(),
+                );
+                let _guard = guard;
+            }
+            CacheCleanupMode::Delete => {
+                match safe_remove_directory(&entry.path, root) {
+                    Ok(()) => {
+                        result.deleted.push(entry.clone());
+                        result.reclaimed_bytes =
+                            result.reclaimed_bytes.saturating_add(entry.size_bytes);
+                        tracing::info!(
+                            project_id = %entry.project_id,
+                            size_bytes = entry.size_bytes,
+                            mode = "delete",
+                            "warm-base idle GC deleted idle base"
+                        );
+                        metrics::increment_cleanup_total(
+                            metrics::COMPONENT_CARGO_WARM_BASE,
+                            metrics::OUTCOME_DELETED,
+                            mode.as_metric_label(),
+                        );
+                        let _guard = guard;
+                    }
+                    Err(_) => {
+                        result.retained.push((entry.project_id.clone(), RetainReason::DeleteError));
+                        emit_idle_metric(
+                            &entry.project_id,
+                            RetainReason::DeleteError,
+                            mode,
+                            &mut result,
+                        );
+                        let _guard = guard;
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+fn emit_idle_metric(
+    project_id: &str,
+    reason: RetainReason,
+    mode: crate::context::CacheCleanupMode,
+    _result: &mut IdleEvictionResult,
+) {
+    use djinn_telemetry::cache_cleanup as metrics;
+
+    let outcome = match reason {
+        RetainReason::Young => metrics::OUTCOME_RETAINED_YOUNG,
+        RetainReason::ActiveTaskRun => metrics::OUTCOME_RETAINED_ACTIVE,
+        RetainReason::WarmJobInFlight | RetainReason::WarmJobError => metrics::OUTCOME_RETAINED,
+        RetainReason::LockBusy => metrics::OUTCOME_RETAINED_LOCK_BUSY,
+        RetainReason::ActivityError
+        | RetainReason::LockError
+        | RetainReason::DeleteError
+        | RetainReason::FreeSpaceError => metrics::OUTCOME_ERROR,
+    };
+
+    let _ = project_id;
+
+    metrics::increment_cleanup_total(
+        metrics::COMPONENT_CARGO_WARM_BASE,
+        outcome,
+        mode.as_metric_label(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recheck_idle_after_lock(
+    project_id: &str,
+    _path: &Path,
+    activity: &dyn ActivityGuard,
+    warm_jobs: &dyn WarmJobGuard,
+    now: SystemTime,
+    retention: Duration,
+    grace: Duration,
+    cached_last_activity: SystemTime,
+) -> Result<bool, RetainReason> {
+    let snapshot = activity
+        .activity(project_id)
+        .await
+        .map_err(|_| RetainReason::ActivityError)?;
+    if snapshot.has_active_task_run {
+        return Err(RetainReason::ActiveTaskRun);
+    }
+    match warm_jobs.has_in_flight_warm(project_id).await {
+        Ok(true) => return Err(RetainReason::WarmJobInFlight),
+        Err(_) => return Err(RetainReason::WarmJobError),
+        Ok(false) => {}
+    }
+    // DB activity is authoritative; if it is absent, use the cached mtime
+    // captured before we acquired the lock (creating the lock file would have
+    // refreshed the directory mtime).
+    let last = if let Some(ts) = snapshot.latest_activity.as_deref() {
+        system_time_from_offset(parse_iso8601(ts).map_err(|_| RetainReason::ActivityError)?)
+    } else {
+        cached_last_activity
+    };
+    let cutoff = last
+        .checked_add(retention + grace)
+        .ok_or(RetainReason::ActivityError)?;
+    Ok(now >= cutoff)
+}
+
+/// Determine whether a base is idle.  DB activity takes precedence; the
+/// directory mtime is used only when DB activity is genuinely absent (not when
+/// the DB query failed).  A base is idle when its latest activity is older
+/// than `retention + grace`.
+fn is_idle_base(
+    latest_activity: Option<&str>,
+    path: &Path,
+    now: SystemTime,
+    retention: Duration,
+    grace: Duration,
+) -> Result<(bool, SystemTime), String> {
+    let last = latest_activity_time(latest_activity, path)?;
+    let cutoff = last
+        .checked_add(retention + grace)
+        .ok_or("retention cutoff overflow")?;
+    Ok((now >= cutoff, last))
+}
+
+fn latest_activity_time(latest_activity: Option<&str>, path: &Path) -> Result<SystemTime, String> {
+    if let Some(ts) = latest_activity {
+        Ok(system_time_from_offset(parse_iso8601(ts)?))
+    } else {
+        let mtime = std::fs::metadata(path)
+            .map_err(|e| format!("failed to read mtime for {}: {e}", path.display()))?
+            .modified()
+            .map_err(|e| format!("no mtime for {}: {e}", path.display()))?;
+        Ok(mtime)
+    }
+}
+
+fn parse_iso8601(value: &str) -> Result<OffsetDateTime, String> {
+    let value = value.trim();
+    OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .map_err(|e| format!("failed to parse activity timestamp {value:?}: {e}"))
+}
+
+fn system_time_from_offset(dt: OffsetDateTime) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(dt.unix_timestamp() as u64)
+}
+
+/// Remove a directory only if it can be proven to reside under `root`.  This
+/// prevents symlink traversal and escape attempts from deleting data outside the
+/// warm-base pool.
+fn safe_remove_directory(path: &Path, root: &Path) -> Result<(), String> {
+    let root_canonical = std::fs::canonicalize(root)
+        .unwrap_or_else(|_| root.to_path_buf());
+    let path_canonical = std::fs::canonicalize(path)
+        .map_err(|e| format!("failed to canonicalize {}: {e}", path.display()))?;
+    if !path_canonical.starts_with(&root_canonical) {
+        return Err(format!(
+            "refusing to delete {} because it is outside {}",
+            path_canonical.display(),
+            root_canonical.display()
+        ));
+    }
+    if path_canonical == root_canonical {
+        return Err(format!(
+            "refusing to delete the warm-base root {}",
+            root_canonical.display()
+        ));
+    }
+    std::fs::remove_dir_all(&path_canonical)
+        .map_err(|e| format!("failed to remove {}: {e}", path_canonical.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_core::clock::TestClock;
 
     struct Activity(Result<ActivitySnapshot, String>);
     #[async_trait]
@@ -360,6 +819,34 @@ mod tests {
             self.0
         }
     }
+    struct RecordingBaseLock {
+        attempts: std::sync::Mutex<Vec<PathBuf>>,
+        succeed: bool,
+    }
+    impl BaseLock for RecordingBaseLock {
+        fn try_lock(&self, path: &Path) -> Result<Option<Box<dyn LockGuard>>, String> {
+            self.attempts.lock().unwrap().push(path.to_path_buf());
+            if self.succeed {
+                Ok(Some(Box::new(NoopGuard)))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+    struct NoopGuard;
+    impl LockGuard for NoopGuard {}
+    struct FailingBaseLock;
+    impl BaseLock for FailingBaseLock {
+        fn try_lock(&self, _: &Path) -> Result<Option<Box<dyn LockGuard>>, String> {
+            Err("lock error".into())
+        }
+    }
+    struct NoopBaseLock;
+    impl BaseLock for NoopBaseLock {
+        fn try_lock(&self, _: &Path) -> Result<Option<Box<dyn LockGuard>>, String> {
+            Ok(Some(Box::new(NoopGuard)))
+        }
+    }
     fn entry() -> WarmBaseEntry {
         WarmBaseEntry {
             project_id: "018f8b9a-0d70-7f0a-8000-000000000001".into(),
@@ -375,6 +862,33 @@ mod tests {
             latest_activity: None,
         }
     }
+    fn default_config() -> crate::context::CacheCleanupConfig {
+        crate::context::CacheCleanupConfig::default()
+    }
+    fn epoch_clock() -> TestClock {
+        TestClock::new(SystemTime::UNIX_EPOCH, std::time::Instant::now())
+    }
+    fn old_base(temp: &tempfile::TempDir, id: &str) -> PathBuf {
+        let base = temp.path().join(id);
+        std::fs::create_dir(&base).expect("dir");
+        filetime::set_file_mtime(
+            &base,
+            filetime::FileTime::from_system_time(SystemTime::UNIX_EPOCH),
+        )
+        .unwrap();
+        base
+    }
+    fn make_entry(base: &Path) -> WarmBaseEntry {
+        WarmBaseEntry {
+            project_id: base.file_name().unwrap().to_str().unwrap().into(),
+            path: base.to_path_buf(),
+            size_bytes: directory_size(base),
+        }
+    }
+    fn future(days: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(days * 24 * 60 * 60)
+    }
+
     #[tokio::test]
     async fn classifications_registered_deleted_and_orphaned() {
         let lock = Lock(LockOutcome::Available);
@@ -540,5 +1054,559 @@ mod tests {
         let inventory = inventory_under(temp.path()).expect("inventory");
         assert_eq!(inventory.entries.len(), 1);
         assert_eq!(inventory.ignored, 2);
+    }
+
+    // ─── Idle eviction tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn idle_eviction_deletes_old_registered_base() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = temp.path().join(id);
+        std::fs::create_dir(&base).expect("dir");
+        std::fs::write(base.join("artifact"), b"x").expect("file");
+        filetime::set_file_mtime(
+            &base,
+            filetime::FileTime::from_system_time(SystemTime::UNIX_EPOCH),
+        )
+        .unwrap();
+
+        let clock = TestClock::new(future(15), std::time::Instant::now());
+        let entry = make_entry(&base);
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: true,
+            has_active_task_run: false,
+            latest_activity: None,
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(false));
+        let locks = NoopBaseLock;
+        let config = default_config();
+
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+        assert_eq!(result.deleted.len(), 1, "deleted={:?}, retained={:?}", result.deleted, result.retained);
+        assert_eq!(result.retained.len(), 0);
+        assert!(result.reclaimed_bytes > 0);
+        assert!(!base.exists());
+    }
+
+    #[tokio::test]
+    async fn idle_eviction_retains_young_base_by_mtime() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = temp.path().join(id);
+        std::fs::create_dir(&base).expect("dir");
+
+        let clock = TestClock::new(SystemTime::now(), std::time::Instant::now());
+        let entry = WarmBaseEntry {
+            project_id: id.into(),
+            path: base.clone(),
+            size_bytes: 1,
+        };
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: true,
+            has_active_task_run: false,
+            latest_activity: None,
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(false));
+        let locks = NoopBaseLock;
+        let config = default_config();
+
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+        assert_eq!(result.retained.len(), 1);
+        assert_eq!(result.retained[0].1, RetainReason::Young);
+        assert!(base.exists());
+    }
+
+    #[tokio::test]
+    async fn idle_eviction_db_activity_takes_precedence_over_mtime() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+
+        let now = future(15);
+        let clock = TestClock::new(now, std::time::Instant::now());
+        let recent = (now - Duration::from_secs(24 * 60 * 60))
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let recent_iso = format!(
+            "{}T00:00:00Z",
+            OffsetDateTime::from(SystemTime::UNIX_EPOCH + Duration::from_secs(recent)).date()
+        );
+        let entry = WarmBaseEntry {
+            project_id: id.into(),
+            path: base.clone(),
+            size_bytes: 1,
+        };
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: true,
+            has_active_task_run: false,
+            latest_activity: Some(recent_iso),
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(false));
+        let locks = NoopBaseLock;
+        let config = default_config();
+
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+        assert_eq!(result.retained.len(), 1);
+        assert_eq!(result.retained[0].1, RetainReason::Young);
+        assert!(base.exists());
+    }
+
+    #[tokio::test]
+    async fn idle_eviction_deletes_deleted_project_base() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+        let entry = make_entry(&base);
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: false,
+            deleted_project: true,
+            has_active_task_run: false,
+            latest_activity: None,
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(false));
+        let locks = NoopBaseLock;
+        let config = default_config();
+        let clock = TestClock::new(future(15), std::time::Instant::now());
+
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+        assert_eq!(result.deleted.len(), 1);
+        assert!(!base.exists());
+    }
+
+    #[tokio::test]
+    async fn idle_eviction_deletes_orphaned_base() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+        let entry = make_entry(&base);
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: false,
+            deleted_project: false,
+            has_active_task_run: false,
+            latest_activity: None,
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(false));
+        let locks = NoopBaseLock;
+        let config = default_config();
+        let clock = TestClock::new(future(15), std::time::Instant::now());
+
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+        assert_eq!(result.deleted.len(), 1);
+        assert!(!base.exists());
+    }
+
+    #[tokio::test]
+    async fn active_task_run_retains_base() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+        let entry = make_entry(&base);
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: true,
+            has_active_task_run: true,
+            latest_activity: None,
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(false));
+        let locks = NoopBaseLock;
+        let config = default_config();
+        let clock = epoch_clock();
+
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+        assert_eq!(result.retained.len(), 1);
+        assert_eq!(result.retained[0].1, RetainReason::ActiveTaskRun);
+        assert!(base.exists());
+    }
+
+    #[tokio::test]
+    async fn in_flight_warm_job_retains_base() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+        let entry = make_entry(&base);
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: true,
+            has_active_task_run: false,
+            latest_activity: None,
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(true));
+        let locks = NoopBaseLock;
+        let config = default_config();
+        let clock = epoch_clock();
+
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+        assert_eq!(result.retained.len(), 1);
+        assert_eq!(result.retained[0].1, RetainReason::WarmJobInFlight);
+        assert!(base.exists());
+    }
+
+    #[tokio::test]
+    async fn lock_busy_retains_base() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+        let entry = make_entry(&base);
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: true,
+            has_active_task_run: false,
+            latest_activity: None,
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(false));
+        let locks = RecordingBaseLock {
+            attempts: std::sync::Mutex::new(Vec::new()),
+            succeed: false,
+        };
+        let config = default_config();
+        let clock = TestClock::new(future(15), std::time::Instant::now());
+
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+        assert_eq!(result.retained.len(), 1);
+        assert_eq!(result.retained[0].1, RetainReason::LockBusy);
+        assert_eq!(locks.attempts.lock().unwrap().len(), 1);
+        assert!(base.exists());
+    }
+
+    #[tokio::test]
+    async fn post_lock_recheck_retains_base() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+        let entry = make_entry(&base);
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        struct FlipActivityGuard {
+            first: std::sync::Mutex<Option<ActivitySnapshot>>,
+            second: ActivitySnapshot,
+        }
+        #[async_trait]
+        impl ActivityGuard for FlipActivityGuard {
+            async fn activity(&self, _: &str) -> Result<ActivitySnapshot, String> {
+                let mut first = self.first.lock().unwrap();
+                if let Some(snapshot) = first.take() {
+                    Ok(snapshot)
+                } else {
+                    Ok(self.second.clone())
+                }
+            }
+        }
+        let activity = FlipActivityGuard {
+            first: std::sync::Mutex::new(Some(ActivitySnapshot {
+                known_project: true,
+                has_active_task_run: false,
+                latest_activity: None,
+                ..snapshot()
+            })),
+            second: ActivitySnapshot {
+                known_project: true,
+                has_active_task_run: true,
+                latest_activity: None,
+                ..snapshot()
+            },
+        };
+        let warm = Warm(Ok(false));
+        let locks = NoopBaseLock;
+        let config = default_config();
+        let clock = TestClock::new(future(15), std::time::Instant::now());
+
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+        assert_eq!(result.retained.len(), 1);
+        assert_eq!(result.retained[0].1, RetainReason::ActiveTaskRun);
+        assert!(base.exists());
+    }
+
+    #[tokio::test]
+    async fn dry_run_and_delete_select_same_candidates() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+        let entry = WarmBaseEntry {
+            project_id: id.into(),
+            path: base.clone(),
+            size_bytes: 42,
+        };
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: true,
+            has_active_task_run: false,
+            latest_activity: None,
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(false));
+        let locks = NoopBaseLock;
+        let config = default_config();
+        let clock = TestClock::new(future(15), std::time::Instant::now());
+
+        let dry = evict_idle_warm_bases(
+            inventory.clone(),
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::DryRun,
+            temp.path(),
+        )
+        .await;
+        let delete = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+
+        assert_eq!(dry.dry_run.len(), 1);
+        assert_eq!(delete.deleted.len(), 1);
+        assert_eq!(dry.projected_bytes, 42);
+        assert_eq!(delete.reclaimed_bytes, 42);
+        assert_eq!(dry.retained.len(), delete.retained.len());
+        assert!(!base.exists());
+    }
+
+    #[tokio::test]
+    async fn activity_error_fails_closed() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+        let entry = make_entry(&base);
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Err("db down".into()));
+        let warm = Warm(Ok(false));
+        let locks = NoopBaseLock;
+        let config = default_config();
+        let clock = epoch_clock();
+
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+        assert_eq!(result.retained.len(), 1);
+        assert_eq!(result.retained[0].1, RetainReason::ActivityError);
+        assert!(base.exists());
+    }
+
+    #[tokio::test]
+    async fn lock_error_fails_closed() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+        let entry = make_entry(&base);
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: true,
+            has_active_task_run: false,
+            latest_activity: None,
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(false));
+        let locks = FailingBaseLock;
+        let config = default_config();
+        let clock = TestClock::new(future(15), std::time::Instant::now());
+
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+        assert_eq!(result.retained.len(), 1);
+        assert_eq!(result.retained[0].1, RetainReason::LockError);
+        assert!(base.exists());
+    }
+
+    #[tokio::test]
+    async fn unsafe_path_is_not_deleted() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+        let entry = make_entry(&base);
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: true,
+            has_active_task_run: false,
+            latest_activity: None,
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(false));
+        let locks = NoopBaseLock;
+        let config = default_config();
+        let clock = TestClock::new(future(15), std::time::Instant::now());
+
+        // Pass a different root so the path is outside it.
+        let result = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            Path::new("/some/other/root"),
+        )
+        .await;
+        assert_eq!(result.retained.len(), 1);
+        assert_eq!(result.retained[0].1, RetainReason::DeleteError);
+        assert!(base.exists());
     }
 }
