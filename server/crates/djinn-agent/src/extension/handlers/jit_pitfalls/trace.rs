@@ -207,7 +207,12 @@ pub(super) async fn persist_jit_trace(
     let trace_repo = RetrievalTraceRepository::new(db.clone());
     let params = CreateRetrievalTraceParams {
         project_id,
-        session_id: Some(session_id),
+        // JIT currently keys its once-per-session guard with a worktree path,
+        // not a database session UUID. The trace schema stores IDs in
+        // VARCHAR(36), so retain an actual compatible ID when provided and
+        // omit path-shaped keys rather than turning trace persistence into a
+        // fail-open insert failure.
+        session_id: (session_id.len() <= 36).then_some(session_id),
         task_run_id: None,
         task_id: None,
         entry_point: RetrievalTraceEntryPoint::JitPitfalls,

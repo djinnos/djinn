@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 //! Parent-terminal child disposition classification.
 //!
 //! When a parent container (epic or proposal) becomes terminal, its direct
@@ -33,15 +34,16 @@ use super::*;
 
 /// Which terminal event triggered the disposition.
 ///
-/// Only [`DispositionEntryPoint::EpicClose`] is wired today; sibling epic
-/// `xc29` will add proposal-abort variants that reuse the same scope/result
-/// shapes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DispositionEntryPoint {
     /// `EpicRepository::close` is the terminal trigger. The closing scope is a
     /// single epic id; `proposal_id` is `None` (direct epic close is not
     /// scoped to any particular proposal even when one graduated the epic).
     EpicClose,
+    /// A proposal is being aborted; all of its linked epics are in scope.
+    ProposalAbort,
+    /// A proposal reconciliation marks one linked epic obsolete.
+    ProposalObsoleteEpicReconcile,
 }
 
 /// The scope of a parent-terminal disposition request.
@@ -66,6 +68,25 @@ impl DispositionScope {
             entry_point: DispositionEntryPoint::EpicClose,
             epic_ids: vec![closing_epic_id.to_owned()],
             proposal_id: None,
+        }
+    }
+
+    /// Build the canonical scope for aborting a proposal and its linked epics.
+    /// The scoped proposal is terminal for the other-open-parent guard.
+    pub fn for_proposal_abort(proposal_id: &str, epic_ids: Vec<String>) -> Self {
+        Self {
+            entry_point: DispositionEntryPoint::ProposalAbort,
+            epic_ids,
+            proposal_id: Some(proposal_id.to_owned()),
+        }
+    }
+
+    /// Build the canonical scope for reconciling one obsolete proposal epic.
+    pub fn for_proposal_obsolete_epic_reconcile(proposal_id: &str, epic_id: &str) -> Self {
+        Self {
+            entry_point: DispositionEntryPoint::ProposalObsoleteEpicReconcile,
+            epic_ids: vec![epic_id.to_owned()],
+            proposal_id: Some(proposal_id.to_owned()),
         }
     }
 }
@@ -550,6 +571,208 @@ pub async fn classify_child_tx(
     Ok(ChildDisposition::RetainedAlreadyTerminal)
 }
 
+/// Collect evidence for the transaction-time other-open-parent guard.
+async fn find_other_open_proposal_parents_tx(
+    conn: &mut sqlx::PgConnection,
+    task_id: &str,
+    scope: &DispositionScope,
+) -> Result<Vec<OpenProposalRef>> {
+    Ok(sqlx::query_as::<_, OpenProposalRef>(
+        r#"SELECT p.id AS proposal_id, p.status AS status
+             FROM proposal_epics pe
+             JOIN proposals p ON p.id = pe.proposal_id
+             JOIN tasks t ON t.id = $1 AND t.epic_id = pe.epic_id
+            WHERE p.status NOT IN ('archived', 'superseded', 'rejected', 'done')
+              AND ($2::text IS NULL OR p.id <> $2)
+            ORDER BY p.id"#,
+    )
+    .bind(task_id)
+    .bind(scope.proposal_id.as_deref())
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// Collect evidence for the transaction-time external-dependent guard.
+async fn find_external_open_dependents_tx(
+    conn: &mut sqlx::PgConnection,
+    task_id: &str,
+    scope: &DispositionScope,
+) -> Result<Vec<DependentRef>> {
+    sqlx::query_as::<_, DependentRef>(
+        r#"SELECT t.id AS task_id, t.short_id, t.title, t.status
+             FROM blockers b
+             JOIN tasks t ON t.id = b.task_id
+            WHERE b.blocking_task_id = $1
+              AND t.status <> 'closed'
+              AND (t.epic_id IS NULL OR t.epic_id <> ALL($2))
+            ORDER BY t.created_at"#,
+    )
+    .bind(task_id)
+    .bind(&scope.epic_ids)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(Into::into)
+}
+
+/// Apply parent-terminal child disposition inside an existing transaction.
+///
+/// Candidate rows are selected and individually locked before being classified
+/// and mutated, so callers can safely combine this with their own parent state
+/// transition. Retained children are recorded in the returned plan and never
+/// cause the transaction to fail merely because a guard applied.
+pub async fn apply_parent_disposition_tx(
+    conn: &mut sqlx::PgConnection,
+    scope: &DispositionScope,
+) -> Result<DispositionPlan> {
+    let echo = DispositionScopeEcho::from(scope);
+    let child_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM tasks WHERE epic_id = ANY($1) ORDER BY created_at")
+            .bind(&scope.epic_ids)
+            .fetch_all(&mut *conn)
+            .await?;
+    let mut findings = Vec::with_capacity(child_ids.len());
+    let entry_point = match scope.entry_point {
+        DispositionEntryPoint::EpicClose => "epic_close",
+        DispositionEntryPoint::ProposalAbort => "proposal_abort",
+        DispositionEntryPoint::ProposalObsoleteEpicReconcile => "proposal_obsolete_epic_reconcile",
+    };
+    let parent_kind = if scope.proposal_id.is_some() {
+        "proposal"
+    } else {
+        "epic"
+    };
+    let parent_id = scope
+        .proposal_id
+        .as_deref()
+        .or_else(|| scope.epic_ids.first().map(String::as_str))
+        .unwrap_or_default();
+
+    for task_id in child_ids {
+        let child: Option<CandidateChild> = sqlx::query_as(
+            "SELECT id AS task_id, short_id, title, status, epic_id FROM tasks WHERE id = $1 FOR UPDATE",
+        )
+        .bind(&task_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(child) = child else { continue };
+        let disposition = classify_child_tx(conn, &child.task_id, &child.status, scope).await?;
+        // Populate retention evidence from the same transaction that made the
+        // classification decision. Besides making the returned plan useful to
+        // terminal callers, this keeps the evidence coherent with the locked
+        // child row and avoids a read-after-commit race.
+        let guard_reason = match disposition {
+            ChildDisposition::RetainedOtherParent => Some(GuardReason::OtherOpenProposalParent {
+                open_proposals: find_other_open_proposal_parents_tx(conn, &child.task_id, scope)
+                    .await?,
+            }),
+            ChildDisposition::RetainedExternalDependent => {
+                Some(GuardReason::ExternalOpenDependent {
+                    dependents: find_external_open_dependents_tx(conn, &child.task_id, scope)
+                        .await?,
+                })
+            }
+            _ => guard_reason_for_disposition(&disposition),
+        };
+
+        match disposition {
+            ChildDisposition::Close => {
+                sqlx::query(r#"UPDATE tasks SET status = 'closed',
+                    closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    close_reason = 'parent_closed',
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#)
+                    .bind(&child.task_id).execute(&mut *conn).await?;
+                insert_disposition_activities(
+                    conn,
+                    &child.task_id,
+                    &child.status,
+                    "closed",
+                    "parent_closed",
+                    "parent_child_disposed",
+                    parent_kind,
+                    parent_id,
+                    entry_point,
+                )
+                .await?;
+            }
+            ChildDisposition::Park => {
+                let reason = park_reason_for_status(&child.status);
+                sqlx::query(r#"UPDATE tasks SET status = 'needs_lead_intervention',
+                    intervention_count = intervention_count + 1,
+                    last_intervention_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    close_reason = NULL,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#)
+                    .bind(&child.task_id).execute(&mut *conn).await?;
+                insert_disposition_activities(
+                    conn,
+                    &child.task_id,
+                    &child.status,
+                    "needs_lead_intervention",
+                    reason,
+                    "parent_child_parked",
+                    parent_kind,
+                    parent_id,
+                    entry_point,
+                )
+                .await?;
+            }
+            _ => {}
+        }
+        findings.push(DispositionFinding {
+            task_id: child.task_id,
+            short_id: child.short_id,
+            title: child.title,
+            status: child.status,
+            guard_reason,
+            disposition,
+            scope: echo.clone(),
+        });
+    }
+    let counts = tally(&findings);
+    Ok(DispositionPlan {
+        scope: echo,
+        findings,
+        counts,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_disposition_activities(
+    conn: &mut sqlx::PgConnection,
+    task_id: &str,
+    from_status: &str,
+    to_status: &str,
+    reason: &str,
+    event_type: &str,
+    parent_kind: &str,
+    parent_id: &str,
+    entry_point: &str,
+) -> Result<()> {
+    let status_payload =
+        serde_json::json!({"from_status": from_status, "to_status": to_status, "reason": reason});
+    let mut disposition_payload = serde_json::json!({"parent_kind": parent_kind, "parent_id": parent_id, "entry_point": entry_point, "from_status": from_status, "to_status": to_status, "reason": reason});
+    // `park_reason` is the established parent-child activity contract. Keep
+    // the generic reason too: status_changed continues to use that key.
+    if event_type == "parent_child_parked" {
+        disposition_payload["park_reason"] = serde_json::Value::String(reason.to_owned());
+    }
+    for (event_type, payload) in [
+        ("status_changed", status_payload),
+        (event_type, disposition_payload),
+    ] {
+        sqlx::query("INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) VALUES ($1, $2, 'system', 'system', $3, $4)")
+            .bind(uuid::Uuid::now_v7().to_string()).bind(task_id).bind(event_type).bind(payload)
+            .execute(&mut *conn).await?;
+    }
+    Ok(())
+}
+
+fn park_reason_for_status(status: &str) -> &'static str {
+    match status {
+        "approved" | "pr_draft" | "pr_review" => "parent_closed_pr_active",
+        _ => "parent_closed_in_flight",
+    }
+}
+
 // ── Internal row + helpers ───────────────────────────────────────────────────
 
 /// Raw candidate-child row projected by `select_candidate_children`.
@@ -1015,6 +1238,103 @@ mod tests {
                 ChildDisposition::RetainedExternalDependent,
                 "internal dependent must not retain child"
             );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_abort_apply_excludes_scoped_proposal_but_retains_other_parent() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        let aborting = make_proposal(&db, "p1", "building").await;
+        let other = make_proposal(&db, "p2", "building").await;
+        link_epic(&db, &aborting, &epic, &project).await;
+        link_epic(&db, &other, &epic, &project).await;
+        let child = make_task(&db, &epic, "open", "t1").await;
+
+        let scope = DispositionScope::for_proposal_abort(&aborting, vec![epic.clone()]);
+        let mut tx = db.pool().begin().await.unwrap();
+        let plan = apply_parent_disposition_tx(&mut tx, &scope).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let finding = finding_for(&plan, &child);
+        assert_eq!(finding.disposition, ChildDisposition::RetainedOtherParent);
+        match &finding.guard_reason {
+            Some(GuardReason::OtherOpenProposalParent { open_proposals }) => {
+                assert_eq!(
+                    open_proposals,
+                    &vec![OpenProposalRef {
+                        proposal_id: other,
+                        status: "building".to_owned()
+                    }]
+                );
+            }
+            other => panic!("expected other-open-parent evidence, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_abort_apply_cascades_through_internal_multi_epic_dependents() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let first_epic = make_epic(&db, &project, "e1").await;
+        let second_epic = make_epic(&db, &project, "e2").await;
+        let proposal = make_proposal(&db, "p1", "building").await;
+        link_epic(&db, &proposal, &first_epic, &project).await;
+        link_epic(&db, &proposal, &second_epic, &project).await;
+        let child = make_task(&db, &first_epic, "open", "t1").await;
+        let dependent = make_task(&db, &second_epic, "open", "t2").await;
+        add_blocker(&db, &dependent, &child).await;
+
+        let scope = DispositionScope::for_proposal_abort(
+            &proposal,
+            vec![first_epic.clone(), second_epic.clone()],
+        );
+        let mut tx = db.pool().begin().await.unwrap();
+        let plan = apply_parent_disposition_tx(&mut tx, &scope).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(plan.counts.close, 2);
+        assert_eq!(
+            finding_for(&plan, &child).disposition,
+            ChildDisposition::Close
+        );
+        assert_eq!(
+            finding_for(&plan, &dependent).disposition,
+            ChildDisposition::Close
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn obsolete_epic_reconcile_apply_retains_external_dependent_with_evidence() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let obsolete_epic = make_epic(&db, &project, "e1").await;
+        let external_epic = make_epic(&db, &project, "e2").await;
+        let proposal = make_proposal(&db, "p1", "building").await;
+        link_epic(&db, &proposal, &obsolete_epic, &project).await;
+        let child = make_task(&db, &obsolete_epic, "open", "t1").await;
+        let dependent = make_task(&db, &external_epic, "open", "t2").await;
+        add_blocker(&db, &dependent, &child).await;
+
+        let scope =
+            DispositionScope::for_proposal_obsolete_epic_reconcile(&proposal, &obsolete_epic);
+        let mut tx = db.pool().begin().await.unwrap();
+        let plan = apply_parent_disposition_tx(&mut tx, &scope).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let finding = finding_for(&plan, &child);
+        assert_eq!(
+            finding.disposition,
+            ChildDisposition::RetainedExternalDependent
+        );
+        match &finding.guard_reason {
+            Some(GuardReason::ExternalOpenDependent { dependents }) => {
+                assert_eq!(dependents.len(), 1);
+                assert_eq!(dependents[0].task_id, dependent);
+                assert_eq!(dependents[0].status, "open");
+            }
+            other => panic!("expected external-dependent evidence, got {other:?}"),
         }
     }
 
