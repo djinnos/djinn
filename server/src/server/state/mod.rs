@@ -24,9 +24,9 @@ use djinn_db::{
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{
-    ImageBuildWatcher, ImageController, ImageControllerConfig, PreflightOutcome,
-    RetentionPreflightConfig, ZotHttpAuth, ZotHttpConfig, ZotHttpStateSource, ZotStateSource,
-    adapt_selected_images, run_preflight,
+    ImageBuildWatcher, ImageController, ImageControllerConfig, PreflightError, PreflightOutcome,
+    PreflightOutcomeKind, RetentionPreflightConfig, ZotHttpAuth, ZotHttpConfig, ZotHttpStateSource,
+    ZotRepository, ZotStateError, ZotStateSource, adapt_selected_images, run_preflight,
 };
 use djinn_k8s::{K8sGraphWarmer, KubernetesConfig, TokenReviewer, WarmCompletionSink};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
@@ -530,7 +530,22 @@ impl AppState {
         config: &ImageControllerConfig,
     ) -> anyhow::Result<()> {
         let retention = &config.zot_retention;
+        let preflight_cfg = RetentionPreflightConfig {
+            enabled: retention.enabled,
+            destructive_enabled: retention.enabled && !retention.dry_run,
+            newest_tags: retention.newest_tags,
+        };
+        // When disabled, run_preflight returns a bounded disabled outcome
+        // without contacting Zot or the DB — no early return needed.
         if !retention.enabled {
+            let outcome = run_preflight(&DisabledZotStateSource, &[], &preflight_cfg)
+                .await
+                .map_err(|error| anyhow::anyhow!("Zot retention preflight failed: {error}"))?;
+            tracing::info!(
+                mode = outcome.mode.label(),
+                outcome = outcome.outcome_kind.label(),
+                "Zot catalog retention preflight: disabled"
+            );
             return Ok(());
         }
         let selected_rows = djinn_db::ImageRepository::new(self.db().clone())
@@ -548,16 +563,9 @@ impl AppState {
         };
         let source = ZotHttpStateSource::new(ZotHttpConfig::new(&retention.endpoint, auth))
             .map_err(|error| anyhow::anyhow!("construct Zot retention state source: {error}"))?;
-        run_retention_preflight_orchestration(
-            &source,
-            &selected_rows,
-            &RetentionPreflightConfig {
-                destructive_enabled: !retention.dry_run,
-                newest_tags: retention.newest_tags,
-            },
-        )
-        .await
-        .map(|_| ())
+        run_retention_preflight_orchestration(&source, &selected_rows, &preflight_cfg)
+            .await
+            .map(|_| ())
     }
 
     /// Abort + await the image-build watcher task if it was spawned.
@@ -2287,14 +2295,42 @@ pub(crate) async fn run_retention_preflight_orchestration(
 ) -> anyhow::Result<PreflightOutcome> {
     let outcome = run_preflight(zot_source, &adapt_selected_images(selected_rows), cfg)
         .await
-        .map_err(|error| anyhow::anyhow!("Zot retention preflight failed: {error}"))?;
+        .map_err(|error| {
+            // Surface the deterministic report from the blocked-destructive
+            // error so operators can inspect it in the startup log.
+            if let PreflightError::UnsafeSelectedImages { ref report, .. } = error {
+                tracing::error!(
+                    mode = cfg.mode().label(),
+                    outcome = PreflightOutcomeKind::DestructiveBlocked.label(),
+                    report = %report,
+                    "Zot catalog retention preflight: destructive blocked"
+                );
+            }
+            anyhow::anyhow!("Zot retention preflight failed: {error}")
+        })?;
     tracing::info!(
-        destructive = cfg.destructive_enabled,
+        mode = outcome.mode.label(),
+        outcome = outcome.outcome_kind.label(),
+        blocks_rollout = outcome.blocks_rollout,
         newest_tags = cfg.newest_tags,
         report = %outcome.report,
         "Zot catalog retention preflight report"
     );
     Ok(outcome)
+}
+
+/// A no-op [`ZotStateSource`] used when retention is disabled — `run_preflight`
+/// never calls `fetch_repositories` in disabled mode, but the trait is still
+/// required by the function signature.
+struct DisabledZotStateSource;
+
+#[async_trait::async_trait]
+impl ZotStateSource for DisabledZotStateSource {
+    async fn fetch_repositories(&self) -> Result<Vec<ZotRepository>, ZotStateError> {
+        Err(ZotStateError::Fetch(
+            "disabled preflight should not contact Zot".into(),
+        ))
+    }
 }
 
 fn build_in_process_graph_warmer(state: AppState) -> djinn_agent::warmer::InProcessGraphWarmer {
@@ -2453,7 +2489,7 @@ mod retention_preflight_tests {
     //! [`djinn_db::SelectedCatalogImage`] rows.
 
     use super::*;
-    use djinn_image_controller::{ZotRepository, ZotStateError, ZotTag};
+    use djinn_image_controller::{PreflightMode, ZotRepository, ZotStateError, ZotTag};
 
     /// Join an error's full cause chain into a single lowercase string for
     /// substring assertions.
@@ -2545,6 +2581,7 @@ mod retention_preflight_tests {
 
     const fn dry_run_cfg(newest: usize) -> RetentionPreflightConfig {
         RetentionPreflightConfig {
+            enabled: true,
             destructive_enabled: false,
             newest_tags: newest,
         }
@@ -2552,8 +2589,17 @@ mod retention_preflight_tests {
 
     const fn destructive_cfg(newest: usize) -> RetentionPreflightConfig {
         RetentionPreflightConfig {
+            enabled: true,
             destructive_enabled: true,
             newest_tags: newest,
+        }
+    }
+
+    const fn disabled_cfg() -> RetentionPreflightConfig {
+        RetentionPreflightConfig {
+            enabled: false,
+            destructive_enabled: false,
+            newest_tags: 5,
         }
     }
 
@@ -2966,5 +3012,116 @@ mod retention_preflight_tests {
         // Retained: v3 (900). Deleted: v1 (700).
         assert_eq!(outcome.plan.projected_retained_bytes, 900);
         assert_eq!(outcome.plan.projected_reclaimed_bytes, 700);
+    }
+
+    // ── Bounded mode/outcome contract at the orchestration seam ───────────
+
+    #[tokio::test]
+    async fn disabled_cfg_produces_disabled_outcome_without_zot_contact() {
+        // FailingZot proves the source is never contacted in disabled mode.
+        let zot = FailingZot;
+        let selected: Vec<djinn_db::SelectedCatalogImage> = vec![];
+        let outcome = run_retention_preflight_orchestration(&zot, &selected, &disabled_cfg())
+            .await
+            .expect("disabled preflight must succeed without Zot contact");
+        assert_eq!(outcome.mode, PreflightMode::Disabled);
+        assert_eq!(outcome.outcome_kind, PreflightOutcomeKind::Disabled);
+        assert!(!outcome.blocks_rollout);
+        assert!(outcome.report.contains("Mode: disabled"));
+        assert!(outcome.report.contains("Outcome: disabled"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_outcome_is_advisory_with_mode_label() {
+        let zot = MockZot {
+            repos: vec![two_tag_repo("i1")],
+        };
+        let selected = vec![db_selected(
+            "i1",
+            "Rust",
+            Some("reg/djinn-image-i1:keep"),
+            Some("sha256:keep"),
+            "ready",
+        )];
+        let outcome = run_retention_preflight_orchestration(&zot, &selected, &dry_run_cfg(1))
+            .await
+            .unwrap();
+        assert_eq!(outcome.mode, PreflightMode::DryRun);
+        assert_eq!(outcome.outcome_kind, PreflightOutcomeKind::Advisory);
+        assert!(outcome.report.contains("Mode: dry_run"));
+        assert!(outcome.report.contains("Outcome: advisory"));
+        // Aggregate candidate counts.
+        assert!(outcome.report.contains("Candidate tags: 2"));
+        assert!(outcome.report.contains("Retained tags: 1"));
+        assert!(outcome.report.contains("Deleted tags: 1"));
+    }
+
+    #[tokio::test]
+    async fn destructive_safe_outcome_has_destructive_safe_label() {
+        let zot = MockZot {
+            repos: vec![two_tag_repo("i1")],
+        };
+        let selected = vec![db_selected(
+            "i1",
+            "Rust",
+            Some("reg/djinn-image-i1:keep"),
+            Some("sha256:keep"),
+            "ready",
+        )];
+        let outcome = run_retention_preflight_orchestration(&zot, &selected, &destructive_cfg(1))
+            .await
+            .unwrap();
+        assert_eq!(outcome.mode, PreflightMode::Destructive);
+        assert_eq!(outcome.outcome_kind, PreflightOutcomeKind::DestructiveSafe);
+        assert!(outcome.report.contains("Mode: destructive"));
+        assert!(outcome.report.contains("Outcome: destructive_safe"));
+    }
+
+    #[tokio::test]
+    async fn destructive_blocked_error_report_contains_mode_and_outcome() {
+        let zot = MockZot {
+            repos: vec![two_tag_repo("i1")],
+        };
+        let selected = vec![db_selected(
+            "i1",
+            "Rust",
+            Some("reg/djinn-image-i1:drop"),
+            Some("sha256:drop"),
+            "ready",
+        )];
+        let err = run_retention_preflight_orchestration(&zot, &selected, &destructive_cfg(1))
+            .await
+            .expect_err("must fail-closed");
+        let chain = error_chain(&err);
+        // The error chain carries the PreflightError message.
+        assert!(chain.contains("blocked"));
+    }
+
+    #[tokio::test]
+    async fn report_contains_gc_observation_guidance_and_operator_owned() {
+        let zot = MockZot {
+            repos: vec![two_tag_repo("i1")],
+        };
+        let selected = vec![db_selected(
+            "i1",
+            "Rust",
+            Some("reg/djinn-image-i1:keep"),
+            Some("sha256:keep"),
+            "ready",
+        )];
+        let outcome = run_retention_preflight_orchestration(&zot, &selected, &dry_run_cfg(1))
+            .await
+            .unwrap();
+        assert!(
+            outcome
+                .report
+                .contains("Post-enable Zot GC observation guidance"),
+            "report must contain GC observation guidance: {report}",
+            report = outcome.report
+        );
+        assert!(
+            outcome.report.contains("operator-owned"),
+            "report must state production execution is operator-owned"
+        );
     }
 }

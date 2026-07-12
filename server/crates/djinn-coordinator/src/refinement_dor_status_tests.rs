@@ -115,3 +115,93 @@ async fn structured_acs_added_mid_refinement_clear_missing_ac_dor_status() {
         task.description
     );
 }
+
+/// Regression: refinement tribunal tasks must be attributed to the resolved
+/// user in the legacy `owner` column (their GitHub login), not the hardcoded
+/// "system" placeholder. The coordinator already fail-closed-validates the
+/// attributed user before dispatch, so a real login is always available —
+/// leaving `owner: "system"` made the Kanban board render tribunal tasks as
+/// unassigned and dropped them from owner-based filters (`task_ready owner=…`).
+/// `created_by_user_id` (the authoritative ownership field) is unaffected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refinement_task_owner_is_attributed_user_login_not_system() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+    let actor = build_refinement_actor(&db, &events_tx, pool.clone());
+
+    let task_id = actor
+        .create_refinement_task_with_context(
+            &fixture.proposal_id,
+            "adversary",
+            1,
+            1,
+            "Proposal currently meets all DoR checks.",
+            None,
+            Some(&fixture.user_id),
+        )
+        .await
+        .expect("create adversary refinement task");
+
+    let task = TaskRepository::new(db.clone(), EventBus::noop())
+        .get(&task_id)
+        .await
+        .expect("read task")
+        .expect("task exists");
+
+    // `owner` (legacy display/filter column) is now the user's GitHub login.
+    assert_eq!(
+        task.owner, "refinement-cap-user",
+        "refinement task owner must be the attributed user's login, not \"system\""
+    );
+    assert_ne!(
+        task.owner, "system",
+        "refinement task owner must not fall back to the \"system\" placeholder \
+         when a real attributed user is in scope"
+    );
+    // Authoritative ownership field is still stamped with the user id.
+    assert_eq!(
+        task.created_by_user_id.as_deref(),
+        Some(fixture.user_id.as_str()),
+        "created_by_user_id must remain the authoritative ownership field"
+    );
+}
+
+/// The owner resolution fails closed to the prior "system" behavior when the
+/// attributed user id cannot be resolved to a row (e.g. a deleted user), rather
+/// than failing task creation. `created_by_user_id` is still stamped with the
+/// supplied id — the fallback only affects the legacy display `owner` column.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refinement_task_owner_falls_back_to_system_when_user_unresolvable() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+    let actor = build_refinement_actor(&db, &events_tx, pool.clone());
+
+    let missing_user_id = "00000000-0000-0000-0000-000000000000";
+    let task_id = actor
+        .create_refinement_task_with_context(
+            &fixture.proposal_id,
+            "judge",
+            1,
+            1,
+            "Proposal currently meets all DoR checks.",
+            None,
+            Some(missing_user_id),
+        )
+        .await
+        .expect("task creation must not fail when the user row is unresolvable");
+
+    let task = TaskRepository::new(db.clone(), EventBus::noop())
+        .get(&task_id)
+        .await
+        .expect("read task")
+        .expect("task exists");
+
+    assert_eq!(
+        task.owner, "system",
+        "owner must fall back to \"system\" when the attributed user cannot be resolved"
+    );
+}

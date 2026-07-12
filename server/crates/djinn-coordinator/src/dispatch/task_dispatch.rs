@@ -3015,6 +3015,7 @@ mod inflight_ledger_tests {
             dispatch_failure_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
+            closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
                 crate::consolidation::DbConsolidationRunner::new(db.clone()),
@@ -4076,6 +4077,7 @@ mod failover_chain_tests {
             dispatch_failure_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
+            closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
                 crate::consolidation::DbConsolidationRunner::new(db.clone()),
@@ -6547,6 +6549,7 @@ mod monitored_reopen_no_eligible_model_tests {
             dispatch_failure_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
+            closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
                 crate::consolidation::DbConsolidationRunner::new(db.clone()),

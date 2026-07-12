@@ -442,6 +442,15 @@ pub fn render_report(plan: &RetentionPlan) -> String {
         }
     }
 
+    out.push_str("\n--- Post-enable Zot GC observation guidance ---\n");
+    out.push_str(
+        "After enabling destructive retention, confirm reclamation by observing \
+         Zot GC: verify djinn-image-* repo tag counts drop to the retained set, \
+         confirm projected_reclaimed_bytes matches actual storage reduction, \
+         and check Zot logs for garbage-collection completion. Production GC \
+         execution is operator-owned; see the runbook for the full checklist.\n",
+    );
+
     out
 }
 
