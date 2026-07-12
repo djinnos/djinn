@@ -183,7 +183,11 @@ pub struct NoteSearchResult {
     pub score: f64,
 }
 
-/// Compact near-duplicate candidate returned by pre-write dedup lookup.
+/// Near-duplicate candidate returned by a bounded dedup lookup.
+///
+/// `content` is the full persisted note body. Callers that put candidates in a
+/// prompt must apply their own explicit prompt-size cap; carrying it here keeps
+/// dedup decisions grounded in the actual note rather than generated summaries.
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NoteDedupCandidate {
@@ -192,6 +196,7 @@ pub struct NoteDedupCandidate {
     pub title: String,
     pub folder: String,
     pub note_type: String,
+    pub content: String,
     pub abstract_: Option<String>,
     pub overview: Option<String>,
     pub score: f64,
