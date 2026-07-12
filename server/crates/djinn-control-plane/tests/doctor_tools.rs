@@ -811,69 +811,58 @@ async fn closed_parent_open_children_db_dry_run_is_read_only() {
         register_closed_parent_open_children_check,
     };
     use djinn_core::events::DjinnEventEnvelope;
-    use djinn_db::EpicRepository;
-    use sqlx::Row;
+    use djinn_db::{EpicRepository, ProposalCreateInput, ProposalRepository, TaskRepository};
     let harness = doctor_test_harness().await;
     let project = common::create_test_project(harness.db()).await;
     let epics = EpicRepository::new(harness.db().clone(), common::test_events());
+    let tasks = TaskRepository::new(harness.db().clone(), common::test_events());
     let mut ids = Vec::new();
     for status in ["open", "in_progress", "pr_review", "open"] {
         let epic = common::create_test_epic(harness.db(), &project.id).await;
         let task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
-        sqlx::query("UPDATE tasks SET status=$1, pr_url=CASE WHEN $1='pr_review' THEN 'https://github.com/djinnos/djinn/pull/999999' ELSE pr_url END WHERE id=$2").bind(status).bind(&task.id).execute(harness.db().pool()).await.unwrap();
+        tasks.set_status(&task.id, status).await.unwrap();
+        if status == "pr_review" {
+            tasks
+                .set_pr_url(&task.id, "https://github.com/djinnos/djinn/pull/999999")
+                .await
+                .unwrap();
+        }
         epics.set_status_raw(&epic.id, "closed").await.unwrap();
         ids.push(task.id);
     }
-    let proposal = uuid::Uuid::now_v7().to_string();
-    sqlx::query(
-        "INSERT INTO proposals(id,short_id,title,status) VALUES($1,$2,'live parent','ready')",
-    )
-    .bind(&proposal)
-    .bind(format!("p{}", &proposal[..7]))
-    .execute(harness.db().pool())
-    .await
-    .unwrap();
-    let epic: String = sqlx::query_scalar("SELECT epic_id FROM tasks WHERE id=$1")
-        .bind(&ids[3])
-        .fetch_one(harness.db().pool())
+    let proposals = ProposalRepository::new(harness.db().clone(), common::test_events());
+    let proposal = proposals
+        .create(ProposalCreateInput {
+            title: "live parent",
+            body: "",
+            acceptance_criteria: None,
+            status: Some("ready"),
+            body_format: None,
+        })
         .await
         .unwrap();
-    sqlx::query("INSERT INTO proposal_epics(proposal_id,epic_id,project_id) VALUES($1,$2,$3)")
-        .bind(&proposal)
-        .bind(epic)
-        .bind(&project.id)
-        .execute(harness.db().pool())
+    let guarded_task = tasks.get(&ids[3]).await.unwrap().unwrap();
+    proposals
+        .link_epic(
+            &proposal.id,
+            guarded_task.epic_id.as_deref().unwrap(),
+            &project.id,
+        )
         .await
         .unwrap();
-    let rows = |rs: Vec<sqlx::postgres::PgRow>| {
-        rs.into_iter()
-            .map(|r| r.get::<String, _>(0))
-            .collect::<Vec<_>>()
-    };
-    let task_sql = "SELECT to_jsonb(t)::text FROM tasks t WHERE id=ANY($1) ORDER BY id";
-    let act_sql = "SELECT to_jsonb(a)::text FROM activity_log a WHERE task_id=ANY($1) ORDER BY id";
-    let tasks_before = rows(
-        sqlx::query(task_sql)
-            .bind(&ids)
-            .fetch_all(harness.db().pool())
-            .await
-            .unwrap(),
-    );
-    let activity_before = rows(
-        sqlx::query(act_sql)
-            .bind(&ids)
-            .fetch_all(harness.db().pool())
-            .await
-            .unwrap(),
-    );
+    let mut tasks_before = Vec::new();
+    let mut activity_before = Vec::new();
+    for id in &ids {
+        tasks_before.push(serde_json::to_value(tasks.get(id).await.unwrap().unwrap()).unwrap());
+        activity_before.push(serde_json::to_value(tasks.list_activity(id).await.unwrap()).unwrap());
+    }
     let (tx, _) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
-    register_closed_parent_open_children_check(
-        registry(),
-        Arc::new(TaskRepositoryClosedParentOpenChildrenSource::new(
-            harness.db().clone(),
-            tx,
-        )),
-    );
+    let source = Arc::new(TaskRepositoryClosedParentOpenChildrenSource::new(
+        harness.db().clone(),
+        tx,
+    ));
+    source.refresh().await;
+    register_closed_parent_open_children_check(registry(), source);
     let response = harness
         .call_tool(
             "doctor_run",
@@ -920,20 +909,12 @@ async fn closed_parent_open_children_db_dry_run_is_read_only() {
     owners.sort();
     ids.sort();
     assert_eq!(owners, ids);
-    let tasks_after = rows(
-        sqlx::query(task_sql)
-            .bind(&ids)
-            .fetch_all(harness.db().pool())
-            .await
-            .unwrap(),
-    );
-    let activity_after = rows(
-        sqlx::query(act_sql)
-            .bind(&ids)
-            .fetch_all(harness.db().pool())
-            .await
-            .unwrap(),
-    );
+    let mut tasks_after = Vec::new();
+    let mut activity_after = Vec::new();
+    for id in &ids {
+        tasks_after.push(serde_json::to_value(tasks.get(id).await.unwrap().unwrap()).unwrap());
+        activity_after.push(serde_json::to_value(tasks.list_activity(id).await.unwrap()).unwrap());
+    }
     assert_eq!(tasks_before, tasks_after);
     assert_eq!(activity_before, activity_after);
 }

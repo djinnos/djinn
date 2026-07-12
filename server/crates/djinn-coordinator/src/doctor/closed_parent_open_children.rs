@@ -193,15 +193,19 @@ impl ClosedParentOpenChildrenSource for TaskRepositoryClosedParentOpenChildrenSo
             }
             Ok(_) => {
                 let _ = std::thread::spawn(move || {
-                    let runtime = tokio::runtime::Runtime::new().expect("create refresh runtime");
-                    runtime.block_on(source.refresh());
+                    match tokio::runtime::Runtime::new() {
+                        Ok(runtime) => runtime.block_on(source.refresh()),
+                        Err(error) => warn!(%error, "closed_parent_open_children doctor: failed to create refresh runtime"),
+                    }
                 })
                 .join();
             }
-            Err(_) => {
-                let runtime = tokio::runtime::Runtime::new().expect("create refresh runtime");
-                runtime.block_on(source.refresh());
-            }
+            Err(_) => match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime.block_on(source.refresh()),
+                Err(error) => {
+                    warn!(%error, "closed_parent_open_children doctor: failed to create refresh runtime")
+                }
+            },
         }
     }
 }
