@@ -32,6 +32,10 @@ pub(crate) enum MemoryWriteDedupDecision {
         merged_title: String,
         merged_content: String,
     },
+    SupersedeExisting {
+        candidate_id: String,
+        reason: String,
+    },
 }
 
 #[async_trait]
