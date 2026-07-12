@@ -83,6 +83,7 @@ pub(super) async fn sweep_stale_resources(
     sweep_durable_output_stash(db).await;
     sweep_cargo_health().await;
     sweep_sccache_guard(&app_state.cache_cleanup).await;
+    sweep_cargo_warm_base_guard(db, &app_state.cache_cleanup).await;
 
     let project_repo = ProjectRepository::new(db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(db.clone(), app_state.event_bus.clone());
@@ -3026,4 +3027,54 @@ mod cache_cleanup_cross_path_tests {
             ) >= 1.0
         );
     }
+}
+
+/// Inventory warm bases during the leader-owned maintenance sweep. This phase
+/// plans only; later idle and pressure passes own any deletion decision.
+async fn sweep_cargo_warm_base_guard(
+    db: &djinn_db::Database,
+    config: &crate::context::CacheCleanupConfig,
+) {
+    use crate::cargo_warm_base_gc as gc;
+    use djinn_telemetry::cache_cleanup as metrics;
+    let inventory = match gc::inventory_under(Path::new(gc::CARGO_WARM_BASE_ROOT)) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            tracing::warn!(error = %error, root = gc::CARGO_WARM_BASE_ROOT, "warm-base GC inventory failed; retaining bases");
+            metrics::increment_cleanup_total(
+                metrics::COMPONENT_CARGO_TARGET_RUNS,
+                metrics::OUTCOME_ERROR,
+                config.mode.as_metric_label(),
+            );
+            return;
+        }
+    };
+    let inventory_count = inventory.entries.len() as u64;
+    let plan = gc::plan(
+        inventory,
+        &gc::DbActivityGuard::new(db.clone()),
+        &gc::UnavailableWarmJobGuard,
+        &gc::StatvfsFreeSpaceGuard,
+        &gc::NoopLockGuard,
+    )
+    .await;
+    if inventory_count > 0 {
+        metrics::increment_candidates(
+            metrics::COMPONENT_CARGO_TARGET_RUNS,
+            config.mode.as_metric_label(),
+            inventory_count,
+        );
+    }
+    tracing::info!(
+        component = "cargo_warm_base",
+        mode = config.mode.as_metric_label(),
+        candidates = plan.candidates.len(),
+        retained = plan.retained.len(),
+        projected_bytes = plan
+            .candidates
+            .iter()
+            .map(|candidate| candidate.entry.size_bytes)
+            .sum::<u64>(),
+        "warm-base GC inventory and guard plan completed"
+    );
 }
