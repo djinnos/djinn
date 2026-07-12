@@ -26,11 +26,11 @@ pub fn tool_code_graph() -> RmcpTool {
          incoming/outgoing context for a symbol; ranked/cycles/orphans/path/edges = broader \
          structural queries; symbols_at/diff_touches/detect_changes = line range to touched \
          symbols; status/metrics_at/snapshot/workspaces = graph health/introspection; \
-         api_surface/dead_symbols/deprecated_callers/route_map/shape_check/api_impact/flow = \
-         public surface and route/flow health; boundary_check/blast_radius/touches_hot_path = \
+         api_surface/dead_symbols/deprecated_callers = public surface health; \
+         boundary_check/blast_radius/touches_hot_path = \
          change-impact analysis; hotspots/cochange/churn/coupling_hubs = git-coupling × PageRank \
          centrality; complexity/refactor_candidates = budget-conscious discovery of \
-         risky/refactorable code; crate_graph = workspace dependency graph with crates as \
+         code that may be costly to maintain; crate_graph = workspace dependency graph with crates as \
          nodes and aggregated cross-crate edges, including per-crate rollups (LOC, node \
          count, fan-in/out, edge weights). AFTER THIS: after capabilities call the chosen op with only \
          required fields; after query_subgraph inspect returned seeds/budget/truncation and \
