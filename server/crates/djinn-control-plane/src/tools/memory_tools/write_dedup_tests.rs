@@ -185,6 +185,32 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn llm_decider_parses_supersede_runtime_response() {
+        let decider = LlmMemoryWriteDedupDecider::with_runtime(Box::new(StaticRuntime {
+            text: r#"{"action":"supersede_existing","candidate_id":"note_1","reason":"More comprehensive coverage"}"#.to_string(),
+        }));
+
+        let decision = decider
+            .decide(MemoryWriteDedupDecisionInput {
+                project_path: "/tmp/project",
+                title: "Title",
+                content: "Body",
+                note_type: "pattern",
+                candidates: &[],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            decision,
+            MemoryWriteDedupDecision::SupersedeExisting {
+                candidate_id: "note_1".to_string(),
+                reason: "More comprehensive coverage".to_string(),
+            }
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn llm_runtime_resolves_private_credential_for_scoped_user_and_attaches_telemetry() {
         let db = Database::open_in_memory().unwrap();
