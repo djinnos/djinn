@@ -1,3 +1,4 @@
+// djinn:allow-oversize — provider tool integration contracts share one harness fixture.
 //! Contract tests for `provider_*` + `model_health` MCP tools.
 //!
 //! Migrated from `server/src/mcp_contract_tests/provider_tools.rs`.  The
@@ -1503,10 +1504,11 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
         })
     };
 
-    // Initial live catalog load: the mock returns two models.
+    // Use a proof-only id which cannot already exist in the embedded snapshot,
+    // so observing it also proves the owner's boot request completed.
     let initial = openai_payload(json!({
         "gpt-5.3-codex": model("gpt-5.3-codex", "GPT-5.3 Codex"),
-        "gpt-5.2": model("gpt-5.2", "GPT-5.2")
+        "refresh-proof.initial": model("refresh-proof.initial", "Refresh Proof Initial")
     }));
     server
         .register(
@@ -1540,8 +1542,9 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
         })
     };
 
-    // The boot phase refreshes immediately; wait for the initial model to land.
-    wait_for_catalog_model_after_request(harness.state().catalog(), "openai/gpt-5.2").await;
+    // The boot phase refreshes immediately; wait for its proof-only model.
+    wait_for_catalog_model_after_request(harness.state().catalog(), "openai/refresh-proof.initial")
+        .await;
     assert_eq!(
         server
             .received_requests()
@@ -1567,8 +1570,8 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
         .map(|m| m["id"].as_str().expect("model id").to_string())
         .collect();
     assert!(
-        ids.contains(&"openai/gpt-5.2".to_string()),
-        "initial catalog should include openai/gpt-5.2, got ids: {:?}",
+        ids.contains(&"openai/refresh-proof.initial".to_string()),
+        "initial catalog should include the proof-only model, got ids: {:?}",
         ids
     );
     assert!(
@@ -1598,7 +1601,7 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
     // ── Release exactly one periodic tick to fetch the changed response ────────────
     //
     // The test never calls `catalog().refresh()` directly. The new model only
-    // appears because the refresh owner's periodic tick (`ticker.tick()` →
+    // appears because the refresh owner's periodic branch (manual tick →
     // `catalog.refresh()`) re-fetches the mock and swaps in the updated catalog.
     // If that tick stopped invoking refresh, this wait would time out.
     tick_tx.send(()).await.expect("release exactly one tick");
