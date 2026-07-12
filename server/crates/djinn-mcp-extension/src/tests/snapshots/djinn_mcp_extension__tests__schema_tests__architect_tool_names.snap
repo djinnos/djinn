@@ -35,6 +35,7 @@ expression: names
   "memory_extracted_audit",
   "memory_broken_links",
   "memory_orphans",
+  "memory_recall_trace",
   "agent_metrics",
   "agent_create",
   "memory_write",

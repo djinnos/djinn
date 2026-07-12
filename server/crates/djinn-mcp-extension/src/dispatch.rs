@@ -282,6 +282,9 @@ async fn dispatch_memory_tools(
             Some(memory_agent::call_memory_search(ctx, args, session_task_id, project_ref).await)
         }
         "memory_list" => Some(memory_agent::call_memory_list(ctx, args, project_ref).await),
+        "memory_recall_trace" => {
+            Some(memory_agent::call_memory_recall_trace(ctx, args, project_ref).await)
+        }
         "memory_build_context" => Some(
             memory_agent::call_memory_build_context(ctx, args, session_task_id, project_ref).await,
         ),

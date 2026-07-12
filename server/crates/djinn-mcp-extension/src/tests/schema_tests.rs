@@ -80,6 +80,7 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "memory_extracted_audit"
         | "memory_broken_links"
         | "memory_orphans"
+        | "memory_recall_trace"
         | "agent_metrics"
         | "pr_review_context" => Some(read_only),
         "code_search" | "github_search" | "code_graph" => Some(open_world_read_only),
@@ -200,6 +201,7 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(planner.iter().any(|n| n == "memory_broken_links"));
     assert!(planner.iter().any(|n| n == "memory_orphans"));
     assert!(planner.iter().any(|n| n == "memory_build_context"));
+    assert!(planner.iter().any(|n| n == "memory_recall_trace"));
     assert!(planner.iter().any(|n| n == "agent_metrics"));
     assert!(planner.iter().any(|n| n == "agent_create"));
 
@@ -213,6 +215,7 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(architect.iter().any(|n| n == "memory_write"));
     assert!(architect.iter().any(|n| n == "memory_edit"));
     assert!(architect.iter().any(|n| n == "memory_move"));
+    assert!(architect.iter().any(|n| n == "memory_recall_trace"));
     assert!(architect.iter().any(|n| n == "submit_work"));
     // Architect must NOT have code-writing tools.
     assert!(!architect.iter().any(|n| n == "write"));
@@ -394,6 +397,25 @@ fn worker_cannot_use_lead_only_tool() {
 }
 
 // ── schema structure / content tests ──────────────────────────────────
+
+#[test]
+fn memory_recall_trace_schema_discriminates_list_and_detail_modes() {
+    let schema = serde_json::to_value(shared_schemas::tool_memory_recall_trace())
+        .expect("serialize memory_recall_trace schema");
+    let variants = schema["inputSchema"]["oneOf"]
+        .as_array()
+        .expect("memory_recall_trace has discriminated request variants");
+    assert_eq!(variants.len(), 2);
+    assert_eq!(variants[0]["properties"]["mode"]["const"], "list");
+    assert_eq!(variants[1]["properties"]["mode"]["const"], "detail");
+    assert_eq!(
+        variants[1]["required"],
+        serde_json::json!(["mode", "trace_id"])
+    );
+    assert_eq!(variants[0]["properties"]["limit"]["minimum"], 1);
+    assert_eq!(variants[0]["properties"]["limit"]["maximum"], 100);
+    assert!(variants[1]["not"]["anyOf"].is_array());
+}
 
 #[test]
 fn code_graph_schema_embeds_workflow_guidance() {

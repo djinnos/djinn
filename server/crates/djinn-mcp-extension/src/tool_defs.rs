@@ -584,6 +584,10 @@ pub fn tool_schemas_planner() -> Vec<serde_json::Value> {
         shared_schemas::tool_memory_orphans(),
         read_only(),
     ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_recall_trace(),
+        read_only(),
+    ));
     // The Planner may curate the knowledge base directly (annotate/fix notes during
     // the Memory Health Review), so expose write + edit alongside the read tools.
     tool_values.push(serialize_tool(
@@ -674,6 +678,10 @@ pub fn tool_schemas_architect() -> Vec<serde_json::Value> {
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_orphans(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_recall_trace(),
         read_only(),
     ));
     tool_values.push(serialize_tool(

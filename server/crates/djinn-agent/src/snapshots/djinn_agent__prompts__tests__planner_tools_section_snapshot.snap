@@ -41,6 +41,7 @@ expression: section
 - `memory_extracted_audit()`
 - `memory_broken_links(folder?)`
 - `memory_orphans(folder?)`
+- `memory_recall_trace()`
 - `memory_write(content, title, type, status?, tags?)`
 - `memory_edit(content, identifier, operation, find_text?, section?, type?)`
 - `agent_metrics(role)`

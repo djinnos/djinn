@@ -15,7 +15,8 @@ use djinn_control_plane::tools::memory_tools::{
     ExtractedAuditParams as SharedMemoryExtractedAuditParams,
     HealthParams as SharedMemoryHealthParams, ListParams as SharedMemoryListParams,
     OrphansParams as SharedMemoryOrphansParams, ReadParams as SharedMemoryReadParams,
-    SearchParams as SharedMemorySearchParams, WriteParams as SharedMemoryWriteParams,
+    RecallTraceParams as SharedMemoryRecallTraceParams, SearchParams as SharedMemorySearchParams,
+    WriteParams as SharedMemoryWriteParams,
 };
 use djinn_db::AgentRepository;
 
@@ -97,6 +98,29 @@ pub(crate) async fn call_memory_list(
         .await,
     )
     .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize memory_list response" })))
+}
+
+/// Delegate retrieval-trace inspection to the control-plane operation while
+/// forcing the resolved current project. The extension owns no trace-query
+/// logic and intentionally ignores caller-supplied project selectors here.
+pub(crate) async fn call_memory_recall_trace(
+    ctx: &dyn ExtensionContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
+) -> Result<serde_json::Value, String> {
+    let mut raw = arguments.clone().unwrap_or_default();
+    raw.insert("project".to_string(), serde_json::json!(project_path));
+    raw.remove("project_id");
+    let params: SharedMemoryRecallTraceParams =
+        serde_json::from_value(serde_json::Value::Object(raw))
+            .map_err(|error| format!("invalid arguments: {error}"))?;
+    let server = djinn_control_plane::server::DjinnMcpServer::new(ctx.mcp_state());
+    Ok(serde_json::to_value(
+        djinn_control_plane::tools::memory_tools::ops::memory_recall_trace(&server, params).await,
+    )
+    .unwrap_or_else(
+        |_| serde_json::json!({ "error": "failed to serialize memory_recall_trace response" }),
+    ))
 }
 
 pub(crate) async fn call_memory_build_context(
