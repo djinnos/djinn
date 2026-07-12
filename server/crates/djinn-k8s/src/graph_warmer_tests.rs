@@ -409,12 +409,16 @@ impl ProgrammableLister {
 
 #[async_trait]
 impl WarmJobLister for ProgrammableLister {
-    async fn has_in_flight_warm(&self, namespace: &str, project_id: &str) -> bool {
+    async fn has_in_flight_warm(
+        &self,
+        namespace: &str,
+        project_id: &str,
+    ) -> Result<bool, kube::Error> {
         self.calls
             .lock()
             .await
             .push((namespace.to_string(), project_id.to_string()));
-        *self.answer.lock().await
+        Ok(*self.answer.lock().await)
     }
 }
 
@@ -432,12 +436,16 @@ struct ScriptedLister {
 
 #[async_trait]
 impl WarmJobLister for ScriptedLister {
-    async fn has_in_flight_warm(&self, namespace: &str, project_id: &str) -> bool {
+    async fn has_in_flight_warm(
+        &self,
+        namespace: &str,
+        project_id: &str,
+    ) -> Result<bool, kube::Error> {
         self.calls
             .lock()
             .await
             .push((namespace.to_string(), project_id.to_string()));
-        *self.answer.lock().expect("answer poisoned")
+        Ok(*self.answer.lock().expect("answer poisoned"))
     }
 }
 
