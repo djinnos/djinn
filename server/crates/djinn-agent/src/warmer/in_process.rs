@@ -87,6 +87,10 @@ impl InProcessGraphWarmer {
 
 #[async_trait]
 impl GraphWarmerService for InProcessGraphWarmer {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn trigger(&self, project_id: &str) {
         let Some(project_root) = (self.deps.project_root)(project_id.to_string()).await else {
             tracing::debug!(

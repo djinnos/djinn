@@ -26,6 +26,7 @@ djinn-lsp = { path = "../djinn-lsp" }
 djinn-orchestration-types = { path = "../djinn-orchestration-types" }
 djinn-slot = { path = "../djinn-slot" }
 djinn-stack = { path = "../djinn-stack" }
+djinn-k8s = { path = "../djinn-k8s" }
 anyhow = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
