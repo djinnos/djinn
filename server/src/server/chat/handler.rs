@@ -3,6 +3,11 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::LazyLock;
+
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 
 /// Default outer timeout for per-tool dispatch in the chat loop.
@@ -104,6 +109,40 @@ use djinn_db::{
 };
 use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_provider};
+
+#[cfg(test)]
+type TestProviderFactory = Arc<dyn Fn() -> Box<dyn LlmProvider> + Send + Sync>;
+
+/// Test-only seam for HTTP handler regressions. The session-affinity key is
+/// already unique per request, so concurrent tests cannot replace each other's
+/// provider behavior.
+#[cfg(test)]
+static TEST_PROVIDERS: LazyLock<Mutex<HashMap<String, TestProviderFactory>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(super) fn register_test_provider(
+    session_id: &str,
+    factory: impl Fn() -> Box<dyn LlmProvider> + Send + Sync + 'static,
+) {
+    let factory: TestProviderFactory = Arc::new(factory);
+    let mut providers = TEST_PROVIDERS.lock().expect("test provider registry lock");
+    providers.insert(session_id.to_owned(), factory.clone());
+    providers.insert(format!("{session_id}:title"), factory);
+}
+
+fn create_chat_provider(config: djinn_provider::provider::ProviderConfig) -> Box<dyn LlmProvider> {
+    #[cfg(test)]
+    if let Some(factory) = config.session_affinity_key.as_deref().and_then(|key| {
+        TEST_PROVIDERS
+            .lock()
+            .ok()
+            .and_then(|providers| providers.get(key).cloned())
+    }) {
+        return factory();
+    }
+    create_provider(config)
+}
 
 const MAX_TOOL_ITERATIONS: usize = 20;
 
@@ -726,7 +765,7 @@ pub(super) async fn completions_handler_impl(
         }
     };
 
-    let provider = create_provider(provider_config);
+    let provider = create_chat_provider(provider_config);
 
     // User-scoped system message: base prompt + optional client-supplied
     // system string, NO per-project repo map, NO per-project brief.  The
@@ -1626,7 +1665,7 @@ async fn generate_chat_title(
     let mut provider_config = provider_config;
     provider_config.reasoning_effort = Some(djinn_provider::provider::ReasoningEffort::Minimal);
 
-    let provider = create_provider(provider_config);
+    let provider = create_chat_provider(provider_config);
     let mut conversation = Conversation::new();
     conversation.push(Message {
         role: Role::System,
