@@ -4,7 +4,6 @@
 use std::path::Path;
 
 use djinn_core::models::Task;
-use djinn_core::models::task_attempt::TaskAttemptPromptSummary;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
@@ -15,58 +14,12 @@ use crate::actors::slot::helpers::{
 use crate::actors::slot::lifecycle::attempt_context;
 use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
-use crate::roles::AgentRole;
 use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 use tracing::Instrument;
 
-/// Fully-assembled prompt context for a single role session.
-#[allow(dead_code)]
-pub(crate) struct PromptContext {
-    /// Merge-conflict file list. `None` when no active conflict.
-    pub conflict_files: Option<String>,
-    /// Activity-log digest. `None` when no activity on the task.
-    pub activity_text: Option<String>,
-    /// Last `work_submitted` summary (reviewer context).
-    pub worker_summary: Option<String>,
-    /// Last `work_submitted` remaining concerns (reviewer context).
-    pub worker_concerns: Option<String>,
-    /// Epic context block.
-    pub epic_context: Option<String>,
-    /// Knowledge-notes block scoped to the task's paths.
-    pub knowledge_context: Option<String>,
-    /// Auto-injected `code_graph context` summary.
-    pub code_graph_context: Option<String>,
-    /// Auto-injected `code_graph detect_changes` summary for reviewers.
-    pub reviewer_diff_context: Option<String>,
-    /// sa4x: promoted BLOCKING directive for red required CI.
-    pub ci_blocking_directive: Option<String>,
-    /// 4x3v / jteh: durable prior attempt history for the current task.
-    pub prior_attempts: Option<Vec<TaskAttemptPromptSummary>>,
-    /// 4x3v / jteh: completed dependency-parent summaries from blocker parents.
-    pub completed_dependency_parents: Option<Vec<djinn_db::CompletedParentSummary>>,
-    /// y8pv / 48ru: one-line resume note for worker dispatch.
-    pub worker_resume_note: Option<String>,
-    /// zkk9: arbiter directive for monitored reopen (worker-only).
-    pub arbiter_directive: Option<String>,
-    /// Base system prompt rendered from the role template + `TaskContext`.
-    pub base_system_prompt: String,
-    /// Base prompt with role-level `system_prompt_extensions` appended.
-    pub system_prompt_with_extensions: String,
-    /// Final prompt: extensions + skills. Pushed as the system message.
-    pub system_prompt: String,
-    /// 7ry9: deterministic hash of the exact `system_prompt` bytes handed to the provider.
-    pub system_prompt_hash: String,
-    /// Setup-command description for session log provenance.
-    pub prompt_setup_commands: Option<String>,
-}
-
-/// Sibling project flagged as relevant (read-only multi-repo, no eager checkout).
-#[derive(Debug, Clone)]
-pub(crate) struct ReadSourceInfo {
-    pub slug: String,
-    pub name: String,
-}
+mod types;
+pub(crate) use types::{PromptContext, PromptContextInputs, ReadSourceInfo};
 
 /// Append read-only sibling repo section to prompt. No-op when no read sources.
 fn append_read_sources_prompt(prompt: &str, read_sources: &[ReadSourceInfo]) -> String {
@@ -88,34 +41,6 @@ fn append_read_sources_prompt(prompt: &str, read_sources: &[ReadSourceInfo]) -> 
         s.push_str(&format!("- **{}** ({})\n", rs.slug, rs.name));
     }
     s
-}
-
-/// Inputs for [`assemble_prompt_context`].
-#[allow(clippy::too_many_arguments)]
-pub(crate) struct PromptContextInputs<'a> {
-    pub task: &'a Task,
-    /// Role whose template is rendered (may be a specialist override).
-    pub runtime_role: &'a dyn AgentRole,
-    /// Role consulted for `needs_epic_context` (original injected role).
-    pub role_for_epic_check: &'a dyn AgentRole,
-    pub project_path: &'a str,
-    pub worktree_path: &'a Path,
-    pub conflict_ctx: Option<&'a MergeConflictMetadata>,
-    pub merge_validation_ctx: Option<String>,
-    pub prompt_setup_commands: Option<String>,
-    pub system_prompt_extensions: &'a str,
-    pub resolved_skills: &'a [ResolvedSkill],
-    pub app_state: &'a AgentContext,
-    /// Read-only multi-repo sources for the task.
-    pub read_sources: &'a [ReadSourceInfo],
-    /// Worker resume note (y8pv/48ru). `None` for non-worker roles.
-    pub worker_resume_note: Option<&'a str>,
-    /// Arbiter directive for monitored reopen (zkk9). `None` for non-worker
-    /// roles or when no monitored reopen is in progress.
-    pub arbiter_directive: Option<&'a str>,
-    /// Per-server MCP instructions from connected servers, in deterministic
-    /// server-name order. Failed or no-instruction servers are omitted.
-    pub mcp_server_instructions: &'a std::collections::BTreeMap<String, String>,
 }
 
 /// Format conflicting files as a `- <path>` markdown list.
