@@ -123,6 +123,26 @@ mod tests {
     }
 
     #[test]
+    fn supersede_rejects_non_string_candidate_id() {
+        let error = parse_memory_write_dedup_decision(
+            r#"{"action":"supersede_existing","candidate_id":123,"reason":"Better"}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("failed to parse dedup decision JSON"));
+    }
+
+    #[test]
+    fn supersede_rejects_non_string_reason() {
+        let error = parse_memory_write_dedup_decision(
+            r#"{"action":"supersede_existing","candidate_id":"note_123","reason":123}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("failed to parse dedup decision JSON"));
+    }
+
+    #[test]
     fn supersede_rejects_malformed_json() {
         let error = parse_memory_write_dedup_decision(
             r#"{"action":"supersede_existing","candidate_id":"note_123","reason"}"#,
