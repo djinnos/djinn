@@ -428,39 +428,85 @@ impl DjinnMcpServer {
         _reason: &str,
         preview: bool,
     ) -> Json<ProposalStopBuildResponse> {
-        let abort_err = |msg: String| Json(ProposalStopBuildResponse {
-            ok: false, mode: "abort".to_string(), proposal_id: Some(proposal.id.clone()),
-            status: None, preview: false, epics_closed: 0, tasks_closed: 0,
-            sessions_killed: 0, disposition: ProposalDispositionSummary::default(), error: Some(msg),
-        });
-        let graduated = match repo.graduated_epics(&proposal.id).await { Ok(v) => v, Err(e) => return abort_err(e.to_string()) };
-        let scope = DispositionScope::for_proposal_abort(&proposal.id, graduated.iter().map(|(id, _)| id.clone()).collect());
+        let abort_err = |msg: String| {
+            Json(ProposalStopBuildResponse {
+                ok: false,
+                mode: "abort".to_string(),
+                proposal_id: Some(proposal.id.clone()),
+                status: None,
+                preview: false,
+                epics_closed: 0,
+                tasks_closed: 0,
+                sessions_killed: 0,
+                disposition: ProposalDispositionSummary::default(),
+                error: Some(msg),
+            })
+        };
+        let graduated = match repo.graduated_epics(&proposal.id).await {
+            Ok(v) => v,
+            Err(e) => return abort_err(e.to_string()),
+        };
+        let scope = DispositionScope::for_proposal_abort(
+            &proposal.id,
+            graduated.iter().map(|(id, _)| id.clone()).collect(),
+        );
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         if preview {
-            let plan = match task_repo.classify_parent_disposition(&scope).await { Ok(plan) => plan, Err(e) => return abort_err(e.to_string()) };
+            let plan = match task_repo.classify_parent_disposition(&scope).await {
+                Ok(plan) => plan,
+                Err(e) => return abort_err(e.to_string()),
+            };
             return Json(ProposalStopBuildResponse {
-                ok: true, mode: "abort".to_string(), proposal_id: Some(proposal.id.clone()),
-                status: Some(proposal.status.clone()), preview: true, epics_closed: graduated.len() as i64,
-                tasks_closed: plan.counts.close as i64, sessions_killed: 0,
-                disposition: proposal_disposition_summary(&plan), error: None,
+                ok: true,
+                mode: "abort".to_string(),
+                proposal_id: Some(proposal.id.clone()),
+                status: Some(proposal.status.clone()),
+                preview: true,
+                epics_closed: graduated.len() as i64,
+                tasks_closed: plan.counts.close as i64,
+                sessions_killed: 0,
+                disposition: proposal_disposition_summary(&plan),
+                error: None,
             });
         }
-        let mut tx = match self.state.db().pool().begin().await { Ok(tx) => tx, Err(e) => return abort_err(e.to_string()) };
-        let plan = match apply_parent_disposition_tx(&mut tx, &scope).await { Ok(plan) => plan, Err(e) => return abort_err(e.to_string()) };
+        let mut tx = match self.state.db().pool().begin().await {
+            Ok(tx) => tx,
+            Err(e) => return abort_err(e.to_string()),
+        };
+        let plan = match apply_parent_disposition_tx(&mut tx, &scope).await {
+            Ok(plan) => plan,
+            Err(e) => return abort_err(e.to_string()),
+        };
         let epic_ids = scope.epic_ids.clone();
-        if let Err(e) = sqlx::query("UPDATE epics SET status = 'closed', closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = ANY($1)").bind(&epic_ids).execute(&mut *tx).await { return abort_err(e.to_string()); }
-        if let Err(e) = sqlx::query("DELETE FROM proposal_epics WHERE proposal_id = $1").bind(&proposal.id).execute(&mut *tx).await { return abort_err(e.to_string()); }
-        if let Err(e) = sqlx::query("UPDATE proposals SET status = 'approved', build_owner_user_id = NULL, build_breakdown_task_id = NULL, build_frozen = false, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1").bind(&proposal.id).execute(&mut *tx).await { return abort_err(e.to_string()); }
-        if let Err(e) = tx.commit().await { return abort_err(e.to_string()); }
+        if let Err(e) = EpicRepository::close_scoped_tx(&mut tx, &epic_ids).await {
+            return abort_err(e.to_string());
+        }
+        if let Err(e) = ProposalRepository::unlink_epics_tx(&mut tx, &proposal.id).await {
+            return abort_err(e.to_string());
+        }
+        if let Err(e) = ProposalRepository::revert_to_approved_tx(&mut tx, &proposal.id).await {
+            return abort_err(e.to_string());
+        }
+        if let Err(e) = tx.commit().await {
+            return abort_err(e.to_string());
+        }
         self.emit_disposition_events(&plan, &epic_ids).await;
         if let Ok(Some(updated)) = repo.get(&proposal.id).await {
-            self.state.event_bus().send(DjinnEventEnvelope::proposal_updated(&updated));
+            self.state
+                .event_bus()
+                .send(DjinnEventEnvelope::proposal_updated(&updated));
         }
         Json(ProposalStopBuildResponse {
-            ok: true, mode: "abort".to_string(), proposal_id: Some(proposal.id.clone()),
-            status: Some("approved".to_string()), preview: false, epics_closed: epic_ids.len() as i64,
-            tasks_closed: plan.counts.close as i64, sessions_killed: 0,
-            disposition: proposal_disposition_summary(&plan), error: None,
+            ok: true,
+            mode: "abort".to_string(),
+            proposal_id: Some(proposal.id.clone()),
+            status: Some("approved".to_string()),
+            preview: false,
+            epics_closed: epic_ids.len() as i64,
+            tasks_closed: plan.counts.close as i64,
+            sessions_killed: 0,
+            disposition: proposal_disposition_summary(&plan),
+            error: None,
         })
     }
 
@@ -573,39 +619,81 @@ impl DjinnMcpServer {
         let scope = DispositionScope::for_proposal_obsolete_epic_reconcile(&proposal.id, epic_id);
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         if preview {
-            let plan = match task_repo.classify_parent_disposition(&scope).await { Ok(plan) => plan, Err(e) => return scoped_err(e.to_string()) };
+            let plan = match task_repo.classify_parent_disposition(&scope).await {
+                Ok(plan) => plan,
+                Err(e) => return scoped_err(e.to_string()),
+            };
             return Json(ProposalReconcileObsoleteEpicResponse {
-                ok: true, proposal_id: Some(proposal.id.clone()), epic_id: Some(epic_id.to_string()), preview: true,
-                blocked: false, blocked_feedback_id: None, blocked_feedback_body: None, merged_tasks: Vec::new(),
-                epics_closed: 1, tasks_closed: plan.counts.close as i64, sessions_killed: 0,
-                disposition: proposal_disposition_summary(&plan), error: None,
+                ok: true,
+                proposal_id: Some(proposal.id.clone()),
+                epic_id: Some(epic_id.to_string()),
+                preview: true,
+                blocked: false,
+                blocked_feedback_id: None,
+                blocked_feedback_body: None,
+                merged_tasks: Vec::new(),
+                epics_closed: 1,
+                tasks_closed: plan.counts.close as i64,
+                sessions_killed: 0,
+                disposition: proposal_disposition_summary(&plan),
+                error: None,
             });
         }
-        let mut tx = match self.state.db().pool().begin().await { Ok(tx) => tx, Err(e) => return scoped_err(e.to_string()) };
-        let plan = match apply_parent_disposition_tx(&mut tx, &scope).await { Ok(plan) => plan, Err(e) => return scoped_err(e.to_string()) };
-        if let Err(e) = sqlx::query("UPDATE epics SET status = 'closed', closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1").bind(epic_id).execute(&mut *tx).await { return scoped_err(e.to_string()); }
-        if let Err(e) = sqlx::query("DELETE FROM proposal_epics WHERE proposal_id = $1 AND epic_id = $2").bind(&proposal.id).bind(epic_id).execute(&mut *tx).await { return scoped_err(e.to_string()); }
-        if let Err(e) = tx.commit().await { return scoped_err(e.to_string()); }
-        self.emit_disposition_events(&plan, &[epic_id.to_string()]).await;
+        let mut tx = match self.state.db().pool().begin().await {
+            Ok(tx) => tx,
+            Err(e) => return scoped_err(e.to_string()),
+        };
+        let plan = match apply_parent_disposition_tx(&mut tx, &scope).await {
+            Ok(plan) => plan,
+            Err(e) => return scoped_err(e.to_string()),
+        };
+        if let Err(e) = EpicRepository::close_scoped_tx(&mut tx, &[epic_id.to_string()]).await {
+            return scoped_err(e.to_string());
+        }
+        if let Err(e) = ProposalRepository::unlink_epic_tx(&mut tx, &proposal.id, epic_id).await {
+            return scoped_err(e.to_string());
+        }
+        if let Err(e) = tx.commit().await {
+            return scoped_err(e.to_string());
+        }
+        self.emit_disposition_events(&plan, &[epic_id.to_string()])
+            .await;
         Json(ProposalReconcileObsoleteEpicResponse {
-            ok: true, proposal_id: Some(proposal.id.clone()), epic_id: Some(epic_id.to_string()), preview: false,
-            blocked: false, blocked_feedback_id: None, blocked_feedback_body: None, merged_tasks: Vec::new(),
-            epics_closed: 1, tasks_closed: plan.counts.close as i64, sessions_killed: 0,
-            disposition: proposal_disposition_summary(&plan), error: None,
+            ok: true,
+            proposal_id: Some(proposal.id.clone()),
+            epic_id: Some(epic_id.to_string()),
+            preview: false,
+            blocked: false,
+            blocked_feedback_id: None,
+            blocked_feedback_body: None,
+            merged_tasks: Vec::new(),
+            epics_closed: 1,
+            tasks_closed: plan.counts.close as i64,
+            sessions_killed: 0,
+            disposition: proposal_disposition_summary(&plan),
+            error: None,
         })
     }
 
     async fn emit_disposition_events(&self, plan: &DispositionPlan, epic_ids: &[String]) {
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
-        for finding in plan.findings.iter().filter(|finding| finding.disposition.applies_change()) {
+        for finding in plan
+            .findings
+            .iter()
+            .filter(|finding| finding.disposition.applies_change())
+        {
             if let Ok(Some(task)) = task_repo.get(&finding.task_id).await {
-                self.state.event_bus().send(DjinnEventEnvelope::task_updated(&task, false));
+                self.state
+                    .event_bus()
+                    .send(DjinnEventEnvelope::task_updated(&task, false));
             }
         }
         let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         for epic_id in epic_ids {
             if let Ok(Some(epic)) = epic_repo.get(epic_id).await {
-                self.state.event_bus().send(DjinnEventEnvelope::epic_updated(&epic));
+                self.state
+                    .event_bus()
+                    .send(DjinnEventEnvelope::epic_updated(&epic));
             }
         }
     }
@@ -1052,7 +1140,10 @@ mod stop_build_tests {
             let t = trepo.get(tid).await.unwrap().unwrap();
             assert_eq!(t.status, "closed", "linked task {tid} should be disposed");
         }
-        assert_eq!(trepo.get(&breakdown_id).await.unwrap().unwrap().status, "open");
+        assert_eq!(
+            trepo.get(&breakdown_id).await.unwrap().unwrap().status,
+            "open"
+        );
 
         // A second abort is rejected — the proposal is no longer building.
         let r2 = server
