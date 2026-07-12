@@ -1309,6 +1309,162 @@ expression: tool_schemas_planner()
     "concurrent_safe": true
   },
   {
+    "name": "memory_recall_trace",
+    "description": "Inspect persisted memory-retrieval traces for the current project. Use mode=list to triage compact trace summaries with optional filters and bounded pagination, or mode=detail with trace_id to inspect one trace and its bounded note excerpts. Allowed entry points: dispatch, jit_pitfalls, load_knowledge_context, format_knowledge_notes, memory_recall_trace. Allowed outcomes: injected, skipped. Allowed skipped reasons: not_top_k, min_confidence, budget_pruned, superseded_pruned, dedupe, search_error.",
+    "inputSchema": {
+      "type": "object",
+      "oneOf": [
+        {
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "const": "list"
+            },
+            "project": {
+              "type": "string",
+              "description": "Optional project UUID or slug for direct control-plane callers; agent calls are always scoped to the current project."
+            },
+            "project_id": {
+              "type": "string",
+              "description": "Optional project UUID compatibility alias for direct control-plane callers."
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": "string"
+            },
+            "task_run_id": {
+              "type": "string"
+            },
+            "entry_point": {
+              "type": "string",
+              "enum": [
+                "dispatch",
+                "jit_pitfalls",
+                "load_knowledge_context",
+                "format_knowledge_notes",
+                "memory_recall_trace"
+              ],
+              "description": "Retrieval entry point."
+            },
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "injected",
+                "skipped"
+              ],
+              "description": "Candidate outcome filter."
+            },
+            "skipped_reason": {
+              "type": "string",
+              "enum": [
+                "not_top_k",
+                "min_confidence",
+                "budget_pruned",
+                "superseded_pruned",
+                "dedupe",
+                "search_error"
+              ],
+              "description": "Skipped-candidate reason filter."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Maximum compact trace summaries to return (1-100; default is server-defined)."
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Zero-based summary page offset."
+            }
+          },
+          "not": {
+            "required": [
+              "trace_id"
+            ]
+          }
+        },
+        {
+          "required": [
+            "mode",
+            "trace_id"
+          ],
+          "properties": {
+            "mode": {
+              "const": "detail"
+            },
+            "trace_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Trace ID returned from a list call."
+            },
+            "project": {
+              "type": "string",
+              "description": "Optional project UUID or slug for direct control-plane callers; agent calls are always scoped to the current project."
+            },
+            "project_id": {
+              "type": "string",
+              "description": "Optional project UUID compatibility alias for direct control-plane callers."
+            }
+          },
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "session_id"
+                ]
+              },
+              {
+                "required": [
+                  "task_id"
+                ]
+              },
+              {
+                "required": [
+                  "task_run_id"
+                ]
+              },
+              {
+                "required": [
+                  "entry_point"
+                ]
+              },
+              {
+                "required": [
+                  "outcome"
+                ]
+              },
+              {
+                "required": [
+                  "skipped_reason"
+                ]
+              },
+              {
+                "required": [
+                  "limit"
+                ]
+              },
+              {
+                "required": [
+                  "offset"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
     "name": "memory_write",
     "description": "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.",
     "inputSchema": {

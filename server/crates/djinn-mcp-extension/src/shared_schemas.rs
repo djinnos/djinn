@@ -10,6 +10,57 @@ pub struct ToolSafetyAnnotations {
     pub concurrent_safe: bool,
 }
 
+/// Inspect persisted memory retrieval traces for the current project.
+///
+/// The two request forms deliberately live in one tool: list calls stay small
+/// enough for operator triage, while detail calls return the selected trace's
+/// bounded candidate excerpts.
+pub fn tool_memory_recall_trace() -> RmcpTool {
+    RmcpTool::new(
+        "memory_recall_trace".to_string(),
+        "Inspect persisted memory-retrieval traces for the current project. Use mode=list to triage compact trace summaries with optional filters and bounded pagination, or mode=detail with trace_id to inspect one trace and its bounded note excerpts. Allowed entry points: dispatch, jit_pitfalls, load_knowledge_context, format_knowledge_notes, memory_recall_trace. Allowed outcomes: injected, skipped. Allowed skipped reasons: not_top_k, min_confidence, budget_pruned, superseded_pruned, dedupe, search_error.".to_string(),
+        object!({
+            "type": "object",
+            "oneOf": [
+                {
+                    "required": ["mode"],
+                    "properties": {
+                        "mode": {"const": "list"},
+                        "project": {"type": "string", "description": "Optional project UUID or slug for direct control-plane callers; agent calls are always scoped to the current project."},
+                        "project_id": {"type": "string", "description": "Optional project UUID compatibility alias for direct control-plane callers."},
+                        "session_id": {"type": "string"},
+                        "task_id": {"type": "string"},
+                        "task_run_id": {"type": "string"},
+                        "entry_point": {"type": "string", "enum": ["dispatch", "jit_pitfalls", "load_knowledge_context", "format_knowledge_notes", "memory_recall_trace"], "description": "Retrieval entry point."},
+                        "outcome": {"type": "string", "enum": ["injected", "skipped"], "description": "Candidate outcome filter."},
+                        "skipped_reason": {"type": "string", "enum": ["not_top_k", "min_confidence", "budget_pruned", "superseded_pruned", "dedupe", "search_error"], "description": "Skipped-candidate reason filter."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum compact trace summaries to return (1-100; default is server-defined)."},
+                        "offset": {"type": "integer", "minimum": 0, "description": "Zero-based summary page offset."}
+                    },
+                    "not": {"required": ["trace_id"]}
+                },
+                {
+                    "required": ["mode", "trace_id"],
+                    "properties": {
+                        "mode": {"const": "detail"},
+                        "trace_id": {"type": "string", "minLength": 1, "description": "Trace ID returned from a list call."},
+                        "project": {"type": "string", "description": "Optional project UUID or slug for direct control-plane callers; agent calls are always scoped to the current project."},
+                        "project_id": {"type": "string", "description": "Optional project UUID compatibility alias for direct control-plane callers."}
+                    },
+                    "not": {
+                        "anyOf": [
+                            {"required": ["session_id"]}, {"required": ["task_id"]},
+                            {"required": ["task_run_id"]}, {"required": ["entry_point"]},
+                            {"required": ["outcome"]}, {"required": ["skipped_reason"]},
+                            {"required": ["limit"]}, {"required": ["offset"]}
+                        ]
+                    }
+                }
+            ]
+        }),
+    )
+}
+
 impl ToolSafetyAnnotations {
     pub const fn new(
         read_only: bool,
