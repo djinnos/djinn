@@ -884,3 +884,439 @@ async fn unsafe_path_is_not_deleted() {
     assert_eq!(result.retained[0].1, RetainReason::DeleteError);
     assert!(base.exists());
 }
+
+// ─── Pressure planning tests ─────────────────────────────────────────
+
+struct Capacity(Result<CapacitySnapshot, String>);
+impl FilesystemCapacity for Capacity {
+    fn capacity(&self, _: &Path) -> Result<CapacitySnapshot, String> {
+        self.0.clone()
+    }
+}
+
+fn pressure_config(low: f64, high: f64) -> crate::context::CacheCleanupConfig {
+    crate::context::CacheCleanupConfig {
+        warm_base_low_free_ratio: low,
+        warm_base_high_free_ratio: high,
+        ..default_config()
+    }
+}
+
+fn pressure_entry(id: &str, size: u64) -> WarmBaseEntry {
+    WarmBaseEntry {
+        project_id: id.into(),
+        path: PathBuf::from(id),
+        size_bytes: size,
+    }
+}
+
+fn old_activity(days_ago: u64) -> String {
+    let when = SystemTime::UNIX_EPOCH + Duration::from_secs(days_ago * 24 * 60 * 60);
+    format!("{}T00:00:00Z", OffsetDateTime::from(when).date())
+}
+
+fn snapshot_at(activity: Option<String>) -> ActivitySnapshot {
+    ActivitySnapshot {
+        known_project: true,
+        deleted_project: false,
+        has_active_task_run: false,
+        latest_activity: activity,
+    }
+}
+
+#[tokio::test]
+async fn pressure_above_low_watermark_produces_no_candidates() {
+    let config = pressure_config(0.15, 0.25);
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 1000,
+        available_bytes: 200,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100)],
+        ignored: 0,
+    };
+    let activity = Activity(Ok(snapshot_at(Some(old_activity(14)))));
+    let warm = Warm(Ok(false));
+    let locks = Lock(LockOutcome::Available);
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory, &activity, &warm, &locks, &capacity, &config, &clock,
+    )
+    .await;
+
+    assert!(plan.candidates.is_empty());
+    assert_eq!(plan.retained.len(), 1);
+    assert_eq!(plan.retained[0].1, PressureSkipReason::AboveLowWatermark);
+}
+
+#[tokio::test]
+async fn pressure_at_low_watermark_is_no_op() {
+    let config = pressure_config(0.15, 0.25);
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 1000,
+        available_bytes: 150,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100)],
+        ignored: 0,
+    };
+    let activity = Activity(Ok(snapshot_at(Some(old_activity(14)))));
+    let warm = Warm(Ok(false));
+    let locks = Lock(LockOutcome::Available);
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory, &activity, &warm, &locks, &capacity, &config, &clock,
+    )
+    .await;
+
+    assert!(plan.candidates.is_empty());
+    assert_eq!(plan.retained.len(), 1);
+    assert_eq!(plan.retained[0].1, PressureSkipReason::AboveLowWatermark);
+}
+
+#[tokio::test]
+async fn pressure_below_low_selects_minimal_prefix() {
+    let config = pressure_config(0.15, 0.25);
+    // 10% free; target = 250 - 100 = 150 bytes.
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 1000,
+        available_bytes: 100,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000003", 80),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 60),
+        ],
+        ignored: 0,
+    };
+    // Same activity for all, so ordering is by project ID.
+    let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
+    let warm = Warm(Ok(false));
+    let locks = Lock(LockOutcome::Available);
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory, &activity, &warm, &locks, &capacity, &config, &clock,
+    )
+    .await;
+
+    assert_eq!(plan.candidates.len(), 2);
+    assert_eq!(plan.projected_bytes, 160);
+    assert_eq!(plan.target_bytes, 150);
+    assert_eq!(
+        plan.candidates[0].entry.project_id,
+        "018f8b9a-0d70-7f0a-8000-000000000001"
+    );
+    assert_eq!(
+        plan.candidates[1].entry.project_id,
+        "018f8b9a-0d70-7f0a-8000-000000000002"
+    );
+    assert_eq!(plan.retained.len(), 1);
+    assert_eq!(plan.retained[0].1, PressureSkipReason::NotSelected);
+}
+
+#[tokio::test]
+async fn pressure_orders_by_activity_then_project_id() {
+    let config = pressure_config(0.15, 0.25);
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 1000,
+        available_bytes: 100,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000003", 50),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
+        ],
+        ignored: 0,
+    };
+    let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
+    let warm = Warm(Ok(false));
+    let locks = Lock(LockOutcome::Available);
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory, &activity, &warm, &locks, &capacity, &config, &clock,
+    )
+    .await;
+
+    assert_eq!(plan.candidates.len(), 3);
+    assert_eq!(
+        plan.candidates[0].entry.project_id,
+        "018f8b9a-0d70-7f0a-8000-000000000001"
+    );
+    assert_eq!(
+        plan.candidates[1].entry.project_id,
+        "018f8b9a-0d70-7f0a-8000-000000000002"
+    );
+    assert_eq!(
+        plan.candidates[2].entry.project_id,
+        "018f8b9a-0d70-7f0a-8000-000000000003"
+    );
+}
+
+#[tokio::test]
+async fn pressure_excluded_candidates_are_not_selected() {
+    let config = pressure_config(0.15, 0.25);
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 1000,
+        available_bytes: 100,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000003", 50),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000004", 50),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000005", 50),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000006", 50),
+        ],
+        ignored: 0,
+    };
+
+    struct GuardActivity;
+    #[async_trait]
+    impl ActivityGuard for GuardActivity {
+        async fn activity(&self, project_id: &str) -> Result<ActivitySnapshot, String> {
+            Ok(match project_id {
+                "018f8b9a-0d70-7f0a-8000-000000000001" => ActivitySnapshot {
+                    has_active_task_run: true,
+                    latest_activity: Some(old_activity(12)),
+                    ..snapshot()
+                },
+                "018f8b9a-0d70-7f0a-8000-000000000004" => return Err("activity error".into()),
+                _ => snapshot_at(Some(old_activity(12))),
+            })
+        }
+    }
+
+    struct GuardWarm;
+    #[async_trait]
+    impl WarmJobGuard for GuardWarm {
+        async fn has_in_flight_warm(&self, project_id: &str) -> Result<bool, String> {
+            match project_id {
+                "018f8b9a-0d70-7f0a-8000-000000000002" => Ok(true),
+                "018f8b9a-0d70-7f0a-8000-000000000005" => Err("warm error".into()),
+                _ => Ok(false),
+            }
+        }
+    }
+
+    struct BusyLock;
+    impl BaseLockGuard for BusyLock {
+        fn try_lock(&self, path: &Path) -> LockOutcome {
+            if path.as_os_str() == "018f8b9a-0d70-7f0a-8000-000000000006" {
+                LockOutcome::Busy
+            } else {
+                LockOutcome::Available
+            }
+        }
+    }
+
+    let warm = GuardWarm;
+    let activity = GuardActivity;
+    let locks = BusyLock;
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory, &activity, &warm, &locks, &capacity, &config, &clock,
+    )
+    .await;
+
+    let selected_ids: Vec<_> = plan
+        .candidates
+        .iter()
+        .map(|c| c.entry.project_id.as_str())
+        .collect();
+    assert!(!selected_ids.contains(&"018f8b9a-0d70-7f0a-8000-000000000001"));
+    assert!(!selected_ids.contains(&"018f8b9a-0d70-7f0a-8000-000000000002"));
+    assert!(!selected_ids.contains(&"018f8b9a-0d70-7f0a-8000-000000000004"));
+    assert!(!selected_ids.contains(&"018f8b9a-0d70-7f0a-8000-000000000005"));
+    assert!(!selected_ids.contains(&"018f8b9a-0d70-7f0a-8000-000000000006"));
+    assert!(selected_ids.contains(&"018f8b9a-0d70-7f0a-8000-000000000003"));
+}
+
+#[tokio::test]
+async fn pressure_measurement_error_fails_closed() {
+    let config = pressure_config(0.15, 0.25);
+    let capacity = Capacity(Err("statvfs failed".into()));
+    let inventory = WarmBaseInventory {
+        entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100)],
+        ignored: 0,
+    };
+    let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
+    let warm = Warm(Ok(false));
+    let locks = Lock(LockOutcome::Available);
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory, &activity, &warm, &locks, &capacity, &config, &clock,
+    )
+    .await;
+
+    assert!(plan.candidates.is_empty());
+    assert_eq!(plan.retained.len(), 1);
+    assert_eq!(plan.retained[0].1, PressureSkipReason::MeasurementError);
+}
+
+#[tokio::test]
+async fn pressure_insufficient_reclaimable_space_selects_all_safe() {
+    let config = pressure_config(0.15, 0.25);
+    // target = 250 - 100 = 150, but safe bases total only 100.
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 1000,
+        available_bytes: 100,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 40),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 60),
+        ],
+        ignored: 0,
+    };
+    let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
+    let warm = Warm(Ok(false));
+    let locks = Lock(LockOutcome::Available);
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory, &activity, &warm, &locks, &capacity, &config, &clock,
+    )
+    .await;
+
+    assert_eq!(plan.candidates.len(), 2);
+    assert_eq!(plan.projected_bytes, 100);
+    assert_eq!(plan.target_bytes, 150);
+    assert!(plan.retained.is_empty());
+}
+
+#[tokio::test]
+async fn pressure_exact_stop_at_high_watermark() {
+    let config = pressure_config(0.15, 0.25);
+    // target = 250 - 100 = 150 exactly.
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 1000,
+        available_bytes: 100,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 150),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
+        ],
+        ignored: 0,
+    };
+    let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
+    let warm = Warm(Ok(false));
+    let locks = Lock(LockOutcome::Available);
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory, &activity, &warm, &locks, &capacity, &config, &clock,
+    )
+    .await;
+
+    assert_eq!(plan.candidates.len(), 1);
+    assert_eq!(plan.projected_bytes, 150);
+    assert_eq!(plan.target_bytes, 150);
+    assert_eq!(plan.retained.len(), 1);
+    assert_eq!(plan.retained[0].1, PressureSkipReason::NotSelected);
+}
+
+#[tokio::test]
+async fn pressure_young_base_is_excluded() {
+    let config = pressure_config(0.15, 0.25);
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 1000,
+        available_bytes: 100,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
+        ],
+        ignored: 0,
+    };
+
+    struct YoungActivity;
+    #[async_trait]
+    impl ActivityGuard for YoungActivity {
+        async fn activity(&self, project_id: &str) -> Result<ActivitySnapshot, String> {
+            Ok(match project_id {
+                "018f8b9a-0d70-7f0a-8000-000000000001" => snapshot_at(Some(old_activity(12))),
+                _ => snapshot_at(Some(format!(
+                    "{}T00:00:00Z",
+                    OffsetDateTime::from(future(15)).date()
+                ))),
+            })
+        }
+    }
+
+    let warm = Warm(Ok(false));
+    let locks = Lock(LockOutcome::Available);
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory,
+        &YoungActivity,
+        &warm,
+        &locks,
+        &capacity,
+        &config,
+        &clock,
+    )
+    .await;
+
+    assert_eq!(plan.candidates.len(), 1);
+    assert_eq!(
+        plan.candidates[0].entry.project_id,
+        "018f8b9a-0d70-7f0a-8000-000000000001"
+    );
+    assert_eq!(plan.retained.len(), 1);
+    assert_eq!(plan.retained[0].0, "018f8b9a-0d70-7f0a-8000-000000000002");
+    assert_eq!(plan.retained[0].1, PressureSkipReason::Young);
+}
+
+#[tokio::test]
+async fn pressure_lock_busy_and_error_retained() {
+    let config = pressure_config(0.15, 0.25);
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 1000,
+        available_bytes: 100,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
+            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
+        ],
+        ignored: 0,
+    };
+
+    struct BusyLock;
+    impl BaseLockGuard for BusyLock {
+        fn try_lock(&self, path: &Path) -> LockOutcome {
+            if path.as_os_str() == "018f8b9a-0d70-7f0a-8000-000000000001" {
+                LockOutcome::Busy
+            } else {
+                LockOutcome::Error
+            }
+        }
+    }
+
+    let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
+    let warm = Warm(Ok(false));
+    let locks = BusyLock;
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory, &activity, &warm, &locks, &capacity, &config, &clock,
+    )
+    .await;
+
+    assert!(plan.candidates.is_empty());
+    assert_eq!(plan.retained.len(), 2);
+    assert_eq!(plan.retained[0].1, PressureSkipReason::LockBusy);
+    assert_eq!(plan.retained[1].1, PressureSkipReason::LockError);
+}
