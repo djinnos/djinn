@@ -67,6 +67,92 @@ mod tests {
     }
 
     #[test]
+    fn parses_supersede_decision() {
+        let decision = parse_memory_write_dedup_decision(
+            r#"{"action":"supersede_existing","candidate_id":"note_123","reason":"More authoritative coverage"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            decision,
+            MemoryWriteDedupDecision::SupersedeExisting {
+                candidate_id: "note_123".to_string(),
+                reason: "More authoritative coverage".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn supersede_requires_candidate_id() {
+        let error = parse_memory_write_dedup_decision(
+            r#"{"action":"supersede_existing","reason":"Better"}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("supersede_existing requires candidate_id"));
+    }
+
+    #[test]
+    fn supersede_rejects_empty_candidate_id() {
+        let error = parse_memory_write_dedup_decision(
+            r#"{"action":"supersede_existing","candidate_id":"","reason":"Better"}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("supersede_existing requires candidate_id"));
+    }
+
+    #[test]
+    fn supersede_requires_reason() {
+        let error = parse_memory_write_dedup_decision(
+            r#"{"action":"supersede_existing","candidate_id":"note_123"}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("supersede_existing requires reason"));
+    }
+
+    #[test]
+    fn supersede_rejects_empty_reason() {
+        let error = parse_memory_write_dedup_decision(
+            r#"{"action":"supersede_existing","candidate_id":"note_123","reason":""}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("supersede_existing requires reason"));
+    }
+
+    #[test]
+    fn supersede_rejects_non_string_candidate_id() {
+        let error = parse_memory_write_dedup_decision(
+            r#"{"action":"supersede_existing","candidate_id":123,"reason":"Better"}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("failed to parse dedup decision JSON"));
+    }
+
+    #[test]
+    fn supersede_rejects_non_string_reason() {
+        let error = parse_memory_write_dedup_decision(
+            r#"{"action":"supersede_existing","candidate_id":"note_123","reason":123}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("failed to parse dedup decision JSON"));
+    }
+
+    #[test]
+    fn supersede_rejects_malformed_json() {
+        let error = parse_memory_write_dedup_decision(
+            r#"{"action":"supersede_existing","candidate_id":"note_123","reason"}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("failed to parse dedup decision JSON"));
+    }
+
+    #[test]
     fn renders_full_candidate_body_below_cap_with_summary_as_metadata() {
         let prompt = render(&candidate("Authoritative candidate body.".to_string()));
 
