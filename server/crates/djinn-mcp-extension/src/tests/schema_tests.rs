@@ -526,6 +526,11 @@ fn proposal_reconcile_obsolete_epic_schema_documents_scope_and_blocking() {
     for required in [
         "Scoped teardown",
         "Blocks if any task has merged work",
+        "only the selected epic's children",
+        "disposed (closed)",
+        "parked",
+        "retained for another open proposal parent",
+        "retained for an external dependent",
         "unlinks it from the proposal",
         "instead of whole-build proposal_stop_build",
     ] {
@@ -534,6 +539,7 @@ fn proposal_reconcile_obsolete_epic_schema_documents_scope_and_blocking() {
             "proposal_reconcile_obsolete_epic description should mention {required}: {description}"
         );
     }
+    assert!(!description.contains("force-close"));
     assert_eq!(
         schema["inputSchema"]["required"],
         serde_json::json!(["proposal_id", "epic_id"])
