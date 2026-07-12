@@ -520,7 +520,7 @@ async fn org_policy_blocks_codex_subscription_via_openai_namespaced_models() {
 
     harness
         .state()
-        .validate_models_for_user(&["openai/gpt-5.5".to_string()], None)
+        .validate_models_for_user(&["openai/gpt-5.2".to_string()], None)
         .await
         .expect("plain openai api-key model stays ungoverned");
 }
