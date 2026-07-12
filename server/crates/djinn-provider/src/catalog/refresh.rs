@@ -19,6 +19,31 @@ use djinn_core::clock::SystemClock;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
+/// Periodic cadence used by the canonical single refresh owner.
+pub enum ProviderCatalogRefreshTicks {
+    /// Tokio's production interval.
+    Interval,
+    /// Explicit releases used by deterministic integration tests.
+    Manual(tokio::sync::mpsc::Receiver<()>),
+}
+
+enum ActiveRefreshTicks {
+    Interval(tokio::time::Interval),
+    Manual(tokio::sync::mpsc::Receiver<()>),
+}
+
+impl ActiveRefreshTicks {
+    async fn next(&mut self) -> bool {
+        match self {
+            Self::Interval(ticker) => {
+                ticker.tick().await;
+                true
+            }
+            Self::Manual(receiver) => receiver.recv().await.is_some(),
+        }
+    }
+}
+
 pub const PROVIDER_CATALOG_REFRESH_INTERVAL_ENV: &str =
     "DJINN_PROVIDER_CATALOG_REFRESH_INTERVAL_SECS";
 pub const DEFAULT_PROVIDER_CATALOG_REFRESH_INTERVAL_SECS: u64 = 3_600;
@@ -152,14 +177,14 @@ fn log_refresh_outcome(catalog: &CatalogService, interval: Duration, phase: &'st
 /// No other refresh task is created when the first live fetch succeeds.
 ///
 /// This is the **single** refresh owner — the server spawns exactly one of these
-/// per `AppState` via an atomic guard. Integration tests call this function
-/// directly (with a short `interval` and a [`CancellationToken`]) so a changed
-/// mocked upstream response is exercised through the periodic tick branch, not a
-/// test-only catalog swap.
+/// per `AppState` via an atomic guard. Integration tests call this function with
+/// a manual tick source so a changed mocked response is exercised through the
+/// periodic branch, not a test-only catalog swap.
 pub async fn run_provider_catalog_refresh_loop(
     catalog: CatalogService,
     interval: Duration,
     cancel: CancellationToken,
+    ticks: ProviderCatalogRefreshTicks,
 ) {
     let mut failures = 0;
     loop {
@@ -182,7 +207,10 @@ pub async fn run_provider_catalog_refresh_loop(
         }
     }
 
-    let jitter = startup_jitter(interval);
+    let jitter = match &ticks {
+        ProviderCatalogRefreshTicks::Interval => startup_jitter(interval),
+        ProviderCatalogRefreshTicks::Manual(_) => Duration::ZERO,
+    };
     if !jitter.is_zero() {
         tracing::info!(
             jitter_seconds = jitter.as_secs(),
@@ -194,14 +222,24 @@ pub async fn run_provider_catalog_refresh_loop(
         }
     }
 
-    let mut ticker = tokio::time::interval(interval);
-    // Skip missed ticks so a slow fetch does not cause a burst of catch-up
-    // refreshes; the next attempt remains on the configured steady cadence.
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut ticks = match ticks {
+        ProviderCatalogRefreshTicks::Interval => {
+            let mut ticker =
+                tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+            // Skip missed ticks so a slow fetch does not cause a burst of catch-up
+            // refreshes; the next attempt remains on the configured steady cadence.
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            ActiveRefreshTicks::Interval(ticker)
+        }
+        ProviderCatalogRefreshTicks::Manual(receiver) => ActiveRefreshTicks::Manual(receiver),
+    };
     loop {
         tokio::select! {
             () = cancel.cancelled() => return,
-            _ = ticker.tick() => {
+            released = ticks.next() => {
+                if !released {
+                    return;
+                }
                 catalog.refresh().await;
                 log_refresh_outcome(&catalog, interval, "periodic");
             }

@@ -1445,26 +1445,18 @@ impl Drop for RestoreCatalogUrl {
     }
 }
 
-/// Poll `catalog.find_model(id)` until it returns `Some`, or time out after
-/// `timeout`. The refresh loop fetches on a periodic tick, so the model does not
-/// appear instantly — the poll proves it arrives through the tick, not a test-
-/// forced direct call.
-async fn wait_for_catalog_model(
+/// Yield only to in-flight I/O until the owner applies an observed response.
+async fn wait_for_catalog_model_after_request(
     catalog: &djinn_provider::catalog::CatalogService,
     id: &str,
-    timeout: std::time::Duration,
 ) {
-    let poll = std::time::Duration::from_millis(20);
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
+    for _ in 0..10_000 {
         if catalog.find_model(id).is_some() {
             return;
         }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for model {id} to appear via periodic refresh tick");
-        }
-        tokio::time::sleep(poll).await;
+        tokio::task::yield_now().await;
     }
+    panic!("owner did not apply observed response for {id}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1533,7 +1525,8 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
     // test through `harness.state().catalog()`.
     let cancel = tokio_util::sync::CancellationToken::new();
     let refresh_catalog = harness.state().catalog().clone();
-    let refresh_interval = std::time::Duration::from_millis(100);
+    let refresh_interval = std::time::Duration::from_secs(3_600);
+    let (tick_tx, tick_rx) = tokio::sync::mpsc::channel(1);
     let refresh_handle = {
         let cancel = cancel.clone();
         tokio::spawn(async move {
@@ -1541,18 +1534,22 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
                 refresh_catalog,
                 refresh_interval,
                 cancel,
+                djinn_provider::catalog::ProviderCatalogRefreshTicks::Manual(tick_rx),
             )
             .await;
         })
     };
 
     // The boot phase refreshes immediately; wait for the initial model to land.
-    wait_for_catalog_model(
-        harness.state().catalog(),
-        "openai/gpt-5.2",
-        std::time::Duration::from_secs(5),
-    )
-    .await;
+    wait_for_catalog_model_after_request(harness.state().catalog(), "openai/gpt-5.2").await;
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("boot request")
+            .len(),
+        1
+    );
     assert_eq!(
         harness.state().catalog().last_refresh_status(),
         djinn_provider::catalog::RefreshStatus::Success,
@@ -1598,18 +1595,22 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
         )
         .await;
 
-    // ── Wait for one periodic tick to fetch the changed response ────────────
+    // ── Release exactly one periodic tick to fetch the changed response ────────────
     //
     // The test never calls `catalog().refresh()` directly. The new model only
     // appears because the refresh owner's periodic tick (`ticker.tick()` →
     // `catalog.refresh()`) re-fetches the mock and swaps in the updated catalog.
     // If that tick stopped invoking refresh, this wait would time out.
-    wait_for_catalog_model(
-        harness.state().catalog(),
-        "openai/gpt-5.2.nano",
-        std::time::Duration::from_secs(5),
-    )
-    .await;
+    tick_tx.send(()).await.expect("release exactly one tick");
+    wait_for_catalog_model_after_request(harness.state().catalog(), "openai/gpt-5.2.nano").await;
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("periodic request")
+            .len(),
+        1
+    );
 
     // Stop the owner loop; subsequent assertions use the now-refreshed catalog.
     cancel.cancel();
