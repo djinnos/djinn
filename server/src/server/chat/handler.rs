@@ -21,6 +21,61 @@ fn chat_tool_dispatch_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
+fn should_persist_interruption_notice(
+    partial: &[ContentBlock],
+    discarded_tool_calls_count: i32,
+) -> bool {
+    !partial.is_empty() || discarded_tool_calls_count > 0
+}
+
+/// Persist an aborted assistant turn and its model-internal interruption notice.
+/// The notice is deliberately in a side table: the partial assistant body remains
+/// provider state/text only, and buffered ToolUse blocks are never written.
+async fn persist_interrupted_assistant_turn(
+    state: &AppState,
+    session_id: &str,
+    partial: &[ContentBlock],
+    discarded_tool_calls_count: i32,
+) {
+    if !should_persist_interruption_notice(partial, discarded_tool_calls_count) {
+        return;
+    }
+
+    let message_repo = SessionMessageRepository::new(state.db().clone(), state.event_bus());
+    let saved_message_id = if partial.is_empty() {
+        None
+    } else {
+        let content_json = serde_json::to_string(partial).unwrap_or_else(|_| "[]".to_string());
+        match message_repo
+            .insert_message(session_id, "", "assistant", &content_json, None)
+            .await
+        {
+            Ok(message) => Some(message.id),
+            Err(error) => {
+                tracing::warn!(session_id=%session_id, error=%error, "failed to persist partial chat turn");
+                None
+            }
+        }
+    };
+
+    // A tools-only interruption has no assistant message by design, but still
+    // needs a durable notice. When partial content could not be saved, avoid a
+    // dangling notice that claims a saved turn exists.
+    if partial.is_empty() || saved_message_id.is_some() {
+        let notice_repo = ChatInterruptionNoticeRepository::new(state.db().clone());
+        if let Err(error) = notice_repo
+            .create(CreateChatInterruptionNotice {
+                session_id,
+                session_message_id: saved_message_id.as_deref(),
+                discarded_tool_calls_count,
+            })
+            .await
+        {
+            tracing::warn!(session_id=%session_id, error=%error, "failed to persist chat interruption notice");
+        }
+    }
+}
+
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::StreamExt;
@@ -43,8 +98,8 @@ use djinn_compaction::COMPACTION_SUMMARY_END_MARKER;
 use djinn_control_plane::server::DjinnMcpServer;
 use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
 use djinn_db::{
-    ProposalRepository, SessionCompactionBoundaryRepository, SessionMessageRepository,
-    SessionRepository,
+    ChatInterruptionNoticeRepository, CreateChatInterruptionNotice, ProposalRepository,
+    SessionCompactionBoundaryRepository, SessionMessageRepository, SessionRepository,
 };
 use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_provider};
@@ -285,7 +340,13 @@ async fn drain_provider_turn(
                 if !turn_text.is_empty() {
                     partial.push(ContentBlock::Text { text: turn_text });
                 }
-                persist_turn(state, session_id, "assistant", &partial).await;
+                persist_interrupted_assistant_turn(
+                    state,
+                    session_id,
+                    &partial,
+                    tool_calls.len() as i32,
+                )
+                .await;
                 return TurnResult::StreamError;
             }
         }
@@ -1569,6 +1630,18 @@ mod tests {
             provider_data: Some(marker),
         };
         Message::system_with_metadata(text, metadata)
+    }
+
+    #[test]
+    fn interrupted_notice_predicate_requires_partial_content_or_discarded_tools() {
+        assert!(should_persist_interruption_notice(
+            &[ContentBlock::Text {
+                text: "partial assistant text".to_owned(),
+            }],
+            0,
+        ));
+        assert!(should_persist_interruption_notice(&[], 2));
+        assert!(!should_persist_interruption_notice(&[], 0));
     }
 
     #[test]
