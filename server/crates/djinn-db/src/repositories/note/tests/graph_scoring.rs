@@ -754,7 +754,7 @@ async fn graph_proximity_embedding_related_included_by_default_no_filter() {
 
     // No edge_kinds filter → all kinds (including embedding_related) participate.
     let (scores, _warnings) = repo
-        .graph_proximity_scores_with_edge_kinds(&[seed.id.clone()], 2, None)
+        .graph_proximity_scores_with_edge_kinds(std::slice::from_ref(&seed.id), 2, None)
         .await
         .unwrap();
     let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
@@ -785,7 +785,11 @@ async fn graph_proximity_edge_kinds_embedding_related_includes_machine_edges() {
 
     let only_embedding = vec!["embedding_related".to_string()];
     let (scores, _warnings) = repo
-        .graph_proximity_scores_with_edge_kinds(&[seed.id.clone()], 2, Some(&only_embedding))
+        .graph_proximity_scores_with_edge_kinds(
+            std::slice::from_ref(&seed.id),
+            2,
+            Some(&only_embedding),
+        )
         .await
         .unwrap();
     let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
@@ -846,7 +850,11 @@ async fn graph_proximity_edge_kinds_without_embedding_related_excludes_machine_e
     // Filter to only co_access — embedding_related should be excluded.
     let only_co_access = vec!["co_access".to_string()];
     let (scores, _warnings) = repo
-        .graph_proximity_scores_with_edge_kinds(&[seed.id.clone()], 2, Some(&only_co_access))
+        .graph_proximity_scores_with_edge_kinds(
+            std::slice::from_ref(&seed.id),
+            2,
+            Some(&only_co_access),
+        )
         .await
         .unwrap();
     let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
@@ -887,7 +895,7 @@ async fn graph_proximity_wikilink_outranks_embedding_related() {
     insert_embedding_association(&repo, &a.id, &c.id, 0.35).await;
 
     let (scores, _warnings) = repo
-        .graph_proximity_scores_with_edge_kinds(&[a.id.clone()], 1, None)
+        .graph_proximity_scores_with_edge_kinds(std::slice::from_ref(&a.id), 1, None)
         .await
         .unwrap();
     let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
@@ -939,7 +947,7 @@ async fn graph_proximity_co_access_unchanged_with_embedding_related_present() {
 
     // Verify the co_access score with no embedding edges present.
     let (scores_before, _) = repo
-        .graph_proximity_scores_with_edge_kinds(&[a.id.clone()], 1, None)
+        .graph_proximity_scores_with_edge_kinds(std::slice::from_ref(&a.id), 1, None)
         .await
         .unwrap();
     let m_before: std::collections::HashMap<_, _> = scores_before.into_iter().collect();
@@ -969,7 +977,7 @@ async fn graph_proximity_co_access_unchanged_with_embedding_related_present() {
     .unwrap();
 
     let (scores_after, _) = repo
-        .graph_proximity_scores_with_edge_kinds(&[a.id.clone()], 1, None)
+        .graph_proximity_scores_with_edge_kinds(std::slice::from_ref(&a.id), 1, None)
         .await
         .unwrap();
     let m_after: std::collections::HashMap<_, _> = scores_after.into_iter().collect();

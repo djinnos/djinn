@@ -576,6 +576,8 @@ impl TaskRepository {
         let protocol_violations =
             super::board_health::protocol_violations_section(self.db.pool()).await;
         let stranded_ready = super::board_health::stranded_ready_section(self.db.pool()).await;
+        let closed_parent_open_children =
+            super::board_health::closed_parent_open_children_section(self.db.pool()).await;
 
         Ok(serde_json::json!({
             "epic_stats":            epic_stats,
@@ -586,6 +588,7 @@ impl TaskRepository {
             "liveness_outcomes":     liveness_outcomes,
             "protocol_violations":   protocol_violations,
             "stranded_ready":        stranded_ready,
+            "closed_parent_open_children": closed_parent_open_children,
         }))
     }
 
