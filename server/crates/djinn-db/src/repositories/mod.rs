@@ -42,6 +42,7 @@ pub mod usage_analytics;
 pub mod user;
 pub mod user_settings;
 pub mod verify_run;
+pub mod warm_base_activity;
 
 /// Render `count` Postgres positional placeholders starting at `$start`.
 ///

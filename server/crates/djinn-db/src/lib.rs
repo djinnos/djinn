@@ -162,5 +162,6 @@ pub use repositories::{
     },
     user::{User, UserRepository},
     user_settings::UserSettingsRepository,
+    warm_base_activity::{WarmBaseActivity, WarmBaseActivityRepository},
 };
 pub use short_id::{ResolvedEntity, resolve_short_ids};
