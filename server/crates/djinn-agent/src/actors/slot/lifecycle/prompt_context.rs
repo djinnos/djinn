@@ -55,6 +55,8 @@ pub(crate) struct PromptContext {
     pub system_prompt_with_extensions: String,
     /// Final prompt: extensions + skills. Pushed as the system message.
     pub system_prompt: String,
+    /// 7ry9: deterministic hash of the exact `system_prompt` bytes handed to the provider.
+    pub system_prompt_hash: String,
     /// Setup-command description for session log provenance.
     pub prompt_setup_commands: Option<String>,
 }
@@ -1013,6 +1015,10 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         read_sources,
         mcp_server_instructions,
     );
+    // 7ry9: Hash the final provider-facing system prompt *after* all
+    // extensions, skills, read sources, MCP instructions, and truncation.
+    // The hash is over the exact bytes supplied to the provider.
+    let system_prompt_hash = djinn_roles::prompts::rendered_system_prompt_hash(&system_prompt);
     djinn_telemetry::prompt_context_metrics::record_total(total_start.elapsed());
     PromptContext {
         conflict_files,
@@ -1031,6 +1037,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         base_system_prompt,
         system_prompt_with_extensions,
         system_prompt,
+        system_prompt_hash,
         prompt_setup_commands,
     }
 }
