@@ -28,6 +28,70 @@ pub struct WriteParams {
     pub retrieval_anchor: Option<String>,
 }
 
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryRecallTraceSummary {
+    pub trace_id: String,
+    pub created_at: String,
+    pub entry_point: String,
+    pub trigger_summary: String,
+    pub candidate_count: i32,
+    pub injected_count: i32,
+    pub skipped_count: i32,
+    pub candidate_cap_exceeded: bool,
+}
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryRecallTraceCandidate {
+    pub note_id: String,
+    pub title: String,
+    pub permalink: String,
+    pub content_excerpt: Option<String>,
+    pub rank: Option<i32>,
+    pub confidence: Option<f64>,
+    pub outcome: String,
+    pub skipped_reason: Option<String>,
+    pub source: Option<String>,
+    pub scope: Option<serde_json::Value>,
+}
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryRecallTraceDetail {
+    pub trace_id: String,
+    pub schema_version: i32,
+    pub created_at: String,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub task_run_id: Option<String>,
+    pub entry_point: String,
+    pub trigger: Option<serde_json::Value>,
+    pub durations_ms: serde_json::Value,
+    pub candidate_cap: i32,
+    pub candidate_cap_exceeded: bool,
+    pub sampling_metadata: Option<serde_json::Value>,
+    pub estimated_injected_tokens: i32,
+    pub candidates: Vec<MemoryRecallTraceCandidate>,
+}
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryRecallTraceResponse {
+    pub traces: Vec<MemoryRecallTraceSummary>,
+    pub trace: Option<MemoryRecallTraceDetail>,
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RecallTraceParams {
+    pub mode: String,
+    pub project: Option<String>,
+    pub project_id: Option<String>,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub task_run_id: Option<String>,
+    pub entry_point: Option<String>,
+    pub outcome: Option<String>,
+    pub skipped_reason: Option<String>,
+    pub limit: Option<i32>,
+    pub offset: Option<i32>,
+    pub trace_id: Option<String>,
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ReadParams {
     pub project: String,
