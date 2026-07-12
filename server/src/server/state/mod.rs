@@ -2772,12 +2772,10 @@ mod retention_preflight_tests {
                 return;
             }
         }
-        // Drop the images table (CASCADE to satisfy FK from image_builds) so
-        // list_selected_catalog_images SQL fails.
-        sqlx::query("DROP TABLE IF EXISTS images CASCADE")
-            .execute(db.pool())
-            .await
-            .expect("drop images table for test");
+        // Drop the images table so list_selected_catalog_images SQL fails.
+        // Use the djinn-db test helper so this test file stays outside the raw
+        // SQL boundary (djinn-db is the allowed home for sqlx::query).
+        djinn_db::test_support::drop_table_cascade_for_test(&db, "images").await;
 
         let state = AppState::new(db, tokio_util::sync::CancellationToken::new());
         // Enabled retention config — forces the DB query to execute.

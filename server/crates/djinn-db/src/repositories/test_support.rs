@@ -180,6 +180,20 @@ pub async fn drop_table_for_test(db: &Database, table_name: &str) {
         .unwrap();
 }
 
+/// Drop a database table if it exists, cascading to dependent constraints.
+/// Test-fixture helper for failure-injection tests where the table is
+/// referenced by foreign keys (e.g. `images` is referenced by
+/// `projects.selected_image_id` with `ON DELETE RESTRICT`).
+///
+/// **Not for production use.**  Panics on SQL errors.
+pub async fn drop_table_cascade_for_test(db: &Database, table_name: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name} CASCADE"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+}
+
 /// Make the `notes.confidence` column nullable and set one note's confidence
 /// to NULL. Test-fixture helper for fail-open retrieval tests that need the
 /// production note query to exclude one row while a trace/query mapping path
