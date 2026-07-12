@@ -1,7 +1,8 @@
 use axum::body::Body;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
+use djinn_core::clock::{Clock, SystemClock};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -72,7 +73,7 @@ async fn health_provider_catalog_source_tier_policy() {
     // avoids network access.
     let catalog = state.catalog().clone();
     catalog.set_last_success_for_tests(
-        Some(Instant::now()),
+        Some(SystemClock::new().now_instant()),
         djinn_provider::catalog::RefreshStatus::Success,
         None,
     );
@@ -83,7 +84,7 @@ async fn health_provider_catalog_source_tier_policy() {
 
     // Simulate a stale fetch by setting the timestamp far in the past.
     catalog.set_last_success_for_tests(
-        Some(Instant::now() - Duration::from_secs(3600 * 3)),
+        Some(SystemClock::new().now_instant() - Duration::from_secs(3600 * 3)),
         djinn_provider::catalog::RefreshStatus::Success,
         None,
     );
