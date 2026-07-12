@@ -163,6 +163,28 @@ pub struct CacheCleanupConfig {
     /// candidates.
     /// Env: `DJINN_CACHE_CLEANUP_CARGO_DEBRIS_MAX_AGE_DAYS` (default `7`).
     pub cargo_debris_max_age_days: u64,
+
+    /// Warm-base idle retention in days before a `/cache/cargo-target/<project_id>`
+    /// directory is eligible for whole-base eviction.
+    /// Env: `DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS` (default `14`).
+    pub warm_base_idle_retention_days: u64,
+
+    /// Grace period before a newly-created or freshly-active warm base can be
+    /// considered idle, even if the recorded DB activity falls outside the
+    /// retention window. Protects warm bases that are mid-warm or about to be
+    /// seeded by a dispatched task run.
+    /// Env: `DJINN_CACHE_CLEANUP_WARM_BASE_GRACE_PERIOD_SECS` (default `300`).
+    pub warm_base_grace_period: Duration,
+
+    /// Disk free-space low watermark below which pressure-driven whole-base
+    /// eviction starts. Expressed as a fraction of total available bytes.
+    /// Env: `DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO` (default `0.15`).
+    pub warm_base_low_free_ratio: f64,
+
+    /// Disk free-space high watermark at which pressure-driven whole-base
+    /// eviction stops. Expressed as a fraction of total available bytes.
+    /// Env: `DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO` (default `0.25`).
+    pub warm_base_high_free_ratio: f64,
 }
 
 impl Default for CacheCleanupConfig {
@@ -173,6 +195,10 @@ impl Default for CacheCleanupConfig {
             sccache_max_age_hours: 24,
             cargo_debris_enabled: true,
             cargo_debris_max_age_days: 7,
+            warm_base_idle_retention_days: 14,
+            warm_base_grace_period: Duration::from_secs(300),
+            warm_base_low_free_ratio: 0.15,
+            warm_base_high_free_ratio: 0.25,
         }
     }
 }
@@ -203,13 +229,69 @@ impl CacheCleanupConfig {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(7);
 
+        let warm_base_idle_retention_days =
+            std::env::var("DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(14);
+
+        let warm_base_grace_period_secs =
+            std::env::var("DJINN_CACHE_CLEANUP_WARM_BASE_GRACE_PERIOD_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(300);
+
+        let warm_base_low_free_ratio =
+            std::env::var("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| (0.0..1.0).contains(v))
+                .unwrap_or(0.15);
+
+        let warm_base_high_free_ratio =
+            std::env::var("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| (0.0..1.0).contains(v))
+                .unwrap_or(0.25);
+
+        let warm_base_low_free_ratio = warm_base_low_free_ratio.min(warm_base_high_free_ratio);
+
         Self {
             mode,
             sccache_enabled,
             sccache_max_age_hours,
             cargo_debris_enabled,
             cargo_debris_max_age_days,
+            warm_base_idle_retention_days,
+            warm_base_grace_period: Duration::from_secs(warm_base_grace_period_secs),
+            warm_base_low_free_ratio,
+            warm_base_high_free_ratio,
         }
+    }
+
+    /// Validate warm-base watermark sanity: low must be <= high and both must
+    /// lie strictly inside [0, 1].
+    pub fn validate_warm_base_watermarks(&self) -> Result<(), String> {
+        if !(0.0..1.0).contains(&self.warm_base_low_free_ratio) {
+            return Err(format!(
+                "low_free_ratio must be in [0, 1), got {}",
+                self.warm_base_low_free_ratio
+            ));
+        }
+        if !(0.0..1.0).contains(&self.warm_base_high_free_ratio) {
+            return Err(format!(
+                "high_free_ratio must be in [0, 1), got {}",
+                self.warm_base_high_free_ratio
+            ));
+        }
+        if self.warm_base_low_free_ratio > self.warm_base_high_free_ratio {
+            return Err(format!(
+                "low_free_ratio ({}) must be <= high_free_ratio ({})",
+                self.warm_base_low_free_ratio, self.warm_base_high_free_ratio
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -327,6 +409,72 @@ mod tests {
         assert_eq!(config.sccache_max_age_hours, 24);
         assert!(config.cargo_debris_enabled);
         assert_eq!(config.cargo_debris_max_age_days, 7);
+        assert_eq!(config.warm_base_idle_retention_days, 14);
+        assert_eq!(config.warm_base_grace_period, Duration::from_secs(300));
+        assert!((config.warm_base_low_free_ratio - 0.15).abs() < f64::EPSILON);
+        assert!((config.warm_base_high_free_ratio - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cache_cleanup_config_from_env_ignores_invalid_numbers() {
+        // Set invalid values and ensure we fall back to defaults, not crash.
+        unsafe {
+            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS", "abc");
+            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_GRACE_PERIOD_SECS", "-1");
+            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO", "1.5");
+            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO", "nope");
+        }
+
+        let config = CacheCleanupConfig::from_env();
+        assert_eq!(config.warm_base_idle_retention_days, 14);
+        assert_eq!(config.warm_base_grace_period, Duration::from_secs(300));
+        assert!((config.warm_base_low_free_ratio - 0.15).abs() < f64::EPSILON);
+        assert!((config.warm_base_high_free_ratio - 0.25).abs() < f64::EPSILON);
+
+        unsafe {
+            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS");
+            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_GRACE_PERIOD_SECS");
+            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO");
+            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO");
+        }
+    }
+
+    #[test]
+    fn cache_cleanup_config_from_env_low_is_capped_to_high() {
+        unsafe {
+            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO", "0.9");
+            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO", "0.2");
+        }
+
+        let config = CacheCleanupConfig::from_env();
+        // Low should be clamped to high so the stop-at-high-watermark semantics
+        // are always defined.
+        assert!((config.warm_base_low_free_ratio - 0.2).abs() < f64::EPSILON);
+        assert!((config.warm_base_high_free_ratio - 0.2).abs() < f64::EPSILON);
+
+        unsafe {
+            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO");
+            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO");
+        }
+    }
+
+    #[test]
+    fn cache_cleanup_config_validates_watermarks() {
+        let valid = CacheCleanupConfig::default();
+        assert!(valid.validate_warm_base_watermarks().is_ok());
+
+        let mut low_invalid = valid.clone();
+        low_invalid.warm_base_low_free_ratio = -0.1;
+        assert!(low_invalid.validate_warm_base_watermarks().is_err());
+
+        let mut high_invalid = valid.clone();
+        high_invalid.warm_base_high_free_ratio = 1.0;
+        assert!(high_invalid.validate_warm_base_watermarks().is_err());
+
+        let mut inverted = valid.clone();
+        inverted.warm_base_low_free_ratio = 0.5;
+        inverted.warm_base_high_free_ratio = 0.3;
+        assert!(inverted.validate_warm_base_watermarks().is_err());
     }
 
     #[test]
