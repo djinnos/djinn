@@ -1,5 +1,8 @@
 use axum::body::Body;
+use std::time::Duration;
+
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
+use djinn_core::clock::{Clock, SystemClock};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -39,6 +42,89 @@ async fn health_returns_ok() {
     assert!(json["memory_mount"]["project_id"].is_null());
     assert!(json["memory_mount"]["detail"].is_null());
     assert!(json["memory_mount"]["last_error"].is_null());
+    assert!(json["provider_catalog"].is_object());
+    assert_eq!(json["provider_catalog"]["source_tier"], "embedded");
+    assert!(json["provider_catalog"]["fetched_at"].is_null());
+    assert!(json["provider_catalog"]["age_seconds"].is_null());
+    assert_eq!(json["provider_catalog"]["refresh_interval_seconds"], 3600);
+    assert_eq!(json["provider_catalog"]["last_refresh_status"], "never");
+    assert!(json["provider_catalog"]["last_refresh_error"].is_null());
+}
+
+/// Source-tier policy test: verify the catalog-only window used by the health
+/// endpoint (`2 * refresh_interval`) without relying on live network access.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_provider_catalog_source_tier_policy() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+
+    // Default state: never refreshed, so the source tier is embedded.
+    assert_eq!(
+        state.catalog().source_tier(Duration::from_secs(3600 * 2)),
+        djinn_provider::catalog::SourceTier::Embedded
+    );
+    assert!(state.catalog().last_successful_fetch_age().is_none());
+    assert_eq!(
+        state.catalog().last_refresh_status(),
+        djinn_provider::catalog::RefreshStatus::Never
+    );
+
+    // Simulate a recent successful fetch by directly setting the internal
+    // `fetched_at` monotonic timestamp. This keeps the test hermetic and
+    // avoids network access.
+    let catalog = state.catalog().clone();
+    catalog.set_last_success_for_tests(
+        Some(SystemClock::new().now_instant()),
+        djinn_provider::catalog::RefreshStatus::Success,
+        None,
+    );
+    assert_eq!(
+        state.catalog().source_tier(Duration::from_secs(3600 * 2)),
+        djinn_provider::catalog::SourceTier::Live
+    );
+
+    // Simulate a stale fetch by setting the timestamp far in the past.
+    catalog.set_last_success_for_tests(
+        Some(SystemClock::new().now_instant() - Duration::from_secs(3600 * 3)),
+        djinn_provider::catalog::RefreshStatus::Success,
+        None,
+    );
+    assert_eq!(
+        state.catalog().source_tier(Duration::from_secs(3600 * 2)),
+        djinn_provider::catalog::SourceTier::Stale
+    );
+}
+
+/// Serialization test for the `last_refresh_status == Error` branch, ensuring
+/// the error text is surfaced without requiring a live models.dev fetch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_provider_catalog_serialize_error_status() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let catalog = state.catalog().clone();
+    catalog.set_last_success_for_tests(
+        None,
+        djinn_provider::catalog::RefreshStatus::Error,
+        Some("simulated refresh failure".to_string()),
+    );
+
+    let app = server::router(state, false);
+    let req = axum::http::Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["provider_catalog"]["source_tier"], "embedded");
+    assert_eq!(json["provider_catalog"]["last_refresh_status"], "error");
+    assert_eq!(
+        json["provider_catalog"]["last_refresh_error"],
+        "simulated refresh failure"
+    );
+    assert!(json["provider_catalog"]["fetched_at"].is_null());
+    assert!(json["provider_catalog"]["age_seconds"].is_null());
+    assert_eq!(json["provider_catalog"]["refresh_interval_seconds"], 3600);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

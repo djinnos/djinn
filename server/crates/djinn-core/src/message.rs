@@ -2303,6 +2303,177 @@ Second rule."
         assert_eq!(parts[0]["text"], "visible");
     }
 
+    // ── OpenAI Responses: skip Anthropic-oriented provider-internal blocks ──
+
+    /// OpenAI Responses serialization (`to_openai_responses_input`) must skip
+    /// the shared Anthropic-oriented variants (Thinking, RedactedThinking,
+    /// Unknown) and OpenAIReasoning rather than emitting empty `output_text` /
+    /// `input_text` items. This guards the shared `ContentBlock` expansion from
+    /// regressing non-Anthropic request content: the newly shared variants must
+    /// not become empty text blocks or otherwise alter the established
+    /// Responses input shape.
+    #[test]
+    fn openai_responses_serialization_skips_thinking_redacted_unknown_blocks() {
+        let mut c = Conversation::new();
+        c.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "internal reasoning".into(),
+                    signature: Some("sig_abc".into()),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "opaque_data_blob".into(),
+                },
+                ContentBlock::Unknown {
+                    content_type: "custom_provider_block".into(),
+                    extra: {
+                        let mut m = serde_json::Map::new();
+                        m.insert("foo".into(), json!("bar"));
+                        m
+                    },
+                },
+                ContentBlock::text("visible output"),
+            ],
+            metadata: None,
+        });
+
+        let (_, input_items) = c.to_openai_responses_input();
+        assert_eq!(input_items.len(), 1);
+        assert_eq!(input_items[0]["role"], "assistant");
+        let content = input_items[0]["content"].as_array().unwrap();
+        // Only the single visible text block should survive as output_text.
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "output_text");
+        assert_eq!(content[0]["text"], "visible output");
+    }
+
+    /// When all content blocks are provider-internal, the Responses input must
+    /// not synthesize an empty-text item for the shared Anthropic variants.
+    /// Guards against the empty-text fallback being reintroduced for the
+    /// Responses path.
+    #[test]
+    fn openai_responses_serialization_drops_all_internal_blocks_without_empty_text() {
+        let mut c = Conversation::new();
+        c.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "deep thoughts".into(),
+                    signature: Some("sig".into()),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "redacted_data".into(),
+                },
+                ContentBlock::Unknown {
+                    content_type: "custom".into(),
+                    extra: serde_json::Map::new(),
+                },
+            ],
+            metadata: None,
+        });
+
+        let (_, input_items) = c.to_openai_responses_input();
+        // No items emitted at all — no empty-text placeholder.
+        assert_eq!(input_items.len(), 0);
+        // Explicitly assert none of the emitted items are empty output_text.
+        assert!(input_items.iter().all(|item| {
+            item.get("content")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    !arr.iter().any(|b| {
+                        b.get("type") == Some(&json!("output_text"))
+                            && b.get("text") == Some(&json!(""))
+                    })
+                })
+                .unwrap_or(true)
+        }));
+    }
+
+    /// Unsigned thinking (no signature) is also skipped by the Responses path.
+    /// This covers the historical-JSON deserialization shape once round-tripped
+    /// through storage and presented to the Responses serializer.
+    #[test]
+    fn openai_responses_serialization_skips_unsigned_thinking_block() {
+        // Simulate a historical unsigned thinking block coming back from DB.
+        let raw = json!({"type": "thinking", "thinking": "legacy reasoning"});
+        let block: ContentBlock = serde_json::from_value(raw).unwrap();
+        let mut c = Conversation::new();
+        c.push(Message {
+            role: Role::Assistant,
+            content: vec![block, ContentBlock::text("visible output")],
+            metadata: None,
+        });
+
+        let (_, input_items) = c.to_openai_responses_input();
+        assert_eq!(input_items.len(), 1);
+        let content = input_items[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "output_text");
+        assert_eq!(content[0]["text"], "visible output");
+    }
+
+    // ── Shared-schema round-trip through full JSON strings ──────────────────
+
+    /// All shared Anthropic-oriented variants round-trip through full JSON
+    /// string serialization/deserialization (simulating DB storage) and preserve
+    /// their shapes. This strengthens the individual serde tests by exercising
+    /// the complete set together via `serde_json::to_string` / `from_str`.
+    #[test]
+    fn all_shared_thinking_variants_round_trip_through_json_string() {
+        let blocks = vec![
+            ContentBlock::Thinking {
+                thinking: "signed reasoning".into(),
+                signature: Some("sig_xyz".into()),
+            },
+            ContentBlock::Thinking {
+                thinking: "unsigned reasoning".into(),
+                signature: None,
+            },
+            ContentBlock::RedactedThinking {
+                data: "opaque_blob==".into(),
+            },
+            ContentBlock::Unknown {
+                content_type: "future_block".into(),
+                extra: {
+                    let mut m = serde_json::Map::new();
+                    m.insert("key".into(), json!({"nested": [1, 2, 3]}));
+                    m
+                },
+            },
+        ];
+
+        for original in &blocks {
+            let json_str = serde_json::to_string(original).unwrap();
+            let deserialized: ContentBlock = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(original, &deserialized, "round-trip failed for: {json_str}");
+        }
+    }
+
+    /// Historical Thinking JSON that lacks `signature` (produced before the
+    /// schema expansion) deserializes as `ContentBlock::Thinking` with
+    /// `signature: None`, survives a full string round-trip, and remains the
+    /// `Thinking` variant — never falling back to `Unknown`.
+    #[test]
+    fn legacy_unsigned_thinking_json_round_trips_and_stays_thinking_variant() {
+        let legacy_json = r#"{"type":"thinking","thinking":"old stored reasoning"}"#;
+        let block: ContentBlock = serde_json::from_str(legacy_json).unwrap();
+        match &block {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "old stored reasoning");
+                assert_eq!(signature, &None);
+            }
+            other => panic!("expected Thinking variant, got {other:?}"),
+        }
+        // Round-trip back through a JSON string.
+        let re = serde_json::to_string(&block).unwrap();
+        let again: ContentBlock = serde_json::from_str(&re).unwrap();
+        assert_eq!(block, again);
+    }
+
     // ── Existing text/tool/image/document behavior preserved ───────────────
 
     /// Text, tool use, tool result, image, and document blocks continue to
