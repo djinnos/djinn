@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
 use serde::Serialize;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
@@ -112,6 +113,53 @@ struct HealthResponse {
     version: &'static str,
     database: crate::db::runtime::DatabaseRuntimeHealth,
     memory_mount: MemoryMountHealth,
+    provider_catalog: ProviderCatalogHealth,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProviderCatalogSourceTier {
+    Embedded,
+    Live,
+    Stale,
+}
+
+impl From<djinn_provider::catalog::SourceTier> for ProviderCatalogSourceTier {
+    fn from(tier: djinn_provider::catalog::SourceTier) -> Self {
+        match tier {
+            djinn_provider::catalog::SourceTier::Embedded => Self::Embedded,
+            djinn_provider::catalog::SourceTier::Live => Self::Live,
+            djinn_provider::catalog::SourceTier::Stale => Self::Stale,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProviderCatalogRefreshStatus {
+    Never,
+    Success,
+    Error,
+}
+
+impl From<djinn_provider::catalog::RefreshStatus> for ProviderCatalogRefreshStatus {
+    fn from(status: djinn_provider::catalog::RefreshStatus) -> Self {
+        match status {
+            djinn_provider::catalog::RefreshStatus::Never => Self::Never,
+            djinn_provider::catalog::RefreshStatus::Success => Self::Success,
+            djinn_provider::catalog::RefreshStatus::Error => Self::Error,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub(crate) struct ProviderCatalogHealth {
+    source_tier: ProviderCatalogSourceTier,
+    fetched_at: Option<String>,
+    age_seconds: Option<u64>,
+    refresh_interval_seconds: u64,
+    last_refresh_status: ProviderCatalogRefreshStatus,
+    last_refresh_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -188,11 +236,30 @@ pub(crate) struct MemoryMountHealth {
 }
 
 async fn health(State(state): State<AppState>) -> axum::Json<HealthResponse> {
+    let interval_secs = state.provider_catalog_refresh_interval_secs();
+    let max_age = Duration::from_secs(interval_secs.saturating_mul(2));
+    let catalog = state.catalog();
+    let age = catalog.last_successful_fetch_age();
+    let source_tier: ProviderCatalogSourceTier = catalog.source_tier(max_age).into();
+    let last_refresh_status: ProviderCatalogRefreshStatus = catalog.last_refresh_status().into();
+    let last_refresh_error = catalog.last_refresh_error();
+    // `CatalogService` only tracks monotonic `Instant` age; no wall-clock timestamp
+    // is exposed, so `fetched_at` is intentionally `None` rather than invented.
+    let fetched_at = None::<String>;
+
     axum::Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         database: state.database_health(),
         memory_mount: state.memory_mount_health().await,
+        provider_catalog: ProviderCatalogHealth {
+            source_tier,
+            fetched_at,
+            age_seconds: age.map(|d| d.as_secs()),
+            refresh_interval_seconds: interval_secs,
+            last_refresh_status,
+            last_refresh_error,
+        },
     })
 }
 
