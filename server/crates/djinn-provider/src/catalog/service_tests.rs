@@ -1170,6 +1170,10 @@ fn freshness_initial_state_is_never_and_embedded() {
     assert_eq!(catalog.last_refresh_status(), RefreshStatus::Never);
     assert!(catalog.last_refresh_error().is_none());
     assert!(
+        catalog.last_successful_fetch_time().is_none(),
+        "embedded data has no wall-clock live-success timestamp"
+    );
+    assert!(
         catalog.last_successful_fetch_age().is_none(),
         "no live fetch has occurred yet"
     );
@@ -1180,38 +1184,44 @@ fn freshness_initial_state_is_never_and_embedded() {
     );
 }
 
-/// After a successful refresh, the status is `Success`, the error is cleared,
-/// a successful-fetch age is recorded, and the source tier is `Live` within the
-/// freshness window.  This exercises the accessors end-to-end without a network
-/// call by composing directly under the write lock (mirroring `refresh()`).
+/// A deterministic successful state exposes its exact wall-clock success time,
+/// while age and source tier continue to derive solely from the monotonic time.
 #[test]
-fn freshness_after_success_is_live_with_age() {
+fn freshness_after_success_exposes_wall_time_and_monotonic_freshness() {
     let catalog = CatalogService::new();
-    {
-        let mut data = catalog.inner.write();
-        let providers = vec![mk_custom_provider("openai")];
-        let mut models_idx = HashMap::new();
-        models_idx.insert("openai".to_string(), vec![mk_seed_model("gpt-x", "openai")]);
-        compose_catalog(&mut data, providers, models_idx);
-        data.fetched_at = Some(SystemClock::new().now_instant());
-        data.last_refresh_status = RefreshStatus::Success;
-        data.last_refresh_error = None;
-    }
+    let monotonic_success = SystemClock::new().now_instant() - Duration::from_secs(30);
+    let expected_wall_success = SystemTime::UNIX_EPOCH + Duration::from_secs(1_735_689_600);
+    catalog.set_last_success_times_for_tests(
+        Some(monotonic_success),
+        Some(expected_wall_success),
+        RefreshStatus::Success,
+        None,
+    );
 
     assert_eq!(catalog.last_refresh_status(), RefreshStatus::Success);
     assert!(catalog.last_refresh_error().is_none());
+    assert_eq!(
+        catalog.last_successful_fetch_time(),
+        Some(expected_wall_success),
+        "the observability timestamp must be the exact successful wall-clock value"
+    );
 
     let age = catalog
         .last_successful_fetch_age()
         .expect("age must be Some after a successful fetch");
     assert!(
-        age <= Duration::from_secs(5),
-        "age should be near-zero immediately after success; got {age:?}"
+        age >= Duration::from_secs(30),
+        "age must derive from the seeded monotonic timestamp; got {age:?}"
     );
     assert_eq!(
         catalog.source_tier(Duration::from_secs(60)),
         SourceTier::Live,
-        "within the freshness window the tier is Live"
+        "the monotonic 30-second age is within the freshness window"
+    );
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(20)),
+        SourceTier::Stale,
+        "source tier must use monotonic age rather than the wall-clock timestamp"
     );
 }
 
@@ -1222,21 +1232,22 @@ fn freshness_after_success_is_live_with_age() {
 #[test]
 fn freshness_success_then_failure_preserves_catalog_and_records_error() {
     let catalog = CatalogService::new();
-    // Seed a successful refresh.
-    {
-        let mut data = catalog.inner.write();
-        let providers = vec![mk_custom_provider("openai")];
-        let mut models_idx = HashMap::new();
-        models_idx.insert("openai".to_string(), vec![mk_seed_model("gpt-x", "openai")]);
-        compose_catalog(&mut data, providers, models_idx);
-        data.fetched_at = Some(SystemClock::new().now_instant());
-        data.last_refresh_status = RefreshStatus::Success;
-        data.last_refresh_error = None;
-    }
-    assert!(catalog.list_providers().iter().any(|p| p.id == "openai"));
+    catalog.add_custom_provider(
+        mk_custom_provider("openai"),
+        vec![mk_seed_model("gpt-x", "openai")],
+    );
+    let monotonic_success = SystemClock::new().now_instant() - Duration::from_secs(90);
+    let expected_wall_success = SystemTime::UNIX_EPOCH + Duration::from_secs(1_735_689_600);
+    catalog.set_last_success_times_for_tests(
+        Some(monotonic_success),
+        Some(expected_wall_success),
+        RefreshStatus::Success,
+        None,
+    );
+    assert_eq!(catalog.source_tier(Duration::from_secs(60)), SourceTier::Stale);
 
     // Now simulate a failing refresh (the Err arm): status flips to Error, an
-    // error message is recorded, but the active catalog is left untouched.
+    // error message is recorded, but neither successful timestamp is changed.
     {
         let mut data = catalog.inner.write();
         data.last_refresh_status = RefreshStatus::Error;
@@ -1250,15 +1261,26 @@ fn freshness_success_then_failure_preserves_catalog_and_records_error() {
         catalog.last_refresh_error().as_deref(),
         Some("models.dev returned HTTP 503")
     );
-    // The active catalog survived.
     assert!(
         catalog.list_providers().iter().any(|p| p.id == "openai"),
         "the previous successful catalog must still be served after a failure"
     );
-    // The last successful fetch age is still available.
+    assert_eq!(
+        catalog.last_successful_fetch_time(),
+        Some(expected_wall_success),
+        "a failed refresh must retain the prior wall-clock success timestamp"
+    );
+    let age = catalog
+        .last_successful_fetch_age()
+        .expect("the monotonic success timestamp must persist after a failure");
     assert!(
-        catalog.last_successful_fetch_age().is_some(),
-        "fetch age must persist after a failure so the tier can be computed"
+        age >= Duration::from_secs(90),
+        "the error must not reset monotonic freshness; got {age:?}"
+    );
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Stale,
+        "source tier must still derive from the retained monotonic timestamp"
     );
 }
 
