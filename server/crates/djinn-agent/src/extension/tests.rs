@@ -19,6 +19,7 @@ mod edit_dispatch_tests;
 mod epic_extension_tests;
 mod evidence_spike_dispatch_tests;
 mod gate_guard_dispatch_tests;
+mod jit_trace_tests;
 mod lsp_dispatch_tests;
 mod lsp_tool_boundary_tests;
 mod memory_dispatch_tests;
