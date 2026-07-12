@@ -1400,6 +1400,7 @@ dependencies = [
  "djinn-db",
  "djinn-image-builder",
  "djinn-k8s",
+ "djinn-provider",
  "djinn-runtime",
  "djinn-stack",
  "djinn-workspace",

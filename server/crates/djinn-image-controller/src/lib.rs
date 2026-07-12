@@ -53,8 +53,8 @@ pub use retention::{
     UnsafeImage, ZotRepository, ZotTag,
 };
 pub use retention_preflight::{
-    PreflightError, PreflightOutcome, RetentionPreflightConfig, ZotStateError, ZotStateSource,
-    adapt_selected_images, run_preflight,
+    PreflightError, PreflightOutcome, RetentionPreflightConfig, ZotHttpAuth, ZotHttpConfig,
+    ZotHttpStateSource, ZotStateError, ZotStateSource, adapt_selected_images, run_preflight,
 };
 pub use types::{BuildRequest, BuildStatus, ProjectImageView};
 pub use watcher::ImageBuildWatcher;

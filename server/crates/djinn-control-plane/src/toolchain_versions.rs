@@ -54,7 +54,7 @@ pub async fn fetch_toolchain_versions() -> BTreeMap<String, Vec<String>> {
         return map.clone();
     }
 
-    let client = HttpClient::new(FETCH_TIMEOUT);
+    let client = HttpClient::new(FETCH_TIMEOUT).ok();
 
     let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for lang in LANGS {
