@@ -151,6 +151,22 @@ fn collapse_interruption_notices(
     })
 }
 
+/// Consume the exact stable ids included in a provider prompt after its stream
+/// has been created. Keeping this at the provider-start boundary makes the
+/// durable one-shot behavior directly testable.
+async fn consume_started_interruption_notices(
+    notice_repo: &ChatInterruptionNoticeRepository,
+    interruption_notice_ids: &mut Vec<String>,
+) -> djinn_db::Result<()> {
+    if interruption_notice_ids.is_empty() {
+        return Ok(());
+    }
+
+    notice_repo.mark_consumed(interruption_notice_ids).await?;
+    interruption_notice_ids.clear();
+    Ok(())
+}
+
 /// Whether `msg` is a projected compaction summary produced by
 /// `load_conversation` when a completed durable boundary exists.
 ///
@@ -1335,16 +1351,15 @@ async fn run_chat_loop(ctx: ChatLoopContext) {
         // Provider stream creation is the model-call start boundary. Only now
         // consume exactly the durable ids which were included in the reminder.
         // A failed initialization above leaves this vector and the rows intact.
-        if !interruption_notice_ids.is_empty() {
-            let notice_repo = ChatInterruptionNoticeRepository::new(state.db().clone());
-            match notice_repo.mark_consumed(&interruption_notice_ids).await {
-                Ok(()) => interruption_notice_ids.clear(),
-                Err(error) => tracing::warn!(
-                    session_id=%session_id,
-                    error=%error,
-                    "failed to consume started chat interruption notices"
-                ),
-            }
+        let notice_repo = ChatInterruptionNoticeRepository::new(state.db().clone());
+        if let Err(error) =
+            consume_started_interruption_notices(&notice_repo, &mut interruption_notice_ids).await
+        {
+            tracing::warn!(
+                session_id=%session_id,
+                error=%error,
+                "failed to consume started chat interruption notices"
+            );
         }
 
         tokio::pin!(stream);
@@ -1693,8 +1708,72 @@ fn clean_generated_title(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers;
     use djinn_core::message::MessageMeta;
+    use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
     use serde_json;
+    use tokio_util::sync::CancellationToken;
+
+    struct SuccessfulProvider;
+
+    impl LlmProvider for SuccessfulProvider {
+        fn name(&self) -> &str {
+            "successful-test-provider"
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _conversation: &'a Conversation,
+            _tools: &'a [serde_json::Value],
+            _tool_choice: Option<ToolChoice>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            std::pin::Pin<
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                Ok(Box::pin(futures::stream::iter(vec![Ok(StreamEvent::Done)]))
+                    as std::pin::Pin<
+                        Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                    >)
+            })
+        }
+    }
+
+    struct FailingProvider;
+
+    impl LlmProvider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing-test-provider"
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _conversation: &'a Conversation,
+            _tools: &'a [serde_json::Value],
+            _tool_choice: Option<ToolChoice>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            std::pin::Pin<
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Err(anyhow::anyhow!("provider unavailable")) })
+        }
+    }
 
     fn compaction_marker_metadata() -> serde_json::Value {
         serde_json::json!({
@@ -1728,6 +1807,134 @@ mod tests {
             interrupted_at: interrupted_at.to_owned(),
             consumed_at: None,
         }
+    }
+
+    #[tokio::test]
+    async fn successful_provider_start_consumes_included_notices_once() {
+        let db = test_helpers::create_test_db();
+        let session_id = uuid::Uuid::now_v7().to_string();
+        djinn_db::test_support::seed_chat_session_row(&db, &session_id).await;
+        let repo = ChatInterruptionNoticeRepository::new(db.clone());
+        let first = repo
+            .create(CreateChatInterruptionNotice {
+                session_id: &session_id,
+                session_message_id: None,
+                discarded_tool_calls_count: 1,
+            })
+            .await
+            .unwrap();
+        let second = repo
+            .create(CreateChatInterruptionNotice {
+                session_id: &session_id,
+                session_message_id: None,
+                discarded_tool_calls_count: 2,
+            })
+            .await
+            .unwrap();
+        let mut included_ids =
+            collapse_interruption_notices(&repo.list_unconsumed(&session_id).await.unwrap())
+                .expect("reminder for notices")
+                .notice_ids;
+
+        let state = AppState::new(db, CancellationToken::new());
+        let provider = SuccessfulProvider;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut conversation = Conversation::new();
+        conversation.push(Message::system("preamble"));
+        assert!(
+            init_provider_stream(
+                &state,
+                &provider,
+                &mut conversation,
+                &[],
+                &tx,
+                &session_id,
+                128_000,
+                &mut 0,
+            )
+            .await
+            .is_ok()
+        );
+
+        consume_started_interruption_notices(&repo, &mut included_ids)
+            .await
+            .expect("successful provider start consumes included ids");
+        assert!(included_ids.is_empty());
+        assert!(repo.list_unconsumed(&session_id).await.unwrap().is_empty());
+        assert!(
+            collapse_interruption_notices(&repo.list_unconsumed(&session_id).await.unwrap())
+                .is_none()
+        );
+        assert_ne!(first.interruption_notice_id, second.interruption_notice_id);
+    }
+
+    #[tokio::test]
+    async fn failed_provider_start_leaves_notices_retryable() {
+        let db = test_helpers::create_test_db();
+        let session_id = uuid::Uuid::now_v7().to_string();
+        djinn_db::test_support::seed_chat_session_row(&db, &session_id).await;
+        let repo = ChatInterruptionNoticeRepository::new(db.clone());
+        let first = repo
+            .create(CreateChatInterruptionNotice {
+                session_id: &session_id,
+                session_message_id: None,
+                discarded_tool_calls_count: 2,
+            })
+            .await
+            .unwrap();
+        let second = repo
+            .create(CreateChatInterruptionNotice {
+                session_id: &session_id,
+                session_message_id: None,
+                discarded_tool_calls_count: 3,
+            })
+            .await
+            .unwrap();
+        let initial_reminder =
+            collapse_interruption_notices(&repo.list_unconsumed(&session_id).await.unwrap())
+                .expect("reminder for notices");
+
+        let state = AppState::new(db, CancellationToken::new());
+        let provider = FailingProvider;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut conversation = Conversation::new();
+        conversation.push(Message::system("preamble"));
+        assert!(matches!(
+            init_provider_stream(
+                &state,
+                &provider,
+                &mut conversation,
+                &[],
+                &tx,
+                &session_id,
+                128_000,
+                &mut 0,
+            )
+            .await,
+            Err(StreamInitOutcome::UnrecoverableBreak)
+        ));
+
+        // The failed-init branch must not consume: retry includes the same ids.
+        let retry_reminder =
+            collapse_interruption_notices(&repo.list_unconsumed(&session_id).await.unwrap())
+                .expect("failed start leaves reminder retryable");
+        assert_eq!(retry_reminder.notice_ids, initial_reminder.notice_ids);
+        assert!(
+            retry_reminder
+                .message
+                .text_content()
+                .contains("5 pending tool call(s)")
+        );
+        assert!(
+            retry_reminder
+                .notice_ids
+                .contains(&first.interruption_notice_id)
+        );
+        assert!(
+            retry_reminder
+                .notice_ids
+                .contains(&second.interruption_notice_id)
+        );
     }
 
     #[test]
