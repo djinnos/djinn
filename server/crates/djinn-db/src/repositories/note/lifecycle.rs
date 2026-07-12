@@ -75,9 +75,10 @@ pub struct LifecycleSweepProjection {
 
 /// Lifecycle status values stored in `notes.status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NoteStatus {
+pub enum NoteStatus {
     Active,
     Archived,
+    Deprecated,
 }
 
 impl NoteStatus {
@@ -85,6 +86,7 @@ impl NoteStatus {
         match self {
             Self::Active => "active",
             Self::Archived => "archived",
+            Self::Deprecated => "deprecated",
         }
     }
 }
@@ -95,7 +97,7 @@ impl NoteRepository {
     /// idempotent for sweep callers: rows that are already archived or otherwise
     /// moved out of the expected status are left untouched and reported as not
     /// changed.
-    pub(crate) async fn set_note_status(
+    pub async fn set_note_status(
         &self,
         note_id: &str,
         current_status: NoteStatus,
