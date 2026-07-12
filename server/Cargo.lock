@@ -7254,7 +7254,6 @@ dependencies = [
  "hyper-util",
  "indexmap 2.14.0",
  "insta",
- "lazy_static",
  "libc",
  "libgit2-sys",
  "log",
