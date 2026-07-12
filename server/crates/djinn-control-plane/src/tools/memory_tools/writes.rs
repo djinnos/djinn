@@ -1,5 +1,8 @@
 use super::lifecycle::schedule_summary_regeneration;
-use super::write_dedup::{LlmMemoryWriteDedupDecider, maybe_apply_write_dedup};
+use super::write_dedup::{
+    LlmMemoryWriteDedupDecider, WriteDedupOutcome, apply_created_note_supersede,
+    maybe_apply_write_dedup,
+};
 use super::write_dedup_types::{MemoryWriteDedupDecider, PendingWriteDedup};
 use super::write_services::{create_note, maybe_update_singleton_note, note_repository};
 use super::{
@@ -54,7 +57,7 @@ impl DjinnMcpServer {
             return Json(response);
         }
 
-        if let Some(response) = maybe_apply_write_dedup(
+        match maybe_apply_write_dedup(
             &repo,
             decider,
             PendingWriteDedup {
@@ -69,15 +72,44 @@ impl DjinnMcpServer {
         )
         .await
         {
-            if let Some(note_id) = response.id.as_deref()
-                && response.error.is_none()
-            {
-                schedule_summary_regeneration(self, note_id);
+            WriteDedupOutcome::Respond(response) => {
+                let response = *response;
+                if let Some(note_id) = response.id.as_deref()
+                    && response.error.is_none()
+                {
+                    schedule_summary_regeneration(self, note_id);
+                }
+                Json(response)
             }
-            return Json(response);
+            WriteDedupOutcome::CreateNew => {
+                Json(create_note(self, &repo, &project_id, &p, &tags_json).await)
+            }
+            WriteDedupOutcome::SupersedeExisting {
+                candidate_id,
+                reason,
+            } => {
+                // Keep incoming creation exactly on the ordinary memory_write path.
+                let response = create_note(self, &repo, &project_id, &p, &tags_json).await;
+                if let Some(new_note_id) = response.id.as_deref()
+                    && response.error.is_none()
+                    && let Err(error) =
+                        apply_created_note_supersede(&repo, new_note_id, &candidate_id, &reason)
+                            .await
+                {
+                    // The new note has already been durably created. Keep its normal
+                    // public creation response while making incomplete association
+                    // work observable for operators.
+                    tracing::warn!(
+                        decision_kind = "supersede_existing",
+                        new_note_id,
+                        candidate_id,
+                        error,
+                        "memory_write supersede mutation failed after creation"
+                    );
+                }
+                Json(response)
+            }
         }
-
-        Json(create_note(self, &repo, &project_id, &p, &tags_json).await)
     }
 
     /// Edit an existing note. Operations: "append" (add to end), "prepend" (add
