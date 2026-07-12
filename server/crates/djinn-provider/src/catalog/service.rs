@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::{Credential, Model, Pricing, Provider};
@@ -144,7 +144,16 @@ struct CatalogData {
     /// data so a live `models.dev` refresh can recompose the active catalog
     /// without dropping user-registered entries.
     custom_providers: HashMap<String, CustomCatalogProvider>,
+    /// Monotonic time of the last successful live `models.dev` refresh.  This is
+    /// the sole basis for age and [`SourceTier`] calculations; it is never set by
+    /// embedded seeding and persists across failed refreshes.
     fetched_at: Option<Instant>,
+    /// Wall-clock time of the same last successful live `models.dev` refresh,
+    /// captured atomically with `fetched_at`.  Used for RFC3339 observability
+    /// downstream; never set by embedded seeding and persists across failed
+    /// refreshes.  Stored as `SystemTime` because it is the idiomatic clock for
+    /// wall timestamps and is panic-free when converted to `OffsetDateTime`.
+    fetched_at_wall: Option<SystemTime>,
     /// Outcome of the most recent live refresh attempt (`Never` until the first
     /// successful refresh).  Failed or rejected refreshes transition to `Error`
     /// without touching the active catalog.
@@ -237,7 +246,9 @@ impl CatalogService {
                     );
                     return;
                 }
-                let now = SystemClock::new().now_instant();
+                let clock = SystemClock::new();
+                let now = clock.now_instant();
+                let now_wall = clock.now();
                 let provider_count = providers.len();
                 let model_count: usize = models_idx.values().map(Vec::len).sum();
                 // Compose the full catalog (upstream + builtins + retained
@@ -245,6 +256,7 @@ impl CatalogService {
                 let mut data = self.inner.write();
                 compose_catalog(&mut data, providers, models_idx);
                 data.fetched_at = Some(now);
+                data.fetched_at_wall = Some(now_wall);
                 data.last_refresh_status = RefreshStatus::Success;
                 data.last_refresh_error = None;
                 tracing::info!(
@@ -368,6 +380,16 @@ impl CatalogService {
         self.inner.read().last_refresh_error.clone()
     }
 
+    /// Wall-clock time of the last successful live `models.dev` fetch, or `None`
+    /// when no live fetch has ever succeeded.  Captured at the same commit as
+    /// the monotonic `fetched_at` value and preserved across failed refreshes.
+    ///
+    /// Returns an owned, `Copy`-able value suitable for downstream RFC3339
+    /// formatting (e.g. `time::format_description::well_known::Rfc3339`).
+    pub fn last_successful_fetch_time(&self) -> Option<SystemTime> {
+        self.inner.read().fetched_at_wall
+    }
+
     /// Elapsed time since the last successful live `models.dev` fetch, or `None`
     /// when no live fetch has ever succeeded (only embedded/seeded data is
     /// served).  Uses the monotonic clock so the value is stable across wall-clock
@@ -420,6 +442,35 @@ impl CatalogService {
     ) {
         let mut data = self.inner.write();
         data.fetched_at = fetched_at;
+        data.fetched_at_wall = fetched_at.map(|i| {
+            // Best-effort deterministic wall estimate: one nanosecond of simulated
+            // monotonic time maps to one nanosecond of wall time since the Unix
+            // epoch. This is an arbitrary but stable mapping so tests can format
+            // a predictable RFC3339 string without relying on real time.
+            let nanos = u64::try_from(i.elapsed().as_nanos()).unwrap_or_default();
+            SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos)
+        });
+        data.last_refresh_status = status;
+        data.last_refresh_error = error;
+    }
+
+    /// Test-only helper to seed *both* the monotonic and wall-clock timestamps of
+    /// the last successful live fetch.  This lets dependent-crate endpoint tests
+    /// set a deterministic wall-clock value (e.g. for RFC3339 serialization) and a
+    /// deterministic monotonic value without network access.
+    ///
+    /// Not used in production code; exposed as `pub` so dependent crates can drive
+    /// catalog state in their own tests.
+    pub fn set_last_success_times_for_tests(
+        &self,
+        fetched_at: Option<Instant>,
+        fetched_at_wall: Option<SystemTime>,
+        status: RefreshStatus,
+        error: Option<String>,
+    ) {
+        let mut data = self.inner.write();
+        data.fetched_at = fetched_at;
+        data.fetched_at_wall = fetched_at_wall;
         data.last_refresh_status = status;
         data.last_refresh_error = error;
     }
