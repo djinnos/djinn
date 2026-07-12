@@ -405,6 +405,25 @@ impl CatalogService {
         }
     }
 
+    /// Test-only helper to seed the monotonic timestamp of the last successful
+    /// live fetch and its status/error. This lets downstream health/observability
+    /// tests exercise embedded/live/stale semantics without hitting models.dev.
+    ///
+    /// Not used in production code; exposed as `pub` so dependent crates can
+    /// drive catalog state in their own tests (dependent crates do not see
+    /// `#[cfg(test)]` helpers of a library dependency).
+    pub fn set_last_success_for_tests(
+        &self,
+        fetched_at: Option<Instant>,
+        status: RefreshStatus,
+        error: Option<String>,
+    ) {
+        let mut data = self.inner.write();
+        data.fetched_at = fetched_at;
+        data.last_refresh_status = status;
+        data.last_refresh_error = error;
+    }
+
     // ── Write accessors ───────────────────────────────────────────────────────
 
     /// Inject synthetic catalog entries for built-in providers that have no
