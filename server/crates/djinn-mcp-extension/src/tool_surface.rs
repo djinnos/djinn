@@ -142,18 +142,18 @@ fn collect_operation_diagnostics(
         return;
     };
     if let Some(properties) = object.get("properties").and_then(Value::as_object) {
-        if let Some(operation_schema) = properties.get("operation") {
-            if let Some(enum_values) = string_enum(operation_schema) {
-                let enum_set: BTreeSet<&str> = enum_values.iter().map(String::as_str).collect();
-                for candidate in extract_operation_candidates(description, &enum_set) {
-                    if !enum_set.contains(candidate.as_str()) && !is_allowlisted(&candidate) {
-                        diagnostics.push(OperationEnumDiagnostic {
-                            tool_name: tool_name.to_string(),
-                            field_path: format!("{path}.properties.operation"),
-                            nearest_enum_values: nearest_enum_values(&candidate, &enum_values),
-                            missing_mentioned_value: candidate,
-                        });
-                    }
+        if let Some(operation_schema) = properties.get("operation")
+            && let Some(enum_values) = string_enum(operation_schema)
+        {
+            let enum_set: BTreeSet<&str> = enum_values.iter().map(String::as_str).collect();
+            for candidate in extract_operation_candidates(description, &enum_set) {
+                if !enum_set.contains(candidate.as_str()) && !is_allowlisted(&candidate) {
+                    diagnostics.push(OperationEnumDiagnostic {
+                        tool_name: tool_name.to_string(),
+                        field_path: format!("{path}.properties.operation"),
+                        nearest_enum_values: nearest_enum_values(&candidate, &enum_values),
+                        missing_mentioned_value: candidate,
+                    });
                 }
             }
         }
@@ -234,6 +234,9 @@ fn extract_operation_candidates(
             .rev()
             .take(48)
             .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>()
             .to_ascii_lowercase()
             .contains("operation");
         if is_operation_token(candidate) && (operation_context || enum_values.contains(candidate)) {
@@ -243,7 +246,7 @@ fn extract_operation_candidates(
         remainder = &after_start[end + 1..];
     }
 
-    for list in description.split(|character: char| matches!(character, ';' | '.' | '\n')) {
+    for list in description.split([';', '.', '\n']) {
         let mut values = list_values(list);
         if values.len() < 2 {
             continue;
