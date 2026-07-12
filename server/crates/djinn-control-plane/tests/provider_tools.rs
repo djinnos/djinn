@@ -1445,6 +1445,28 @@ impl Drop for RestoreCatalogUrl {
     }
 }
 
+/// Poll `catalog.find_model(id)` until it returns `Some`, or time out after
+/// `timeout`. The refresh loop fetches on a periodic tick, so the model does not
+/// appear instantly — the poll proves it arrives through the tick, not a test-
+/// forced direct call.
+async fn wait_for_catalog_model(
+    catalog: &djinn_provider::catalog::CatalogService,
+    id: &str,
+    timeout: std::time::Duration,
+) {
+    let poll = std::time::Duration::from_millis(20);
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if catalog.find_model(id).is_some() {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for model {id} to appear via periodic refresh tick");
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_restart() {
     let _guard = CATALOG_URL_LOCK.lock().await;
@@ -1489,7 +1511,7 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
         })
     };
 
-    // Initial live catalog load.
+    // Initial live catalog load: the mock returns two models.
     let initial = openai_payload(json!({
         "gpt-5.3-codex": model("gpt-5.3-codex", "GPT-5.3 Codex"),
         "gpt-5.2": model("gpt-5.2", "GPT-5.2")
@@ -1501,13 +1523,40 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
         )
         .await;
 
-    // This calls the same production refresh path used by the her4 refresh owner,
-    // but deterministically against the mocked upstream response.
-    harness.state().catalog().refresh().await;
+    // ── Drive the her4 refresh owner ────────────────────────────────────────
+    //
+    // We spawn the *actual* `run_provider_catalog_refresh_loop` — the single
+    // owner that production starts in `AppState::startup`. A short deterministic
+    // interval lets the periodic tick fire quickly. The `CatalogService` is
+    // `Arc<RwLock<_>>`-backed and `Clone`, so the spawned loop and the harness
+    // share one catalog instance: a refresh inside the loop is visible to the
+    // test through `harness.state().catalog()`.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let refresh_catalog = harness.state().catalog().clone();
+    let refresh_interval = std::time::Duration::from_millis(100);
+    let refresh_handle = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            djinn_provider::catalog::run_provider_catalog_refresh_loop(
+                refresh_catalog,
+                refresh_interval,
+                cancel,
+            )
+            .await;
+        })
+    };
+
+    // The boot phase refreshes immediately; wait for the initial model to land.
+    wait_for_catalog_model(
+        harness.state().catalog(),
+        "openai/gpt-5.2",
+        std::time::Duration::from_secs(5),
+    )
+    .await;
     assert_eq!(
         harness.state().catalog().last_refresh_status(),
         djinn_provider::catalog::RefreshStatus::Success,
-        "initial mocked refresh should succeed"
+        "boot refresh via the owner loop should succeed"
     );
 
     let connected = harness
@@ -1527,10 +1576,16 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
     );
     assert!(
         !ids.contains(&"openai/gpt-5.2.nano".to_string()),
-        "dotted model should not appear before refresh"
+        "dotted model should not appear before the periodic tick picks it up"
     );
 
-    // One deterministic refresh tick: the mock upstream now returns the new model.
+    // ── Change the mocked upstream response ────────────────────────────────
+    //
+    // Reset the mock server and register the updated payload containing the new
+    // dotted model. The same running application/catalog state — no restart,
+    // no reconstruction — now sees a different upstream on the next periodic
+    // tick of the existing refresh owner.
+    server.reset().await;
     let refreshed = openai_payload(json!({
         "gpt-5.3-codex": model("gpt-5.3-codex", "GPT-5.3 Codex"),
         "gpt-5.2": model("gpt-5.2", "GPT-5.2"),
@@ -1543,12 +1598,22 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
         )
         .await;
 
-    harness.state().catalog().refresh().await;
-    assert_eq!(
-        harness.state().catalog().last_refresh_status(),
-        djinn_provider::catalog::RefreshStatus::Success,
-        "refreshed mocked refresh should succeed"
-    );
+    // ── Wait for one periodic tick to fetch the changed response ────────────
+    //
+    // The test never calls `catalog().refresh()` directly. The new model only
+    // appears because the refresh owner's periodic tick (`ticker.tick()` →
+    // `catalog.refresh()`) re-fetches the mock and swaps in the updated catalog.
+    // If that tick stopped invoking refresh, this wait would time out.
+    wait_for_catalog_model(
+        harness.state().catalog(),
+        "openai/gpt-5.2.nano",
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+
+    // Stop the owner loop; subsequent assertions use the now-refreshed catalog.
+    cancel.cancel();
+    let _ = refresh_handle.await;
 
     let connected_after = harness
         .call_tool("provider_models_connected", json!({}))
