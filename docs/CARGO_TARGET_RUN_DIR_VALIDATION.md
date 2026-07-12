@@ -2,6 +2,11 @@
 
 This runbook verifies that per-task-run Cargo target directories prevent same-project worker Pods from contending on Cargo's build-directory lock, and identifies the log fields operators should use to compare seed/cleanup behavior against storage budgets.
 
+For the canonical cross-path rollout order, ownership, stop conditions, and
+rollback/rebuild procedures for Zot, sccache, run-root debris, and warm-base
+cleanup, use [Shared-cache cleanup rollout and rollback runbook](SHARED_CACHE_CLEANUP_ROLLOUT.md).
+That runbook does not change the UUID run-directory lifecycle invariants below.
+
 ## What is expected
 
 - Task-run Pods set `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`.
