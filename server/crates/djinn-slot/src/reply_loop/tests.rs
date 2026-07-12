@@ -31,6 +31,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+mod anthropic_replay;
+
 /// Process-wide mutex that serializes the soft-budget tests' mutations of
 /// `DJINN_SESSION_BUDGET_*` env vars. The reply loop reads its
 /// `SessionBudgetPolicy` via `SessionBudgetPolicy::from_env()` at the start of

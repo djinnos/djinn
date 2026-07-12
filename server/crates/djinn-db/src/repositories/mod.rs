@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod audit_sampler;
+pub mod chat_interruption_notice;
 pub mod code_chunk;
 pub mod commit_file_changes;
 pub mod dispatch_pause;
@@ -41,6 +42,7 @@ pub mod usage_analytics;
 pub mod user;
 pub mod user_settings;
 pub mod verify_run;
+pub mod warm_base_activity;
 
 /// Render `count` Postgres positional placeholders starting at `$start`.
 ///

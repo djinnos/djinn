@@ -40,6 +40,9 @@ pub use repositories::{
         MergedChangeRow, RecordOutcomeParams, SampleFrameRow, SamplePolicyRow, SelectionRow,
         UnmaterializedSelection, UpsertMergedChangeParams,
     },
+    chat_interruption_notice::{
+        ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
+    },
     code_chunk::{
         ChunkAndEmbedReport, CodeChunk, CodeChunkEmbeddingProvider, CodeChunkRepairEmbeddingRow,
         CodeChunkRepository, CodeChunkSearchHit, CodeChunkVectorBackend, CodeChunkVectorMatch,
@@ -159,5 +162,6 @@ pub use repositories::{
     },
     user::{User, UserRepository},
     user_settings::UserSettingsRepository,
+    warm_base_activity::{WarmBaseActivity, WarmBaseActivityRepository},
 };
 pub use short_id::{ResolvedEntity, resolve_short_ids};
