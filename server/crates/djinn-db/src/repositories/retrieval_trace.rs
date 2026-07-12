@@ -1,44 +1,17 @@
-//! Retrieval trace repository: durable storage for memory recall traces
-//! (epic 5wdh / proposal ykkj phase 1).
-//!
-//! Provides insert, list/filter, and detail primitives for
-//! `retrieval_traces` rows. Each row records one dispatch-injection event
-//! with its capped candidate set, cap metadata, optional sampling metadata,
-//! durations, and estimated injected tokens.
-//!
-//! Errors are returned as `Result` so downstream instrumentation can log and
-//! continue fail-open without changing injection output.
-//!
-//! ## Data-layer contract for sibling epics
-//!
-//! The persisted trace shape is consumed by two sibling epics:
-//!
-//! - **`mwtv`** (dispatch injection instrumentation) writes trace rows via
-//!   [`RetrievalTraceRepository::insert`] and populates each
-//!   [`TraceCandidate`] with classification metadata (`outcome`,
-//!   `skipped_reason`, `rank`, `confidence`, `source`, `scope`).
-//!
-//! - **`liso`** (`memory_recall_trace` MCP tooling) reads trace rows via
-//!   [`RetrievalTraceRepository::list_by_project`] /
-//!   [`RetrievalTraceRepository::get_by_id`] and exposes the persisted
-//!   identity and metadata fields to operators.
-//!
-//! ### Required persisted fields per trace row
-//!
-//! | Layer | Field(s) |
-//! |-------|----------|
-//! | Row-level | `id`, `schema_version`, `project_id`, `session_id`, `task_run_id`, `task_id`, `entry_point`, `trigger`, `candidates` (JSONB), `candidate_cap`, `candidate_cap_exceeded`, `sampling_metadata` (optional), `durations_ms`, `estimated_injected_tokens`, `created_at` |
-//! | Per-candidate ([`TraceCandidate`]) | `note_id`, `permalink`, `title`, `outcome`, `rank`, `confidence`, `skipped_reason`, `source`, `scope` |
-//!
-//! The candidate JSONB array is validated by [`validate_candidates`] before
-//! persistence. The skipped-reason vocabulary is fixed at exactly
-//! [`SKIPPED_REASON_VALUES`].
-
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
 use crate::database::Database;
 use crate::error::DbError;
+
+/// Maximum rows returned per `list_by_project` page when the caller does not
+/// provide an explicit limit.
+pub const DEFAULT_RETRIEVAL_TRACE_LIMIT: i32 = 100;
+
+/// Maximum offset accepted by `list_by_project` to keep the bounded recent-row
+/// query cheap. Larger offsets are rejected with a validation error rather than
+/// being silently truncated, which is safer for operator tooling.
+pub const MAX_RETRIEVAL_TRACE_OFFSET: i32 = 10_000;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -415,8 +388,46 @@ pub struct RetrievalTraceListFilter<'a> {
     pub task_id: Option<&'a str>,
     /// Filter by entry point.
     pub entry_point: Option<RetrievalTraceEntryPoint>,
+    /// Filter by candidate outcome (matches any candidate in the row's JSONB
+    /// array with this `outcome` value).
+    pub outcome: Option<CandidateOutcome>,
+    /// Filter by skipped reason (matches any candidate in the row's JSONB
+    /// array with this `skipped_reason` value). Only meaningful when at least
+    /// one candidate in the row is skipped, but the predicate itself is
+    /// independent of the `outcome` filter so callers can compose them.
+    pub skipped_reason: Option<SkippedReason>,
+    /// Number of rows to skip after ordering (bounded, must be non-negative).
+    pub offset: Option<i32>,
     /// Maximum number of rows to return (applied after ordering).
     pub limit: Option<i32>,
+}
+
+impl<'a> RetrievalTraceListFilter<'a> {
+    /// Validate the filter bounds, returning a clear error for invalid values.
+    ///
+    /// `offset` must be non-negative and not exceed
+    /// [`MAX_RETRIEVAL_TRACE_OFFSET`]. `limit` is capped by default behavior in
+    /// the query builder; callers are not allowed to pass negative limits.
+    fn validate(&self) -> Result<()> {
+        if let Some(offset) = self.offset {
+            if offset < 0 {
+                return Err(DbError::InvalidData(
+                    "retrieval trace offset must be non-negative".to_owned(),
+                ));
+            }
+            if offset > MAX_RETRIEVAL_TRACE_OFFSET {
+                return Err(DbError::InvalidData(format!(
+                    "retrieval trace offset cannot exceed {MAX_RETRIEVAL_TRACE_OFFSET}"
+                )));
+            }
+        }
+        if self.limit.is_some_and(|limit| limit < 0) {
+            return Err(DbError::InvalidData(
+                "retrieval trace limit must be non-negative".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 // ── Repository ────────────────────────────────────────────────────────────────
@@ -469,13 +480,16 @@ impl RetrievalTraceRepository {
     }
 
     /// List recent traces for a project, ordered by `created_at DESC`,
-    /// optionally filtered by session/task-run/task/entry-point.
+    /// optionally filtered by session/task-run/task/entry-point/candidate-outcome
+    /// and skipped-reason.
     pub async fn list_by_project(
         &self,
         project_id: &str,
         filter: RetrievalTraceListFilter<'_>,
     ) -> Result<Vec<RetrievalTraceRow>> {
         self.db.ensure_initialized().await?;
+
+        filter.validate()?;
 
         // Build a dynamic WHERE clause with positional bind params. The base
         // query always filters on project_id ($1). Each optional filter appends
@@ -499,9 +513,28 @@ impl RetrievalTraceRepository {
             conditions.push(format!("entry_point = ${bind_pos}"));
             bind_pos += 1;
         }
+        // JSONB candidate predicates: because there is no GIN index on the
+        // `candidates` array, these predicates are applied only inside the
+        // mandatory project-scoped, bounded list query. The query remains a
+        // recent-row scan (with a LIMIT), not an unbounded candidate lookup.
+        if filter.outcome.is_some() {
+            conditions.push(format!(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements(candidates) AS c WHERE (c->>'outcome')::text = ${bind_pos}::text)"
+            ));
+            bind_pos += 1;
+        }
+        if filter.skipped_reason.is_some() {
+            conditions.push(format!(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements(candidates) AS c WHERE (c->>'skipped_reason')::text = ${bind_pos}::text)"
+            ));
+            bind_pos += 1;
+        }
 
+        let offset_bind = bind_pos; // next position for OFFSET
+        let offset = filter.offset.unwrap_or(0);
+        bind_pos += 1;
         let limit_bind = bind_pos; // next position for LIMIT
-        let limit = filter.limit.unwrap_or(100);
+        let limit = filter.limit.unwrap_or(DEFAULT_RETRIEVAL_TRACE_LIMIT);
 
         let condition_clause = if conditions.is_empty() {
             String::new()
@@ -517,7 +550,8 @@ impl RetrievalTraceRepository {
                 durations_ms, estimated_injected_tokens, created_at
             FROM retrieval_traces
             WHERE project_id = $1{condition_clause}
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
+            OFFSET ${offset_bind}
             LIMIT ${limit_bind}"#
         );
 
@@ -535,6 +569,13 @@ impl RetrievalTraceRepository {
         if let Some(ep) = filter.entry_point {
             query = query.bind(ep.as_str());
         }
+        if let Some(outcome) = filter.outcome {
+            query = query.bind(outcome.as_str());
+        }
+        if let Some(reason) = filter.skipped_reason {
+            query = query.bind(reason.as_str());
+        }
+        query = query.bind(offset);
         query = query.bind(limit);
 
         Ok(query.fetch_all(self.db.pool()).await?)
