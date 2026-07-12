@@ -33,8 +33,9 @@ use crate::tools::image_tools::{
 use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
     DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
-    ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecentParams,
-    RepairEmbeddingsParams, RunEnrichmentParams, SearchParams, TaskRefsParams, WriteParams,
+    ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecallTraceParams,
+    RecentParams, RepairEmbeddingsParams, RunEnrichmentParams, SearchParams, TaskRefsParams,
+    WriteParams,
 };
 use crate::tools::org_policy_tools::{OrgPolicyGetParams, OrgPolicySetParams};
 use crate::tools::pr_review_tools::PrReviewContextParams;
@@ -799,6 +800,11 @@ impl DjinnMcpServer {
                     name, args,
                 )?))
                 .await,
+            ),
+            "memory_recall_trace" => map_json(
+                name,
+                self.memory_recall_trace(Parameters(decode_args::<RecallTraceParams>(name, args)?))
+                    .await,
             ),
             "session_list" => map_json(
                 name,

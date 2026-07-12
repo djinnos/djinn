@@ -8737,6 +8737,323 @@
     "concurrent_safe": false
   },
   {
+    "name": "memory_recall_trace",
+    "description": "Browse persisted memory retrieval traces. Use mode=list with project or project_id and filters (limit maximum: 100), or mode=detail with trace_id. Lists are compact; detail returns one trace with bounded note excerpts.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "mode"
+      ],
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entry_point": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skipped_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "trace_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "MemoryRecallTraceSummary": {
+          "type": "object",
+          "properties": {
+            "trace_id": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "entry_point": {
+              "type": "string"
+            },
+            "trigger_summary": {
+              "type": "string"
+            },
+            "candidate_count": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "injected_count": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "skipped_count": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "candidate_cap_exceeded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "trace_id",
+            "created_at",
+            "entry_point",
+            "trigger_summary",
+            "candidate_count",
+            "injected_count",
+            "skipped_count",
+            "candidate_cap_exceeded"
+          ]
+        },
+        "MemoryRecallTraceDetail": {
+          "type": "object",
+          "properties": {
+            "trace_id": {
+              "type": "string"
+            },
+            "schema_version": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "entry_point": {
+              "type": "string"
+            },
+            "trigger": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnyJson"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "durations_ms": {
+              "$ref": "#/$defs/AnyJson"
+            },
+            "candidate_cap": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "candidate_cap_exceeded": {
+              "type": "boolean"
+            },
+            "sampling_metadata": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnyJson"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "estimated_injected_tokens": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "candidates": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MemoryRecallTraceCandidate"
+              }
+            }
+          },
+          "required": [
+            "trace_id",
+            "schema_version",
+            "created_at",
+            "entry_point",
+            "durations_ms",
+            "candidate_cap",
+            "candidate_cap_exceeded",
+            "estimated_injected_tokens",
+            "candidates"
+          ]
+        },
+        "AnyJson": {},
+        "MemoryRecallTraceCandidate": {
+          "type": "object",
+          "properties": {
+            "note_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "content_excerpt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "rank": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "confidence": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "skipped_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnyJson"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "note_id",
+            "title",
+            "permalink",
+            "outcome"
+          ]
+        }
+      },
+      "type": "object",
+      "properties": {
+        "traces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemoryRecallTraceSummary"
+          }
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryRecallTraceDetail"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "traces"
+      ]
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "memory_recent",
     "description": "List recently updated notes by timeframe (e.g., '7d', '24h', 'today'). Returns compact summaries.",
     "inputSchema": {
