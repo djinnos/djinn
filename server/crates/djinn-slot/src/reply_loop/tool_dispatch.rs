@@ -790,7 +790,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collect_tool_results_preserves_names_and_ordering_across_serial_parallel_streaming() {
+    async fn collect_tool_results_preserves_names_and_ordering_and_applies_turn_budget_pass() {
         use crate::test_helpers::{agent_context_from_db, create_test_db};
         use std::collections::HashSet;
         use tokio_util::sync::CancellationToken;
@@ -929,6 +929,177 @@ mod tests {
                 ("call-3".to_string(), "streamed write ok".to_string(), false),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn collect_tool_results_budget_pass_externalizes_largest_serial_parallel_streaming() {
+        use crate::test_helpers::{
+            ConfigurableToolDispatcher, ToolHandlerFn, agent_context_from_db_with_dispatcher,
+            create_test_db,
+        };
+        use std::collections::HashMap;
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let mut handlers: HashMap<String, ToolHandlerFn> = HashMap::new();
+        handlers.insert(
+            "shell".to_string(),
+            (|_| {
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "exit_code": 0,
+                    "stdout": "A".repeat(40_000),
+                    "stderr": "",
+                    "workdir": "/tmp"
+                }))
+            }) as ToolHandlerFn,
+        );
+        handlers.insert(
+            "read".to_string(),
+            (|_| Ok(serde_json::json!({"ok": true}))) as ToolHandlerFn,
+        );
+        handlers.insert(
+            "code_search".to_string(),
+            (|_| Ok(serde_json::json!({"ok": true}))) as ToolHandlerFn,
+        );
+        handlers.insert(
+            "write".to_string(),
+            (|_| Ok(serde_json::json!({"ok": true}))) as ToolHandlerFn,
+        );
+        let dispatcher = Arc::new(ConfigurableToolDispatcher::new(Vec::new(), handlers));
+        let ctx =
+            agent_context_from_db_with_dispatcher(db, CancellationToken::new(), Some(dispatcher));
+        let worktree_path = std::path::Path::new("/tmp");
+
+        // Use a very small budget and preview floor so the ~40k-char shell result
+        // is definitely selected and the stub is definitely smaller.
+        unsafe {
+            std::env::set_var("DJINN_TURN_INLINE_CHAR_BUDGET", "5000");
+            std::env::set_var("DJINN_TURN_INLINE_PREVIEW_FLOOR", "500");
+        }
+
+        let schemas = vec![
+            // serial
+            test_tool_schema(
+                "shell",
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(false),
+            ),
+            // parallel
+            test_tool_schema(
+                "read",
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(true),
+            ),
+            test_tool_schema(
+                "code_search",
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(true),
+            ),
+        ];
+        let tool_metadata = tool_runtime_metadata(&schemas);
+
+        // A serial shell, a parallel read, a parallel code_search, and a
+        // streaming write. The streaming result is provided pre-dispatched.
+        let turn_tool_calls = vec![
+            ContentBlock::ToolUse {
+                id: "call-0".into(),
+                name: "shell".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolUse {
+                id: "call-2".into(),
+                name: "code_search".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolUse {
+                id: "call-3".into(),
+                name: "write".into(),
+                input: serde_json::json!({}),
+            },
+        ];
+
+        let streaming_results = vec![(
+            3,
+            ContentBlock::ToolResult {
+                tool_use_id: "call-3".into(),
+                content: vec![ContentBlock::text("streamed write ok")],
+                is_error: false,
+            },
+        )];
+        let streaming_dispatched = HashSet::from([3]);
+
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        // Use the public collect_tool_results so the turn-budget post-pass runs.
+        let blocks = collect_tool_results(
+            &turn_tool_calls,
+            streaming_results,
+            &streaming_dispatched,
+            &tool_metadata,
+            &dispatch_ctx,
+        )
+        .await;
+
+        // Result order must still be 0,1,2,3 after merge/sort/post-pass.
+        let ids: Vec<String> = blocks
+            .iter()
+            .map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => tool_use_id.clone(),
+                _ => panic!("expected ToolResult"),
+            })
+            .collect();
+        assert_eq!(ids, vec!["call-0", "call-1", "call-2", "call-3"]);
+
+        // The shell result is by far the largest (~40k chars), so it should be
+        // externalized; the smaller parallel and streaming results should remain
+        // inline.
+        let shell_text = match &blocks[0] {
+            ContentBlock::ToolResult { content, .. } => match &content[0] {
+                ContentBlock::Text { text } => text.clone(),
+                _ => panic!("expected text"),
+            },
+            _ => panic!("expected ToolResult"),
+        };
+        assert!(
+            shell_text.starts_with("[djinn-output-stash"),
+            "serial shell result (largest) should be externalized; got: {}",
+            &shell_text[..shell_text.len().min(80)]
+        );
+        assert!(shell_text.contains("tool_use_id=\"call-0\""));
+        assert!(shell_text.contains("tool_name=\"shell\""));
+        assert!(shell_text.contains("reason=\"turn_budget\""));
+
+        // The other results are smaller and should remain inline.
+        for (idx, expected_name) in [(1, "read"), (2, "code_search"), (3, "write")] {
+            let text = match &blocks[idx] {
+                ContentBlock::ToolResult { content, .. } => match &content[0] {
+                    ContentBlock::Text { text } => text.clone(),
+                    _ => panic!("expected text"),
+                },
+                _ => panic!("expected ToolResult"),
+            };
+            assert!(
+                !text.starts_with("[djinn-output-stash"),
+                "{expected_name} result should remain inline"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1089,7 +1260,17 @@ mod tests {
         assert!(!collected[0].name_missing);
     }
 
-    // ─── Per-turn inline-character budget post-pass tests (v9ie) ────────────
+    /// Per-turn inline-character budget post-pass tests (v9ie).
+    ///
+    /// Launch-readiness constraints (see design/v9ie-launch-readiness-notes):
+    /// - The canonical stub preserves `tool_use_id`, `tool_name`, and
+    ///   `reason="turn_budget"` for compaction-placeholder compatibility.
+    /// - Extra sub-30k stash writes are bounded by the number of tool results per
+    ///   turn, so they remain within existing retention/GC assumptions.
+    /// - Chat is outside the group pass; these tests cover reply-loop tool
+    ///   results only.
+    /// - Coordinator duplicate stash code is unchanged because the durable
+    ///   format is unchanged.
 
     /// Build a `CollectedToolResult` for a single text-block tool result.
     fn collected_text(
@@ -1293,6 +1474,82 @@ mod tests {
             text_b, original_b,
             "floor-limited candidate must remain unchanged"
         );
+    }
+
+    #[tokio::test]
+    async fn externalization_preserves_extension_mcp_and_native_resource_recovery_metadata() {
+        use crate::test_helpers::{
+            ConfigurableToolDispatcher, ToolHandlerFn, agent_context_from_db_with_dispatcher,
+            create_test_db,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let mut handlers: HashMap<String, ToolHandlerFn> = HashMap::new();
+        handlers.insert(
+            "mcp_fetch".to_string(),
+            (|_| Ok(serde_json::json!({"ok": true}))) as ToolHandlerFn,
+        );
+        handlers.insert(
+            "extension_compute".to_string(),
+            (|_| Ok(serde_json::json!({"result": 42}))) as ToolHandlerFn,
+        );
+        handlers.insert(
+            "read_mcp_resource".to_string(),
+            (|_| Ok(serde_json::json!({"content": "native resource output"}))) as ToolHandlerFn,
+        );
+        let dispatcher = Arc::new(ConfigurableToolDispatcher::new(
+            vec!["mcp_fetch".to_string(), "read_mcp_resource".to_string()],
+            handlers,
+        ));
+        let ctx =
+            agent_context_from_db_with_dispatcher(db, CancellationToken::new(), Some(dispatcher));
+        let worktree_path = std::path::Path::new("/tmp");
+        let tool_metadata = ToolRuntimeMetadataMap::new();
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        let config = TurnInlineBudgetConfig {
+            budget: 200,
+            preview_floor: 10,
+        };
+
+        // Large extension result, large MCP result, and large native resource result.
+        let ext = "E".repeat(5_000);
+        let mcp = "M".repeat(5_000);
+        let res = "R".repeat(5_000);
+        let mut results = vec![
+            collected_text(0, "call-ext", "extension_compute", &ext),
+            collected_text(1, "call-mcp", "mcp_fetch", &mcp),
+            collected_text(2, "call-res", "read_mcp_resource", &res),
+        ];
+        apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+
+        // All three candidates are larger than the budget headroom and are
+        // eligible for externalization. The mock seam emits the canonical header
+        // for every externalized result, so each real tool_name is recoverable.
+        for (expected_id, expected_name) in [
+            ("call-ext", "extension_compute"),
+            ("call-mcp", "mcp_fetch"),
+            ("call-res", "read_mcp_resource"),
+        ] {
+            let result = results
+                .iter()
+                .find(|r| r.tool_use_id == expected_id)
+                .unwrap_or_else(|| panic!("missing result for {expected_id}"));
+            let text = match &result.content[0] {
+                ContentBlock::Text { text } => text.clone(),
+                _ => panic!("expected text"),
+            };
+            assert!(
+                text.starts_with("[djinn-output-stash"),
+                "{expected_name} result should be externalized"
+            );
+            assert!(text.contains(&format!("tool_use_id=\"{expected_id}\"")));
+            assert!(text.contains(&format!("tool_name=\"{expected_name}\"")));
+            assert!(text.contains("reason=\"turn_budget\""));
+        }
     }
 
     #[tokio::test]
