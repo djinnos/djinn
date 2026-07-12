@@ -483,17 +483,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      coldStart: ${{ steps.plan.outputs.coldStart }}
     env:
       SQLX_OFFLINE: "true"
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: djinn
-        ports:
-          - 5433:5432
-        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -506,19 +498,11 @@ jobs:
           cache-all-crates: true
           save-if: false
       - uses: taiki-e/install-action@nextest
-      - name: Restore latest successful timing data when available
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: quality-gate.yml
-          workflow_conclusion: success
-          name: nextest-timing
-          path: nextest-timing
-          if_no_artifact_found: ignore
-          search_artifacts: true
       - name: Discover current nextest tests and plan exact-once shards
         id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -526,6 +510,39 @@ jobs:
             merge_group) profile=merge-group ;;
             *) profile=full-validation ;;
           esac
+          # Restore the latest successful timing artifact. This can fail because of
+          # missing artifacts, stale/incompatible data, or GitHub API rate limits;
+          # in every failure case the planner cold-starts safely from current discovery.
+          mkdir -p nextest-timing
+          set +e
+          gh api "repos/${{ github.repository }}/actions/artifacts?name=nextest-timing&per_page=1" \
+            --jq '.artifacts[0] | select(.workflow_run.conclusion == "success") | .id' > nextest-timing/artifact-id.txt 2> nextest-timing/restore.log
+          api_status=$?
+          set -e
+          if [ "$api_status" -ne 0 ] || [ ! -s nextest-timing/artifact-id.txt ]; then
+            echo "::notice::No compatible prior timing artifact found; using cold-start balancing."
+          else
+            artifact_id="$(cat nextest-timing/artifact-id.txt)"
+            if [ -n "$artifact_id" ]; then
+              set +e
+              gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > nextest-timing/timing.zip 2>> nextest-timing/restore.log
+              dl_status=$?
+              set -e
+              if [ "$dl_status" -eq 0 ] && [ -s nextest-timing/timing.zip ]; then
+                set +e
+                unzip -p nextest-timing/timing.zip timing.json > nextest-timing/timing.json 2>> nextest-timing/restore.log
+                unzip_status=$?
+                set -e
+                if [ "$unzip_status" -eq 0 ] && [ -s nextest-timing/timing.json ]; then
+                  echo "::notice::Restored compatible timing artifact $artifact_id for shard balancing."
+                else
+                  echo "::notice::Could not extract timing artifact $artifact_id; using cold-start balancing."
+                fi
+              else
+                echo "::notice::Could not download timing artifact $artifact_id; using cold-start balancing."
+              fi
+            fi
+          fi
           mkdir -p nextest-plan
           (
             cd server
@@ -550,6 +567,7 @@ jobs:
           cat nextest-plan/proof.json
           echo '::endgroup::'
           echo "matrix=$(jq -c '{include: .shards}' nextest-plan/matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "coldStart=$(jq -r '.coldStart' nextest-plan/proof.json)" >> "$GITHUB_OUTPUT"
       - name: Upload discovery, plan, and exact-once proof
         uses: actions/upload-artifact@v4
         with:
