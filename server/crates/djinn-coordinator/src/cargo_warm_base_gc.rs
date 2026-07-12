@@ -371,7 +371,9 @@ impl BaseLock for FlockBaseLock {
             .create(true)
             .truncate(false)
             .open(&lock_path)
-            .map_err(|error| format!("failed to open lock file {}: {error}", lock_path.display()))?;
+            .map_err(|error| {
+                format!("failed to open lock file {}: {error}", lock_path.display())
+            })?;
         let fd = file.as_raw_fd();
         // SAFETY: fd is valid for the lifetime of `file`, and flock is async-signal-safe.
         let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
@@ -532,44 +534,40 @@ pub async fn evict_idle_warm_bases(
             result
                 .retained
                 .push((entry.project_id.clone(), RetainReason::Young));
-            emit_idle_metric(
-                &entry.project_id,
-                RetainReason::Young,
-                mode,
-                &mut result,
-            );
+            emit_idle_metric(&entry.project_id, RetainReason::Young, mode, &mut result);
             continue;
         }
 
-        // Acquire the per-base lock and recheck safety before any destructive
-        // work.  Fail closed if the lock cannot be acquired or the recheck
-        // changes the decision.
-        let guard = match locks.try_lock(&entry.path) {
-            Ok(Some(guard)) => guard,
-            Ok(None) => {
-                result
-                    .retained
-                    .push((entry.project_id.clone(), RetainReason::LockBusy));
-                emit_idle_metric(
-                    &entry.project_id,
-                    RetainReason::LockBusy,
-                    mode,
-                    &mut result,
-                );
-                continue;
+        // Acquire the per-base lock only in delete mode.  Dry-run must not
+        // create the lock file because doing so refreshes the directory mtime
+        // and would change the fallback activity used by a later delete pass.
+        // The same post-lock safety recheck is performed in both modes so the
+        // candidate decisions remain identical.
+        let guard = if mode == CacheCleanupMode::Delete {
+            match locks.try_lock(&entry.path) {
+                Ok(Some(guard)) => Some(guard),
+                Ok(None) => {
+                    result
+                        .retained
+                        .push((entry.project_id.clone(), RetainReason::LockBusy));
+                    emit_idle_metric(&entry.project_id, RetainReason::LockBusy, mode, &mut result);
+                    continue;
+                }
+                Err(_) => {
+                    result
+                        .retained
+                        .push((entry.project_id.clone(), RetainReason::LockError));
+                    emit_idle_metric(
+                        &entry.project_id,
+                        RetainReason::LockError,
+                        mode,
+                        &mut result,
+                    );
+                    continue;
+                }
             }
-            Err(_) => {
-                result
-                    .retained
-                    .push((entry.project_id.clone(), RetainReason::LockError));
-                emit_idle_metric(
-                    &entry.project_id,
-                    RetainReason::LockError,
-                    mode,
-                    &mut result,
-                );
-                continue;
-            }
+        } else {
+            None
         };
 
         let post_lock_idle = match recheck_idle_after_lock(
@@ -595,12 +593,7 @@ pub async fn evict_idle_warm_bases(
             result
                 .retained
                 .push((entry.project_id.clone(), RetainReason::Young));
-            emit_idle_metric(
-                &entry.project_id,
-                RetainReason::Young,
-                mode,
-                &mut result,
-            );
+            emit_idle_metric(&entry.project_id, RetainReason::Young, mode, &mut result);
             continue;
         }
 
@@ -619,39 +612,38 @@ pub async fn evict_idle_warm_bases(
                     metrics::OUTCOME_DRY_RUN,
                     mode.as_metric_label(),
                 );
-                let _guard = guard;
             }
-            CacheCleanupMode::Delete => {
-                match safe_remove_directory(&entry.path, root) {
-                    Ok(()) => {
-                        result.deleted.push(entry.clone());
-                        result.reclaimed_bytes =
-                            result.reclaimed_bytes.saturating_add(entry.size_bytes);
-                        tracing::info!(
-                            project_id = %entry.project_id,
-                            size_bytes = entry.size_bytes,
-                            mode = "delete",
-                            "warm-base idle GC deleted idle base"
-                        );
-                        metrics::increment_cleanup_total(
-                            metrics::COMPONENT_CARGO_WARM_BASE,
-                            metrics::OUTCOME_DELETED,
-                            mode.as_metric_label(),
-                        );
-                        let _guard = guard;
-                    }
-                    Err(_) => {
-                        result.retained.push((entry.project_id.clone(), RetainReason::DeleteError));
-                        emit_idle_metric(
-                            &entry.project_id,
-                            RetainReason::DeleteError,
-                            mode,
-                            &mut result,
-                        );
-                        let _guard = guard;
-                    }
+            CacheCleanupMode::Delete => match safe_remove_directory(&entry.path, root) {
+                Ok(()) => {
+                    result.deleted.push(entry.clone());
+                    result.reclaimed_bytes =
+                        result.reclaimed_bytes.saturating_add(entry.size_bytes);
+                    tracing::info!(
+                        project_id = %entry.project_id,
+                        size_bytes = entry.size_bytes,
+                        mode = "delete",
+                        "warm-base idle GC deleted idle base"
+                    );
+                    metrics::increment_cleanup_total(
+                        metrics::COMPONENT_CARGO_WARM_BASE,
+                        metrics::OUTCOME_DELETED,
+                        mode.as_metric_label(),
+                    );
+                    let _guard = guard;
                 }
-            }
+                Err(_) => {
+                    result
+                        .retained
+                        .push((entry.project_id.clone(), RetainReason::DeleteError));
+                    emit_idle_metric(
+                        &entry.project_id,
+                        RetainReason::DeleteError,
+                        mode,
+                        &mut result,
+                    );
+                    let _guard = guard;
+                }
+            },
         }
     }
 
@@ -767,8 +759,7 @@ fn system_time_from_offset(dt: OffsetDateTime) -> SystemTime {
 /// prevents symlink traversal and escape attempts from deleting data outside the
 /// warm-base pool.
 fn safe_remove_directory(path: &Path, root: &Path) -> Result<(), String> {
-    let root_canonical = std::fs::canonicalize(root)
-        .unwrap_or_else(|_| root.to_path_buf());
+    let root_canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let path_canonical = std::fs::canonicalize(path)
         .map_err(|e| format!("failed to canonicalize {}: {e}", path.display()))?;
     if !path_canonical.starts_with(&root_canonical) {
@@ -1098,7 +1089,13 @@ mod tests {
             temp.path(),
         )
         .await;
-        assert_eq!(result.deleted.len(), 1, "deleted={:?}, retained={:?}", result.deleted, result.retained);
+        assert_eq!(
+            result.deleted.len(),
+            1,
+            "deleted={:?}, retained={:?}",
+            result.deleted,
+            result.retained
+        );
         assert_eq!(result.retained.len(), 0);
         assert!(result.reclaimed_bytes > 0);
         assert!(!base.exists());
@@ -1497,6 +1494,69 @@ mod tests {
 
         assert_eq!(dry.dry_run.len(), 1);
         assert_eq!(delete.deleted.len(), 1);
+        assert_eq!(dry.projected_bytes, 42);
+        assert_eq!(delete.reclaimed_bytes, 42);
+        assert_eq!(dry.retained.len(), delete.retained.len());
+        assert!(!base.exists());
+    }
+
+    #[tokio::test]
+    async fn dry_run_and_delete_parity_with_flock_lock() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+        let base = old_base(&temp, id);
+        let entry = WarmBaseEntry {
+            project_id: id.into(),
+            path: base.clone(),
+            size_bytes: 42,
+        };
+        let inventory = WarmBaseInventory {
+            entries: vec![entry],
+            ignored: 0,
+        };
+        let activity = Activity(Ok(ActivitySnapshot {
+            known_project: true,
+            has_active_task_run: false,
+            latest_activity: None,
+            ..snapshot()
+        }));
+        let warm = Warm(Ok(false));
+        let locks = FlockBaseLock;
+        let config = default_config();
+        let clock = TestClock::new(future(15), std::time::Instant::now());
+
+        let dry = evict_idle_warm_bases(
+            inventory.clone(),
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::DryRun,
+            temp.path(),
+        )
+        .await;
+
+        // Dry-run must not create the lock file; doing so would refresh the
+        // directory mtime and change the fallback activity for a later delete
+        // pass, breaking parity between the two modes.
+        assert!(!base.join(WARM_BASE_GC_LOCK_FILE).exists());
+
+        let delete = evict_idle_warm_bases(
+            inventory,
+            &activity,
+            &warm,
+            &locks,
+            &config,
+            &clock,
+            crate::context::CacheCleanupMode::Delete,
+            temp.path(),
+        )
+        .await;
+
+        assert_eq!(dry.dry_run.len(), 1);
+        assert_eq!(delete.deleted.len(), 1);
+        assert_eq!(dry.dry_run[0].project_id, delete.deleted[0].project_id);
         assert_eq!(dry.projected_bytes, 42);
         assert_eq!(delete.reclaimed_bytes, 42);
         assert_eq!(dry.retained.len(), delete.retained.len());
