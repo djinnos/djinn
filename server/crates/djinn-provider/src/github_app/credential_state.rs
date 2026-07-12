@@ -178,7 +178,9 @@ fn try_load_from_env_detailed() -> EnvLoadResult {
     // At least one core var is set — attempt full load, collecting issues.
     let mut issues: Vec<&'static str> = Vec::new();
 
-    // APP_ID: required, must parse as u64.
+    // APP_ID: required, must parse as a non-zero u64. GitHub App IDs are
+    // positive identifiers; accepting zero only defers the failure to JWT/API
+    // use and incorrectly advertises the Secret as usable.
     let app_id = match std::env::var(ENV_APP_ID) {
         Ok(val) => {
             let trimmed = val.trim();
@@ -187,6 +189,10 @@ fn try_load_from_env_detailed() -> EnvLoadResult {
                 None
             } else {
                 match trimmed.parse::<u64>() {
+                    Ok(0) => {
+                        issues.push("GITHUB_APP_ID must be greater than zero");
+                        None
+                    }
                     Ok(id) => Some(id),
                     Err(_) => {
                         issues.push("GITHUB_APP_ID is not a valid number");
@@ -235,9 +241,17 @@ fn try_load_from_env_detailed() -> EnvLoadResult {
         }
     };
 
-    // PEM: required, must yield non-empty content.
+    // PEM: required, and it must be a usable RSA private key. A non-empty PEM
+    // envelope is not enough: EC keys and structurally malformed RSA key data
+    // cannot sign the RS256 JWT GitHub requires.
     let pem = match read_env_pem_detailed() {
-        Some(p) => Some(p),
+        Some(p) => match super::jwt::validate_rsa_private_key(&p) {
+            Ok(()) => Some(p),
+            Err(_) => {
+                issues.push("GITHUB_APP_PRIVATE_KEY is not a valid RSA private key");
+                None
+            }
+        },
         None => {
             issues.push("GITHUB_APP_PRIVATE_KEY (or _PATH) is not set or empty");
             None
@@ -383,22 +397,32 @@ pub async fn clear_persisted_app_config(repo: &CredentialRepository) -> Result<b
 
 #[cfg(test)]
 mod tests {
+    use super::super::jwt::tests::TEST_RSA_PRIVATE_KEY;
     use super::*;
     use djinn_core::events::EventBus;
     use djinn_db::Database;
 
     // ── helpers ──────────────────────────────────────────────────────────
 
+    const TEST_EC_PRIVATE_KEY: &str = "-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIIl4cWgLf9/UBxBiwqKKzrCPdOWOn8DdO8wn7FxCwZ5loAoGCCqGSM49
+AwEHoUQDQgAEhLdpVmG8MBC2uexhGwHjWK0yoX9uLH5PAuTXMBdRSck+C5MGYcp0
+kveFVBYy/01GtT5ymlBeq5yOk/P8wEI62A==
+-----END EC PRIVATE KEY-----";
+
     /// Set env vars for a valid GitHub App configuration.
     /// Returns a guard that clears them on drop.
     struct EnvGuard {
         vars: Vec<(&'static str, String)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         /// Clear all GitHub App env vars to ensure a clean slate.
         /// Returns a guard that also clears on drop.
         fn clean() -> Self {
+            let lock = super::super::config::github_app_test_lock();
+            super::super::clear_runtime_config();
             let all_keys = [
                 "GITHUB_APP_ID",
                 "GITHUB_APP_SLUG",
@@ -413,20 +437,21 @@ mod tests {
             for k in &all_keys {
                 unsafe { std::env::remove_var(k) };
             }
-            Self { vars: Vec::new() }
+            Self {
+                vars: Vec::new(),
+                _lock: lock,
+            }
         }
 
         fn set_valid() -> Self {
+            let lock = super::super::config::github_app_test_lock();
+            super::super::clear_runtime_config();
             let vars = vec![
                 ("GITHUB_APP_ID", "12345".to_string()),
                 ("GITHUB_APP_SLUG", "djinn-test".to_string()),
                 ("GITHUB_APP_CLIENT_ID", "Iv1.abc".to_string()),
                 ("GITHUB_APP_CLIENT_SECRET", "shh".to_string()),
-                (
-                    "GITHUB_APP_PRIVATE_KEY",
-                    "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n"
-                        .to_string(),
-                ),
+                ("GITHUB_APP_PRIVATE_KEY", TEST_RSA_PRIVATE_KEY.to_string()),
                 ("GITHUB_APP_WEBHOOK_SECRET", "wsec".to_string()),
                 ("DJINN_PUBLIC_URL", "https://djinn.example.com".to_string()),
             ];
@@ -434,33 +459,33 @@ mod tests {
                 // SAFETY: test env mutation — EnvGuard::drop cleans up.
                 unsafe { std::env::set_var(k, v) };
             }
-            Self { vars }
+            Self { vars, _lock: lock }
         }
 
         fn set_incomplete() -> Self {
+            let lock = super::super::config::github_app_test_lock();
+            super::super::clear_runtime_config();
             // Only set APP_ID but not CLIENT_ID/SECRET/PEM.
             let vars = vec![("GITHUB_APP_ID", "12345".to_string())];
             for &(k, ref v) in &vars {
                 unsafe { std::env::set_var(k, v) };
             }
-            Self { vars }
+            Self { vars, _lock: lock }
         }
 
         fn set_malformed_app_id() -> Self {
+            let lock = super::super::config::github_app_test_lock();
+            super::super::clear_runtime_config();
             let vars = vec![
                 ("GITHUB_APP_ID", "not-a-number".to_string()),
                 ("GITHUB_APP_CLIENT_ID", "Iv1.abc".to_string()),
                 ("GITHUB_APP_CLIENT_SECRET", "shh".to_string()),
-                (
-                    "GITHUB_APP_PRIVATE_KEY",
-                    "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n"
-                        .to_string(),
-                ),
+                ("GITHUB_APP_PRIVATE_KEY", TEST_RSA_PRIVATE_KEY.to_string()),
             ];
             for &(k, ref v) in &vars {
                 unsafe { std::env::set_var(k, v) };
             }
-            Self { vars }
+            Self { vars, _lock: lock }
         }
     }
 
@@ -492,7 +517,7 @@ mod tests {
             slug: "djinn-fixture".into(),
             client_id: "Iv1.fixture".into(),
             client_secret: "fixture-secret".into(),
-            pem: "-----BEGIN RSA PRIVATE KEY-----\nfixture\n-----END RSA PRIVATE KEY-----\n".into(),
+            pem: TEST_RSA_PRIVATE_KEY.into(),
             webhook_secret: "fixture-wh".into(),
             public_url: "https://fixture.example.com".into(),
         }
@@ -501,6 +526,16 @@ mod tests {
     fn cred_repo() -> CredentialRepository {
         let db = Database::open_in_memory().expect("failed to create test database");
         CredentialRepository::new(db, EventBus::noop())
+    }
+
+    fn set_complete_env(app_id: &str, private_key: &str) {
+        // SAFETY: callers hold the module-wide env lock through `EnvGuard`.
+        unsafe {
+            std::env::set_var("GITHUB_APP_ID", app_id);
+            std::env::set_var("GITHUB_APP_CLIENT_ID", "Iv1.abc");
+            std::env::set_var("GITHUB_APP_CLIENT_SECRET", "shh");
+            std::env::set_var("GITHUB_APP_PRIVATE_KEY", private_key);
+        }
     }
 
     // ── AC 1: typed state replaces Option-only ambiguity ─────────────────
@@ -575,6 +610,63 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zero_app_id_is_fatal_over_persisted() {
+        let repo = cred_repo();
+        persist_app_config(&repo, &fixture_config()).await.unwrap();
+
+        let _env = EnvGuard::clean();
+        set_complete_env("0", TEST_RSA_PRIVATE_KEY);
+
+        let state = resolve_credential_source(Some(&repo)).await;
+        let CredentialSourceState::InvalidSecret(detail) = state else {
+            panic!("zero App ID must be InvalidSecret, not usable or persisted fallback");
+        };
+        assert!(
+            detail
+                .issues
+                .contains(&"GITHUB_APP_ID must be greater than zero")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_private_key_is_fatal_over_persisted() {
+        let repo = cred_repo();
+        persist_app_config(&repo, &fixture_config()).await.unwrap();
+
+        let _env = EnvGuard::clean();
+        set_complete_env("12345", "not-a-private-key");
+
+        let state = resolve_credential_source(Some(&repo)).await;
+        let CredentialSourceState::InvalidSecret(detail) = state else {
+            panic!("malformed private key must be InvalidSecret, not ValidSecret");
+        };
+        assert!(
+            detail
+                .issues
+                .contains(&"GITHUB_APP_PRIVATE_KEY is not a valid RSA private key")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_rsa_private_key_is_fatal_over_persisted() {
+        let repo = cred_repo();
+        persist_app_config(&repo, &fixture_config()).await.unwrap();
+
+        let _env = EnvGuard::clean();
+        set_complete_env("12345", TEST_EC_PRIVATE_KEY);
+
+        let state = resolve_credential_source(Some(&repo)).await;
+        let CredentialSourceState::InvalidSecret(detail) = state else {
+            panic!("EC private key must be InvalidSecret, not ValidSecret");
+        };
+        assert!(
+            detail
+                .issues
+                .contains(&"GITHUB_APP_PRIVATE_KEY is not a valid RSA private key")
+        );
+    }
+
     /// Regression for the credential-source precedence gap: when an operator
     /// sets a required env var to an *empty* value (e.g. `GITHUB_APP_ID=""`)
     /// while persisted credentials exist, the env source must be treated as
@@ -625,12 +717,7 @@ mod tests {
         unsafe { std::env::set_var("GITHUB_APP_ID", "12345") };
         unsafe { std::env::set_var("GITHUB_APP_CLIENT_ID", "") };
         unsafe { std::env::set_var("GITHUB_APP_CLIENT_SECRET", "shh") };
-        unsafe {
-            std::env::set_var(
-                "GITHUB_APP_PRIVATE_KEY",
-                "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n",
-            )
-        };
+        unsafe { std::env::set_var("GITHUB_APP_PRIVATE_KEY", TEST_RSA_PRIVATE_KEY) };
 
         let state = resolve_credential_source(Some(&repo)).await;
         assert!(
@@ -879,6 +966,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn persist_and_clear_round_trip() {
+        let _env = EnvGuard::clean();
         let repo = cred_repo();
         let config = fixture_config();
 

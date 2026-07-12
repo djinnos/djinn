@@ -58,11 +58,7 @@ impl DjinnMcpServer {
     ) -> Json<GithubListReposResponse> {
         use djinn_provider::github_app::{GitHubAppClient, get_installation_by_id};
 
-        if std::env::var("GITHUB_APP_ID")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .is_none()
-        {
+        if djinn_provider::github_app::app_id().is_err() {
             return Json(GithubListReposResponse {
                 status: "error: GitHub App not configured".into(),
                 repos: vec![],

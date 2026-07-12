@@ -20,7 +20,10 @@ import {
   type InstallationSummary,
 } from "@/api/auth";
 
-export const INSTALLATIONS_QUERY_KEY = ["github", "installations"] as const;
+// This endpoint returns a bare InstallationSummary[]. The authenticated
+// Add-Project dialog uses a different endpoint/shape, so sharing a cache key
+// lets React Query hand an array to code expecting `{ installations, ... }`.
+export const INSTALLATIONS_QUERY_KEY = ["github", "setup-installations"] as const;
 export const SETUP_STATUS_QUERY_KEY = ["auth", "setup-status"] as const;
 
 export function InstallationPicker() {

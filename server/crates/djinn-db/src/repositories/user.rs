@@ -160,6 +160,36 @@ impl UserRepository {
         Ok(())
     }
 
+    /// Atomically grant the one-time bootstrap-admin role when no admin exists.
+    ///
+    /// The auth callback can run concurrently for different GitHub users. A
+    /// separate `admin_count()` followed by `set_admin_status()` lets both
+    /// callbacks observe zero and promote both users. The transaction-scoped
+    /// advisory lock serializes only this rare bootstrap decision; normal
+    /// user writes and later manual admin changes remain unaffected.
+    pub async fn grant_bootstrap_admin_if_none(&self, id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+
+        // Stable, process-independent lock key for "bootstrap the first admin".
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(0x444A_494E_4E41_444Di64)
+            .execute(&mut *tx)
+            .await?;
+
+        let result = sqlx::query(
+            "UPDATE users SET is_admin = TRUE \
+             WHERE id = $1 \
+               AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin = TRUE)",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Set a user's proposal capability `role` (`proposer` | `pm` | `engineer`).
     pub async fn set_role(&self, id: &str, role: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
@@ -313,5 +343,26 @@ mod tests {
 
         repo.set_admin_status(&u.id, false).await.unwrap();
         assert_eq!(repo.admin_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_bootstrap_admin_has_exactly_one_winner() {
+        let repo = UserRepository::new(test_db());
+        let first = repo
+            .upsert_from_github(101, "first", None, None)
+            .await
+            .unwrap();
+        let second = repo
+            .upsert_from_github(202, "second", None, None)
+            .await
+            .unwrap();
+
+        let (first_won, second_won) = tokio::join!(
+            repo.grant_bootstrap_admin_if_none(&first.id),
+            repo.grant_bootstrap_admin_if_none(&second.id),
+        );
+
+        assert_ne!(first_won.unwrap(), second_won.unwrap());
+        assert_eq!(repo.admin_count().await.unwrap(), 1);
     }
 }

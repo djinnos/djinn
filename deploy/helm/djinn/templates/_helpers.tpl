@@ -118,6 +118,28 @@ that string wins; otherwise we use the chart-local name.
 {{- end -}}
 {{- end -}}
 
+{{/*
+Whether the operator attempted GitHub App Secret configuration.
+
+The distinction between "absent" and "present but incomplete" is part of the
+server credential-source contract:
+  * no existingSecret and no inline value -> omit the Secret, env vars, path,
+    and volume entirely so local self-setup can use persisted credentials;
+  * any inline value or existingSecret -> expose the complete Secret/env
+    surface, allowing the server to reject partial or malformed configuration
+    instead of silently falling through to persisted credentials.
+*/}}
+{{- define "djinn.githubAppConfigAttempted" -}}
+{{- $cfg := .Values.secrets.githubApp -}}
+{{- if or
+      (ne (toString $cfg.existingSecret) "")
+      (ne (toString $cfg.appId) "")
+      (ne (toString $cfg.clientId) "")
+      (ne (toString $cfg.clientSecret) "")
+      (ne (toString $cfg.privateKey) "")
+-}}true{{- end -}}
+{{- end -}}
+
 {{- define "djinn.secretName.vaultKey" -}}
 {{- if .Values.secrets.vaultKey.existingSecret -}}
 {{- .Values.secrets.vaultKey.existingSecret -}}
