@@ -8668,6 +8668,322 @@ expression: signatures
     }
   },
   {
+    "name": "memory_recall_trace",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "entry_point": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "type": "string"
+        },
+        "offset": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skipped_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trace_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "AnyJson": {},
+        "MemoryRecallTraceCandidate": {
+          "properties": {
+            "confidence": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "content_excerpt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note_id": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "rank": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnyJson"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "skipped_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "note_id",
+            "title",
+            "permalink",
+            "outcome"
+          ],
+          "type": "object"
+        },
+        "MemoryRecallTraceDetail": {
+          "properties": {
+            "candidate_cap": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "candidate_cap_exceeded": {
+              "type": "boolean"
+            },
+            "candidates": {
+              "items": {
+                "$ref": "#/$defs/MemoryRecallTraceCandidate"
+              },
+              "type": "array"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "durations_ms": {
+              "$ref": "#/$defs/AnyJson"
+            },
+            "entry_point": {
+              "type": "string"
+            },
+            "estimated_injected_tokens": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "sampling_metadata": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnyJson"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "schema_version": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "trace_id": {
+              "type": "string"
+            },
+            "trigger": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnyJson"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "trace_id",
+            "schema_version",
+            "created_at",
+            "entry_point",
+            "durations_ms",
+            "candidate_cap",
+            "candidate_cap_exceeded",
+            "estimated_injected_tokens",
+            "candidates"
+          ],
+          "type": "object"
+        },
+        "MemoryRecallTraceSummary": {
+          "properties": {
+            "candidate_cap_exceeded": {
+              "type": "boolean"
+            },
+            "candidate_count": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "entry_point": {
+              "type": "string"
+            },
+            "injected_count": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "skipped_count": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "trace_id": {
+              "type": "string"
+            },
+            "trigger_summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "trace_id",
+            "created_at",
+            "entry_point",
+            "trigger_summary",
+            "candidate_count",
+            "injected_count",
+            "skipped_count",
+            "candidate_cap_exceeded"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryRecallTraceDetail"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "traces": {
+          "items": {
+            "$ref": "#/$defs/MemoryRecallTraceSummary"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "traces"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "memory_recent",
     "read_only": false,
     "destructive": true,

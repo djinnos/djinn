@@ -167,7 +167,7 @@ pub(super) async fn recall(s: &DjinnMcpServer, p: RecallTraceParams) -> MemoryRe
             outcome: c.outcome.as_str().to_string(),
             skipped_reason: c.skipped_reason.map(|x| x.as_str().to_string()),
             source: c.source,
-            scope: c.scope,
+            scope: c.scope.map(Into::into),
         });
     }
     MemoryRecallTraceResponse {
@@ -180,11 +180,11 @@ pub(super) async fn recall(s: &DjinnMcpServer, p: RecallTraceParams) -> MemoryRe
             task_id: r.task_id,
             task_run_id: r.task_run_id,
             entry_point: r.entry_point,
-            trigger: r.trigger,
-            durations_ms: r.durations_ms,
+            trigger: r.trigger.map(Into::into),
+            durations_ms: r.durations_ms.into(),
             candidate_cap: r.candidate_cap,
             candidate_cap_exceeded: r.candidate_cap_exceeded,
-            sampling_metadata: r.sampling_metadata,
+            sampling_metadata: r.sampling_metadata.map(Into::into),
             estimated_injected_tokens: r.estimated_injected_tokens,
             candidates,
         }),

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::tools::json_object::AnyJson;
 
 // ── Param structs ─────────────────────────────────────────────────────────────
 
@@ -50,7 +51,7 @@ pub struct MemoryRecallTraceCandidate {
     pub outcome: String,
     pub skipped_reason: Option<String>,
     pub source: Option<String>,
-    pub scope: Option<serde_json::Value>,
+    pub scope: Option<AnyJson>,
 }
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryRecallTraceDetail {
@@ -61,11 +62,11 @@ pub struct MemoryRecallTraceDetail {
     pub task_id: Option<String>,
     pub task_run_id: Option<String>,
     pub entry_point: String,
-    pub trigger: Option<serde_json::Value>,
-    pub durations_ms: serde_json::Value,
+    pub trigger: Option<AnyJson>,
+    pub durations_ms: AnyJson,
     pub candidate_cap: i32,
     pub candidate_cap_exceeded: bool,
-    pub sampling_metadata: Option<serde_json::Value>,
+    pub sampling_metadata: Option<AnyJson>,
     pub estimated_injected_tokens: i32,
     pub candidates: Vec<MemoryRecallTraceCandidate>,
 }
