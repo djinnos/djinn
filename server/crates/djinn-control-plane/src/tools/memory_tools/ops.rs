@@ -10,10 +10,17 @@ use super::{
     BrokenLinksParams, BuildContextParams, ExtractedAuditParams, HealthParams, ListParams,
     MemoryBrokenLinksResponse, MemoryBuildContextResponse, MemoryExtractedAuditResponse,
     MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse, MemoryOrphansResponse,
-    MemoryProposalOverview, MemorySearchResponse, MemorySearchResultItem, OrphansParams,
-    ReadParams, ResolvedMention, SearchParams, note_to_view, parse_proposal_ref_item,
-    parse_task_ref_item,
+    MemoryProposalOverview, MemoryRecallTraceResponse, MemorySearchResponse,
+    MemorySearchResultItem, OrphansParams, ReadParams, RecallTraceParams, ResolvedMention,
+    SearchParams, note_to_view, parse_proposal_ref_item, parse_task_ref_item,
 };
+
+pub async fn memory_recall_trace(
+    server: &DjinnMcpServer,
+    p: RecallTraceParams,
+) -> MemoryRecallTraceResponse {
+    super::recall_trace::recall(server, p).await
+}
 
 fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
     folder.and_then(|value| {
