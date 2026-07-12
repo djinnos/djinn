@@ -135,6 +135,16 @@ pub trait FreeSpaceGuard: Send + Sync {
     fn free_space_bytes(&self, path: &Path) -> Result<u64, String>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacitySnapshot {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+pub trait FilesystemCapacity: Send + Sync {
+    fn capacity(&self, path: &Path) -> Result<CapacitySnapshot, String>;
+}
+
 pub trait BaseLockGuard: Send + Sync {
     fn try_lock(&self, path: &Path) -> LockOutcome;
 }
@@ -184,6 +194,28 @@ pub struct WarmBasePlan {
     pub retained: Vec<(String, RetainReason)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressureSkipReason {
+    AboveLowWatermark,
+    ActivityError,
+    ActiveTaskRun,
+    WarmJobError,
+    WarmJobInFlight,
+    LockBusy,
+    LockError,
+    Young,
+    MeasurementError,
+    NotSelected,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PressureEvictionPlan {
+    pub candidates: Vec<WarmBaseCandidate>,
+    pub retained: Vec<(String, PressureSkipReason)>,
+    pub projected_bytes: u64,
+    pub target_bytes: u64,
+}
+
 /// Evaluate all destructive-operation guards.  Any guard error becomes a
 /// retention result; callers must never turn it into eligibility.
 pub async fn plan(
@@ -204,42 +236,63 @@ pub async fn plan(
             return plan;
         }
     };
+    let (evaluations, retained) = evaluate_guards(inventory, activity, warm_jobs, locks).await;
+    plan.retained = retained;
+    for eval in evaluations {
+        plan.candidates.push(WarmBaseCandidate {
+            entry: eval.entry,
+            classification: eval.classification,
+            latest_activity: eval.latest_activity,
+            free_space_bytes: free,
+        });
+    }
+    plan
+}
+
+struct GuardEvaluation {
+    entry: WarmBaseEntry,
+    classification: BaseClassification,
+    latest_activity: Option<String>,
+}
+
+async fn evaluate_guards(
+    inventory: WarmBaseInventory,
+    activity: &dyn ActivityGuard,
+    warm_jobs: &dyn WarmJobGuard,
+    locks: &dyn BaseLockGuard,
+) -> (Vec<GuardEvaluation>, Vec<(String, RetainReason)>) {
+    let mut candidates = Vec::new();
+    let mut retained = Vec::new();
     for entry in inventory.entries {
         let snapshot = match activity.activity(&entry.project_id).await {
             Ok(value) => value,
             Err(_) => {
-                plan.retained
-                    .push((entry.project_id, RetainReason::ActivityError));
+                retained.push((entry.project_id, RetainReason::ActivityError));
                 continue;
             }
         };
         if snapshot.has_active_task_run {
-            plan.retained
-                .push((entry.project_id, RetainReason::ActiveTaskRun));
+            retained.push((entry.project_id, RetainReason::ActiveTaskRun));
             continue;
         }
         match warm_jobs.has_in_flight_warm(&entry.project_id).await {
             Ok(true) => {
-                plan.retained
-                    .push((entry.project_id, RetainReason::WarmJobInFlight));
+                retained.push((entry.project_id, RetainReason::WarmJobInFlight));
                 continue;
             }
             Err(_) => {
-                plan.retained
-                    .push((entry.project_id, RetainReason::WarmJobError));
+                retained.push((entry.project_id, RetainReason::WarmJobError));
                 continue;
             }
             Ok(false) => {}
         }
         match locks.try_lock(&entry.path) {
             LockOutcome::Busy => {
-                plan.retained
-                    .push((entry.project_id, RetainReason::LockBusy));
+                retained.push((entry.project_id, RetainReason::LockBusy));
                 continue;
             }
             LockOutcome::Error => {
-                plan.retained
-                    .push((entry.project_id, RetainReason::LockError));
+                retained.push((entry.project_id, RetainReason::LockError));
                 continue;
             }
             LockOutcome::Available => {}
@@ -251,14 +304,204 @@ pub async fn plan(
         } else {
             BaseClassification::Orphaned
         };
-        plan.candidates.push(WarmBaseCandidate {
+        candidates.push(GuardEvaluation {
             entry,
             classification,
             latest_activity: snapshot.latest_activity,
-            free_space_bytes: free,
         });
     }
+    (candidates, retained)
+}
+
+/// Pure, deterministic disk-pressure planning for warm bases.
+///
+/// The measurement starts pressure planning only when the free percentage is
+/// strictly below the configured low watermark. Measurement errors fail closed
+/// and return an empty candidate list. Candidates that pass the shared safety,
+/// activity, warm-job, and lock guards are then filtered by the grace period,
+/// ordered by oldest derived activity and then canonical project ID, and the
+/// minimal prefix needed to reach the high watermark is selected.
+///
+/// No directories are deleted and no per-project caps are applied.
+pub async fn plan_pressure_eviction(
+    inventory: WarmBaseInventory,
+    activity: &dyn ActivityGuard,
+    warm_jobs: &dyn WarmJobGuard,
+    locks: &dyn BaseLockGuard,
+    capacity: &dyn FilesystemCapacity,
+    config: &crate::context::CacheCleanupConfig,
+    clock: &dyn Clock,
+) -> PressureEvictionPlan {
+    let mut plan = PressureEvictionPlan::default();
+    let capacity_snapshot = match capacity.capacity(Path::new(CARGO_WARM_BASE_ROOT)) {
+        Ok(value) => value,
+        Err(_) => {
+            for entry in inventory.entries {
+                plan.retained
+                    .push((entry.project_id, PressureSkipReason::MeasurementError));
+            }
+            return plan;
+        }
+    };
+    plan.target_bytes = target_reclaim_bytes(&capacity_snapshot, config.warm_base_high_free_ratio);
+
+    if !available_below_ratio(
+        capacity_snapshot.available_bytes,
+        capacity_snapshot.total_bytes,
+        config.warm_base_low_free_ratio,
+    ) {
+        for entry in inventory.entries {
+            plan.retained
+                .push((entry.project_id, PressureSkipReason::AboveLowWatermark));
+        }
+        return plan;
+    }
+
+    let (evaluations, retained) = evaluate_guards(inventory, activity, warm_jobs, locks).await;
+    for (project_id, reason) in retained {
+        plan.retained
+            .push((project_id, pressure_skip_reason_from_retain(reason)));
+    }
+
+    let grace = config.warm_base_grace_period;
+    let now = clock.now();
+    let mut safe: Vec<(GuardEvaluation, SystemTime)> = Vec::new();
+    for eval in evaluations {
+        let last = match latest_activity_time(eval.latest_activity.as_deref(), &eval.entry.path) {
+            Ok(value) => value,
+            Err(_) => {
+                plan.retained.push((
+                    eval.entry.project_id.clone(),
+                    PressureSkipReason::ActivityError,
+                ));
+                continue;
+            }
+        };
+        let cutoff = match last.checked_add(grace) {
+            Some(value) => value,
+            None => {
+                plan.retained.push((
+                    eval.entry.project_id.clone(),
+                    PressureSkipReason::ActivityError,
+                ));
+                continue;
+            }
+        };
+        if now < cutoff {
+            plan.retained
+                .push((eval.entry.project_id.clone(), PressureSkipReason::Young));
+            continue;
+        }
+        safe.push((eval, last));
+    }
+
+    safe.sort_by(|left, right| {
+        left.1
+            .cmp(&right.1)
+            .then_with(|| left.0.entry.project_id.cmp(&right.0.entry.project_id))
+    });
+
+    let mut cumulative: u64 = 0;
+    for (eval, _last) in safe {
+        let size = eval.entry.size_bytes;
+        let selected = cumulative < plan.target_bytes;
+        cumulative = cumulative.saturating_add(size);
+        if selected {
+            plan.candidates.push(WarmBaseCandidate {
+                entry: eval.entry,
+                classification: eval.classification,
+                latest_activity: eval.latest_activity,
+                free_space_bytes: 0,
+            });
+            plan.projected_bytes = plan.projected_bytes.saturating_add(size);
+        } else {
+            plan.retained
+                .push((eval.entry.project_id, PressureSkipReason::NotSelected));
+        }
+    }
     plan
+}
+
+fn target_reclaim_bytes(capacity: &CapacitySnapshot, high_free_ratio: f64) -> u64 {
+    // We need *at least* `total_bytes * high_free_ratio` bytes to be free, so
+    // round up to a whole byte. Do this with the ratio's IEEE-754 components,
+    // rather than converting total_bytes to f64: u64 capacities above 2^53
+    // would otherwise be rounded before the ceiling is applied.
+    let high_bytes = ceiling_ratio_bytes(capacity.total_bytes, high_free_ratio);
+    high_bytes.saturating_sub(capacity.available_bytes)
+}
+
+/// Compare `available / total < ratio` exactly, without converting bytes to f64.
+/// Invalid ratios and zero capacity fail closed (pressure is not started).
+fn available_below_ratio(available: u64, total: u64, ratio: f64) -> bool {
+    if total == 0 || ratio <= 0.0 || !ratio.is_finite() || ratio >= 1.0 {
+        return false;
+    }
+    let (significand, binary_exponent) = finite_positive_ratio_parts(ratio);
+    let numerator = (total as u128) * (significand as u128);
+    let shift = (-binary_exponent) as u32;
+    if shift >= 128 {
+        return available == 0 && numerator != 0;
+    }
+    let available = available as u128;
+    if available > (u128::MAX >> shift) {
+        return false;
+    }
+    (available << shift) < numerator
+}
+
+fn finite_positive_ratio_parts(ratio: f64) -> (u64, i32) {
+    let bits = ratio.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    if exponent == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1_u64 << 52), exponent - 1023 - 52)
+    }
+}
+
+/// Return `ceil(total * ratio)` without lossy conversion of `total` to f64.
+///
+/// Watermark configuration is constrained to finite ratios in `[0, 1)`, but
+/// this helper defensively bounds invalid values to keep planning fail-safe and
+/// bounded when called with an unchecked test fixture.
+fn ceiling_ratio_bytes(total: u64, ratio: f64) -> u64 {
+    if total == 0 || ratio <= 0.0 {
+        return 0;
+    }
+    if !ratio.is_finite() || ratio >= 1.0 {
+        return total;
+    }
+
+    let (significand, binary_exponent) = finite_positive_ratio_parts(ratio);
+
+    // A valid positive ratio below one has a negative binary exponent. For a
+    // denominator wider than u128, even the largest u64 capacity times the
+    // significand is below one byte, so its ceiling is exactly one byte.
+    let shift = (-binary_exponent) as u32;
+    if shift >= 128 {
+        return 1;
+    }
+    let numerator = (total as u128).saturating_mul(significand as u128);
+    let denominator = 1_u128 << shift;
+    let whole_bytes = numerator / denominator;
+    let has_fraction = !numerator.is_multiple_of(denominator);
+    (whole_bytes + u128::from(has_fraction)).min(total as u128) as u64
+}
+
+fn pressure_skip_reason_from_retain(reason: RetainReason) -> PressureSkipReason {
+    match reason {
+        RetainReason::ActivityError => PressureSkipReason::ActivityError,
+        RetainReason::ActiveTaskRun => PressureSkipReason::ActiveTaskRun,
+        RetainReason::WarmJobError => PressureSkipReason::WarmJobError,
+        RetainReason::WarmJobInFlight => PressureSkipReason::WarmJobInFlight,
+        RetainReason::FreeSpaceError => PressureSkipReason::MeasurementError,
+        RetainReason::LockBusy => PressureSkipReason::LockBusy,
+        RetainReason::LockError => PressureSkipReason::LockError,
+        RetainReason::Young => PressureSkipReason::Young,
+        RetainReason::DeleteError => PressureSkipReason::MeasurementError,
+    }
 }
 
 pub struct DbActivityGuard {
@@ -342,6 +585,26 @@ impl FreeSpaceGuard for StatvfsFreeSpaceGuard {
         }
         let stat = unsafe { stat.assume_init() };
         Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+    }
+}
+
+pub struct StatvfsFilesystemCapacity;
+impl FilesystemCapacity for StatvfsFilesystemCapacity {
+    fn capacity(&self, path: &Path) -> Result<CapacitySnapshot, String> {
+        let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|error| error.to_string())?;
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: statvfs initializes `stat` on a successful return.
+        if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let stat = unsafe { stat.assume_init() };
+        let total_bytes = stat.f_blocks.saturating_mul(stat.f_frsize);
+        let available_bytes = stat.f_bavail.saturating_mul(stat.f_frsize);
+        Ok(CapacitySnapshot {
+            total_bytes,
+            available_bytes,
+        })
     }
 }
 
