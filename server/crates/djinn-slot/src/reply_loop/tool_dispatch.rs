@@ -736,10 +736,16 @@ fn apply_turn_inline_budget_pass_with_config(
     }
     let largest_result_chars = results.iter().map(result_inline_chars).max().unwrap_or(0);
 
+    // Compute the group-level `tool_name_missing` flag across ALL collected
+    // results before selection. A nameless result may exist in the batch without
+    // being selected for externalization (e.g. an orphan streaming result that
+    // is smaller than a larger named result), so this flag must reflect the
+    // entire group, not just the selected candidates.
+    let tool_name_missing = results.iter().any(|r| r.name_missing);
+
     // Greedy largest-first selection. Iterate while over budget; each pass
     // picks the largest remaining candidate that can still shrink.
     let mut externalized_count: usize = 0;
-    let mut tool_name_missing = false;
     // Track which results have already been externalized this pass so we do not
     // re-select them.
     let mut externalized: Vec<bool> = vec![false; results.len()];
@@ -773,9 +779,6 @@ fn apply_turn_inline_budget_pass_with_config(
             break;
         };
         let result = &mut results[idx];
-        if result.name_missing {
-            tool_name_missing = true;
-        }
         // Render the current content text for the seam. Only single text-block
         // results are eligible (multi-block or non-text results are skipped).
         let Some(rendered) = single_text_content(&result.content) else {
@@ -1523,5 +1526,110 @@ mod tests {
         assert!(text.contains("tool_use_id=\"call-preserve-id\""));
         assert!(text.contains("tool_name=\"code_search\""));
         assert!(text.contains("reason=\"turn_budget\""));
+    }
+
+    // ─── Telemetry regression: group-level tool_name_missing ────────────────
+
+    /// A `MakeWriter` that captures tracing output into a buffer so tests can
+    /// assert on structured log content.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl CapturedLogs {
+        fn output(&self) -> String {
+            let buf = self.0.lock().expect("captured logs mutex poisoned");
+            String::from_utf8(buf.clone()).expect("captured log bytes were not valid utf-8")
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogsWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogsWriter {
+                inner: std::sync::Arc::clone(&self.0),
+            }
+        }
+    }
+    struct CapturedLogsWriter {
+        inner: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+    impl std::io::Write for CapturedLogsWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("captured logs mutex poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression for the group-level `tool_name_missing` telemetry flag.
+    ///
+    /// When a nameless result exists in the batch but is NOT selected for
+    /// externalization (because a larger named result trips the budget and is
+    /// selected first), the telemetry must still report `tool_name_missing=true`.
+    /// This mirrors the caller-reachable scenario where an orphan streaming
+    /// result (constructed without an originating `ToolUse` name) coexists with
+    /// a larger named result.
+    #[tokio::test]
+    async fn budget_trip_reports_tool_name_missing_for_unselected_nameless_result() {
+        use crate::test_helpers::{agent_context_from_db, create_test_db};
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let ctx = agent_context_from_db(db, CancellationToken::new());
+        let worktree_path = std::path::Path::new("/tmp");
+        let tool_metadata = ToolRuntimeMetadataMap::new();
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        // Small budget + small floor so externalization triggers.
+        let config = TurnInlineBudgetConfig {
+            budget: 200,
+            preview_floor: 10,
+        };
+
+        // A large named result that will be externalized first.
+        let big = "B".repeat(5_000);
+        let big_result = collected_text(0, "call-big", "shell", &big);
+
+        // A small nameless result that will NOT be selected for externalization
+        // (it is smaller than the named result and below the budget after the
+        // big result is externalized). This mirrors the orphan streaming result.
+        let small_nameless = CollectedToolResult {
+            idx: 5,
+            tool_use_id: "call-5".to_string(),
+            tool_name: UNKNOWN_TOOL_NAME.to_string(),
+            content: vec![ContentBlock::Text {
+                text: "orphan result".to_string(),
+            }],
+            is_error: true,
+            name_missing: true,
+        };
+
+        let mut results = vec![big_result, small_nameless];
+
+        // Capture the tracing output to verify the telemetry flag.
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(true)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+
+        let output = logs.output();
+        assert!(
+            output.contains("tool_name_missing=true"),
+            "telemetry must report tool_name_missing=true when a nameless result \
+             exists in the batch, even if it was not selected for externalization. \
+             Got: {output}"
+        );
     }
 }
