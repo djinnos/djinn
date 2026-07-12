@@ -348,8 +348,17 @@ async fn trace_persistence_failure_does_not_change_prompt_output() {
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
 
+    // Capture the normal, tracing-success rendered output first. This is the
+    // production baseline that must be preserved even when trace persistence
+    // fails. The same code path produces the same packed string from the same
+    // production note set, so a byte-for-byte comparison is the right regression
+    // guard against accidental injection of extra trace-related text.
+    let expected = load_knowledge_context(&task, None, &app_state)
+        .await
+        .expect("baseline prompt should be produced");
+
     // Drop the retrieval_traces table to force a persistence error.
-    // The prompt output should still be correct.
+    // The prompt output should still be byte-identical to the baseline.
     djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
 
     let result = load_knowledge_context(&task, None, &app_state).await;
@@ -357,6 +366,10 @@ async fn trace_persistence_failure_does_not_change_prompt_output() {
     // Prompt should still be produced correctly despite trace persistence failure.
     assert!(result.is_some(), "prompt should still be produced");
     let prompt = result.unwrap();
+    assert_eq!(
+        prompt, expected,
+        "prompt output must be byte-identical with and without trace persistence"
+    );
     assert!(prompt.contains("Fail Pattern"));
 }
 
