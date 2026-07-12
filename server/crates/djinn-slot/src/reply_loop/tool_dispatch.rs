@@ -458,6 +458,95 @@ pub(super) async fn collect_tool_results(
     tool_metadata: &ToolRuntimeMetadataMap,
     ctx: &ToolDispatchContext<'_>,
 ) -> Vec<ContentBlock> {
+    collect_tool_results_internal(
+        turn_tool_calls,
+        streaming_results,
+        streaming_dispatched,
+        tool_metadata,
+        ctx,
+    )
+    .await
+    .into_iter()
+    .map(CollectedToolResult::into_content_block)
+    .collect()
+}
+
+const UNKNOWN_TOOL_NAME: &str = "unknown_tool";
+
+/// Internal collected result that preserves the originating tool name and the
+/// original index through merge and sort so a later per-turn policy pass can
+/// correlate results with their `ToolUse` without re-scanning the transcript.
+#[derive(Debug, Clone)]
+struct CollectedToolResult {
+    pub idx: usize,
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub content: Vec<ContentBlock>,
+    pub is_error: bool,
+    /// True when the originating `ToolUse` did not have a tool name at the
+    /// original index; the explicit `unknown_tool` sentinel is used.
+    pub name_missing: bool,
+}
+
+impl CollectedToolResult {
+    fn into_content_block(self) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: self.tool_use_id,
+            content: self.content,
+            is_error: self.is_error,
+        }
+    }
+}
+
+fn resolve_tool_name(turn_tool_calls: &[ContentBlock], idx: usize) -> (String, bool) {
+    match turn_tool_calls.get(idx) {
+        Some(ContentBlock::ToolUse { name, .. }) => (name.clone(), false),
+        _ => (UNKNOWN_TOOL_NAME.to_string(), true),
+    }
+}
+
+fn collect_tool_result_from_block(
+    idx: usize,
+    block: ContentBlock,
+    turn_tool_calls: &[ContentBlock],
+) -> CollectedToolResult {
+    match block {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
+            let (tool_name, name_missing) = resolve_tool_name(turn_tool_calls, idx);
+            CollectedToolResult {
+                idx,
+                tool_use_id,
+                tool_name,
+                content,
+                is_error,
+                name_missing,
+            }
+        }
+        _ => {
+            let (tool_name, name_missing) = resolve_tool_name(turn_tool_calls, idx);
+            CollectedToolResult {
+                idx,
+                tool_use_id: String::new(),
+                tool_name,
+                content: vec![block],
+                is_error: false,
+                name_missing,
+            }
+        }
+    }
+}
+
+async fn collect_tool_results_internal(
+    turn_tool_calls: &[ContentBlock],
+    streaming_results: Vec<(usize, ContentBlock)>,
+    streaming_dispatched: &HashSet<usize>,
+    tool_metadata: &ToolRuntimeMetadataMap,
+    ctx: &ToolDispatchContext<'_>,
+) -> Vec<CollectedToolResult> {
     // rdx6 only introduced the host seam for externalizing an already-rendered
     // result. It intentionally does not apply that seam here: collect_tool_results
     // remains a per-result dispatcher with no per-turn inline-budget group pass.
@@ -477,7 +566,7 @@ pub(super) async fn collect_tool_results(
                 ToolBatch::Serial(_) => 0,
             })
             .sum();
-        let serial_remaining = indexed_tool_calls.len() - safe_remaining;
+        let serial_remaining = indexed_tool_calls.len().saturating_sub(safe_remaining);
         tracing::debug!(
             task_id = %ctx.task_id,
             total = total_tools,
@@ -488,9 +577,13 @@ pub(super) async fn collect_tool_results(
             "ReplyLoop: tool call dispatch (ADR-048 §1A+§1B)"
         );
     }
-    let mut indexed_results: Vec<(usize, ContentBlock)> =
+    let mut indexed_results: Vec<CollectedToolResult> =
         Vec::with_capacity(indexed_tool_calls.len() + streaming_results.len());
-    indexed_results.extend(streaming_results);
+    indexed_results.extend(
+        streaming_results
+            .into_iter()
+            .map(|(idx, block)| collect_tool_result_from_block(idx, block, turn_tool_calls)),
+    );
     for batch in &batches {
         match batch {
             ToolBatch::Parallel(indices) => {
@@ -500,20 +593,23 @@ pub(super) async fn collect_tool_results(
                         .map(|&idx| make_tool_future(idx, turn_tool_calls[idx].clone(), ctx))
                         .collect();
                     let results = futures::future::join_all(futures).await;
-                    indexed_results.extend(results);
+                    indexed_results.extend(results.into_iter().map(|(idx, block)| {
+                        collect_tool_result_from_block(idx, block, turn_tool_calls)
+                    }));
                 }
             }
             ToolBatch::Serial(idx) => {
                 let result = make_tool_future(*idx, turn_tool_calls[*idx].clone(), ctx).await;
-                indexed_results.push(result);
+                indexed_results.push(collect_tool_result_from_block(
+                    result.0,
+                    result.1,
+                    turn_tool_calls,
+                ));
             }
         }
     }
-    indexed_results.sort_by_key(|(idx, _)| *idx);
+    indexed_results.sort_by_key(|r| r.idx);
     indexed_results
-        .into_iter()
-        .map(|(_, block)| block)
-        .collect()
 }
 
 #[cfg(test)]
@@ -664,5 +760,321 @@ mod tests {
         .await;
         assert_eq!(out, 7);
         assert_eq!(beats.load(Ordering::SeqCst), 0);
+    }
+
+    fn test_dispatch_context<'a>(
+        ctx: &'a SlotContext,
+        tool_metadata: &'a ToolRuntimeMetadataMap,
+        worktree_path: &'a std::path::Path,
+    ) -> ToolDispatchContext<'a> {
+        ToolDispatchContext {
+            ctx,
+            task_id: "test-task",
+            worktree_path,
+            role_name: "test-role",
+            tool_metadata,
+            tool_dispatcher: ctx.tool_dispatcher.as_ref().unwrap().as_ref(),
+            otel_session: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_tool_results_preserves_names_and_ordering_across_serial_parallel_streaming() {
+        use crate::test_helpers::{agent_context_from_db, create_test_db};
+        use std::collections::HashSet;
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let ctx = agent_context_from_db(db, CancellationToken::new());
+        let worktree_path = std::path::Path::new("/tmp");
+
+        let schemas = vec![
+            // serial: read-only but not concurrent-safe
+            test_tool_schema(
+                "shell",
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(false),
+            ),
+            // parallel
+            test_tool_schema(
+                "read",
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(true),
+            ),
+            test_tool_schema(
+                "code_search",
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(true),
+            ),
+        ];
+        let tool_metadata = tool_runtime_metadata(&schemas);
+
+        let turn_tool_calls = vec![
+            ContentBlock::ToolUse {
+                id: "call-0".into(),
+                name: "shell".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolUse {
+                id: "call-2".into(),
+                name: "code_search".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolUse {
+                id: "call-3".into(),
+                name: "write".into(),
+                input: serde_json::json!({}),
+            },
+        ];
+
+        let streaming_results = vec![(
+            3,
+            ContentBlock::ToolResult {
+                tool_use_id: "call-3".into(),
+                content: vec![ContentBlock::text("streamed write ok")],
+                is_error: false,
+            },
+        )];
+        let streaming_dispatched = HashSet::from([3]);
+
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        let collected = collect_tool_results_internal(
+            &turn_tool_calls,
+            streaming_results,
+            &streaming_dispatched,
+            &tool_metadata,
+            &dispatch_ctx,
+        )
+        .await;
+
+        assert_eq!(collected.len(), 4);
+        assert_eq!(collected[0].idx, 0);
+        assert_eq!(collected[1].idx, 1);
+        assert_eq!(collected[2].idx, 2);
+        assert_eq!(collected[3].idx, 3);
+
+        assert_eq!(collected[0].tool_name, "shell");
+        assert_eq!(collected[1].tool_name, "read");
+        assert_eq!(collected[2].tool_name, "code_search");
+        assert_eq!(collected[3].tool_name, "write");
+
+        assert!(!collected.iter().any(|r| r.name_missing));
+
+        let blocks: Vec<ContentBlock> = collected
+            .into_iter()
+            .map(CollectedToolResult::into_content_block)
+            .collect();
+        let ids: Vec<String> = blocks
+            .iter()
+            .map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => tool_use_id.clone(),
+                _ => panic!("expected ToolResult"),
+            })
+            .collect();
+        assert_eq!(ids, vec!["call-0", "call-1", "call-2", "call-3"]);
+
+        let rendered_results: Vec<(String, String, bool)> = blocks
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
+                    let [ContentBlock::Text { text }] = content.as_slice() else {
+                        panic!("expected a ToolResult containing one text block");
+                    };
+                    (tool_use_id.clone(), text.clone(), *is_error)
+                }
+                _ => panic!("expected a ToolResult containing one text block"),
+            })
+            .collect();
+        assert_eq!(
+            rendered_results,
+            vec![
+                (
+                    "call-0".to_string(),
+                    "{\n  \"ok\": true,\n  \"exit_code\": 0,\n  \"stdout\": \"mock shell output\\n\",\n  \"stderr\": \"\",\n  \"workdir\": \"/tmp\"\n}"
+                        .to_string(),
+                    false,
+                ),
+                ("call-1".to_string(), "{\n  \"ok\": true\n}".to_string(), false),
+                ("call-2".to_string(), "{\n  \"ok\": true\n}".to_string(), false),
+                ("call-3".to_string(), "streamed write ok".to_string(), false),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_tool_results_uses_unknown_tool_for_nameless_input() {
+        use crate::test_helpers::{agent_context_from_db, create_test_db};
+        use std::collections::HashSet;
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let ctx = agent_context_from_db(db, CancellationToken::new());
+        let worktree_path = std::path::Path::new("/tmp");
+        let tool_metadata = ToolRuntimeMetadataMap::new();
+
+        let turn_tool_calls = vec![ContentBlock::ToolUse {
+            id: "call-0".into(),
+            name: "shell".into(),
+            input: serde_json::json!({}),
+        }];
+
+        let streaming_results = vec![(
+            5,
+            ContentBlock::ToolResult {
+                tool_use_id: "call-5".into(),
+                content: vec![ContentBlock::text("orphan result")],
+                is_error: true,
+            },
+        )];
+        let streaming_dispatched = HashSet::from([5]);
+
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        let collected = collect_tool_results_internal(
+            &turn_tool_calls,
+            streaming_results,
+            &streaming_dispatched,
+            &tool_metadata,
+            &dispatch_ctx,
+        )
+        .await;
+
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].idx, 0);
+        assert_eq!(collected[0].tool_name, "shell");
+        assert!(!collected[0].name_missing);
+
+        assert_eq!(collected[1].idx, 5);
+        assert_eq!(collected[1].tool_name, UNKNOWN_TOOL_NAME);
+        assert!(collected[1].name_missing);
+    }
+
+    #[tokio::test]
+    async fn collect_tool_results_preserves_mcp_and_extension_names() {
+        use crate::test_helpers::{
+            ConfigurableToolDispatcher, ToolHandlerFn, agent_context_from_db_with_dispatcher,
+            create_test_db,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let mut handlers: HashMap<String, ToolHandlerFn> = HashMap::new();
+        handlers.insert(
+            "mcp_fetch".to_string(),
+            (|_| Ok(serde_json::json!({"ok": true}))) as ToolHandlerFn,
+        );
+        handlers.insert(
+            "extension_compute".to_string(),
+            (|_| Ok(serde_json::json!({"result": 42}))) as ToolHandlerFn,
+        );
+        let dispatcher = Arc::new(ConfigurableToolDispatcher::new(
+            vec!["mcp_fetch".to_string()],
+            handlers,
+        ));
+        let ctx =
+            agent_context_from_db_with_dispatcher(db, CancellationToken::new(), Some(dispatcher));
+        let worktree_path = std::path::Path::new("/tmp");
+
+        let schemas = vec![
+            test_tool_schema(
+                "mcp_fetch",
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(true),
+            ),
+            test_tool_schema(
+                "extension_compute",
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(true),
+            ),
+        ];
+        let tool_metadata = tool_runtime_metadata(&schemas);
+
+        let turn_tool_calls = vec![
+            ContentBlock::ToolUse {
+                id: "mcp-1".into(),
+                name: "mcp_fetch".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolUse {
+                id: "ext-1".into(),
+                name: "extension_compute".into(),
+                input: serde_json::json!({}),
+            },
+        ];
+
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        let collected = collect_tool_results_internal(
+            &turn_tool_calls,
+            Vec::new(),
+            &HashSet::new(),
+            &tool_metadata,
+            &dispatch_ctx,
+        )
+        .await;
+
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].tool_name, "mcp_fetch");
+        assert_eq!(collected[1].tool_name, "extension_compute");
+        assert!(!collected.iter().any(|r| r.name_missing));
+    }
+
+    #[tokio::test]
+    async fn collect_tool_results_preserves_stash_tool_name() {
+        use crate::test_helpers::{agent_context_from_db, create_test_db};
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let ctx = agent_context_from_db(db, CancellationToken::new());
+        let worktree_path = std::path::Path::new("/tmp");
+        let tool_metadata = ToolRuntimeMetadataMap::new();
+
+        let turn_tool_calls = vec![ContentBlock::ToolUse {
+            id: "stash-1".into(),
+            name: "output_view".into(),
+            input: serde_json::json!({"tool_use_id": "prior"}),
+        }];
+
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        let collected = collect_tool_results_internal(
+            &turn_tool_calls,
+            Vec::new(),
+            &HashSet::new(),
+            &tool_metadata,
+            &dispatch_ctx,
+        )
+        .await;
+
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].tool_name, "output_view");
+        assert!(!collected[0].name_missing);
     }
 }
