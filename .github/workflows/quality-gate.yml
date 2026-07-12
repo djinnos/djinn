@@ -1,47 +1,23 @@
 name: CI
-
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
-  merge_group:
-  workflow_dispatch:
-
-# PR heads and main pushes are deliberately coalesced. Merge-queue candidates
-# must never be cancelled by a later candidate; dispatch runs are isolated.
+    branches:
+      - main
+  merge_group: null
+  workflow_dispatch: null
 concurrency:
-  group: >-
-    ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main' || github.event_name == 'merge_group' && format('ci-merge-group-{0}', github.event.merge_group.head_sha || github.ref) || format('ci-dispatch-{0}', github.run_id) }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main' || github.event_name == 'merge_group' && format('ci-merge-group-{0}', github.event.merge_group.head_sha || github.ref) || format('ci-dispatch-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
-
-# Shared environment for all jobs.
-#
-# CI is deliberately INSULATED from the workspace `.cargo/config.toml`, which
-# no longer pins sccache and lets cargo's incremental dev/test profiles apply
-# (the djinn warm/verify/worker pods need incremental-on for the warm-cache
-# fast path). CI does NOT want large incremental artifact dirs in the GitHub
-# Actions cache, so it pins `CARGO_INCREMENTAL: "0"` here and relies on the
-# Swatinem/rust-cache action for cross-run caching (RUSTC_WRAPPER cleared so
-# no local sccache is invoked). Pinning these at the job level means A.1's
-# config.toml change is a no-op for CI.
-#
-# RUSTFLAGS is set ONCE here and must NOT be overridden per-job. Both the
-# rust-cache key and Cargo's compile fingerprint fold in RUSTFLAGS, so any
-# divergence between the warm-cache jobs (push to main) and the PR /
-# merge_group consumer jobs is a guaranteed cache miss + full cold rebuild.
-# (Registry/path deps are capped to `--cap-lints allow`, so `-D warnings`
-# only gates first-party crates and never recompiles dependencies.)
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   CARGO_BUILD_BUILD_DIR: target
   RUSTC_WRAPPER: ""
-  RUSTFLAGS: "-D warnings"
-
+  RUSTFLAGS: -D warnings
 jobs:
-  # ── Routed preflight ─────────────────────────────────────────────────
-  # The checked-in router is the sole source of lane decisions.
   preflight:
     name: Preflight routing
     runs-on: ubuntu-latest
@@ -110,7 +86,6 @@ jobs:
           path: preflight/manifest.json
           if-no-files-found: error
           retention-days: 30
-
   main-admission:
     name: Main admission delay
     needs: preflight
@@ -118,106 +93,115 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: sleep 90
-
-  # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  Cache Warming (main push only)                                 ║
-  # ║                                                                  ║
-  # ║  These jobs build the workspace to pre-populate GitHub Actions   ║
-  # ║  cache after every merge to main.  PR / merge_group jobs set     ║
-  # ║  save-if: false so they never write cache — guaranteeing         ║
-  # ║  consistent warm hits from the last main commit.                 ║
-  # ╚══════════════════════════════════════════════════════════════════╝
-
-  warm-cache-quality:
-    name: Warm Cache (Quality)
-    needs: [preflight, main-admission]
+  cache-warm-x86_64-quality:
+    name: Cache Warm x86_64 (Quality)
+    needs:
+      - preflight
+      - main-admission
     if: github.event_name == 'push' && needs.preflight.outputs.clippy == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: server
     env:
-      # No MySQL service in this job. Force sqlx to read from the
-      # committed `.sqlx/` offline cache instead of trying to connect to
-      # the DATABASE_URL baked into `.cargo/config.toml`.
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
-
       - run: rustup toolchain install
         working-directory: server
-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
           shared-key: server-quality
           cache-on-failure: true
+          save-if: true
           cache-all-crates: true
-
-      # Warm with the SAME command the PR consumer runs (`cargo clippy`),
-      # not `cargo check` — clippy compiles workspace crates through
-      # clippy-driver under a separate fingerprint, so a `check` warm
-      # leaves the workspace-crate clippy pass cold. Deps are shared.
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-quality"
+          echo "shared-key=server-quality"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-quality shared-key=server-quality cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: Build workspace (populate cache)
         run: cargo clippy --all-targets --features qdrant -- -D warnings
-
-      - name: Prune old caches
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh cache list --repo ${{ github.repository }} --key server-quality- \
-            --sort created_at --order asc --json id | \
-            jq -r '.[:-1].[].id' | \
-            xargs -r -I{} gh cache delete {} --repo ${{ github.repository }} 2>/dev/null || true
-
-  warm-cache-test:
-    name: Warm Cache (Test)
-    needs: [preflight, main-admission]
+  cache-warm-x86_64-test:
+    name: Cache Warm x86_64 (Test)
+    needs:
+      - preflight
+      - main-admission
     if: github.event_name == 'push' && needs.preflight.outputs.serverTest == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: server
     env:
-      # No MySQL service in this job (it only compiles, --no-run).
-      # Force sqlx to read from the committed `.sqlx/` offline cache.
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
-
       - run: rustup toolchain install
         working-directory: server
-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
           shared-key: server-test
           cache-on-failure: true
+          save-if: true
           cache-all-crates: true
-
+        id: rust-cache
       - uses: taiki-e/install-action@nextest
-
       - name: Build test binaries (populate cache)
         run: cargo nextest run --workspace --all-targets --features qdrant --no-run
-
-      - name: Prune old caches
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-test"
+          echo "shared-key=server-test"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
         if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh cache list --repo ${{ github.repository }} --key server-test- \
-            --sort created_at --order asc --json id | \
-            jq -r '.[:-1].[].id' | \
-            xargs -r -I{} gh cache delete {} --repo ${{ github.repository }} 2>/dev/null || true
-
-  # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  Server cargo-deny (PR + merge queue)                            ║
-  # ║                                                                  ║
-  # ║  Supply-chain and policy ratchet that inspects lockfile,         ║
-  # ║  manifests, and deny.toml only — no database required.           ║
-  # ╚══════════════════════════════════════════════════════════════════╝
-
+  cache-warm-aarch64:
+    name: Cache Warm aarch64
+    needs:
+      - preflight
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.aarch64 == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      OPENSSL_NO_VENDOR: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+        working-directory: server
+      - run: rustup target add aarch64-unknown-linux-gnu
+        working-directory: server
+      - name: Install cross C toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-aarch64-check
+          cache-on-failure: true
+          save-if: true
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-aarch64-check"
+          echo "shared-key=server-aarch64-check"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-aarch64-check shared-key=server-aarch64-check cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: cargo check (aarch64)
+        run: cargo check -p djinn-sandbox --all-targets --target aarch64-unknown-linux-gnu
   server-cargo-deny:
     name: Server cargo-deny
     needs: preflight
@@ -228,14 +212,11 @@ jobs:
         working-directory: server
     steps:
       - uses: actions/checkout@v4
-
       - run: rustup toolchain install
         working-directory: server
-
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-
       - name: cargo-deny check
         run: |
           # Retry up to 3 times with backoff — crates.io downloads can
@@ -255,8 +236,6 @@ jobs:
           done
           echo "::error::cargo-deny check failed after 3 attempts"
           exit 1
-
-      # Fail fast — see the note above the Quality Gate job.
       - name: Fail fast
         if: failure()
         env:
@@ -264,16 +243,6 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
-
-  # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  Server Lint (PR + merge queue)                                  ║
-  # ║                                                                  ║
-  # ║  Clippy is the cheap, fast-feedback gate that runs on every PR   ║
-  # ║  push as well as in the merge queue.  It reads warm cache and    ║
-  # ║  needs no database.  The expensive DB-backed test jobs below     ║
-  # ║  run only in the merge queue to save action runs on PR churn.    ║
-  # ╚══════════════════════════════════════════════════════════════════╝
-
   server-clippy:
     name: Server Clippy
     needs: preflight
@@ -286,18 +255,24 @@ jobs:
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
-
       - run: rustup toolchain install
         working-directory: server
-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
           shared-key: server-quality
           cache-on-failure: true
           cache-all-crates: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-quality"
+          echo "shared-key=server-quality"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-quality shared-key=server-quality cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - uses: taiki-e/install-action@v2
         if: github.event_name != 'merge_group'
         with:
@@ -309,15 +284,11 @@ jobs:
             echo "::error::workspace-hack is out of date. Run 'cargo hakari generate && cargo hakari manage-deps' locally."
             exit 1
           }
-
       - name: Verify skills manifest is up to date
         if: github.event_name != 'merge_group'
         run: cargo run -p djinn-agent --bin djinn-skills-manifest -- check --root ..
-
       - name: Clippy
         run: cargo clippy --all-targets --features qdrant -- -D warnings
-
-      # Fail fast — see the note above the Quality Gate job.
       - name: Fail fast
         if: failure()
         env:
@@ -325,21 +296,9 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
-
-  # Cross-check the Linux sandbox layer for aarch64. Everything else in CI
-  # compiles x86_64-only, which let an aarch64-breaking seccomp deny list
-  # (x86_64-only legacy syscall constants in djinn-sandbox) ship to main —
-  # local dev on Apple Silicon (kind node = linux/arm64) then failed to
-  # build. Check-only (no link), scoped to the crate that owns the
-  # arch-conditional syscall/landlock code.
   server-aarch64-check:
     name: Server aarch64 Check
     needs: preflight
-    # Gated on the `sandbox` filter, NOT `server`: the arch-conditional code
-    # this job protects is confined to djinn-sandbox, so a full cold aarch64
-    # cross-compile is only warranted when the sandbox crate (or the inputs
-    # that reshape its aarch64 build) change. Skipped → Quality Gate treats it
-    # as success, so unrelated PRs no longer pay the ~400s cold build.
     if: needs.preflight.outputs.aarch64 == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     defaults:
@@ -347,51 +306,34 @@ jobs:
         working-directory: server
     env:
       SQLX_OFFLINE: "true"
-      # Cross C compiler for any cc-built dep reached through the crate's
-      # tree (e.g. via workspace-hack); `check` doesn't link, but build
-      # scripts still compile target-arch C.
       CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      # workspace-hack activates openssl-sys's `vendored` feature for the whole
-      # workspace, but server/.cargo/config.toml pins OPENSSL_NO_VENDOR=1 to
-      # link the *host* system OpenSSL (there is no aarch64 system libssl here,
-      # and pkg-config isn't set up for cross). Override it back to 0 so
-      # openssl-sys compiles the vendored copy from source with the cross C
-      # toolchain installed below. (config.toml's [env] isn't force=true, so a
-      # real env var wins.)
       OPENSSL_NO_VENDOR: "0"
     steps:
       - uses: actions/checkout@v4
-
       - run: rustup toolchain install
         working-directory: server
       - run: rustup target add aarch64-unknown-linux-gnu
         working-directory: server
-
       - name: Install cross C toolchain
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
           shared-key: server-aarch64-check
           cache-on-failure: true
-          # This job is gated OFF `push` (it runs only on pull_request /
-          # merge_group / workflow_dispatch), so a `github.ref == 'refs/heads/main'`
-          # save-if is NEVER true here and the aarch64 cache was permanently cold
-          # — every sandbox-touching run paid the full ~400s cross-compile from
-          # scratch (PR #1590 finding). Unlike the x86 jobs, there is no
-          # main-push warm-cache job priming this key, so the authoritative place
-          # to SAVE is the merge_group run: it is the last build of the change
-          # before it lands, and its saved cache warms the NEXT sandbox-touching
-          # PR/queue run. pull_request runs still read-only (save-if false) so a
-          # cold PR build never overwrites the good queue-primed cache.
-          save-if: ${{ github.event_name == 'merge_group' }}
-
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-aarch64-check"
+          echo "shared-key=server-aarch64-check"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-aarch64-check shared-key=server-aarch64-check cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: cargo check (aarch64)
         run: cargo check -p djinn-sandbox --all-targets --target aarch64-unknown-linux-gnu
-
-      # Fail fast — see the note above the Quality Gate job.
       - name: Fail fast
         if: failure()
         env:
@@ -399,33 +341,18 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
-
-  # Pure-shell PR-time guard for Rust source file size; independent from clippy.
-  # Runs in changed-file mode (--files-from-stdin) so the job enforces the
-  # "new or edited Rust file" regression guard and does not fail on the
-  # legacy oversized files that the sibling split epics are still working
-  # through. Full-tree audits remain available locally via
-  # `./scripts/check-file-size.sh --all`.
   server-size-guard:
     name: Server Size Guard
     needs: preflight
     if: needs.preflight.outputs.size == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
-      # fetch-depth: 0 is required so `git diff` can resolve the merge base
-      # against the PR / merge-queue base SHA. A shallow clone would force
-      # the diff command to fail on stale base commits.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Check changed Rust file sizes
         env:
-          # Pick a base SHA appropriate for the current event:
-          #   pull_request: the PR's base ref HEAD
-          #   merge_group:  the merge-queue base ref HEAD
-          #   workflow_dispatch / other: empty → fall back to origin/main below
-          BASE_SHA: >-
+          BASE_SHA: |-
             ${{ github.event.pull_request.base.sha
                || github.event.merge_group.base_sha
                || '' }}
@@ -452,8 +379,6 @@ jobs:
           # which tolerates a slightly stale PR base SHA after main advances.
           git diff --name-only --diff-filter=AMR "$BASE_SHA...HEAD" \
             | ./scripts/check-file-size.sh --files-from-stdin
-
-      # Fail fast — see the note above the Quality Gate job.
       - name: Fail fast
         if: failure()
         env:
@@ -461,37 +386,22 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
-
-  # Pure-shell PR-time guard: already-applied sqlx migrations are immutable.
-  # Editing/renaming/deleting a migration that exists on the base branch breaks
-  # the `migrate` init container on every EXISTING database (sqlx checksum
-  # mismatch) while still passing on a fresh CI DB — so it only detonates at
-  # deploy time. This guard blocks the merge; schema changes must be a NEW
-  # migration. Wired into the Quality Gate below so it is a hard blocker.
   server-migrations-guard:
     name: Server Migrations Guard
     needs: preflight
     if: needs.preflight.outputs.migrations == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
-      # fetch-depth: 0 so `git diff` can resolve the merge base against the
-      # PR / merge-queue base SHA. A shallow clone would fail on stale bases.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Check applied migrations are immutable
         env:
-          # PR: the PR's base ref HEAD; merge_group: the merge-queue base ref
-          # HEAD; workflow_dispatch / other: empty → the script falls back to
-          # origin/main.
-          BASE_SHA: >-
+          BASE_SHA: |-
             ${{ github.event.pull_request.base.sha
                || github.event.merge_group.base_sha
                || '' }}
         run: ./scripts/check-migrations-immutable.sh
-
-      # Fail fast — see the note above the Quality Gate job.
       - name: Fail fast
         if: failure()
         env:
@@ -499,37 +409,22 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
-
-  # Pure-shell PR-time guard: raw sqlx query usage is confined to djinn-db.
-  # Enforces the boundary that all direct sqlx::query / sqlx::query! calls
-  # must live inside `server/crates/djinn-db/` and not leak into other crates.
-  # Wired into the Quality Gate below so it is a hard blocker.
   server-raw-sql-boundary:
     name: Server Raw-SQL Boundary
     needs: preflight
     if: needs.preflight.outputs.rawSql == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
-      # fetch-depth: 0 is required so `git diff` can resolve the merge base
-      # against the PR / merge-queue base SHA.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Check raw-SQL boundary
         env:
-          # Pick a base SHA appropriate for the current event:
-          #   pull_request: the PR's base ref HEAD
-          #   merge_group:  the merge-queue base ref HEAD
-          #   workflow_dispatch / other: empty → the script falls back to
-          #   origin/main.
-          BASE_SHA: >-
+          BASE_SHA: |-
             ${{ github.event.pull_request.base.sha
                || github.event.merge_group.base_sha
                || '' }}
         run: ./scripts/check-raw-sql-boundary.sh
-
-      # Fail fast — see the note above the Quality Gate job.
       - name: Fail fast
         if: failure()
         env:
@@ -537,36 +432,20 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
-
-  # Pure-shell PR-time guard for the git, HTTP, and Kubernetes capability
-  # boundaries.  All direct git usage (git2::, Command::new("git")), outbound
-  # HTTP client construction (reqwest::Client/ClientBuilder/RequestBuilder), and
-  # Kubernetes client access (kube::, k8s_openapi, Command::new("kubectl"))
-  # must live inside the owner crates (djinn-git, djinn-provider, djinn-k8s).
-  # Wired into the Quality Gate below as a hard blocker.
   server-capability-boundaries:
     name: Server Capability Boundaries
     needs: preflight
     if: needs.preflight.outputs.capability == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
-      # fetch-depth: 0 is required so `git diff` can resolve the merge base
-      # against the PR / merge-queue base SHA.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Self-test capability boundary detectors
         run: ./scripts/test-capability-boundaries.sh
-
       - name: Check capability boundaries
         env:
-          # Pick a base SHA appropriate for the current event:
-          #   pull_request: the PR's base ref HEAD
-          #   merge_group:  the merge-queue base ref HEAD
-          #   workflow_dispatch / other: empty → the detectors fall back to
-          #   origin/main for a full-tree audit.
-          BASE_SHA: >-
+          BASE_SHA: |-
             ${{ github.event.pull_request.base.sha
                || github.event.merge_group.base_sha
                || '' }}
@@ -574,8 +453,6 @@ jobs:
           ./scripts/check-git-boundary.sh
           ./scripts/check-http-boundary.sh
           ./scripts/check-k8s-boundary.sh
-
-      # Fail fast — see the note above the Quality Gate job.
       - name: Fail fast
         if: failure()
         env:
@@ -583,14 +460,6 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
-
-  # Pure-script PR-time guard: architectural layering boundaries.
-  # Enforces the forbidden-edge rules in `server/boundary_rules.toml`
-  # against the workspace's declared crate dependencies + a source scan
-  # for file-level rules. Reads manifests and greps source only — no DB,
-  # no SCIP graph warm, no workspace compile — so it runs in seconds and
-  # needs no Postgres or build step. Wired into the Quality Gate below as
-  # a hard blocker.
   server-boundaries:
     name: Server Architectural Boundaries
     needs: preflight
@@ -598,11 +467,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Check architectural boundaries
         run: python3 scripts/check_boundaries.py
-
-      # Fail fast — see the note above the Quality Gate job.
       - name: Fail fast
         if: failure()
         env:
@@ -610,53 +476,22 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
-
-  # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  Server Tests (merge queue only)                                 ║
-  # ║                                                                  ║
-  # ║  DB-backed, full-compile + run. Skipped on PRs to save action    ║
-  # ║  runs — they execute once when a PR enters the merge queue       ║
-  # ║  (and on manual workflow_dispatch), now in PARALLEL with clippy  ║
-  # ║  rather than gated behind it (see the per-job note below).        ║
-  # ╚══════════════════════════════════════════════════════════════════╝
-
   server-test:
     name: Server Test
-    # Runs in PARALLEL with clippy (no longer `needs: server-clippy`). The old
-    # gate was a pure cost optimization — skip the 4 Postgres shards if clippy
-    # would fail anyway — but it serialized ~112s of warm clippy in front of
-    # every merge-queue run. Merge-queue code is already PR-reviewed and clippy
-    # rarely fails on the rebase, so the far more common case is paying that
-    # 112s for nothing. A red clippy still fails the Quality Gate; the only
-    # cost of parallelizing is occasionally burning shards on a doomed run.
-    #
-    # PR-HEAD REPRESENTATIVENESS: this DB-backed suite now runs on `pull_request`
-    # as well, not just the merge queue. When it was merge_group-only, a PR went
-    # green on lint alone while the authoritative test suite ran for the first
-    # time inside the merge queue — so a test that would reject the change only
-    # surfaced AFTER the PR looked mergeable, ejecting it from the queue and
-    # forcing rework. The draft-PR-gated agent flow reads the PR-head checks as
-    # the readiness signal, so the suite that can reject in the queue must also
-    # execute on the PR head. The `server` change-filter still short-circuits
-    # docs-only PRs (they skip here AND in the queue, so no queue rejection is
-    # possible), preserving that economy. Cache is still saved on main only
-    # (save-if below), so PR/merge_group runs read the warm cache without
-    # writing divergent entries.
     needs: preflight
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard:
+          - 1
+          - 2
+          - 3
+          - 4
     defaults:
       run:
         working-directory: server
-    # Ephemeral Postgres for djinn-db integration tests (the MySQL/Dolt
-    # cut-over shipped in v0.2.x). The workspace `.cargo/config.toml`
-    # points DATABASE_URL (compile-time sqlx macros) and
-    # DJINN_TEST_DATABASE_URL (runtime per-test DB clones) at :5433 — CI
-    # inherits those automatically, so we just forward the port here.
     services:
       postgres:
         image: postgres:16
@@ -665,42 +500,36 @@ jobs:
           POSTGRES_DB: djinn
         ports:
           - 5433:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=5s --health-timeout=3s --health-retries=20
+        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
-
       - run: rustup toolchain install
         working-directory: server
-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
           shared-key: server-test
           cache-on-failure: true
           cache-all-crates: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-test"
+          echo "shared-key=server-test"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - uses: taiki-e/install-action@nextest
-
-      # Prebuilt binary — avoids a multi-minute Rust build of sqlx-cli.
       - uses: taiki-e/install-action@v2
         with:
           tool: sqlx-cli
-
-      # The compile-time sqlx::query! macros connect to DATABASE_URL
-      # (:5433/djinn via .cargo/config.toml), so the schema must exist
-      # before the test binaries build.
       - name: Apply djinn-db migrations
         working-directory: server/crates/djinn-db
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: sqlx migrate run --source migrations_postgres
-
-      # Per-test databases clone from `djinn_test_template` (see
-      # Database::open_in_memory). Build it, migrate it, and flag it as a
-      # TEMPLATE so `CREATE DATABASE … TEMPLATE djinn_test_template` works.
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres
@@ -710,50 +539,19 @@ jobs:
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
           cd crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
-
-      # Tests default DJINN_VAULT_KEY_PATH to /var/tmp/djinn-test-vault
-      # (.cargo/config.toml); create the disk-backed key the crypto layer
-      # expects so vault-touching tests don't fall back to the prod path.
       - name: Create test vault key
         run: |
           mkdir -p /var/tmp/djinn-test-vault
           openssl rand -out /var/tmp/djinn-test-vault/vault.key 32
           chmod 600 /var/tmp/djinn-test-vault/vault.key
-
       - name: Configure git identity for tests
         run: |
           git config --global user.email "ci@test.local"
           git config --global user.name "CI Test"
-
-      # This unfiltered nextest invocation is the authoritative merge-queue /
-      # manual full-suite path for lifecycle/concurrency regressions inventoried
-      # in docs/LIFECYCLE_CONCURRENCY_TEST_INVENTORY.md. Keep the dispatch-cap,
-      # slot-pool event-race, execution_kill_task settlement, and
-      # reopen/intervention chaos tests discoverable here; if future stress
-      # coverage needs a slower profile, wire that explicit profile into this
-      # job instead of filtering the regressions out of CI.
       - name: Tests
         run: cargo nextest run --workspace --all-targets --features qdrant --profile ci --partition count:${{ matrix.shard }}/4
-
-  # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  sqlx offline-cache freshness gate (PR + merge queue)            ║
-  # ║                                                                  ║
-  # ║  The compile-checked `sqlx::query!` macros validate SQL against  ║
-  # ║  a live schema. Their results are committed to `server/.sqlx/`   ║
-  # ║  so the rest of CI (and prod builds) can compile with            ║
-  # ║  SQLX_OFFLINE=true. If a query changes but the cache isn't       ║
-  # ║  regenerated (`make sqlx-prepare`), the offline build silently   ║
-  # ║  uses stale type info. This job stands up a Postgres matching    ║
-  # ║  the schema and fails if the committed cache is out of date.     ║
-  # ╚══════════════════════════════════════════════════════════════════╝
-
   server-sqlx-freshness:
     name: Server sqlx Freshness
-    # Runs in PARALLEL with clippy (no longer `needs: server-clippy`). Both
-    # compile the workspace off the same `server-quality` warm cache, so
-    # serializing them doubled the wall-clock of the server path on every PR
-    # (clippy ~261s THEN sqlx ~135s) for no correctness benefit — this is a
-    # self-contained freshness check, not a downstream consumer of clippy.
     needs: preflight
     if: needs.preflight.outputs.sqlxFreshness == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
@@ -761,13 +559,7 @@ jobs:
       run:
         working-directory: server
     env:
-      # `cargo sqlx prepare --check` connects to DATABASE_URL to re-derive
-      # each query's type info, then diffs it against the committed
-      # `.sqlx/`. Point it at the ephemeral Postgres service below.
-      DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5433/djinn"
-    # Ephemeral Postgres mirroring the prod backend (the MySQL cut-over
-    # shipped in v0.2.x). Port :5433 matches the workspace
-    # `.cargo/config.toml` so the sqlx macros resolve the same DB.
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
     services:
       postgres:
         image: postgres:16
@@ -776,51 +568,36 @@ jobs:
           POSTGRES_DB: djinn
         ports:
           - 5433:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=5s --health-timeout=3s --health-retries=20
+        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
-
       - run: rustup toolchain install
         working-directory: server
-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
           shared-key: server-quality
           cache-on-failure: true
           cache-all-crates: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      # Prebuilt binary — avoids a multi-minute Rust build of sqlx-cli.
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-quality"
+          echo "shared-key=server-quality"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-quality shared-key=server-quality cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - uses: taiki-e/install-action@v2
         with:
           tool: sqlx-cli
-
       - name: Apply djinn-db migrations
         working-directory: server/crates/djinn-db
         run: sqlx migrate run --source migrations_postgres
-
-      # `make sqlx-verify` regenerates the offline cache into a scratch dir
-      # with the SAME surface the offline consumers compile (`--all-targets
-      # --all-features`), force-re-runs the sqlx proc-macros (touch), and
-      # diffs against the committed cache. This is a strict superset of the
-      # `--features qdrant` offline build that Warm Cache (Test) / Server
-      # Clippy run, so a stale cache now fails here at PR / merge-queue time
-      # instead of post-merge. The old `cargo sqlx prepare --check
-      # -- --all-targets` covered neither feature-gated queries nor macro
-      # re-execution on a warm cache and let 71 entries slip through.
-      #
-      # `sqlx-verify` (not `sqlx-check`) is used here: the schema is already
-      # applied by the step above against the service Postgres, and the
-      # `sqlx-check` wrapper's `test-db-migrate` prerequisite waits on a
-      # `docker exec djinn-postgres-test` container that does not exist in CI.
       - name: Verify .sqlx offline cache is up to date
         working-directory: .
         run: make sqlx-verify
-
-      # Fail fast — see the note above the Quality Gate job.
       - name: Fail fast
         if: failure()
         env:
@@ -828,18 +605,6 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
-
-  # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  Memory-eval Phase 1 PR gate (PR + merge queue)                  ║
-  # ║                                                                  ║
-  # ║  Deterministic, no-LLM rank benchmark that exercises the real    ║
-  # ║  NoteRepository::search / build_context paths against committed  ║
-  # ║  JSONL fixtures. Provisions the same Postgres :5433 + migration  ║
-  # ║  + test-template setup used by server-test, loads fixtures,      ║
-  # ║  runs the benchmark, compares against baselines/phase1.json,     ║
-  # ║  and fails the job on any threshold regression.                  ║
-  # ╚══════════════════════════════════════════════════════════════════╝
-
   memory-eval:
     name: Memory Eval Phase 1
     needs: preflight
@@ -849,12 +614,6 @@ jobs:
       run:
         working-directory: server
     env:
-      # The djinn-memory-eval binary uses Database::open_in_memory(), which
-      # resolves DJINN_TEST_DATABASE_URL (template-clone harness) and
-      # DATABASE_URL (compile-time sqlx macros). Both point at :5433 per
-      # .cargo/config.toml. SQLX_OFFLINE forces macro compilation off the
-      # committed .sqlx/ cache so we don't need a live connection at build
-      # time (the service Postgres is up for the run itself).
       SQLX_OFFLINE: "true"
     services:
       postgres:
@@ -864,37 +623,35 @@ jobs:
           POSTGRES_DB: djinn
         ports:
           - 5433:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=5s --health-timeout=3s --health-retries=20
+        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
-
       - run: rustup toolchain install
         working-directory: server
-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
           shared-key: server-quality
           cache-on-failure: true
           cache-all-crates: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      # Prebuilt binary — avoids a multi-minute Rust build of sqlx-cli.
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-quality"
+          echo "shared-key=server-quality"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-quality shared-key=server-quality cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - uses: taiki-e/install-action@v2
         with:
           tool: sqlx-cli
-
       - name: Apply djinn-db migrations
         working-directory: server/crates/djinn-db
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: sqlx migrate run --source migrations_postgres
-
-      # The benchmark harness clones a per-run database from
-      # djinn_test_template (Database::open_in_memory). Build the migrated
-      # template exactly like server-test does so fixture loading works.
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres
@@ -904,46 +661,21 @@ jobs:
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
           cd crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
-
-      # Tests default DJINN_VAULT_KEY_PATH to /var/tmp/djinn-test-vault
-      # (.cargo/config.toml); create the disk-backed key the crypto layer
-      # expects so vault-touching code paths don't fall back to prod.
       - name: Create test vault key
         run: |
           mkdir -p /var/tmp/djinn-test-vault
           openssl rand -out /var/tmp/djinn-test-vault/vault.key 32
           chmod 600 /var/tmp/djinn-test-vault/vault.key
-
-      # Validate committed fixtures before spending DB time on the run.
       - name: Validate fixtures
         run: cargo run -p djinn-memory-eval -- validate-fixtures
-
-      # Run the deterministic benchmark (loads fixtures into an isolated
-      # per-run Postgres clone, exercises real search/build_context, computes
-      # metrics, writes target/memory-eval/phase1-report.json + .md).
-      # No LLM calls, no external network.
       - name: Run Phase 1 benchmark
         env:
           DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
         run: cargo run -p djinn-memory-eval -- run
-
-      # Phase 2 QA judge is intentionally NOT run here. It is a nightly-only
-      # non-gating workflow in memory-qa-nightly.yml and must not be invoked as
-      # a PR or merge-queue check, because it depends on LLM providers and
-      # credentialed model slots. Phase 1 remains deterministic, no-LLM, and
-      # required.
-
-      # Compare current metrics against the committed baseline. Exits non-zero
-      # (failing the job) on any unapproved threshold regression. Re-writes the
-      # reports with per-query regression details (query id, text, permalink,
-      # old/new rank, metric delta) for the artifact/summary upload below.
       - name: Compare against baseline
         env:
           DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
         run: cargo run -p djinn-memory-eval -- compare
-
-      # Upload both artifacts so reviewers can inspect the full report and
-      # the Markdown summary even after the job cleans up its workspace.
       - name: Upload Phase 1 report artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -954,10 +686,6 @@ jobs:
             server/target/memory-eval/phase1-summary.md
           if-no-files-found: error
           retention-days: 30
-
-      # Append the Markdown summary to the GitHub Actions job summary so it
-      # renders inline on the run page and PR checks tab without downloading
-      # the artifact.
       - name: Write job summary
         if: always()
         run: |
@@ -965,9 +693,6 @@ jobs:
           if [[ -f "$SUMMARY" ]]; then
             cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      # Fail fast — see the note above the Quality Gate job. Placed after the
-      # always() artifact/summary steps so the report still uploads first.
       - name: Fail fast
         if: failure()
         env:
@@ -975,11 +700,6 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
-
-  # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  UI (PR + merge queue)                                           ║
-  # ╚══════════════════════════════════════════════════════════════════╝
-
   ui-frontend:
     name: UI Frontend
     needs: preflight
@@ -990,48 +710,24 @@ jobs:
         working-directory: ui
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
         with:
           version: 9
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: ui/pnpm-lock.yaml
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      # Regenerate the TS client types from the committed MCP tool-schema
-      # snapshot and fail if they drift. Keeps src/api/generated/mcp-tools.gen.ts
-      # in lockstep with the Rust tool params so a backend schema change can't
-      # silently leave the frontend types stale.
       - name: Generated MCP types are up to date
         run: pnpm mcp:types:check
-
       - name: Generated usage analytics types are up to date
         run: pnpm usage:types:check
-
       - name: Type check
         run: pnpm tsc --noEmit
-
       - name: Tests
         run: pnpm test
-
-      # Run the real production bundler — the same `pnpm build` the release
-      # workflow runs. `tsc --noEmit` resolves types (often via hoisted /
-      # transitive paths) and the dev server resolves lazily, so both
-      # tolerate a dependency that's present-but-undeclared under pnpm's
-      # strict node_modules, plus loose vite alias prefix-matches. Only the
-      # production `vite build` enforces the real module graph. Without this
-      # step those failures slip through a green PR and only surface at tag
-      # time in release.yml (e.g. the elkjs alias and refractor regressions).
       - name: Production build
         run: pnpm build
-
-      # Fail fast — see the note above the Quality Gate job.
       - name: Fail fast
         if: failure()
         env:
@@ -1039,10 +735,6 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
-
-  # ── Quality gate ────────────────────────────────────────────────────
-  # `quality-gate` is the required check. A selected lane must succeed; skips
-  # are neutral only when the manifest explicitly left the lane unselected.
   quality-gate:
     name: Quality Gate
     runs-on: ubuntu-latest

@@ -40,6 +40,16 @@ pub struct NormalizedToolCallRow {
     pub error_class: Option<String>,
     pub error_text: Option<String>,
     pub read_truncated: bool,
+    /// File path extracted from tool args (`path`, `file_path`, or apply_patch
+    /// patch header). Used by metric derivation for path-based matching.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Read offset extracted from `read` tool args. Used by read-loop detection.
+    #[serde(default)]
+    pub read_offset: Option<i64>,
+    /// Read limit extracted from `read` tool args. Used by read-loop detection.
+    #[serde(default)]
+    pub read_limit: Option<i64>,
     pub diagnostics: Vec<String>,
 }
 pub struct ToolCallExportRepository {
@@ -116,6 +126,49 @@ fn err(text: &str) -> (&'static str, String) {
     };
     (c, t.chars().take(512).collect())
 }
+/// Extract the file path from tool-call args.
+///
+/// Checks `path` and `file_path` keys first, then for `apply_patch` parses the
+/// patch header (`*** Update/Add/Delete File: <path>`).
+fn extract_path(name: &str, args: &serde_json::Value) -> Option<String> {
+    if let Some(p) = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(p.to_owned());
+    }
+    if let Some(p) = args
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(p.to_owned());
+    }
+    if name == "apply_patch"
+        && let Some(patch) = args.get("patch").and_then(|v| v.as_str())
+    {
+        for line in patch.lines() {
+            for prefix in &["*** Update File: ", "*** Add File: ", "*** Delete File: "] {
+                if let Some(rest) = line.strip_prefix(prefix) {
+                    let p = rest.trim();
+                    if !p.is_empty() {
+                        return Some(p.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract `(offset, limit)` from tool-call args for `read` window tracking.
+fn extract_read_range(args: &serde_json::Value) -> (Option<i64>, Option<i64>) {
+    let offset = args.get("offset").and_then(|v| v.as_i64());
+    let limit = args.get("limit").and_then(|v| v.as_i64());
+    (offset, limit)
+}
+
 pub fn normalize_persisted_transcript(input: &PersistedTranscript) -> Vec<NormalizedToolCallRow> {
     let mut calls = Vec::new();
     let mut results = Vec::new();
@@ -242,12 +295,23 @@ pub fn normalize_persisted_transcript(input: &PersistedTranscript) -> Vec<Normal
                 calendar_day: day,
                 tool_call_id: id,
                 turn_index: pos,
-                tool_name: name,
+                tool_name: name.clone(),
                 args_hash: stable_args_hash(&args),
                 result_status: status,
                 error_class: ec,
                 error_text: et,
                 read_truncated: rt,
+                path: extract_path(&name, &args),
+                read_offset: if name == "read" {
+                    extract_read_range(&args).0
+                } else {
+                    None
+                },
+                read_limit: if name == "read" {
+                    extract_read_range(&args).1
+                } else {
+                    None
+                },
                 diagnostics: d,
             }
         })
@@ -386,6 +450,7 @@ mod tests {
                    error_class: Option<String>,
                    error_text: Option<String>,
                    read_truncated: bool,
+                   path: Option<&str>,
                    diagnostics: Vec<String>| NormalizedToolCallRow {
             provider_id: Some("anthropic".into()),
             model_id: Some("claude-test".into()),
@@ -404,6 +469,9 @@ mod tests {
             error_class,
             error_text,
             read_truncated,
+            path: path.map(str::to_owned),
+            read_offset: None,
+            read_limit: None,
             diagnostics,
         };
         assert_eq!(
@@ -418,6 +486,7 @@ mod tests {
                     None,
                     None,
                     true,
+                    Some("src/lib.rs"),
                     vec![]
                 ),
                 row(
@@ -429,6 +498,7 @@ mod tests {
                     Some("provider".into()),
                     Some("Provider rate limit".into()),
                     true,
+                    None,
                     vec![]
                 ),
                 row(
@@ -440,6 +510,7 @@ mod tests {
                     None,
                     None,
                     false,
+                    None,
                     vec!["missing_matching_tool_result".into()]
                 ),
                 row(
@@ -451,6 +522,7 @@ mod tests {
                     Some("cancelled".into()),
                     Some("cancelled by user".into()),
                     false,
+                    None,
                     vec![
                         "missing_tool_call_id".into(),
                         "tool_result_paired_by_transcript_position".into()
@@ -504,6 +576,9 @@ mod tests {
                 error_class: Some("timeout".into()),
                 error_text: Some(expected_error),
                 read_truncated: false,
+                path: None,
+                read_offset: None,
+                read_limit: None,
                 diagnostics: vec![
                     "missing_agent_role".into(),
                     "missing_format_family".into(),
