@@ -7,7 +7,7 @@ use djinn_core::models::ActivityEntry;
 use djinn_db::{Database, EpicRepository, ProposalCreateInput, ProposalRepository};
 use tokio_util::sync::CancellationToken;
 
-use crate::roles::{LeadRole, WorkerRole};
+use crate::roles::{AgentRole, LeadRole, WorkerRole};
 use crate::test_helpers::{agent_context_from_db, create_test_project, test_tempdir};
 
 use super::test_support::{

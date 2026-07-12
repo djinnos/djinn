@@ -2,6 +2,10 @@ use djinn_memory::NoteDedupCandidate;
 
 use super::write_dedup_types::{MemoryWriteDedupDecision, MemoryWriteDedupDecisionInput};
 
+/// Maximum Unicode scalar values from one candidate body included in the
+/// write-dedup prompt. The repository still carries the complete body.
+pub(super) const MEMORY_WRITE_DEDUP_CANDIDATE_CONTENT_CHAR_CAP: usize = 4_000;
+
 pub(super) const MEMORY_WRITE_DEDUP_SYSTEM: &str = "You are deciding whether a new knowledge-base note should create a new note, reuse an existing candidate, or merge into an existing candidate. Respond with JSON only.\n\
 Schema: {\"action\":\"create_new|reuse_existing|merge_into_existing\",\"candidate_id\":\"optional candidate id\",\"merged_title\":\"required for merge_into_existing\",\"merged_content\":\"required for merge_into_existing\"}.\n\
 Choose create_new when the draft is materially distinct.\n\
@@ -42,11 +46,28 @@ fn format_candidate(candidate: &NoteDedupCandidate) -> String {
         .as_deref()
         .or(candidate.abstract_.as_deref())
         .unwrap_or("");
+    let body = truncate_candidate_content(&candidate.content);
 
     format!(
-        "- id: {}\n  title: {}\n  permalink: {}\n  score: {:.3}\n  summary: {}",
-        candidate.id, candidate.title, candidate.permalink, candidate.score, summary
+        "- id: {}\n  title: {}\n  permalink: {}\n  score: {:.3}\n  body:\n{}\n  summary: {}",
+        candidate.id, candidate.title, candidate.permalink, candidate.score, body, summary
     )
+}
+
+fn truncate_candidate_content(content: &str) -> String {
+    let mut characters = content.chars();
+    let body: String = characters
+        .by_ref()
+        .take(MEMORY_WRITE_DEDUP_CANDIDATE_CONTENT_CHAR_CAP)
+        .collect();
+
+    if characters.next().is_some() {
+        format!(
+            "{body}\n… [truncated at {MEMORY_WRITE_DEDUP_CANDIDATE_CONTENT_CHAR_CAP} characters]"
+        )
+    } else {
+        body
+    }
 }
 
 pub(crate) fn parse_memory_write_dedup_decision(

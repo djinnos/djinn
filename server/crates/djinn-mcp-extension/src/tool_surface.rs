@@ -250,44 +250,38 @@ fn extract_operation_candidates(
     }
 
     for list in description.split([';', '.', '\n']) {
-        let mut values = list_values(list);
-        if values.len() < 2 {
-            continue;
-        }
-        values.retain(|value| value != "operation" && value != "operations");
         let lower_list = list.to_ascii_lowercase();
         let operation_context = lower_list.contains("operation:")
             || lower_list.contains("operations:")
             || lower_list.contains("operation=");
-        let enum_overlap = values
-            .iter()
-            .filter(|value| enum_values.contains(value.as_str()))
-            .count();
-        if operation_context || enum_overlap >= 2 {
-            candidates.extend(values)
+
+        // Evaluate each slash catalogue independently. A broad sentence can
+        // contain both an actual operation catalogue and ordinary slash prose
+        // such as `graph health/introspection`; pooling their tokens would
+        // promote that prose to nonexistent operations.
+        for run in list.split_whitespace().filter(|run| run.contains('/')) {
+            let values: Vec<String> = run.split('/').filter_map(clean_operation_token).collect();
+            let enum_overlap = values
+                .iter()
+                .filter(|value| enum_values.contains(value.as_str()))
+                .count();
+            if values.len() >= 2 && (enum_overlap >= 2 || (operation_context && enum_overlap >= 1))
+            {
+                candidates.extend(values);
+            }
+        }
+
+        // Comma catalogues require an explicit operation label. This accepts
+        // the conventional `operations: foo, bar` form without promoting a
+        // prose comma.
+        if let Some(marker) = ["operations:", "operation:", "operation="]
+            .into_iter()
+            .find_map(|marker| lower_list.find(marker).map(|index| index + marker.len()))
+        {
+            candidates.extend(list[marker..].split(',').filter_map(clean_operation_token));
         }
     }
     candidates
-}
-
-fn list_values(text: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    // Slash catalogues are intentionally restricted to one whitespace-delimited
-    // run, so prose after `ranked/cycles/... = ...` is never treated as values.
-    for run in text.split_whitespace().filter(|run| run.contains('/')) {
-        values.extend(run.split('/').filter_map(clean_operation_token));
-    }
-
-    // Comma catalogues require an explicit operation label. This accepts the
-    // conventional `operations: foo, bar` form without promoting a prose comma.
-    let lower = text.to_ascii_lowercase();
-    let marker = ["operations:", "operation:", "operation="]
-        .into_iter()
-        .find_map(|marker| lower.find(marker).map(|index| index + marker.len()));
-    if let Some(marker) = marker {
-        values.extend(text[marker..].split(',').filter_map(clean_operation_token));
-    }
-    values
 }
 
 fn clean_operation_token(value: &str) -> Option<String> {

@@ -5,7 +5,7 @@ use super::*;
 use djinn_core::events::EventBus;
 use djinn_db::{Database, TaskRepository};
 
-use crate::roles::{ReviewerRole, WorkerRole};
+use crate::roles::{AgentRole, ReviewerRole, WorkerRole};
 
 use super::test_support::{assemble_for_role, assert_contains_all, create_epic, task_with_ci};
 use crate::test_helpers::create_test_project;
