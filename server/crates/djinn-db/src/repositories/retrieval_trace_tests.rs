@@ -6,9 +6,10 @@ use serde_json::json;
 use crate::database::Database;
 use crate::repositories::retrieval_trace::{
     CANDIDATE_OUTCOME_VALUES, CandidateOutcome, CreateRetrievalTraceParams, DEFAULT_CANDIDATE_CAP,
-    ENTRY_POINT_VALUES, RETRIEVAL_TRACE_SCHEMA_VERSION, RetrievalTraceEntryPoint,
-    RetrievalTraceListFilter, RetrievalTraceRepository, RetrievalTraceRow, SKIPPED_REASON_VALUES,
-    SkippedReason, TraceCandidate, validate_candidates,
+    DEFAULT_RETRIEVAL_TRACE_LIMIT, ENTRY_POINT_VALUES, MAX_RETRIEVAL_TRACE_OFFSET,
+    RETRIEVAL_TRACE_SCHEMA_VERSION, RetrievalTraceEntryPoint, RetrievalTraceListFilter,
+    RetrievalTraceRepository, RetrievalTraceRow, SKIPPED_REASON_VALUES, SkippedReason,
+    TraceCandidate, validate_candidates,
 };
 
 fn test_db() -> Database {
@@ -437,6 +438,388 @@ async fn list_by_project_respects_limit() {
         .await
         .unwrap();
     assert_eq!(limited.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_by_project_filters_by_outcome_and_skipped_reason() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000025";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db);
+
+    let injected_only = serde_json::to_value(vec![injected_candidate("n1", 1, 0.9)]).unwrap();
+    let skipped_not_top_k = serde_json::to_value(vec![skipped_candidate(
+        "n2",
+        2,
+        0.3,
+        SkippedReason::NotTopK,
+    )])
+    .unwrap();
+    let skipped_min_conf = serde_json::to_value(vec![skipped_candidate(
+        "n3",
+        3,
+        0.2,
+        SkippedReason::MinConfidence,
+    )])
+    .unwrap();
+    let mixed = serde_json::to_value(vec![
+        injected_candidate("n4", 1, 0.95),
+        skipped_candidate("n5", 2, 0.1, SkippedReason::NotTopK),
+    ])
+    .unwrap();
+
+    let trace_injected = repo
+        .insert(CreateRetrievalTraceParams {
+            project_id,
+            session_id: None,
+            task_run_id: None,
+            task_id: None,
+            entry_point: RetrievalTraceEntryPoint::Dispatch,
+            trigger: None,
+            candidates: &injected_only,
+            candidate_cap: 50,
+            candidate_cap_exceeded: false,
+            sampling_metadata: None,
+            durations_ms: &json!({}),
+            estimated_injected_tokens: 0,
+        })
+        .await
+        .unwrap();
+
+    let trace_not_top_k = repo
+        .insert(CreateRetrievalTraceParams {
+            project_id,
+            session_id: None,
+            task_run_id: None,
+            task_id: None,
+            entry_point: RetrievalTraceEntryPoint::JitPitfalls,
+            trigger: None,
+            candidates: &skipped_not_top_k,
+            candidate_cap: 50,
+            candidate_cap_exceeded: false,
+            sampling_metadata: None,
+            durations_ms: &json!({}),
+            estimated_injected_tokens: 0,
+        })
+        .await
+        .unwrap();
+
+    let _trace_min_conf = repo
+        .insert(CreateRetrievalTraceParams {
+            project_id,
+            session_id: None,
+            task_run_id: None,
+            task_id: None,
+            entry_point: RetrievalTraceEntryPoint::LoadKnowledgeContext,
+            trigger: None,
+            candidates: &skipped_min_conf,
+            candidate_cap: 50,
+            candidate_cap_exceeded: false,
+            sampling_metadata: None,
+            durations_ms: &json!({}),
+            estimated_injected_tokens: 0,
+        })
+        .await
+        .unwrap();
+
+    let trace_mixed = repo
+        .insert(CreateRetrievalTraceParams {
+            project_id,
+            session_id: None,
+            task_run_id: None,
+            task_id: None,
+            entry_point: RetrievalTraceEntryPoint::Dispatch,
+            trigger: None,
+            candidates: &mixed,
+            candidate_cap: 50,
+            candidate_cap_exceeded: false,
+            sampling_metadata: None,
+            durations_ms: &json!({}),
+            estimated_injected_tokens: 0,
+        })
+        .await
+        .unwrap();
+
+    // Outcome = Injected should match traces with at least one injected candidate.
+    let by_injected = repo
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                outcome: Some(CandidateOutcome::Injected),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_injected.len(), 2);
+    let injected_ids: std::collections::HashSet<String> =
+        by_injected.iter().map(|r| r.id.clone()).collect();
+    assert!(injected_ids.contains(&trace_injected.id));
+    assert!(injected_ids.contains(&trace_mixed.id));
+
+    // Skipped reason = NotTopK should match rows with at least one such skipped candidate.
+    let by_not_top_k = repo
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                skipped_reason: Some(SkippedReason::NotTopK),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_not_top_k.len(), 2);
+    let not_top_k_ids: std::collections::HashSet<String> =
+        by_not_top_k.iter().map(|r| r.id.clone()).collect();
+    assert!(not_top_k_ids.contains(&trace_not_top_k.id));
+    assert!(not_top_k_ids.contains(&trace_mixed.id));
+
+    // Combining entry_point with skipped_reason.
+    let combined = repo
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                entry_point: Some(RetrievalTraceEntryPoint::Dispatch),
+                skipped_reason: Some(SkippedReason::NotTopK),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(combined.len(), 1);
+    assert_eq!(combined[0].id, trace_mixed.id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_by_project_combined_identity_and_entry_point_filters() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000026";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db);
+    let candidates = serde_json::to_value(vec![injected_candidate("n1", 1, 0.9)]).unwrap();
+
+    let _ = repo
+        .insert(CreateRetrievalTraceParams {
+            project_id,
+            session_id: Some("sess-a"),
+            task_run_id: Some("run-1"),
+            task_id: Some("task-x"),
+            entry_point: RetrievalTraceEntryPoint::Dispatch,
+            trigger: None,
+            candidates: &candidates,
+            candidate_cap: 50,
+            candidate_cap_exceeded: false,
+            sampling_metadata: None,
+            durations_ms: &json!({}),
+            estimated_injected_tokens: 0,
+        })
+        .await
+        .unwrap();
+
+    let _ = repo
+        .insert(CreateRetrievalTraceParams {
+            project_id,
+            session_id: Some("sess-a"),
+            task_run_id: Some("run-1"),
+            task_id: Some("task-x"),
+            entry_point: RetrievalTraceEntryPoint::JitPitfalls,
+            trigger: None,
+            candidates: &candidates,
+            candidate_cap: 50,
+            candidate_cap_exceeded: false,
+            sampling_metadata: None,
+            durations_ms: &json!({}),
+            estimated_injected_tokens: 0,
+        })
+        .await
+        .unwrap();
+
+    let matching = repo
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                session_id: Some("sess-a"),
+                task_run_id: Some("run-1"),
+                task_id: Some("task-x"),
+                entry_point: Some(RetrievalTraceEntryPoint::Dispatch),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].entry_point, "dispatch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_by_project_pagination_is_deterministic_and_excludes_other_projects() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000027";
+    let other_project = "019f4900-0000-7000-8000-000000000028";
+    seed_project(&db, project_id).await;
+    seed_project(&db, other_project).await;
+    let repo = RetrievalTraceRepository::new(db);
+    let candidates = serde_json::to_value(vec![injected_candidate("n1", 1, 0.9)]).unwrap();
+
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let row = repo
+            .insert(CreateRetrievalTraceParams {
+                project_id,
+                session_id: None,
+                task_run_id: None,
+                task_id: None,
+                entry_point: RetrievalTraceEntryPoint::Dispatch,
+                trigger: Some(&json!({"idx": i})),
+                candidates: &candidates,
+                candidate_cap: 50,
+                candidate_cap_exceeded: false,
+                sampling_metadata: None,
+                durations_ms: &json!({}),
+                estimated_injected_tokens: 0,
+            })
+            .await
+            .unwrap();
+        ids.push(row.id);
+        // Ensure monotonic ordering by sleeping 10ms between inserts. SQLite
+        // in-memory timestamps have millisecond precision; this makes the
+        // DESC order stable across the test.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // Insert into another project.
+    repo.insert(CreateRetrievalTraceParams {
+        project_id: other_project,
+        session_id: None,
+        task_run_id: None,
+        task_id: None,
+        entry_point: RetrievalTraceEntryPoint::Dispatch,
+        trigger: None,
+        candidates: &candidates,
+        candidate_cap: 50,
+        candidate_cap_exceeded: false,
+        sampling_metadata: None,
+        durations_ms: &json!({}),
+        estimated_injected_tokens: 0,
+    })
+    .await
+    .unwrap();
+
+    // Default limit is DEFAULT_RETRIEVAL_TRACE_LIMIT; use explicit limit 2 here.
+    let page1 = repo
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                limit: Some(2),
+                offset: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1[0].id, ids[4]);
+    assert_eq!(page1[1].id, ids[3]);
+
+    let page2 = repo
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                limit: Some(2),
+                offset: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page2.len(), 2);
+    assert_eq!(page2[0].id, ids[2]);
+    assert_eq!(page2[1].id, ids[1]);
+
+    let page3 = repo
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                limit: Some(2),
+                offset: Some(4),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page3.len(), 1);
+    assert_eq!(page3[0].id, ids[0]);
+
+    // Other project is not included in the target project's pagination.
+    let all_target = repo
+        .list_by_project(project_id, RetrievalTraceListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(all_target.len(), 5);
+    for row in all_target {
+        assert_eq!(row.project_id, project_id);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_by_project_validates_offset_and_limit_bounds() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000029";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db);
+
+    let res = repo
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                offset: Some(-1),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(res.is_err());
+    let err_msg = format!("{}", res.unwrap_err());
+    assert!(
+        err_msg.contains("offset must be non-negative"),
+        "expected non-negative offset error, got: {err_msg}"
+    );
+
+    let res = repo
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                offset: Some(MAX_RETRIEVAL_TRACE_OFFSET + 1),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(res.is_err());
+    let err_msg = format!("{}", res.unwrap_err());
+    assert!(
+        err_msg.contains("offset cannot exceed"),
+        "expected bounded offset error, got: {err_msg}"
+    );
+
+    let res = repo
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                limit: Some(-1),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(res.is_err());
+    let err_msg = format!("{}", res.unwrap_err());
+    assert!(
+        err_msg.contains("limit must be non-negative"),
+        "expected non-negative limit error, got: {err_msg}"
+    );
+}
+
+#[test]
+fn default_retrieval_trace_limit_is_100() {
+    assert_eq!(DEFAULT_RETRIEVAL_TRACE_LIMIT, 100);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
