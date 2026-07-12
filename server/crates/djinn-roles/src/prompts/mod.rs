@@ -6,6 +6,7 @@
 //! Each role template appends role-specific mission, instructions, and rules.
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::config::RoleConfig;
 use djinn_core::models::Task;
@@ -344,6 +345,20 @@ pub fn render_prompt_for_role(
     }
 
     out
+}
+
+/// Deterministic hash of the final rendered system prompt.
+///
+/// Hashes the exact UTF-8 bytes of `prompt` (the string returned after
+/// `render_prompt_for_role` has already applied `MAX_SYSTEM_PROMPT_CHARS`
+/// truncation) and returns a stable identifier in the form
+/// `sha256:<16 lowercase hex characters>`.
+pub fn rendered_system_prompt_hash(prompt: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(prompt.as_bytes());
+    let digest = hasher.finalize();
+    let hex = format!("{digest:x}");
+    format!("sha256:{}", &hex[..16])
 }
 
 // ─── Tool section generator ───────────────────────────────────────────────
