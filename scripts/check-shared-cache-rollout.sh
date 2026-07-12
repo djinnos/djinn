@@ -188,6 +188,117 @@ assert_contains_regex_multiline() {
     fi
 }
 
+# Extract the set of anchor IDs that Markdown links can target in a file.
+# Includes heading-derived GitHub-style slugs and explicit <a name="..."> / {#...}
+# anchors. Prints one anchor per line.
+extract_anchors() {
+    file=$1
+    awk '
+    /^#{1,6} / {
+        h = $0
+        sub(/^#{1,6} +/, "", h)
+        gsub(/`/, "", h)
+        h = tolower(h)
+        gsub(/[^a-z0-9 _\-]/, "", h)
+        gsub(/ /, "-", h)
+        gsub(/^-+|-+$/, "", h)
+        if (h != "") print h
+    }
+    /<a[ \t]+[^>]*name="/ {
+        line = $0
+        while (match(line, /name="[^"]+"/)) {
+            a = substr(line, RSTART + 6, RLENGTH - 7)
+            if (a != "") print a
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    /\{#\^?[^}]+\}/ {
+        line = $0
+        while (match(line, /\{#\^?[^}]+\}/)) {
+            a = substr(line, RSTART + 2, RLENGTH - 3)
+            gsub(/\^/, "", a)
+            if (a != "") print a
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    ' "$file"
+}
+
+# Check every Markdown link in $src. For links with a URL fragment, resolve the
+# target file and assert the fragment exists as an anchor there. Links without
+# a fragment are ignored here (file existence is asserted elsewhere). Emits pass
+# or fail messages under the given label prefix.
+check_file_links() {
+    label_prefix=$1
+    src=$2
+    src_dir=$(CDPATH= cd -- "$(dirname -- "$src")" && pwd)
+
+    _links_ok=1
+    _link_tmp=$(mktemp)
+    awk '
+    {
+        line = $0
+        while (match(line, /\[[^]]+\]\([^)]+\)/)) {
+            link = substr(line, RSTART, RLENGTH)
+            p1 = index(link, "(")
+            p2 = index(link, ")")
+            url = substr(link, p1 + 1, p2 - p1 - 1)
+            # Strip optional title in double quotes; CommonMark also allows
+            # single-quoted titles, but the project docs do not use them and
+            # trying to match both inside a POSIX shell single-quoted awk script
+            # breaks quote escaping, so we only handle double-quoted titles here.
+            if (match(url, /[ \t]+".*"$/)) url = substr(url, 1, RSTART - 1)
+            if (url != "") print url
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    ' "$src" > "$_link_tmp"
+
+    while IFS= read -r url; do
+        case "$url" in
+            *#*)
+                fragment="${url##*#}"
+                path_part="${url%#*}"
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        [ -z "$fragment" ] && continue
+
+        if [ -z "$path_part" ]; then
+            target="$src"
+        else
+            case "$path_part" in
+                /*)
+                    target="$path_part"
+                    ;;
+                *)
+                    target="$src_dir/$path_part"
+                    ;;
+            esac
+        fi
+
+        if [ ! -f "$target" ]; then
+            fail "$label_prefix: link target not found: $url" \
+                "resolved to $target"
+            _links_ok=0
+            continue
+        fi
+
+        if ! extract_anchors "$target" | grep -qxF -- "$fragment"; then
+            fail "$label_prefix: link fragment not found: $url" \
+                "fragment '$fragment' not present in $target"
+            _links_ok=0
+        fi
+    done < "$_link_tmp"
+    rm -f -- "$_link_tmp"
+
+    if [ "$_links_ok" -eq 1 ]; then
+        pass "$label_prefix: all markdown link fragments resolve"
+    fi
+}
+
 printf '== shared-cache rollout artifact validation ==\n'
 printf 'repository: %s\n' "$REPO_ROOT"
 
@@ -214,24 +325,21 @@ for heading in $RUNBOOK_REQUIRED_HEADINGS; do
 done
 IFS="$_prev_ifs"
 
-# ── Runbook internal links to companion docs ─────────────────────────
-printf '\n-- runbook cross-links --\n'
-assert_contains "runbook links to CARGO_TARGET_RUN_DIR_VALIDATION" \
-    "$RUNBOOK" "CARGO_TARGET_RUN_DIR_VALIDATION.md"
+# ── Cross-link anchor resolution ──────────────────────────────────────
+# The docs link to one another with Markdown URLs that may include fragments.
+# Broad substring checks are not enough: a link can point to a heading that has
+# been renamed or removed. Verify every fragment link resolves to a real anchor
+# in the target file.
+printf '\n-- cross-link anchor resolution --\n'
+check_file_links "runbook" "$RUNBOOK"
+check_file_links "checklist" "$CHECKLIST"
 
-# ── Checklist cross-links to runbook anchors ─────────────────────────
-printf '\n-- checklist cross-links --\n'
-assert_contains "checklist links to runbook" \
-    "$CHECKLIST" "SHARED_CACHE_CLEANUP_ROLLOUT.md"
-assert_contains "checklist links to run-dir guide" \
-    "$CHECKLIST" "CARGO_TARGET_RUN_DIR_VALIDATION.md"
-assert_contains "checklist references zot observation doc" \
-    "$CHECKLIST" "zot-retention-gc-observation.md"
-
-# Each runbook stage heading the checklist links to must exist in the runbook.
-# The checklist references anchors like #stage-0--zot-dry-run-... which derive
-# from the literal stage headings; verify the literal headings are linkable.
+# Keep a separate guard that the runbook still contains the literal stage
+# headings the checklist expects to link to, so a heading rename cannot be
+# hidden by simply removing the link.
+printf '\n-- checklist-linked runbook headings --\n'
 for stage_heading in \
+    '## Required rollout order' \
     '## Stage 0 — Zot dry-run and selected-image preflight' \
     '## Stage 1 — prove build pods do not rely on sccache' \
     '## Stage 2 — operator-owned one-time `/cache/sccache` deletion' \
@@ -239,7 +347,7 @@ for stage_heading in \
     '## Stage 4 — warm-base idle eviction, then pressure eviction' \
     '## Fingerprint-last hold'
 do
-    assert_contains "checklist-linked runbook stage exists: $stage_heading" \
+    assert_contains "checklist-linked runbook heading exists: $stage_heading" \
         "$RUNBOOK" "$stage_heading"
 done
 
