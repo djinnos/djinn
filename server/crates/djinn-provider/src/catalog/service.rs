@@ -228,45 +228,7 @@ impl CatalogService {
     /// unchanged.
     pub async fn refresh(&self) {
         match self.fetch_remote().await {
-            Ok(raw) => {
-                let (providers, models_idx) = normalize(raw);
-                // Reject an empty normalized upstream payload so a degenerate
-                // fetch never overwrites the active catalog with nothing.
-                if providers.is_empty() {
-                    let mut data = self.inner.write();
-                    data.last_refresh_status = RefreshStatus::Error;
-                    data.last_refresh_error =
-                        Some("models.dev normalized payload had zero providers".to_string());
-                    tracing::warn!(
-                        status = ?data.last_refresh_status,
-                        source_tier = ?source_tier_from_data(&data, REFRESH_LOG_MAX_AGE),
-                        providers = data.providers.len(),
-                        error = "models.dev normalized payload had zero providers",
-                        "catalog refresh rejected zero-provider payload — keeping active catalog"
-                    );
-                    return;
-                }
-                let clock = SystemClock::new();
-                let now = clock.now_instant();
-                let now_wall = clock.now();
-                let provider_count = providers.len();
-                let model_count: usize = models_idx.values().map(Vec::len).sum();
-                // Compose the full catalog (upstream + builtins + retained
-                // custom providers) and swap it in under a single write lock.
-                let mut data = self.inner.write();
-                compose_catalog(&mut data, providers, models_idx);
-                data.fetched_at = Some(now);
-                data.fetched_at_wall = Some(now_wall);
-                data.last_refresh_status = RefreshStatus::Success;
-                data.last_refresh_error = None;
-                tracing::info!(
-                    status = ?data.last_refresh_status,
-                    source_tier = ?SourceTier::Live,
-                    providers = provider_count,
-                    models = model_count,
-                    "provider catalog refreshed from models.dev"
-                );
-            }
+            Ok(value) => self.refresh_from_json(value).await,
             Err(e) => {
                 let mut data = self.inner.write();
                 data.last_refresh_status = RefreshStatus::Error;
@@ -282,7 +244,68 @@ impl CatalogService {
         }
     }
 
-    async fn fetch_remote(&self) -> Result<HashMap<String, RawProvider>, String> {
+    /// Deterministic test seam that drives the same normalize/compose/swap path
+    /// as a live `refresh()` but with a caller-supplied JSON payload. This lets
+    /// cross-crate integration tests prove catalog freshness behavior without
+    /// hitting models.dev or waiting for a production refresh interval.
+    pub async fn refresh_from_json(&self, value: serde_json::Value) {
+        let raw = match serde_json::from_value::<HashMap<String, RawProvider>>(value) {
+            Ok(raw) => raw,
+            Err(e) => {
+                let mut data = self.inner.write();
+                data.last_refresh_status = RefreshStatus::Error;
+                data.last_refresh_error = Some(format!("models.dev JSON parse error: {e}"));
+                tracing::warn!(
+                    status = ?data.last_refresh_status,
+                    source_tier = ?source_tier_from_data(&data, REFRESH_LOG_MAX_AGE),
+                    providers = data.providers.len(),
+                    error = %e,
+                    "catalog refresh failed — using cached/embedded data"
+                );
+                return;
+            }
+        };
+
+        let (providers, models_idx) = normalize(raw);
+        // Reject an empty normalized upstream payload so a degenerate
+        // fetch never overwrites the active catalog with nothing.
+        if providers.is_empty() {
+            let mut data = self.inner.write();
+            data.last_refresh_status = RefreshStatus::Error;
+            data.last_refresh_error =
+                Some("models.dev normalized payload had zero providers".to_string());
+            tracing::warn!(
+                status = ?data.last_refresh_status,
+                source_tier = ?source_tier_from_data(&data, REFRESH_LOG_MAX_AGE),
+                providers = data.providers.len(),
+                error = "models.dev normalized payload had zero providers",
+                "catalog refresh rejected zero-provider payload — keeping active catalog"
+            );
+            return;
+        }
+        let clock = SystemClock::new();
+        let now = clock.now_instant();
+        let now_wall = clock.now();
+        let provider_count = providers.len();
+        let model_count: usize = models_idx.values().map(Vec::len).sum();
+        // Compose the full catalog (upstream + builtins + retained
+        // custom providers) and swap it in under a single write lock.
+        let mut data = self.inner.write();
+        compose_catalog(&mut data, providers, models_idx);
+        data.fetched_at = Some(now);
+        data.fetched_at_wall = Some(now_wall);
+        data.last_refresh_status = RefreshStatus::Success;
+        data.last_refresh_error = None;
+        tracing::info!(
+            status = ?data.last_refresh_status,
+            source_tier = ?SourceTier::Live,
+            providers = provider_count,
+            models = model_count,
+            "provider catalog refreshed from models.dev"
+        );
+    }
+
+    async fn fetch_remote(&self) -> Result<serde_json::Value, String> {
         let client = reqwest::Client::builder()
             .timeout(FETCH_TIMEOUT)
             .build()
@@ -298,7 +321,7 @@ impl CatalogService {
             return Err(format!("models.dev returned HTTP {}", resp.status()));
         }
 
-        resp.json::<HashMap<String, RawProvider>>()
+        resp.json::<serde_json::Value>()
             .await
             .map_err(|e| e.to_string())
     }

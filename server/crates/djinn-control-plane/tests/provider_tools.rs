@@ -1253,3 +1253,158 @@ async fn non_recommended_connected_model_persists_and_validates_including_org_ov
         .await
         .expect("catalog-present models should remain dispatch-valid after overrides");
 }
+
+// ── Periodic refresh: new non-recommended model becomes dispatchable without restart ─
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_restart() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    CredentialRepository::new(db.clone(), EventBus::noop())
+        .set("openai", "OPENAI_API_KEY", "sk-test")
+        .await
+        .unwrap();
+
+    let openai_payload = |models: serde_json::Value| {
+        json!({
+            "openai": {
+                "id": "openai",
+                "npm": "@ai-sdk/openai",
+                "env": ["OPENAI_API_KEY"],
+                "api": "https://api.openai.com/v1",
+                "doc": "https://platform.openai.com/docs",
+                "models": models
+            }
+        })
+    };
+
+    let model = |id: &str, name: &str| {
+        json!({
+            "id": id,
+            "name": name,
+            "tool_call": true,
+            "reasoning": false,
+            "attachment": false,
+            "cost": {"input": 1.0, "output": 2.0, "cache_read": 0.5, "cache_write": 0.5},
+            "limit": {"context": 128000, "output": 16384}
+        })
+    };
+
+    // Initial live catalog load (mocked models.dev response).
+    let initial = openai_payload(json!({
+        "gpt-5.3-codex": model("gpt-5.3-codex", "GPT-5.3 Codex"),
+        "gpt-5.2": model("gpt-5.2", "GPT-5.2")
+    }));
+    harness.state().catalog().refresh_from_json(initial).await;
+    assert_eq!(
+        harness.state().catalog().last_refresh_status(),
+        djinn_provider::catalog::RefreshStatus::Success,
+        "initial mocked refresh should succeed"
+    );
+
+    let connected = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch");
+    let ids: Vec<String> = connected["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .map(|m| m["id"].as_str().expect("model id").to_string())
+        .collect();
+    assert!(
+        ids.contains(&"openai/gpt-5.2".to_string()),
+        "initial catalog should include openai/gpt-5.2, got ids: {:?}",
+        ids
+    );
+    assert!(
+        !ids.contains(&"openai/gpt-5.2.nano".to_string()),
+        "dotted model should not appear before refresh"
+    );
+
+    // Refreshed mocked response adds a new non-recommended dotted model.
+    let refreshed = openai_payload(json!({
+        "gpt-5.3-codex": model("gpt-5.3-codex", "GPT-5.3 Codex"),
+        "gpt-5.2": model("gpt-5.2", "GPT-5.2"),
+        "gpt-5.2.nano": model("gpt-5.2.nano", "GPT-5.2 Nano")
+    }));
+    harness.state().catalog().refresh_from_json(refreshed).await;
+    assert_eq!(
+        harness.state().catalog().last_refresh_status(),
+        djinn_provider::catalog::RefreshStatus::Success,
+        "refreshed mocked refresh should succeed"
+    );
+
+    let connected_after = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch after refresh");
+    let new_model = connected_after["models"]
+        .as_array()
+        .expect("models array after refresh")
+        .iter()
+        .find(|m| m["id"] == "openai/gpt-5.2.nano")
+        .expect("refreshed dotted model should appear in provider_models_connected");
+    assert!(
+        !new_model["recommended"].as_bool().unwrap_or(true),
+        "newly refreshed dotted model should be non-recommended"
+    );
+
+    // Round-trip through user settings and dispatch-time validation.
+    let user_repo = UserRepository::new(db.clone());
+    let user = user_repo
+        .upsert_from_github(999_010, "refresh-test-user", None, None)
+        .await
+        .expect("create test user");
+    let user_id = user.id;
+
+    let set = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness
+                .call_tool(
+                    "user_settings_set",
+                    json!({
+                        "lanes": {
+                            "implement": ["openai/gpt-5.2.nano"]
+                        }
+                    }),
+                )
+                .await
+        })
+        .await
+        .expect("user_settings_set dispatch");
+    assert!(set["ok"].as_bool().unwrap_or(false), "user_settings_set ok");
+    assert_eq!(
+        set["lanes"]["implement"],
+        json!(["openai/gpt-5.2.nano"]),
+        "user_settings_set should echo the exact refreshed dotted id"
+    );
+
+    let get = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness.call_tool("user_settings_get", json!({})).await
+        })
+        .await
+        .expect("user_settings_get dispatch");
+    assert!(get["ok"].as_bool().unwrap_or(false), "user_settings_get ok");
+    assert_eq!(
+        get["lanes"]["implement"],
+        json!(["openai/gpt-5.2.nano"]),
+        "user_settings_get should round-trip the exact refreshed dotted id"
+    );
+
+    harness
+        .state()
+        .validate_models_for_user(&["openai/gpt-5.2.nano".to_string()], Some(&user_id))
+        .await
+        .expect("refreshed dotted model should be dispatch-valid");
+
+    // Confirm the refreshed catalog survives state without restart/reconstruction.
+    let reloaded_state = harness.state().catalog().last_refresh_status();
+    assert_eq!(
+        reloaded_state,
+        djinn_provider::catalog::RefreshStatus::Success,
+        "refresh status should remain success on the same running state"
+    );
+}
