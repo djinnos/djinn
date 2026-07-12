@@ -378,6 +378,19 @@ fn is_profile_root_name(name: &str) -> bool {
     matches!(name, "debug" | "release" | "test" | "doc")
 }
 
+/// Return whether `path` exists and is a directory, treating `NotFound` as a
+/// normal absence and any other metadata error as a fail-closed error.
+fn is_directory_fallible(path: &Path) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_dir()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!(
+            "failed to read metadata for {}: {e}",
+            path.display()
+        )),
+    }
+}
+
 /// Directory size measurement that fails closed rather than silently skipping
 /// unreadable entries.
 fn directory_size_fail_closed(root: &Path) -> Result<u64, String> {
@@ -483,7 +496,7 @@ pub fn inventory_fingerprint_units(base: &Path) -> Result<FingerprintUnitInvento
     // Top-level profile roots.
     for name in ["debug", "release", "test", "doc"] {
         let root = base_canonical.join(name);
-        if root.is_dir() {
+        if is_directory_fallible(&root)? {
             profile_roots.push(root);
         }
     }
@@ -515,7 +528,7 @@ pub fn inventory_fingerprint_units(base: &Path) -> Result<FingerprintUnitInvento
         }
         for profile in ["debug", "release", "test", "doc"] {
             let nested = child.path().join(profile);
-            if nested.is_dir() {
+            if is_directory_fallible(&nested)? {
                 profile_roots.push(nested);
             }
         }
@@ -541,8 +554,21 @@ pub fn inventory_fingerprint_units(base: &Path) -> Result<FingerprintUnitInvento
         }
 
         let fingerprint_dir = profile_canonical.join(FINGERPRINT_DIR);
-        if !fingerprint_dir.exists() {
-            continue;
+        let fingerprint_metadata = match std::fs::metadata(&fingerprint_dir) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(format!(
+                    "failed to read metadata for .fingerprint {}: {e}",
+                    fingerprint_dir.display()
+                ));
+            }
+        };
+        if !fingerprint_metadata.is_dir() {
+            return Err(format!(
+                ".fingerprint at {} is not a directory",
+                fingerprint_dir.display()
+            ));
         }
         let fingerprint_canonical = std::fs::canonicalize(&fingerprint_dir).map_err(|e| {
             format!(
@@ -555,12 +581,6 @@ pub fn inventory_fingerprint_units(base: &Path) -> Result<FingerprintUnitInvento
                 ".fingerprint {} escapes warm base {}",
                 fingerprint_canonical.display(),
                 base_canonical.display()
-            ));
-        }
-        if !fingerprint_canonical.is_dir() {
-            return Err(format!(
-                ".fingerprint at {} is not a directory",
-                fingerprint_canonical.display()
             ));
         }
 

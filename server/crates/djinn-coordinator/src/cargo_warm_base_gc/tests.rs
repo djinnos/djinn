@@ -1726,4 +1726,69 @@ fn inventory_returns_projected_bytes_for_single_file() {
     assert_eq!(inventory.units[0].projected_bytes, 5);
 }
 
+#[cfg(unix)]
+#[test]
+fn inventory_fails_closed_when_fingerprint_dir_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_temp, base) = temp_base();
+    let unit_path = base.join("debug/.fingerprint/unit");
+    write_file(&unit_path.join("x.json"), b"x");
+
+    // Remove all permissions from the profile root so that traversal into
+    // `.fingerprint` fails with EACCES, while the profile root itself is
+    // still stat-able (the exact fail-closed case from review feedback).
+    let profile_root = base.join("debug");
+    let mut perms = fs::metadata(&profile_root).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(&profile_root, perms).unwrap();
+
+    let result = inventory_fingerprint_units(&base);
+
+    let mut perms = fs::metadata(&profile_root).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&profile_root, perms).unwrap();
+
+    assert!(
+        result.is_err(),
+        "expected unreadable .fingerprint to fail closed"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("failed to read metadata"),
+        "unexpected error: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_fails_closed_when_nested_profile_root_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_temp, base) = temp_base();
+    let unit_path = base.join("x86_64-unknown-linux-gnu/debug/.fingerprint/unit");
+    write_file(&unit_path.join("x.json"), b"x");
+
+    let target_root = base.join("x86_64-unknown-linux-gnu");
+    let mut perms = fs::metadata(&target_root).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(&target_root, perms).unwrap();
+
+    let result = inventory_fingerprint_units(&base);
+
+    let mut perms = fs::metadata(&target_root).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&target_root, perms).unwrap();
+
+    assert!(
+        result.is_err(),
+        "expected unreadable nested profile root to fail closed"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("failed to read metadata"),
+        "unexpected error: {err}"
+    );
+}
+
 mod pressure_execution;
