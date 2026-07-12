@@ -1379,6 +1379,9 @@ async fn sweep_sccache_guard_under(
             path = %sccache_root.display(),
             age_hours = ?age_hours,
             size_bytes,
+            projected_bytes = size_bytes,
+            mode = "dry_run",
+            cleanup_outcome = "dry_run",
             "CoordinatorActor: sccache guard dry-run — would delete stale directory"
         );
         cleanup_metrics::increment_cleanup_total(COMPONENT_SCCACHE, OUTCOME_DRY_RUN, MODE_DRY_RUN);
@@ -1392,6 +1395,7 @@ async fn sweep_sccache_guard_under(
                 path = %sccache_root.display(),
                 age_hours = ?age_hours,
                 size_bytes,
+                reclaimed_bytes = size_bytes,
                 cleanup_outcome = "deleted",
                 "CoordinatorActor: sccache guard deleted stale directory"
             );
@@ -1960,6 +1964,7 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                 path = %path.display(),
                 entry_kind,
                 size_bytes = entry_bytes,
+                projected_bytes = entry_bytes,
                 age_secs = ?entry_mtime_secs.map(|m| now_secs.saturating_sub(m)),
                 mode = "dry_run",
                 cleanup_outcome = if file_type.is_dir() { "malformed_dir_deleted" } else { "loose_file_deleted" },
@@ -2995,6 +3000,24 @@ mod cache_cleanup_cross_path_tests {
                 ],
             ) >= 1.0
         );
+        assert!(
+            cache_metric_value(
+                "djinn_cache_cleanup_candidates_total",
+                &[
+                    ("component", metrics::COMPONENT_SCCACHE),
+                    ("mode", metrics::MODE_DRY_RUN)
+                ],
+            ) >= 1.0
+        );
+        assert!(
+            cache_metric_value(
+                "djinn_cache_cleanup_candidates_total",
+                &[
+                    ("component", metrics::COMPONENT_CARGO_TARGET_RUNS),
+                    ("mode", metrics::MODE_DRY_RUN)
+                ],
+            ) >= 2.0
+        );
 
         let delete = CacheCleanupConfig {
             mode: CacheCleanupMode::Delete,
@@ -3030,6 +3053,24 @@ mod cache_cleanup_cross_path_tests {
                     ("mode", metrics::MODE_DELETE)
                 ],
             ) >= 1.0
+        );
+        assert!(
+            cache_metric_value(
+                "djinn_cache_cleanup_reclaimed_bytes_total",
+                &[
+                    ("component", metrics::COMPONENT_SCCACHE),
+                    ("mode", metrics::MODE_DELETE)
+                ],
+            ) >= 7.0
+        );
+        assert!(
+            cache_metric_value(
+                "djinn_cache_cleanup_reclaimed_bytes_total",
+                &[
+                    ("component", metrics::COMPONENT_CARGO_TARGET_RUNS),
+                    ("mode", metrics::MODE_DELETE)
+                ],
+            ) >= deleted.debris_bytes_deleted as f64
         );
     }
 }
