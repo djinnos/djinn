@@ -40,6 +40,9 @@ pub use repositories::{
         MergedChangeRow, RecordOutcomeParams, SampleFrameRow, SamplePolicyRow, SelectionRow,
         UnmaterializedSelection, UpsertMergedChangeParams,
     },
+    chat_interruption_notice::{
+        ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
+    },
     code_chunk::{
         ChunkAndEmbedReport, CodeChunk, CodeChunkEmbeddingProvider, CodeChunkRepairEmbeddingRow,
         CodeChunkRepository, CodeChunkSearchHit, CodeChunkVectorBackend, CodeChunkVectorMatch,

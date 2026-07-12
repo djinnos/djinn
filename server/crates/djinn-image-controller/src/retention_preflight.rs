@@ -13,7 +13,12 @@
 //! be proven pullable, preflight **fails closed** — returns an `Err` and does
 //! NOT proceed.
 
-use crate::retention::{self, CATALOG_REPO_PREFIX, RetentionPlan, SelectedImage, ZotRepository};
+use crate::retention::{
+    self, CATALOG_REPO_PREFIX, RetentionPlan, SelectedImage, ZotRepository, ZotTag,
+};
+use djinn_provider::http_util::{HttpClient, HttpError, HttpRequestBuilder, HttpResponse};
+use serde::Deserialize;
+use std::time::Duration;
 
 /// A mockable source of Zot repository/tag state.
 ///
@@ -32,6 +37,246 @@ pub enum ZotStateError {
     Fetch(String),
     #[error("zot state parse error: {0}")]
     Parse(String),
+    #[error("zot transport failure during {operation}: {message}")]
+    Transport { operation: String, message: String },
+    #[error("zot returned HTTP {status} during {operation}")]
+    Status { operation: String, status: u16 },
+    #[error("zot returned incomplete state for {repo}:{tag}: missing {field}")]
+    Incomplete {
+        repo: String,
+        tag: String,
+        field: &'static str,
+    },
+}
+
+/// Explicit authentication for Zot API requests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ZotHttpAuth {
+    None,
+    Basic { username: String, password: String },
+    Bearer(String),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZotHttpConfig {
+    pub endpoint: String,
+    pub auth: ZotHttpAuth,
+    pub request_timeout: Duration,
+}
+impl ZotHttpConfig {
+    pub fn new(endpoint: impl Into<String>, auth: ZotHttpAuth) -> Self {
+        Self {
+            endpoint: endpoint.into().trim_end_matches('/').to_owned(),
+            auth,
+            request_timeout: Duration::from_secs(15),
+        }
+    }
+}
+/// Production Zot Distribution client; it maps only `djinn-image-*` repos.
+#[derive(Clone)]
+pub struct ZotHttpStateSource {
+    config: ZotHttpConfig,
+    client: HttpClient,
+}
+impl ZotHttpStateSource {
+    pub fn new(config: ZotHttpConfig) -> Result<Self, ZotStateError> {
+        let client = HttpClient::new(config.request_timeout)?;
+        Ok(Self { config, client })
+    }
+    fn request(&self, url: &str) -> HttpRequestBuilder {
+        let request = self
+            .client
+            .get(url)
+            .header("Accept", "application/vnd.oci.image.manifest.v1+json");
+        match &self.config.auth {
+            ZotHttpAuth::None => request,
+            ZotHttpAuth::Basic { username, password } => request.basic_auth(username, password),
+            ZotHttpAuth::Bearer(token) => request.bearer_auth(token),
+        }
+    }
+    async fn response(&self, url: &str, op: &'static str) -> Result<HttpResponse, ZotStateError> {
+        self.request(url)
+            .send(op)
+            .await
+            .map_err(ZotStateError::from)
+    }
+    async fn names(
+        &self,
+        mut next: Option<String>,
+        op: &'static str,
+        key: &'static str,
+    ) -> Result<Vec<String>, ZotStateError> {
+        let mut names = Vec::new();
+        while let Some(url) = next.take() {
+            let response = self.response(&url, op).await?;
+            let link = response
+                .header("Link")
+                .as_deref()
+                .and_then(next_link)
+                .map(str::to_owned);
+            let body: serde_json::Value = response.json().await?;
+            let entries = body
+                .get(key)
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| ZotStateError::Parse(format!("missing array field {key}")))?;
+            for value in entries {
+                names.push(
+                    value
+                        .as_str()
+                        .ok_or_else(|| ZotStateError::Parse(format!("non-string {key}")))?
+                        .to_owned(),
+                );
+            }
+            next = link.map(|url| {
+                if url.starts_with("http") {
+                    url
+                } else {
+                    format!("{}{}", self.config.endpoint, url)
+                }
+            });
+        }
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+    async fn tag(&self, repo: &str, tag: &str) -> Result<ZotTag, ZotStateError> {
+        let response = self
+            .response(
+                &format!("{}/v2/{repo}/manifests/{tag}", self.config.endpoint),
+                "manifest",
+            )
+            .await?;
+        let digest = response
+            .header("Docker-Content-Digest")
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| ZotStateError::Incomplete {
+                repo: repo.into(),
+                tag: tag.into(),
+                field: "Docker-Content-Digest",
+            })?;
+        let bytes = response.bytes("manifest").await?;
+        let manifest: Manifest =
+            serde_json::from_slice(&bytes).map_err(|e| ZotStateError::Parse(e.to_string()))?;
+        let config = manifest.config.ok_or_else(|| ZotStateError::Incomplete {
+            repo: repo.into(),
+            tag: tag.into(),
+            field: "manifest config",
+        })?;
+        let config_size = config.size.ok_or_else(|| ZotStateError::Incomplete {
+            repo: repo.into(),
+            tag: tag.into(),
+            field: "manifest config size",
+        })?;
+        let image_config: ImageConfig = self
+            .response(
+                &format!("{}/v2/{repo}/blobs/{}", self.config.endpoint, config.digest),
+                "image config",
+            )
+            .await?
+            .json()
+            .await?;
+        let pushed_at = image_config
+            .created
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| ZotStateError::Incomplete {
+                repo: repo.into(),
+                tag: tag.into(),
+                field: "config created timestamp",
+            })?;
+        let layers = manifest.layers.ok_or_else(|| ZotStateError::Incomplete {
+            repo: repo.into(),
+            tag: tag.into(),
+            field: "manifest layers",
+        })?;
+        let layer_size = layers.into_iter().try_fold(0_u64, |total, layer| {
+            let size = layer.size.ok_or_else(|| ZotStateError::Incomplete {
+                repo: repo.into(),
+                tag: tag.into(),
+                field: "manifest layer size",
+            })?;
+            Ok::<_, ZotStateError>(total + size)
+        })?;
+        Ok(ZotTag {
+            tag: tag.into(),
+            digest,
+            size_bytes: bytes.len() as u64 + config_size + layer_size,
+            pushed_at,
+        })
+    }
+}
+#[async_trait::async_trait]
+impl ZotStateSource for ZotHttpStateSource {
+    async fn fetch_repositories(&self) -> Result<Vec<ZotRepository>, ZotStateError> {
+        let repositories = self
+            .names(
+                Some(format!("{}/v2/_catalog?n=100", self.config.endpoint)),
+                "catalog",
+                "repositories",
+            )
+            .await?;
+        let mut result = Vec::new();
+        for name in repositories
+            .into_iter()
+            .filter(|name| name.starts_with(CATALOG_REPO_PREFIX))
+        {
+            let names = self
+                .names(
+                    Some(format!(
+                        "{}/v2/{name}/tags/list?n=100",
+                        self.config.endpoint
+                    )),
+                    "tag list",
+                    "tags",
+                )
+                .await?;
+            let mut tags = Vec::new();
+            for tag in names {
+                tags.push(self.tag(&name, &tag).await?);
+            }
+            result.push(ZotRepository { name, tags });
+        }
+        Ok(result)
+    }
+}
+impl From<HttpError> for ZotStateError {
+    fn from(e: HttpError) -> Self {
+        match e {
+            HttpError::Build { message } => ZotStateError::Transport {
+                operation: "client construction".to_string(),
+                message,
+            },
+            HttpError::Transport { operation, message } => {
+                ZotStateError::Transport { operation, message }
+            }
+            HttpError::Status { operation, status } => ZotStateError::Status { operation, status },
+            HttpError::Body { operation, message } => {
+                ZotStateError::Transport { operation, message }
+            }
+            HttpError::Parse { message } => ZotStateError::Parse(message),
+        }
+    }
+}
+
+fn next_link(value: &str) -> Option<&str> {
+    let part = value
+        .split(',')
+        .find(|part| part.contains("rel=\"next\""))?;
+    let start = part.find('<')? + 1;
+    let end = part[start..].find('>')? + start;
+    Some(&part[start..end])
+}
+#[derive(Deserialize)]
+struct Manifest {
+    config: Option<Descriptor>,
+    layers: Option<Vec<Descriptor>>,
+}
+#[derive(Deserialize)]
+struct Descriptor {
+    digest: String,
+    size: Option<u64>,
+}
+#[derive(Deserialize)]
+struct ImageConfig {
+    created: Option<String>,
 }
 
 /// Preflight configuration for retention gating.
@@ -180,6 +425,243 @@ fn extract_tag_name(full_ref: &str) -> String {
 mod tests {
     use super::*;
     use crate::retention::ZotTag;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+
+    struct HttpResponse {
+        path: &'static str,
+        status: u16,
+        headers: Vec<(&'static str, &'static str)>,
+        body: &'static str,
+        authorization: Option<&'static str>,
+    }
+
+    async fn mock_http(responses: Vec<HttpResponse>) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0; 1024];
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "client closed before sending HTTP headers");
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.starts_with(&format!("GET {} HTTP/1.1", response.path)));
+                if let Some(auth) = response.authorization {
+                    assert!(
+                        request
+                            .to_ascii_lowercase()
+                            .contains(&format!("authorization: {}\r\n", auth.to_ascii_lowercase()))
+                    );
+                }
+                let reason = if response.status == 200 {
+                    "OK"
+                } else {
+                    "Error"
+                };
+                let mut wire = format!(
+                    "HTTP/1.1 {} {reason}\r\nConnection: close\r\nContent-Length: {}\r\n",
+                    response.status,
+                    response.body.len()
+                );
+                for (name, value) in response.headers {
+                    wire.push_str(&format!("{name}: {value}\r\n"));
+                }
+                wire.push_str("\r\n");
+                wire.push_str(response.body);
+                stream.write_all(wire.as_bytes()).await.unwrap();
+            }
+        });
+        (endpoint, server)
+    }
+
+    fn ok(path: &'static str, body: &'static str) -> HttpResponse {
+        HttpResponse {
+            path,
+            status: 200,
+            headers: vec![],
+            body,
+            authorization: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn http_source_paginates_filters_and_maps_catalog_state() {
+        let new_manifest = r#"{"config":{"digest":"sha256:config-new","size":11},"layers":[{"digest":"sha256:layer-new","size":21}]}"#;
+        let old_manifest = r#"{"config":{"digest":"sha256:config-old","size":10},"layers":[{"digest":"sha256:layer-old","size":20}]}"#;
+        let (endpoint, server) = mock_http(vec![
+            HttpResponse {
+                path: "/v2/_catalog?n=100",
+                status: 200,
+                headers: vec![(
+                    "Link",
+                    "</v2/_catalog?n=100&last=djinn-image-alpha>; rel=\"next\"",
+                )],
+                body: r#"{"repositories":["buildkit-cache","djinn-image-alpha"]}"#,
+                authorization: None,
+            },
+            ok(
+                "/v2/_catalog?n=100&last=djinn-image-alpha",
+                r#"{"repositories":["unrelated","djinn-image-zed"]}"#,
+            ),
+            HttpResponse {
+                path: "/v2/djinn-image-alpha/tags/list?n=100",
+                status: 200,
+                headers: vec![(
+                    "Link",
+                    "</v2/djinn-image-alpha/tags/list?n=100&last=old>; rel=\"next\"",
+                )],
+                body: r#"{"tags":["old"]}"#,
+                authorization: None,
+            },
+            ok(
+                "/v2/djinn-image-alpha/tags/list?n=100&last=old",
+                r#"{"tags":["new"]}"#,
+            ),
+            HttpResponse {
+                path: "/v2/djinn-image-alpha/manifests/new",
+                status: 200,
+                headers: vec![("Docker-Content-Digest", "sha256:new")],
+                body: new_manifest,
+                authorization: None,
+            },
+            ok(
+                "/v2/djinn-image-alpha/blobs/sha256:config-new",
+                r#"{"created":"2024-01-02T00:00:00Z"}"#,
+            ),
+            HttpResponse {
+                path: "/v2/djinn-image-alpha/manifests/old",
+                status: 200,
+                headers: vec![("Docker-Content-Digest", "sha256:old")],
+                body: old_manifest,
+                authorization: None,
+            },
+            ok(
+                "/v2/djinn-image-alpha/blobs/sha256:config-old",
+                r#"{"created":"2024-01-01T00:00:00Z"}"#,
+            ),
+            ok("/v2/djinn-image-zed/tags/list?n=100", r#"{"tags":[]}"#),
+        ])
+        .await;
+        let source =
+            ZotHttpStateSource::new(ZotHttpConfig::new(endpoint, ZotHttpAuth::None)).unwrap();
+        let repos = source.fetch_repositories().await.unwrap();
+        server.await.unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].name, "djinn-image-alpha");
+        assert_eq!(
+            repos[0]
+                .tags
+                .iter()
+                .map(|tag| tag.tag.as_str())
+                .collect::<Vec<_>>(),
+            ["new", "old"]
+        );
+        assert_eq!(repos[0].tags[0].digest, "sha256:new");
+        assert_eq!(repos[0].tags[0].pushed_at, "2024-01-02T00:00:00Z");
+        assert_eq!(repos[0].tags[0].size_bytes, new_manifest.len() as u64 + 32);
+        assert_eq!(repos[1].name, "djinn-image-zed");
+    }
+
+    #[tokio::test]
+    async fn http_source_sends_configured_authentication() {
+        let (endpoint, server) = mock_http(vec![HttpResponse {
+            authorization: Some("Basic YWxpY2U6c2VjcmV0"),
+            ..ok("/v2/_catalog?n=100", r#"{"repositories":[]}"#)
+        }])
+        .await;
+        let source = ZotHttpStateSource::new(ZotHttpConfig::new(
+            endpoint,
+            ZotHttpAuth::Basic {
+                username: "alice".into(),
+                password: "secret".into(),
+            },
+        ))
+        .unwrap();
+        assert!(source.fetch_repositories().await.unwrap().is_empty());
+        server.await.unwrap();
+
+        let (endpoint, server) = mock_http(vec![HttpResponse {
+            authorization: Some("Bearer token-123"),
+            ..ok("/v2/_catalog?n=100", r#"{"repositories":[]}"#)
+        }])
+        .await;
+        let source = ZotHttpStateSource::new(ZotHttpConfig::new(
+            endpoint,
+            ZotHttpAuth::Bearer("token-123".into()),
+        ))
+        .unwrap();
+        assert!(source.fetch_repositories().await.unwrap().is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_source_returns_typed_errors_for_bad_http_responses() {
+        let (endpoint, server) = mock_http(vec![ok("/v2/_catalog?n=100", "not-json")]).await;
+        let source =
+            ZotHttpStateSource::new(ZotHttpConfig::new(endpoint, ZotHttpAuth::None)).unwrap();
+        assert!(matches!(
+            source.fetch_repositories().await,
+            Err(ZotStateError::Parse(_))
+        ));
+        server.await.unwrap();
+
+        let (endpoint, server) = mock_http(vec![HttpResponse {
+            status: 503,
+            ..ok("/v2/_catalog?n=100", "unavailable")
+        }])
+        .await;
+        let source =
+            ZotHttpStateSource::new(ZotHttpConfig::new(endpoint, ZotHttpAuth::None)).unwrap();
+        assert!(matches!(
+            source.fetch_repositories().await,
+            Err(ZotStateError::Status {
+                operation,
+                status: 503
+            }) if operation == "catalog"
+        ));
+        server.await.unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let source =
+            ZotHttpStateSource::new(ZotHttpConfig::new(endpoint, ZotHttpAuth::None)).unwrap();
+        assert!(matches!(
+            source.fetch_repositories().await,
+            Err(ZotStateError::Transport {
+                operation,
+                ..
+            }) if operation == "catalog"
+        ));
+    }
+
+    #[tokio::test]
+    async fn http_source_rejects_missing_descriptor_size() {
+        let (endpoint, server) = mock_http(vec![
+            ok("/v2/_catalog?n=100", r#"{"repositories":["djinn-image-alpha"]}"#),
+            ok("/v2/djinn-image-alpha/tags/list?n=100", r#"{"tags":["v1"]}"#),
+            HttpResponse { path: "/v2/djinn-image-alpha/manifests/v1", status: 200, headers: vec![("Docker-Content-Digest", "sha256:v1")], body: r#"{"config":{"digest":"sha256:config"},"layers":[{"digest":"sha256:layer","size":20}]}"#, authorization: None },
+        ]).await;
+        let source =
+            ZotHttpStateSource::new(ZotHttpConfig::new(endpoint, ZotHttpAuth::None)).unwrap();
+        assert!(matches!(
+            source.fetch_repositories().await,
+            Err(ZotStateError::Incomplete {
+                field: "manifest config size",
+                ..
+            })
+        ));
+        server.await.unwrap();
+    }
 
     // ── Mock Zot state source ─────────────────────────────────────────────
 
