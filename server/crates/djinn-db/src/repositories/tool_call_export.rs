@@ -50,6 +50,7 @@ pub struct NormalizedToolCallRow {
     /// Read limit extracted from `read` tool args. Used by read-loop detection.
     #[serde(default)]
     pub read_limit: Option<i64>,
+    #[serde(default)]
     pub diagnostics: Vec<String>,
 }
 pub struct ToolCallExportRepository {

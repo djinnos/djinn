@@ -30,6 +30,10 @@ pub use database::{
     SqliteVecStatus, default_db_path,
 };
 pub use error::{DbError as Error, DbResult as Result};
+pub use repositories::tool_call_evaluator::{
+    Decision, EvalInput, GateResult, GateThresholds, GoStopReport, ManualAuditResult, SampleMinima,
+    WindowSpec, evaluate, matched_baseline_rows,
+};
 pub use repositories::tool_call_export::{
     ExportDimensions, NormalizedToolCallRow, PersistedTranscript, ToolCallExportRepository,
     normalize_persisted_transcript,
