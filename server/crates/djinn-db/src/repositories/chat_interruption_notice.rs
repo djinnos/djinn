@@ -114,30 +114,16 @@ mod tests {
     use djinn_core::events::EventBus;
 
     use super::*;
-    use crate::repositories::epic::EpicRepository;
-    use crate::repositories::session::{CreateSessionParams, SessionRepository};
+    use crate::repositories::session::SessionRepository;
 
     async fn session_id(db: Database) -> String {
-        let bus = EventBus::noop();
-        let epic = EpicRepository::new(db.clone(), bus.clone())
-            .create("Epic", "", "", "", "", None)
-            .await
-            .unwrap();
-        let task_id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design, issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs) VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)")
-            .bind(&task_id).bind(&epic.project_id).bind(format!("t{}", &task_id[..8])).bind(&epic.id)
-            .execute(db.pool()).await.unwrap();
-        SessionRepository::new(db, bus)
-            .create(CreateSessionParams {
-                project_id: &epic.project_id,
-                task_id: Some(&task_id),
-                model: "test",
-                agent_type: "chat",
-                metadata_json: None,
-                task_run_id: None,
-                pricing: None,
-                cost_basis: None,
-            })
+        // Chat sessions are project-less and user-scoped, so use the canonical
+        // `upsert_chat_session` path rather than `CreateSessionParams` (which
+        // requires a non-null project_id and would violate the
+        // `sessions_project_scope_by_agent_type` CHECK constraint).
+        let session_id = uuid::Uuid::now_v7().to_string();
+        SessionRepository::new(db, EventBus::noop())
+            .upsert_chat_session(&session_id, "test")
             .await
             .unwrap()
             .id
