@@ -946,15 +946,38 @@ async fn non_recommended_connected_model_persists_and_validates_including_org_ov
         .await
         .expect("catalog-present non-recommended id should be dispatch-valid");
 
-    let absent = "nope/unknown-model";
+    let absent = "openai/not-in-catalog";
     let err = harness
         .state()
         .validate_models_for_user(&[absent.to_string()], Some(&user_id))
         .await
         .expect_err("catalog-absent id should be rejected by dispatch validation");
     assert!(
-        err.contains("providers you haven't connected"),
-        "expected connectivity rejection for absent id, got: {err}"
+        err.contains("not available in the connected provider catalog"),
+        "expected catalog membership rejection for absent id, got: {err}"
+    );
+
+    let rejected_set = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness
+                .call_tool(
+                    "user_settings_set",
+                    json!({"lanes": {"plan": [absent]}}),
+                )
+                .await
+        })
+        .await
+        .expect("user_settings_set rejection dispatch");
+    assert!(
+        !rejected_set["ok"].as_bool().unwrap_or(true),
+        "user_settings_set must reject a catalog-absent id under a connected provider: {rejected_set}"
+    );
+    assert!(
+        rejected_set["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not available in the connected provider catalog"),
+        "user_settings_set should report catalog membership rejection: {rejected_set}"
     );
 
     let policy_set = harness
