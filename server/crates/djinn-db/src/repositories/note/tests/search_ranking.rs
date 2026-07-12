@@ -471,6 +471,7 @@ async fn dedup_candidates_filter_by_folder_and_note_type() {
     assert_eq!(results[0].id, matching.id);
     assert_eq!(results[0].folder, "decisions");
     assert_eq!(results[0].note_type, "adr");
+    assert_eq!(results[0].content, "shared dedup token appears here");
     assert_eq!(results[0].abstract_.as_deref(), Some("matching abstract"));
     assert_eq!(results[0].overview.as_deref(), Some("matching overview"));
     assert!(results[0].score > -3.0);

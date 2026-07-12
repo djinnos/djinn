@@ -100,6 +100,7 @@ impl NoteRepository {
                 String,
                 String,
                 String,
+                String,
                 Option<String>,
                 Option<String>,
                 f64,
@@ -120,13 +121,14 @@ impl NoteRepository {
         Ok(rows
             .into_iter()
             .map(
-                |(id, permalink, title, folder, note_type, abstract_, overview, score)| {
+                |(id, permalink, title, folder, note_type, content, abstract_, overview, score)| {
                     NoteDedupCandidate {
                         id,
                         permalink,
                         title,
                         folder,
                         note_type,
+                        content,
                         abstract_,
                         overview,
                         score: normalize_lexical_score(&plan, score),

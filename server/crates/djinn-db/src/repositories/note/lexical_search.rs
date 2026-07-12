@@ -164,7 +164,7 @@ pub fn build_lexical_search_plan(
         (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Dedup) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       -bm25(notes_fts, 3.0, 1.0, 2.0) as score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\n  AND n.status = 'active'\n  AND n.folder = $33\n  AND n.note_type = $44\n  AND -bm25(notes_fts, 3.0, 1.0, 2.0) > $55\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $66".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.content, n.abstract, n.overview,\n       -bm25(notes_fts, 3.0, 1.0, 2.0) as score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\n  AND n.status = 'active'\n  AND n.folder = $33\n  AND n.note_type = $44\n  AND -bm25(notes_fts, 3.0, 1.0, 2.0) > $55\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $66".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
@@ -216,7 +216,7 @@ pub fn build_lexical_search_plan(
             mode,
             // Bind order (see `dedup_lexical_candidates`): $1 query, $2 project_id,
             // $3 folder, $4 note_type, $5 threshold, $6 limit.
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       ts_rank(n.search_vector, to_tsquery('english', $1))::float8 AS score\nFROM notes n\nWHERE n.project_id = $2\n  AND n.status = 'active'\n  AND n.folder = $3\n  AND n.note_type = $4\n  AND n.search_vector @@ to_tsquery('english', $1)\n  AND ts_rank(n.search_vector, to_tsquery('english', $1))::float8 > $5\nORDER BY score DESC, n.id ASC\nLIMIT $6".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.content, n.abstract, n.overview,\n       ts_rank(n.search_vector, to_tsquery('english', $1))::float8 AS score\nFROM notes n\nWHERE n.project_id = $2\n  AND n.status = 'active'\n  AND n.folder = $3\n  AND n.note_type = $4\n  AND n.search_vector @@ to_tsquery('english', $1)\n  AND ts_rank(n.search_vector, to_tsquery('english', $1))::float8 > $5\nORDER BY score DESC, n.id ASC\nLIMIT $6".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
