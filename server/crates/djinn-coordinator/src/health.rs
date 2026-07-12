@@ -3034,14 +3034,19 @@ mod cache_cleanup_cross_path_tests {
     }
 }
 
-/// Inventory warm bases during the leader-owned maintenance sweep. This phase
-/// plans only; later idle and pressure passes own any deletion decision.
+/// Inventory and evict idle warm bases during the leader-owned maintenance
+/// sweep.  The idle evictor derives activity DB-first, falls back to directory
+/// mtime, and acquires a non-blocking per-base lock before any destructive work,
+/// rechecking safety while the lock is held.  Both dry-run and delete modes
+/// select the same candidates; dry-run reports projected bytes, delete reports
+/// reclaimed bytes.
 async fn sweep_cargo_warm_base_guard(
     db: &djinn_db::Database,
     config: &crate::context::CacheCleanupConfig,
     warm_job_guard: Option<Arc<dyn crate::cargo_warm_base_gc::WarmJobGuard>>,
 ) {
     use crate::cargo_warm_base_gc as gc;
+    use djinn_core::clock::SystemClock;
     use djinn_telemetry::cache_cleanup as metrics;
     let guard: Arc<dyn gc::WarmJobGuard> =
         warm_job_guard.unwrap_or_else(|| Arc::new(gc::UnavailableWarmJobGuard));
@@ -3050,7 +3055,7 @@ async fn sweep_cargo_warm_base_guard(
         Err(error) => {
             tracing::warn!(error = %error, root = gc::CARGO_WARM_BASE_ROOT, "warm-base GC inventory failed; retaining bases");
             metrics::increment_cleanup_total(
-                metrics::COMPONENT_CARGO_TARGET_RUNS,
+                metrics::COMPONENT_CARGO_WARM_BASE,
                 metrics::OUTCOME_ERROR,
                 config.mode.as_metric_label(),
             );
@@ -3058,31 +3063,49 @@ async fn sweep_cargo_warm_base_guard(
         }
     };
     let inventory_count = inventory.entries.len() as u64;
-    let plan = gc::plan(
-        inventory,
-        &gc::DbActivityGuard::new(db.clone()),
-        guard.as_ref(),
-        &gc::StatvfsFreeSpaceGuard,
-        &gc::NoopLockGuard,
-    )
-    .await;
     if inventory_count > 0 {
         metrics::increment_candidates(
-            metrics::COMPONENT_CARGO_TARGET_RUNS,
+            metrics::COMPONENT_CARGO_WARM_BASE,
             config.mode.as_metric_label(),
             inventory_count,
         );
     }
+    let clock = SystemClock::new();
+    let locks = gc::FlockBaseLock;
+    let result = gc::evict_idle_warm_bases(
+        inventory,
+        &gc::DbActivityGuard::new(db.clone()),
+        guard.as_ref(),
+        &locks,
+        config,
+        &clock,
+        config.mode,
+        Path::new(gc::CARGO_WARM_BASE_ROOT),
+    )
+    .await;
+    if result.reclaimed_bytes > 0 {
+        metrics::record_reclaimed_bytes(
+            metrics::COMPONENT_CARGO_WARM_BASE,
+            config.mode.as_metric_label(),
+            result.reclaimed_bytes,
+        );
+    }
+    if result.projected_bytes > 0 {
+        tracing::info!(
+            component = metrics::COMPONENT_CARGO_WARM_BASE,
+            mode = config.mode.as_metric_label(),
+            projected_bytes = result.projected_bytes,
+            "warm-base idle GC projected bytes"
+        );
+    }
     tracing::info!(
-        component = "cargo_warm_base",
+        component = metrics::COMPONENT_CARGO_WARM_BASE,
         mode = config.mode.as_metric_label(),
-        candidates = plan.candidates.len(),
-        retained = plan.retained.len(),
-        projected_bytes = plan
-            .candidates
-            .iter()
-            .map(|candidate| candidate.entry.size_bytes)
-            .sum::<u64>(),
-        "warm-base GC inventory and guard plan completed"
+        deleted = result.deleted.len(),
+        dry_run = result.dry_run.len(),
+        retained = result.retained.len(),
+        reclaimed_bytes = result.reclaimed_bytes,
+        projected_bytes = result.projected_bytes,
+        "warm-base idle GC completed"
     );
 }
