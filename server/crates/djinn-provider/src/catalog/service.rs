@@ -10,6 +10,7 @@ use serde::Deserialize;
 use crate::catalog::builtin::{BUILTIN_PROVIDERS, BuiltinProvider};
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
+const CATALOG_URL_ENV: &str = "DJINN_PROVIDER_CATALOG_URL";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default freshness window used when computing the source tier for structured
@@ -228,45 +229,7 @@ impl CatalogService {
     /// unchanged.
     pub async fn refresh(&self) {
         match self.fetch_remote().await {
-            Ok(raw) => {
-                let (providers, models_idx) = normalize(raw);
-                // Reject an empty normalized upstream payload so a degenerate
-                // fetch never overwrites the active catalog with nothing.
-                if providers.is_empty() {
-                    let mut data = self.inner.write();
-                    data.last_refresh_status = RefreshStatus::Error;
-                    data.last_refresh_error =
-                        Some("models.dev normalized payload had zero providers".to_string());
-                    tracing::warn!(
-                        status = ?data.last_refresh_status,
-                        source_tier = ?source_tier_from_data(&data, REFRESH_LOG_MAX_AGE),
-                        providers = data.providers.len(),
-                        error = "models.dev normalized payload had zero providers",
-                        "catalog refresh rejected zero-provider payload — keeping active catalog"
-                    );
-                    return;
-                }
-                let clock = SystemClock::new();
-                let now = clock.now_instant();
-                let now_wall = clock.now();
-                let provider_count = providers.len();
-                let model_count: usize = models_idx.values().map(Vec::len).sum();
-                // Compose the full catalog (upstream + builtins + retained
-                // custom providers) and swap it in under a single write lock.
-                let mut data = self.inner.write();
-                compose_catalog(&mut data, providers, models_idx);
-                data.fetched_at = Some(now);
-                data.fetched_at_wall = Some(now_wall);
-                data.last_refresh_status = RefreshStatus::Success;
-                data.last_refresh_error = None;
-                tracing::info!(
-                    status = ?data.last_refresh_status,
-                    source_tier = ?SourceTier::Live,
-                    providers = provider_count,
-                    models = model_count,
-                    "provider catalog refreshed from models.dev"
-                );
-            }
+            Ok(value) => self.refresh_from_json(value).await,
             Err(e) => {
                 let mut data = self.inner.write();
                 data.last_refresh_status = RefreshStatus::Error;
@@ -282,23 +245,94 @@ impl CatalogService {
         }
     }
 
-    async fn fetch_remote(&self) -> Result<HashMap<String, RawProvider>, String> {
+    /// Deterministic test seam that drives the same normalize/compose/swap path
+    /// as a live `refresh()` but with a caller-supplied JSON payload. Kept as an
+    /// internal helper so the only public entry point to the live refresh path is
+    /// [`refresh`](Self::refresh); integration tests should drive that public path
+    /// with a mocked upstream URL rather than bypassing it here.
+    async fn refresh_from_json(&self, value: serde_json::Value) {
+        let raw = match serde_json::from_value::<HashMap<String, RawProvider>>(value) {
+            Ok(raw) => raw,
+            Err(e) => {
+                let mut data = self.inner.write();
+                data.last_refresh_status = RefreshStatus::Error;
+                data.last_refresh_error = Some(format!("models.dev JSON parse error: {e}"));
+                tracing::warn!(
+                    status = ?data.last_refresh_status,
+                    source_tier = ?source_tier_from_data(&data, REFRESH_LOG_MAX_AGE),
+                    providers = data.providers.len(),
+                    error = %e,
+                    "catalog refresh failed — using cached/embedded data"
+                );
+                return;
+            }
+        };
+
+        let (providers, models_idx) = normalize(raw);
+        // Reject an empty normalized upstream payload so a degenerate
+        // fetch never overwrites the active catalog with nothing.
+        if providers.is_empty() {
+            let mut data = self.inner.write();
+            data.last_refresh_status = RefreshStatus::Error;
+            data.last_refresh_error =
+                Some("models.dev normalized payload had zero providers".to_string());
+            tracing::warn!(
+                status = ?data.last_refresh_status,
+                source_tier = ?source_tier_from_data(&data, REFRESH_LOG_MAX_AGE),
+                providers = data.providers.len(),
+                error = "models.dev normalized payload had zero providers",
+                "catalog refresh rejected zero-provider payload — keeping active catalog"
+            );
+            return;
+        }
+        let clock = SystemClock::new();
+        let now = clock.now_instant();
+        let now_wall = clock.now();
+        let provider_count = providers.len();
+        let model_count: usize = models_idx.values().map(Vec::len).sum();
+        // Compose the full catalog (upstream + builtins + retained
+        // custom providers) and swap it in under a single write lock.
+        let mut data = self.inner.write();
+        compose_catalog(&mut data, providers, models_idx);
+        data.fetched_at = Some(now);
+        data.fetched_at_wall = Some(now_wall);
+        data.last_refresh_status = RefreshStatus::Success;
+        data.last_refresh_error = None;
+        tracing::info!(
+            status = ?data.last_refresh_status,
+            source_tier = ?SourceTier::Live,
+            providers = provider_count,
+            models = model_count,
+            "provider catalog refreshed from models.dev"
+        );
+    }
+
+    /// Test-only override surface for the upstream models.dev URL. Production
+    /// code always falls back to `CATALOG_URL`; integration tests can set
+    /// `DJINN_PROVIDER_CATALOG_URL` to a local mock server so the real
+    /// `refresh()` loop fetches a mocked payload instead of calling the live
+    /// internet endpoint.
+    fn catalog_url() -> String {
+        std::env::var(CATALOG_URL_ENV)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| CATALOG_URL.to_string())
+    }
+
+    async fn fetch_remote(&self) -> Result<serde_json::Value, String> {
         let client = reqwest::Client::builder()
             .timeout(FETCH_TIMEOUT)
             .build()
             .map_err(|e| e.to_string())?;
 
-        let resp = client
-            .get(CATALOG_URL)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+        let url = Self::catalog_url();
+        let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
 
         if !resp.status().is_success() {
             return Err(format!("models.dev returned HTTP {}", resp.status()));
         }
 
-        resp.json::<HashMap<String, RawProvider>>()
+        resp.json::<serde_json::Value>()
             .await
             .map_err(|e| e.to_string())
     }

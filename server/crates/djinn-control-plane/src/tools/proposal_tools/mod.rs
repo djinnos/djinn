@@ -161,6 +161,7 @@ pub(super) fn err_single(error: impl Into<String>) -> ProposalSingleResponse {
 
 // ── Router composition ────────────────────────────────────────────────────────
 
+#[allow(clippy::items_after_test_module)]
 impl DjinnMcpServer {
     /// Composite router for all proposal tools (CRUD/targets + feedback +
     /// signoff + lifecycle tools).

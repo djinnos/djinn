@@ -1533,7 +1533,10 @@ impl AppState {
             let cancel = self.cancel().clone();
             tokio::spawn(async move {
                 provider_catalog_refresh::run_provider_catalog_refresh_loop(
-                    catalog, interval, cancel,
+                    catalog,
+                    interval,
+                    cancel,
+                    djinn_provider::catalog::ProviderCatalogRefreshTicks::Interval,
                 )
                 .await;
             });
