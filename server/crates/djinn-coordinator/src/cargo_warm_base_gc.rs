@@ -15,6 +15,7 @@ pub const CARGO_WARM_BASE_ROOT: &str = "/cache/cargo-target";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseClassification {
     Registered,
+    Deleted,
     Orphaned,
 }
 
@@ -104,6 +105,9 @@ fn directory_size(root: &Path) -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivitySnapshot {
     pub known_project: bool,
+    /// A durable deletion tombstone exists for this project id. This is
+    /// intentionally distinct from an unknown UUID directory.
+    pub deleted_project: bool,
     pub has_active_task_run: bool,
     pub latest_activity: Option<String>,
 }
@@ -219,7 +223,9 @@ pub async fn plan(
             }
             LockOutcome::Available => {}
         }
-        let classification = if snapshot.known_project {
+        let classification = if snapshot.deleted_project {
+            BaseClassification::Deleted
+        } else if snapshot.known_project {
             BaseClassification::Registered
         } else {
             BaseClassification::Orphaned
@@ -252,12 +258,14 @@ impl ActivityGuard for DbActivityGuard {
             .map_err(|error| error.to_string())?;
         Ok(match record {
             Some(record) => ActivitySnapshot {
-                known_project: true,
+                known_project: !record.deleted_project,
+                deleted_project: record.deleted_project,
                 has_active_task_run: record.has_active_task_run,
                 latest_activity: record.latest_activity,
             },
             None => ActivitySnapshot {
                 known_project: false,
+                deleted_project: false,
                 has_active_task_run: false,
                 latest_activity: None,
             },
@@ -363,12 +371,13 @@ mod tests {
     fn snapshot() -> ActivitySnapshot {
         ActivitySnapshot {
             known_project: true,
+            deleted_project: false,
             has_active_task_run: false,
             latest_activity: None,
         }
     }
     #[tokio::test]
-    async fn classifications_registered_and_orphaned() {
+    async fn classifications_registered_deleted_and_orphaned() {
         let lock = Lock(LockOutcome::Available);
         let space = Space(Ok(9));
         let warm = Warm(Ok(false));
@@ -389,6 +398,26 @@ mod tests {
         assert_eq!(
             registered.candidates[0].classification,
             BaseClassification::Registered
+        );
+
+        let deleted = plan(
+            WarmBaseInventory {
+                entries: vec![entry()],
+                ignored: 0,
+            },
+            &Activity(Ok(ActivitySnapshot {
+                known_project: false,
+                deleted_project: true,
+                ..snapshot()
+            })),
+            &warm,
+            &space,
+            &lock,
+        )
+        .await;
+        assert_eq!(
+            deleted.candidates[0].classification,
+            BaseClassification::Deleted
         );
 
         let orphaned = plan(
