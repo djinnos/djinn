@@ -22,6 +22,7 @@ mod lifecycle;
 mod move_ops;
 pub mod ops;
 mod reads;
+mod recall_trace;
 mod repair_embeddings;
 mod run_enrichment;
 mod search;
@@ -49,6 +50,8 @@ mod entity_types_tests;
 #[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
+mod recall_trace_tests;
+#[cfg(test)]
 mod run_enrichment_tests;
 #[cfg(test)]
 mod search_tests;
@@ -67,6 +70,7 @@ impl DjinnMcpServer {
             + Self::memory_confirm_router()
             + Self::memory_writes_router()
             + Self::memory_search_router()
+            + Self::memory_recall_trace_router()
             + Self::memory_associations_router()
             + Self::memory_repair_embeddings_router()
             + Self::memory_run_enrichment_router()
