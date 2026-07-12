@@ -58,11 +58,7 @@ impl ClosedParentOpenChildrenCheck {
             Finding::new(
                 FindingSeverity::Warn,
                 CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME,
-                ResolverSnapshot::new(
-                    "resolve_closed_parent_open_children",
-                    inputs,
-                    outputs,
-                ),
+                ResolverSnapshot::new("resolve_closed_parent_open_children", inputs, outputs),
                 detail,
             )
             .with_entity_id("task_id", task_id)
@@ -172,7 +168,9 @@ impl ClosedParentOpenChildrenSource for TaskRepositoryClosedParentOpenChildrenSo
         match self.cache.try_read() {
             Ok(guard) => guard.clone(),
             Err(_) => {
-                warn!("closed_parent_open_children doctor: cache locked during snapshot read; returning empty");
+                warn!(
+                    "closed_parent_open_children doctor: cache locked during snapshot read; returning empty"
+                );
                 json!({})
             }
         }
@@ -199,7 +197,10 @@ mod tests {
         ));
         let finding = check.run().unwrap().pop().unwrap();
         assert_eq!(finding.check_name, CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME);
-        assert_eq!(finding.evidence["board_health_finding"]["terminal_epic_ids"][0], "epic-1");
+        assert_eq!(
+            finding.evidence["board_health_finding"]["terminal_epic_ids"][0],
+            "epic-1"
+        );
         assert_eq!(finding.evidence["selected_disposition"]["action"], "close");
         assert_eq!(finding.resolver_snapshot.outputs["would_mutate"], true);
     }
@@ -216,7 +217,10 @@ mod tests {
             ));
             let finding = check.run().unwrap().pop().unwrap();
             assert_eq!(finding.evidence["selected_disposition"]["guard"], guard);
-            assert_eq!(finding.resolver_snapshot.outputs["would_mutate"], action != "retain");
+            assert_eq!(
+                finding.resolver_snapshot.outputs["would_mutate"],
+                action != "retain"
+            );
         }
     }
 }

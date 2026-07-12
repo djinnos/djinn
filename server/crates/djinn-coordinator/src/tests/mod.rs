@@ -488,6 +488,7 @@ fn coordinator_actor_for_tests(
         active_refinements: HashMap::new(),
         refinement_sessions: HashMap::new(),
         stranded_ready_source: None,
+        closed_parent_open_children_source: None,
         dispatched: 0,
         recovered: 0,
     }

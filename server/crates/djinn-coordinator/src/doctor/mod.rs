@@ -15,9 +15,9 @@
 
 #![allow(dead_code)]
 
+pub mod closed_parent_open_children;
 pub mod leader_tick;
 pub mod live_mover;
-pub mod closed_parent_open_children;
 pub mod stranded_ready;
 pub mod zombie_running_session;
 
@@ -25,12 +25,12 @@ use std::sync::Arc;
 
 use djinn_core::doctor::{DoctorCheck, DoctorRegistry};
 
-pub use live_mover::{ActiveTask, LiveMoverPredicateCheck, LiveMoverSource};
 pub use closed_parent_open_children::{
     CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, ClosedParentOpenChildrenCheck,
     ClosedParentOpenChildrenSource, MemoryClosedParentOpenChildrenSource,
     TaskRepositoryClosedParentOpenChildrenSource,
 };
+pub use live_mover::{ActiveTask, LiveMoverPredicateCheck, LiveMoverSource};
 pub use stranded_ready::{
     MemoryStrandedReadySource, STRANDED_READY_CHECK_NAME, StrandedReadyCandidate,
     StrandedReadyCheck, StrandedReadySource, TaskRepositoryStrandedReadySource,

@@ -799,3 +799,79 @@ async fn doctor_run_persists_jk7v_aligned_classifier_evidence() {
     assert_eq!(snapshot["outputs"]["verdict"], "dead");
     assert_eq!(snapshot["outputs"]["outcome"], "dead_reclaimed");
 }
+
+// ---------------------------------------------------------------------------
+// closed_parent_open_children: persisted dry-run contract
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn closed_parent_open_children_dry_run_persists_all_matrix_rows_without_fixing() {
+    use djinn_agent::doctor::{
+        CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, MemoryClosedParentOpenChildrenSource,
+        register_closed_parent_open_children_check,
+    };
+
+    let harness = doctor_test_harness().await;
+    let source = Arc::new(MemoryClosedParentOpenChildrenSource::new(json!({
+        "total": 4,
+        "findings": [
+            {"id":"orphan-close","short_id":"close","title":"Close","status":"open",
+             "terminal_epic_ids":["epic-1"],"recommended_disposition":{"action":"close","status":"closed","guard":"parent_closed"}},
+            {"id":"orphan-in-flight","short_id":"flight","title":"In flight","status":"in_progress",
+             "terminal_epic_ids":["epic-1"],"recommended_disposition":{"action":"park","status":"needs_lead_intervention","guard":"historical_parent_closed_in_flight"}},
+            {"id":"orphan-pr","short_id":"pr","title":"PR active","status":"pr_review",
+             "terminal_epic_ids":["epic-1"],"recommended_disposition":{"action":"park","status":"needs_lead_intervention","guard":"historical_parent_closed_pr_active"}},
+            {"id":"orphan-skip","short_id":"skip","title":"Guarded","status":"open",
+             "terminal_epic_ids":["epic-1"],"other_open_parent_ids":["epic-open"],"recommended_disposition":{"action":"retain","status":"none","guard":"other_open_parent"}}
+        ]
+    })));
+    register_closed_parent_open_children_check(registry(), source);
+
+    let response = harness
+        .call_tool(
+            "doctor_run",
+            json!({"check_names": [CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME]}),
+        )
+        .await
+        .expect("doctor run dispatches");
+    assert_eq!(response["ok"], true);
+    let findings = response["results"][0]["findings"]
+        .as_array()
+        .expect("four findings");
+    assert_eq!(findings.len(), 4);
+
+    let repo = DoctorFindingRepository::new(harness.db().clone());
+    let mut guards = Vec::new();
+    for entry in findings {
+        let finding = repo
+            .get(entry["finding_id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(finding.check_name, CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME);
+        assert!(
+            finding.resolver_snapshot.is_some(),
+            "dry-run resolver evidence persists"
+        );
+        guards.push(
+            finding.evidence["selected_disposition"]["guard"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+        assert_eq!(
+            finding.evidence["board_health_finding"]["id"], finding.entity_ids["task_id"],
+            "persisted evidence remains owned by its finding task"
+        );
+    }
+    guards.sort();
+    assert_eq!(
+        guards,
+        vec![
+            "historical_parent_closed_in_flight",
+            "historical_parent_closed_pr_active",
+            "other_open_parent",
+            "parent_closed",
+        ]
+    );
+}
