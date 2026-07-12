@@ -1169,7 +1169,10 @@ fn freshness_initial_state_is_never_and_embedded() {
     assert!(catalog.last_refresh_error().is_none());
     assert!(catalog.last_successful_fetch_time().is_none());
     assert!(catalog.last_successful_fetch_age().is_none());
-    assert_eq!(catalog.source_tier(Duration::from_secs(60)), SourceTier::Embedded);
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Embedded
+    );
 }
 
 #[test]
@@ -1186,14 +1189,23 @@ fn freshness_after_success_exposes_wall_time_and_monotonic_freshness() {
 
     assert_eq!(catalog.last_refresh_status(), RefreshStatus::Success);
     assert!(catalog.last_refresh_error().is_none());
-    assert_eq!(catalog.last_successful_fetch_time(), Some(expected_wall_success));
+    assert_eq!(
+        catalog.last_successful_fetch_time(),
+        Some(expected_wall_success)
+    );
 
     let age = catalog
         .last_successful_fetch_age()
         .expect("age must be Some after a successful fetch");
     assert!(age >= Duration::from_secs(30), "got {age:?}");
-    assert_eq!(catalog.source_tier(Duration::from_secs(60)), SourceTier::Live);
-    assert_eq!(catalog.source_tier(Duration::from_secs(20)), SourceTier::Stale);
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Live
+    );
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(20)),
+        SourceTier::Stale
+    );
 }
 
 #[test]
@@ -1211,7 +1223,10 @@ fn freshness_success_then_failure_preserves_catalog_and_records_error() {
         RefreshStatus::Success,
         None,
     );
-    assert_eq!(catalog.source_tier(Duration::from_secs(60)), SourceTier::Stale);
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Stale
+    );
 
     {
         let mut data = catalog.inner.write();
@@ -1225,12 +1240,18 @@ fn freshness_success_then_failure_preserves_catalog_and_records_error() {
         Some("models.dev returned HTTP 503")
     );
     assert!(catalog.list_providers().iter().any(|p| p.id == "openai"));
-    assert_eq!(catalog.last_successful_fetch_time(), Some(expected_wall_success));
+    assert_eq!(
+        catalog.last_successful_fetch_time(),
+        Some(expected_wall_success)
+    );
     let age = catalog
         .last_successful_fetch_age()
         .expect("the monotonic success timestamp must persist after a failure");
     assert!(age >= Duration::from_secs(90), "got {age:?}");
-    assert_eq!(catalog.source_tier(Duration::from_secs(60)), SourceTier::Stale);
+    assert_eq!(
+        catalog.source_tier(Duration::from_secs(60)),
+        SourceTier::Stale
+    );
 }
 
 /// `source_tier` reports `Stale` when a fetch previously succeeded but the
