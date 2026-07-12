@@ -231,14 +231,15 @@ pub trait WarmJobLister: Send + Sync {
     /// one whose `.status.succeeded` and `.status.failed` are both
     /// `None`/zero — i.e. it is still running, has not been observed
     /// completing, and could plausibly hold the shared
-    /// `/cache/cargo-target/<project>` base. Implementations MUST be
-    /// tolerant of apiserver errors: a transient error returns
-    /// `false` (fail-open) so a flapping apiserver doesn't lock out
-    /// warming entirely — the in-process single-flight map is the
-    /// per-process backstop, the freshness gate is the commit-aligned
-    /// backstop, and the worst-case outcome of a fail-open here is
-    /// the pre-fix duplicate-warm behaviour, not a stuck cluster.
-    async fn has_in_flight_warm(&self, namespace: &str, project_id: &str) -> bool;
+    /// `/cache/cargo-target/<project>` base. Implementations SHOULD
+    /// surface apiserver errors so callers can choose their own
+    /// fail-open / fail-closed policy; the warmer path treats errors
+    /// as absent, while the GC path treats them as a retention signal.
+    async fn has_in_flight_warm(
+        &self,
+        namespace: &str,
+        project_id: &str,
+    ) -> Result<bool, kube::Error>;
 }
 
 /// Production lister backed by a live `kube::Client`. Filters on the
@@ -260,7 +261,11 @@ impl KubeClientWarmJobLister {
 
 #[async_trait]
 impl WarmJobLister for KubeClientWarmJobLister {
-    async fn has_in_flight_warm(&self, namespace: &str, project_id: &str) -> bool {
+    async fn has_in_flight_warm(
+        &self,
+        namespace: &str,
+        project_id: &str,
+    ) -> Result<bool, kube::Error> {
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), namespace);
         // `sanitize_id` (warm_job.rs) lowercases the project id and
         // replaces disallowed chars with `-`, mirroring the label value
@@ -270,19 +275,8 @@ impl WarmJobLister for KubeClientWarmJobLister {
         // re-introduced double-warms.
         let sanitized = crate::warm_job::sanitize_id(project_id);
         let selector = format!("{LABEL_WARM}=true,{LABEL_PROJECT_ID}={sanitized}");
-        let list = match jobs.list(&ListParams::default().labels(&selector)).await {
-            Ok(l) => l,
-            Err(e) => {
-                warn!(
-                    namespace = %namespace,
-                    project_id,
-                    error = %e,
-                    "K8sGraphWarmer: cluster warm-Job lister failed; failing open"
-                );
-                return false;
-            }
-        };
-        list.items.iter().any(|job| {
+        let list = jobs.list(&ListParams::default().labels(&selector)).await?;
+        Ok(list.items.iter().any(|job| {
             let Some(status) = job.status.as_ref() else {
                 // No status yet (just created) → still in flight.
                 return true;
@@ -294,19 +288,23 @@ impl WarmJobLister for KubeClientWarmJobLister {
             // succeeded/failed set yet) — we want to coalesce against
             // anything that hasn't reported a terminal state.
             !succeeded && !failed
-        })
+        }))
     }
 }
 
 /// No-op lister used by unit tests that don't exercise the
-/// cluster-side de-dupe. Always returns `false`; the in-process
+/// cluster-side de-dupe. Always returns `Ok(false)`; the in-process
 /// `in_flight` map is the only de-dupe exercised in those tests.
 pub struct NoopWarmJobLister;
 
 #[async_trait]
 impl WarmJobLister for NoopWarmJobLister {
-    async fn has_in_flight_warm(&self, _namespace: &str, _project_id: &str) -> bool {
-        false
+    async fn has_in_flight_warm(
+        &self,
+        _namespace: &str,
+        _project_id: &str,
+    ) -> Result<bool, kube::Error> {
+        Ok(false)
     }
 }
 
@@ -475,6 +473,18 @@ impl K8sGraphWarmer {
         matches!(repo.get(project_id, &tip).await, Ok(Some(_)))
     }
 
+    /// Kubernetes namespace used by this warmer.
+    pub fn namespace(&self) -> &str {
+        &self.config.namespace
+    }
+
+    /// Expose the Kubernetes warm-job lister so the coordinator can build a
+    /// production [`WarmJobGuard`] that shares the same non-terminal Job
+    /// semantics.
+    pub fn warm_job_lister(&self) -> Option<Arc<dyn WarmJobLister>> {
+        self.lister.clone()
+    }
+
     /// Cross-process dedupe query: `true` if the cluster (any process)
     /// currently holds at least one non-terminal warm Job for
     /// `project_id`. Centralised so the two `trigger` call sites
@@ -486,11 +496,21 @@ impl K8sGraphWarmer {
     /// inject a lister explicitly.
     async fn cluster_has_in_flight_warm(&self, project_id: &str) -> bool {
         match self.lister.as_ref() {
-            Some(lister) => {
-                lister
-                    .has_in_flight_warm(&self.config.namespace, project_id)
-                    .await
-            }
+            Some(lister) => match lister
+                .has_in_flight_warm(&self.config.namespace, project_id)
+                .await
+            {
+                Ok(in_flight) => in_flight,
+                Err(error) => {
+                    warn!(
+                        project_id,
+                        namespace = %self.config.namespace,
+                        error = %error,
+                        "K8sGraphWarmer: cluster warm-Job lister failed; failing open"
+                    );
+                    false
+                }
+            },
             None => false,
         }
     }
@@ -514,6 +534,10 @@ async fn discover_mirror_main_tip(project_id: &str) -> Option<String> {
 
 #[async_trait]
 impl GraphWarmerService for K8sGraphWarmer {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), WarmerError> {
         let client = self.client.as_ref().ok_or_else(|| {
             WarmerError::Backend("task-run Job teardown requires a live kube client".to_string())

@@ -5,6 +5,7 @@
 //! evaluation separate makes every unsafe/unknown condition retain the base.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -14,7 +15,6 @@ pub const CARGO_WARM_BASE_ROOT: &str = "/cache/cargo-target";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseClassification {
     Registered,
-    Deleted,
     Orphaned,
 }
 
@@ -104,7 +104,6 @@ fn directory_size(root: &Path) -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivitySnapshot {
     pub known_project: bool,
-    pub deleted_project: bool,
     pub has_active_task_run: bool,
     pub latest_activity: Option<String>,
 }
@@ -222,8 +221,6 @@ pub async fn plan(
         }
         let classification = if snapshot.known_project {
             BaseClassification::Registered
-        } else if snapshot.deleted_project {
-            BaseClassification::Deleted
         } else {
             BaseClassification::Orphaned
         };
@@ -256,13 +253,11 @@ impl ActivityGuard for DbActivityGuard {
         Ok(match record {
             Some(record) => ActivitySnapshot {
                 known_project: true,
-                deleted_project: false,
                 has_active_task_run: record.has_active_task_run,
                 latest_activity: record.latest_activity,
             },
             None => ActivitySnapshot {
                 known_project: false,
-                deleted_project: false,
                 has_active_task_run: false,
                 latest_activity: None,
             },
@@ -280,6 +275,32 @@ impl WarmJobGuard for UnavailableWarmJobGuard {
         Err("Kubernetes warm-job guard unavailable".into())
     }
 }
+
+/// Production guard that delegates to the same [`WarmJobLister`] used by
+/// [`K8sGraphWarmer`], ensuring the GC sees the same non-terminal warm Job
+/// semantics as the warmer. Kubernetes errors are propagated so the GC
+/// fails closed and retains the base.
+pub struct WarmJobListerGuard {
+    lister: Arc<dyn djinn_k8s::graph_warmer::WarmJobLister>,
+    namespace: String,
+}
+
+impl WarmJobListerGuard {
+    pub fn new(lister: Arc<dyn djinn_k8s::graph_warmer::WarmJobLister>, namespace: String) -> Self {
+        Self { lister, namespace }
+    }
+}
+
+#[async_trait]
+impl WarmJobGuard for WarmJobListerGuard {
+    async fn has_in_flight_warm(&self, project_id: &str) -> Result<bool, String> {
+        self.lister
+            .has_in_flight_warm(&self.namespace, project_id)
+            .await
+            .map_err(|error| format!("warm-job lister failed: {error}"))
+    }
+}
+
 pub struct StatvfsFreeSpaceGuard;
 impl FreeSpaceGuard for StatvfsFreeSpaceGuard {
     fn free_space_bytes(&self, path: &Path) -> Result<u64, String> {
@@ -304,6 +325,8 @@ impl BaseLockGuard for NoopLockGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Mutex;
+
     struct Activity(Result<ActivitySnapshot, String>);
     #[async_trait]
     impl ActivityGuard for Activity {
@@ -340,10 +363,52 @@ mod tests {
     fn snapshot() -> ActivitySnapshot {
         ActivitySnapshot {
             known_project: true,
-            deleted_project: false,
             has_active_task_run: false,
             latest_activity: None,
         }
+    }
+    #[tokio::test]
+    async fn classifications_registered_and_orphaned() {
+        let lock = Lock(LockOutcome::Available);
+        let space = Space(Ok(9));
+        let warm = Warm(Ok(false));
+        let registered = plan(
+            WarmBaseInventory {
+                entries: vec![entry()],
+                ignored: 0,
+            },
+            &Activity(Ok(ActivitySnapshot {
+                known_project: true,
+                ..snapshot()
+            })),
+            &warm,
+            &space,
+            &lock,
+        )
+        .await;
+        assert_eq!(
+            registered.candidates[0].classification,
+            BaseClassification::Registered
+        );
+
+        let orphaned = plan(
+            WarmBaseInventory {
+                entries: vec![entry()],
+                ignored: 0,
+            },
+            &Activity(Ok(ActivitySnapshot {
+                known_project: false,
+                ..snapshot()
+            })),
+            &warm,
+            &space,
+            &lock,
+        )
+        .await;
+        assert_eq!(
+            orphaned.candidates[0].classification,
+            BaseClassification::Orphaned
+        );
     }
     #[tokio::test]
     async fn guards_fail_closed_and_classify() {
@@ -408,6 +473,55 @@ mod tests {
             assert_eq!(planned.retained[0].1, reason);
         }
     }
+    #[tokio::test]
+    async fn warm_job_lister_guard_delegates_and_fails_closed_on_error() {
+        use async_trait::async_trait;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct SpyLister {
+            project_calls: Arc<Mutex<AtomicUsize>>,
+            in_flight: Arc<Mutex<bool>>,
+            error: Arc<Mutex<bool>>,
+        }
+        #[async_trait]
+        impl djinn_k8s::graph_warmer::WarmJobLister for SpyLister {
+            async fn has_in_flight_warm(
+                &self,
+                namespace: &str,
+                project_id: &str,
+            ) -> Result<bool, kube::Error> {
+                assert_eq!(namespace, "warm-jobs");
+                assert_eq!(project_id, entry().project_id);
+                self.project_calls
+                    .lock()
+                    .await
+                    .fetch_add(1, Ordering::SeqCst);
+                if *self.error.lock().await {
+                    return Err(kube::Error::Api(kube::core::ErrorResponse {
+                        status: "Failure".into(),
+                        message: "apiserver unreachable".into(),
+                        reason: "InternalError".into(),
+                        code: 500,
+                    }));
+                }
+                Ok(*self.in_flight.lock().await)
+            }
+        }
+
+        let lister = Arc::new(SpyLister::default());
+        let guard = WarmJobListerGuard::new(lister.clone(), "warm-jobs".into());
+        assert!(!guard.has_in_flight_warm(&entry().project_id).await.unwrap());
+        assert_eq!(lister.project_calls.lock().await.load(Ordering::SeqCst), 1);
+
+        *lister.in_flight.lock().await = true;
+        assert!(guard.has_in_flight_warm(&entry().project_id).await.unwrap());
+
+        *lister.error.lock().await = true;
+        assert!(guard.has_in_flight_warm(&entry().project_id).await.is_err());
+    }
+
     #[tokio::test]
     async fn activity_and_measurement_errors_retain() {
         let lock = Lock(LockOutcome::Available);

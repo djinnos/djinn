@@ -83,7 +83,12 @@ pub(super) async fn sweep_stale_resources(
     sweep_durable_output_stash(db).await;
     sweep_cargo_health().await;
     sweep_sccache_guard(&app_state.cache_cleanup).await;
-    sweep_cargo_warm_base_guard(db, &app_state.cache_cleanup).await;
+    sweep_cargo_warm_base_guard(
+        db,
+        &app_state.cache_cleanup,
+        app_state.warm_job_guard.clone(),
+    )
+    .await;
 
     let project_repo = ProjectRepository::new(db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(db.clone(), app_state.event_bus.clone());
@@ -3034,9 +3039,12 @@ mod cache_cleanup_cross_path_tests {
 async fn sweep_cargo_warm_base_guard(
     db: &djinn_db::Database,
     config: &crate::context::CacheCleanupConfig,
+    warm_job_guard: Option<Arc<dyn crate::cargo_warm_base_gc::WarmJobGuard>>,
 ) {
     use crate::cargo_warm_base_gc as gc;
     use djinn_telemetry::cache_cleanup as metrics;
+    let guard: Arc<dyn gc::WarmJobGuard> =
+        warm_job_guard.unwrap_or_else(|| Arc::new(gc::UnavailableWarmJobGuard));
     let inventory = match gc::inventory_under(Path::new(gc::CARGO_WARM_BASE_ROOT)) {
         Ok(inventory) => inventory,
         Err(error) => {
@@ -3053,7 +3061,7 @@ async fn sweep_cargo_warm_base_guard(
     let plan = gc::plan(
         inventory,
         &gc::DbActivityGuard::new(db.clone()),
-        &gc::UnavailableWarmJobGuard,
+        guard.as_ref(),
         &gc::StatvfsFreeSpaceGuard,
         &gc::NoopLockGuard,
     )
