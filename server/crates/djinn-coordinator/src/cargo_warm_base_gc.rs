@@ -466,6 +466,31 @@ pub struct PressureEvictionResult {
     pub remeasurement_failed: bool,
 }
 
+/// Emit the pressure sweep completion event without exposing per-project
+/// identifiers. Retention reasons are enums, preserving bounded diagnostics
+/// while callers retain the detailed result for control flow.
+pub(crate) fn log_pressure_eviction_completion(
+    pressure: &PressureEvictionResult,
+    mode: crate::context::CacheCleanupMode,
+) {
+    use djinn_telemetry::cache_cleanup as metrics;
+
+    let retained_outcomes: Vec<_> = pressure.retained.iter().map(|(_, reason)| reason).collect();
+    tracing::info!(
+        component = metrics::COMPONENT_CARGO_WARM_BASE,
+        mode = mode.as_metric_label(),
+        deleted = pressure.deleted.len(),
+        dry_run = pressure.dry_run.len(),
+        retained = pressure.retained.len(),
+        retained_outcomes = ?retained_outcomes,
+        reclaimed_bytes = pressure.reclaimed_bytes,
+        projected_bytes = pressure.projected_bytes,
+        reached_high_watermark = pressure.reached_high_watermark,
+        remeasurement_failed = pressure.remeasurement_failed,
+        "warm-base pressure GC completed"
+    );
+}
+
 /// Evaluate all destructive-operation guards.  Any guard error becomes a
 /// retention result; callers must never turn it into eligibility.
 pub async fn plan(

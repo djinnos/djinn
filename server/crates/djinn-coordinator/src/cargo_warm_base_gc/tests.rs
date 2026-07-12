@@ -1,5 +1,47 @@
 use super::*;
 use djinn_core::clock::TestClock;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{Layer, registry::LookupSpan};
+
+#[derive(Clone, Default)]
+struct EventRecordingLayer {
+    events: Arc<Mutex<Vec<HashMap<String, String>>>>,
+}
+
+impl EventRecordingLayer {
+    fn events(&self) -> Vec<HashMap<String, String>> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[derive(Default)]
+struct EventFieldRecorder {
+    fields: HashMap<String, String>,
+}
+
+impl Visit for EventFieldRecorder {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields.insert(
+            field.name().to_owned(),
+            format!("{value:?}").trim_matches('"').to_owned(),
+        );
+    }
+}
+
+impl<S> Layer<S> for EventRecordingLayer
+where
+    S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        let mut recorder = EventFieldRecorder::default();
+        event.record(&mut recorder);
+        self.events.lock().unwrap().push(recorder.fields);
+    }
+}
 
 struct Activity(Result<ActivitySnapshot, String>);
 #[async_trait]
@@ -1663,4 +1705,83 @@ async fn pressure_executor_preserves_planning_outcomes_and_stops_on_remeasuremen
     assert_eq!(result.reclaimed_bytes, 7);
     assert_eq!(result.projected_bytes, 99);
     assert!(result.remeasurement_failed);
+}
+
+#[tokio::test]
+async fn pressure_failure_telemetry_and_completion_log_are_bounded() {
+    use djinn_telemetry::cache_cleanup as metrics;
+
+    const PROJECT_ID: &str = "018f8b9a-0d70-7f0a-8000-000000000099";
+    djinn_telemetry::init().unwrap();
+    let layer = EventRecordingLayer::default();
+    let subscriber = tracing_subscriber::registry().with(layer.clone());
+    let subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+    let result = execute_pressure_eviction(
+        PressureEvictionPlan {
+            candidates: Vec::new(),
+            retained: vec![(PROJECT_ID.to_owned(), PressureSkipReason::MeasurementError)],
+            projected_bytes: 0,
+            target_bytes: 0,
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &Capacity(Err("capacity must not be called".into())),
+        &executable_pressure_config(),
+        &epoch_clock(),
+        crate::context::CacheCleanupMode::Delete,
+        Path::new("/unused"),
+    )
+    .await;
+    log_pressure_eviction_completion(&result, crate::context::CacheCleanupMode::Delete);
+    drop(subscriber_guard);
+
+    let rendered_metrics = djinn_telemetry::render().unwrap();
+    let metric_line = rendered_metrics
+        .lines()
+        .find(|line| {
+            line.starts_with("djinn_cache_cleanup_total{")
+                && line.contains(&format!(
+                    "component=\"{}\"",
+                    metrics::COMPONENT_CARGO_WARM_BASE
+                ))
+                && line.contains(&format!("mode=\"{}\"", metrics::MODE_DELETE))
+                && line.contains(&format!("outcome=\"{}\"", metrics::OUTCOME_ERROR))
+        })
+        .expect("pressure error metric");
+    let (_, labels) = metric_line.split_once('{').unwrap();
+    let (labels, _) = labels.split_once('}').unwrap();
+    let mut labels: Vec<_> = labels.split(',').collect();
+    labels.sort_unstable();
+    assert_eq!(
+        labels,
+        vec![
+            "component=\"cargo_warm_base\"",
+            "mode=\"delete\"",
+            "outcome=\"error\"",
+        ]
+    );
+    assert!(!metric_line.contains(PROJECT_ID));
+
+    let event = layer
+        .events()
+        .into_iter()
+        .find(|fields| {
+            fields.get("message").map(String::as_str) == Some("warm-base pressure GC completed")
+        })
+        .expect("pressure completion event");
+    assert_eq!(
+        event.get("component").map(String::as_str),
+        Some(metrics::COMPONENT_CARGO_WARM_BASE)
+    );
+    assert_eq!(
+        event.get("mode").map(String::as_str),
+        Some(metrics::MODE_DELETE)
+    );
+    assert_eq!(
+        event.get("retained_outcomes").map(String::as_str),
+        Some("[MeasurementError]")
+    );
+    assert!(event.values().all(|value| !value.contains(PROJECT_ID)));
 }

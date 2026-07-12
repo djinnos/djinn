@@ -3160,18 +3160,5 @@ async fn sweep_cargo_warm_base_guard(
         Path::new(gc::CARGO_WARM_BASE_ROOT),
     )
     .await;
-    let retained_outcomes: Vec<_> = pressure.retained.iter().map(|(_, reason)| reason).collect();
-    tracing::info!(
-        component = metrics::COMPONENT_CARGO_WARM_BASE,
-        mode = config.mode.as_metric_label(),
-        deleted = pressure.deleted.len(),
-        dry_run = pressure.dry_run.len(),
-        retained = pressure.retained.len(),
-        retained_outcomes = ?retained_outcomes,
-        reclaimed_bytes = pressure.reclaimed_bytes,
-        projected_bytes = pressure.projected_bytes,
-        reached_high_watermark = pressure.reached_high_watermark,
-        remeasurement_failed = pressure.remeasurement_failed,
-        "warm-base pressure GC completed"
-    );
+    gc::log_pressure_eviction_completion(&pressure, config.mode);
 }
