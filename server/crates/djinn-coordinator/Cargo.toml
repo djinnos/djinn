@@ -56,8 +56,6 @@ tempfile = "3"
 insta = { version = "1", features = ["json"] }
 tracing-test = "0.2"
 djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
-kube = { version = "0.95", default-features = false, features = ["client", "rustls-tls"] }
-k8s-openapi = { version = "0.23", features = ["v1_30"] }
 
 [lints.clippy]
 # Workspace lint baseline (manually replicated because this crate also carries

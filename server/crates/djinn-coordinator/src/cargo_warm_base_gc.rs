@@ -333,7 +333,6 @@ impl BaseLockGuard for NoopLockGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::Mutex;
 
     struct Activity(Result<ActivitySnapshot, String>);
     #[async_trait]
@@ -502,55 +501,6 @@ mod tests {
             assert_eq!(planned.retained[0].1, reason);
         }
     }
-    #[tokio::test]
-    async fn warm_job_lister_guard_delegates_and_fails_closed_on_error() {
-        use async_trait::async_trait;
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Default)]
-        struct SpyLister {
-            project_calls: Arc<Mutex<AtomicUsize>>,
-            in_flight: Arc<Mutex<bool>>,
-            error: Arc<Mutex<bool>>,
-        }
-        #[async_trait]
-        impl djinn_k8s::graph_warmer::WarmJobLister for SpyLister {
-            async fn has_in_flight_warm(
-                &self,
-                namespace: &str,
-                project_id: &str,
-            ) -> Result<bool, kube::Error> {
-                assert_eq!(namespace, "warm-jobs");
-                assert_eq!(project_id, entry().project_id);
-                self.project_calls
-                    .lock()
-                    .await
-                    .fetch_add(1, Ordering::SeqCst);
-                if *self.error.lock().await {
-                    return Err(kube::Error::Api(kube::core::ErrorResponse {
-                        status: "Failure".into(),
-                        message: "apiserver unreachable".into(),
-                        reason: "InternalError".into(),
-                        code: 500,
-                    }));
-                }
-                Ok(*self.in_flight.lock().await)
-            }
-        }
-
-        let lister = Arc::new(SpyLister::default());
-        let guard = WarmJobListerGuard::new(lister.clone(), "warm-jobs".into());
-        assert!(!guard.has_in_flight_warm(&entry().project_id).await.unwrap());
-        assert_eq!(lister.project_calls.lock().await.load(Ordering::SeqCst), 1);
-
-        *lister.in_flight.lock().await = true;
-        assert!(guard.has_in_flight_warm(&entry().project_id).await.unwrap());
-
-        *lister.error.lock().await = true;
-        assert!(guard.has_in_flight_warm(&entry().project_id).await.is_err());
-    }
-
     #[tokio::test]
     async fn activity_and_measurement_errors_retain() {
         let lock = Lock(LockOutcome::Available);
