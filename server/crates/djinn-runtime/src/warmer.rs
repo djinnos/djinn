@@ -48,6 +48,12 @@ pub struct TaskrunJobRef {
 ///   architect proceeds without a warm skeleton.
 #[async_trait]
 pub trait GraphWarmerService: Send + Sync {
+    /// Allow downcasting to a concrete implementation. Used by the
+    /// coordinator composition root to extract a warm-job guard from
+    /// the Kubernetes runtime without leaking Kubernetes types through
+    /// the trait boundary.
+    fn as_any(&self) -> &dyn std::any::Any;
+
     /// Fire-and-forget: start a warm if one isn't already in flight for this
     /// project.  Cold-cache / warm-cache / inflight-coalesce policy lives in
     /// the concrete implementation.

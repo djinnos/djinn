@@ -11,6 +11,7 @@ use super::consolidation::{ConsolidationRunner, DbConsolidationRunner};
 use super::health;
 use super::messages::CoordinatorMessage;
 use super::types::*;
+use crate::cargo_warm_base_gc::{WarmJobGuard, WarmJobListerGuard};
 use crate::roles::RoleRegistry;
 use djinn_control_plane::bridge::RuntimeOps;
 use djinn_core::clock::{Clock, SystemClock};
@@ -953,6 +954,21 @@ impl CoordinatorActor {
     }
 
     pub(super) fn maintenance_context(&self) -> crate::context::CoordinatorContext {
+        // If the coordinator is backed by the Kubernetes graph warmer, extract
+        // its warm-job lister so the stale-resource sweep uses the same
+        // non-terminal Job semantics as the warmer itself. Any other graph
+        // warmer implementation leaves the guard empty, falling back to the
+        // unavailable default.
+        let warm_job_guard = self.graph_warmer.as_ref().and_then(|gw| {
+            gw.as_any()
+                .downcast_ref::<djinn_k8s::graph_warmer::K8sGraphWarmer>()
+                .and_then(|k8s| {
+                    k8s.warm_job_lister().map(|lister| {
+                        Arc::new(WarmJobListerGuard::new(lister, k8s.namespace().to_string()))
+                            as Arc<dyn WarmJobGuard>
+                    })
+                })
+        });
         crate::context::CoordinatorContext {
             db: self.db.clone(),
             event_bus: crate::events::event_bus_for(&self.events_tx),
@@ -967,6 +983,7 @@ impl CoordinatorActor {
             task_ops_project_path_override: None,
             working_root: None,
             graph_warmer: None,
+            warm_job_guard,
             repo_graph_ops: None,
             runtime_ops: self.runtime_ops.clone(),
             // Explicit host-side runs root so the periodic sweep targets the

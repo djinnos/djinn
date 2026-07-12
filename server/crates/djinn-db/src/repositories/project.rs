@@ -584,9 +584,24 @@ impl ProjectRepository {
 
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
+        let mut transaction = self.db.pool().begin().await?;
+        // Preserve a minimal durable source before the cascading delete removes
+        // every project-owned row. The warm-base GC uses it to distinguish a
+        // deleted project from a UUID directory that was never registered.
+        // Selecting from `projects` prevents a no-op delete from creating a
+        // tombstone for an arbitrary id.
+        sqlx::query(
+            "INSERT INTO deleted_projects (project_id) \
+             SELECT id FROM projects WHERE id = $1 \
+             ON CONFLICT (project_id) DO NOTHING",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
         sqlx::query!("DELETE FROM projects WHERE id = $1", id)
-            .execute(self.db.pool())
+            .execute(&mut *transaction)
             .await?;
+        transaction.commit().await?;
 
         self.events.send(DjinnEventEnvelope::project_deleted(id));
         Ok(())
@@ -1332,6 +1347,13 @@ mod tests {
 
         repo.delete(&project.id).await.unwrap();
         assert!(repo.get(&project.id).await.unwrap().is_none());
+        let tombstone: Option<String> =
+            sqlx::query_scalar("SELECT project_id FROM deleted_projects WHERE project_id = $1")
+                .bind(&project.id)
+                .fetch_optional(repo.db.pool())
+                .await
+                .unwrap();
+        assert_eq!(tombstone.as_deref(), Some(project.id.as_str()));
 
         let events = captured.lock().unwrap();
         assert_eq!(events.len(), 1);
