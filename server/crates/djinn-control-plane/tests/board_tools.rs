@@ -536,3 +536,23 @@ async fn board_health_stranded_ready_matches_seeded_task() {
         "rate_limited must be false for a fresh task"
     );
 }
+
+/// Closed-parent orphan section is surfaced through the MCP board_health tool
+/// with the additive default behavior: present, empty when no drift, and
+/// deserializable into the typed response struct.
+#[tokio::test]
+async fn board_health_closed_parent_open_children_empty_by_default() {
+    let harness = McpTestHarness::new().await;
+    let project = common::create_test_project(harness.db()).await;
+
+    let response = harness
+        .call_tool("board_health", json!({ "project": project.slug() }))
+        .await
+        .expect("board_health should dispatch");
+
+    let section = response
+        .get("closed_parent_open_children")
+        .expect("closed_parent_open_children section must be present");
+    assert_eq!(section.get("total").and_then(|v| v.as_i64()), Some(0));
+    assert!(section.get("findings").and_then(|v| v.as_array()).is_some());
+}

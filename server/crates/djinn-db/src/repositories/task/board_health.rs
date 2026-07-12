@@ -465,3 +465,569 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
         "findings":          findings,
     })
 }
+
+/// Closed-parent orphans: non-closed tasks whose parent scopes are terminal
+/// (epic is closed or all linked proposals are terminal) and that have no
+/// other open proposal parent.
+///
+/// Each finding carries enough evidence for a later repair snapshot: task
+/// identity/status, terminal epic/proposal ids, other open parent ids, external
+/// open-dependent evidence, and the recommended disposition derived from the
+/// shared parent-disposition matrix. The query is read-only and does not mutate
+/// any task or activity row.
+pub(super) async fn closed_parent_open_children_section(pool: &sqlx::PgPool) -> serde_json::Value {
+    // Runtime query: the section is additive and must not add entries to the
+    // offline sqlx cache. We aggregate evidence as JSONB so the row shape is
+    // stable regardless of how many proposals/dependents a task has.
+    //
+    // The external-dependent filter matches the landed parent-disposition
+    // semantics: a terminal proposal owns all of the epics it linked, so any
+    // open dependent in those epics is internal to the closing scope, not an
+    // external blocker. For a closed epic without an associated terminal
+    // proposal, the scope is the child's own epic only. We derive the
+    // per-terminal-proposal linked epic IDs from `task_scope` in the CTE below.
+    let rows = sqlx::query(
+        r#"WITH terminal_proposals AS (
+              SELECT p.id AS proposal_id
+                FROM proposals p
+               WHERE p.status IN ('archived', 'superseded', 'rejected', 'done')
+            ),
+            task_scope AS (
+              SELECT t.id AS task_id,
+                     t.epic_id,
+                     e.status AS epic_status,
+                     COALESCE(
+                       (SELECT jsonb_agg(DISTINCT pe2.epic_id ORDER BY pe2.epic_id)
+                          FROM proposal_epics pe1
+                          JOIN terminal_proposals tp ON tp.proposal_id = pe1.proposal_id
+                          JOIN proposal_epics pe2 ON pe2.proposal_id = pe1.proposal_id
+                         WHERE pe1.epic_id = t.epic_id),
+                       '[]'::jsonb
+                     ) AS proposal_scope_epic_ids,
+                     COALESCE(
+                       (SELECT jsonb_agg(pe.proposal_id ORDER BY pe.proposal_id)
+                          FROM proposal_epics pe
+                          JOIN terminal_proposals tp ON tp.proposal_id = pe.proposal_id
+                         WHERE pe.epic_id = t.epic_id),
+                       '[]'::jsonb
+                     ) AS terminal_proposal_ids
+                FROM tasks t
+                JOIN epics e ON t.epic_id = e.id
+               WHERE t.status <> 'closed'
+            )
+            SELECT
+              t.id AS task_id,
+              t.short_id,
+              t.title,
+              t.status,
+              t.updated_at,
+              t.epic_id,
+              e.short_id AS epic_short_id,
+              e.status AS epic_status,
+              ts.terminal_proposal_ids,
+              COALESCE(
+                (SELECT jsonb_agg(p.id ORDER BY p.id)
+                 FROM proposal_epics pe
+                 JOIN proposals p ON p.id = pe.proposal_id
+                 WHERE pe.epic_id = e.id
+                   AND p.status NOT IN ('archived', 'superseded', 'rejected', 'done')),
+                '[]'::jsonb
+              ) AS open_proposal_ids,
+              COALESCE(
+                (SELECT jsonb_agg(
+                    jsonb_build_object(
+                      'task_id', dep.id,
+                      'short_id', dep.short_id,
+                      'title', dep.title,
+                      'status', dep.status
+                    ) ORDER BY dep.created_at
+                 )
+                 FROM blockers b
+                 JOIN tasks dep ON dep.id = b.task_id
+                 JOIN task_scope ts2 ON ts2.task_id = t.id
+                 WHERE b.blocking_task_id = t.id
+                   AND dep.status <> 'closed'
+                   AND (
+                     dep.epic_id IS NULL
+                     OR ts2.epic_status <> 'closed' AND NOT (ts2.proposal_scope_epic_ids @> jsonb_build_array(dep.epic_id))
+                     OR ts2.epic_status = 'closed' AND NOT (ts2.proposal_scope_epic_ids @> jsonb_build_array(dep.epic_id)) AND dep.epic_id <> t.epic_id
+                   )),
+                '[]'::jsonb
+              ) AS external_open_dependents
+           FROM tasks t
+           JOIN epics e ON t.epic_id = e.id
+           JOIN task_scope ts ON ts.task_id = t.id
+           WHERE t.status <> 'closed'
+           ORDER BY t.created_at"#,
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut findings = Vec::with_capacity(rows.len());
+    for row in rows {
+        let epic_status: String = row.get("epic_status");
+        let epic_id: Option<String> = row.get("epic_id");
+        let terminal_proposal_ids: serde_json::Value = row.get("terminal_proposal_ids");
+        let open_proposal_ids: serde_json::Value = row.get("open_proposal_ids");
+        let external_open_dependents: serde_json::Value = row.get("external_open_dependents");
+
+        let terminal_proposals = terminal_proposal_ids
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        let open_parents = open_proposal_ids
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        let external_blockers = external_open_dependents
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+
+        // A closed-parent orphan must have at least one terminal parent scope
+        // and no open proposal parent. The epic itself is an open parent when
+        // it is not closed; in that case we require terminal proposals to
+        // make the *proposal* parent scope terminal.
+        let has_terminal_parent = epic_status == "closed" || terminal_proposals;
+        if !has_terminal_parent {
+            continue;
+        }
+
+        let status: String = row.get("status");
+        let (recommended_action, recommended_status, recommended_reason) = if open_parents {
+            ("retain", "none", "other_open_parent")
+        } else if external_blockers {
+            ("retain", "none", "external_open_dependent")
+        } else if super::parent_disposition::CLOSE_READY_STATUSES.contains(&status.as_str()) {
+            ("close", "closed", "parent_closed")
+        } else if super::parent_disposition::PARK_STATUSES.contains(&status.as_str()) {
+            let reason = super::parent_disposition::historical_park_reason_for_status(&status);
+            ("park", "needs_lead_intervention", reason)
+        } else {
+            ("retain", "none", "unmapped_status")
+        };
+
+        findings.push(serde_json::json!({
+            "id": row.get::<String, _>("task_id"),
+            "short_id": row.get::<String, _>("short_id"),
+            "title": row.get::<String, _>("title"),
+            "status": status,
+            "updated_at": row.get::<String, _>("updated_at"),
+            "epic_id": epic_id,
+            "epic_short_id": row.get::<Option<String>, _>("epic_short_id"),
+            "epic_status": epic_status,
+            "terminal_epic_ids": if epic_status == "closed" {
+                serde_json::json!([epic_id])
+            } else {
+                serde_json::json!([])
+            },
+            "terminal_proposal_ids": terminal_proposal_ids,
+            "other_open_parent_ids": open_proposal_ids,
+            "external_open_dependents": external_open_dependents,
+            "recommended_action": recommended_action,
+            "recommended_status": recommended_status,
+            "recommended_reason": recommended_reason,
+            "recommended_disposition": {
+                "action": recommended_action,
+                "status": recommended_status,
+                "guard": recommended_reason,
+            },
+        }));
+    }
+
+    serde_json::json!({
+        "total": findings.len(),
+        "findings": findings,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Database;
+
+    async fn project(db: &Database) -> String {
+        db.ensure_initialized().await.unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&id)
+        .bind("cp-test")
+        .bind("test")
+        .bind("cp-test")
+        .execute(db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn epic(db: &Database, project_id: &str, status: &str) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(&id)
+        .bind(project_id)
+        .bind(format!("e{}", &id.replace('-', "")[..31]))
+        .bind("Epic")
+        .bind("")
+        .bind("")
+        .bind("")
+        .bind("")
+        .bind(status)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn task(db: &Database, epic_id: &str, status: &str) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        let project_id: (String,) = sqlx::query_as("SELECT project_id FROM epics WHERE id = $1")
+            .bind(epic_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                    issue_type, status, priority, owner, labels, acceptance_criteria, memory_refs)
+               VALUES ($1, $2, $3, $4, $5, '', '', 'task', $6, 1, '', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)"#,
+        )
+        .bind(&id)
+        .bind(project_id.0)
+        .bind(format!("t{}", &id.replace('-', "")[..31]))
+        .bind(epic_id)
+        .bind("Task")
+        .bind(status)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn proposal(db: &Database, status: &str) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            r#"INSERT INTO proposals (id, short_id, title, body, body_format, acceptance_criteria, status, latest_revision_seq)
+               VALUES ($1, $2, $3, '', 'markdown', '[]'::jsonb, $4, 1)"#,
+        )
+        .bind(&id)
+        .bind(format!("p{}", &id.replace('-', "")[..31]))
+        .bind("Proposal")
+        .bind(status)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn link_epic(db: &Database, proposal_id: &str, epic_id: &str, project_id: &str) {
+        sqlx::query(
+            "INSERT INTO proposal_epics (proposal_id, epic_id, project_id) VALUES ($1, $2, $3)",
+        )
+        .bind(proposal_id)
+        .bind(epic_id)
+        .bind(project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn blocker(db: &Database, blocked_id: &str, blocking_id: &str) {
+        sqlx::query("INSERT INTO blockers (task_id, blocking_task_id) VALUES ($1, $2)")
+            .bind(blocked_id)
+            .bind(blocking_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_parent_section_reports_ready_orphan_for_close() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let epic = epic(&db, &project, "closed").await;
+        let child = task(&db, &epic, "open").await;
+
+        let section = closed_parent_open_children_section(db.pool()).await;
+        let findings = section.get("findings").unwrap().as_array().unwrap();
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(finding.get("id").unwrap().as_str(), Some(child.as_str()));
+        assert_eq!(finding.get("status").unwrap().as_str(), Some("open"));
+        assert_eq!(
+            finding.get("recommended_action").unwrap().as_str(),
+            Some("close")
+        );
+        assert_eq!(
+            finding.get("recommended_status").unwrap().as_str(),
+            Some("closed")
+        );
+        assert_eq!(
+            finding.get("recommended_reason").unwrap().as_str(),
+            Some("parent_closed")
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_parent_section_parks_in_flight_orphan_with_historical_reason() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let epic = epic(&db, &project, "closed").await;
+        let child = task(&db, &epic, "in_progress").await;
+
+        let section = closed_parent_open_children_section(db.pool()).await;
+        let finding = &section.get("findings").unwrap().as_array().unwrap()[0];
+        assert_eq!(finding.get("id").unwrap().as_str(), Some(child.as_str()));
+        assert_eq!(
+            finding.get("recommended_action").unwrap().as_str(),
+            Some("park")
+        );
+        assert_eq!(
+            finding.get("recommended_status").unwrap().as_str(),
+            Some("needs_lead_intervention")
+        );
+        assert_eq!(
+            finding.get("recommended_reason").unwrap().as_str(),
+            Some("historical_parent_closed_in_flight")
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_parent_section_parks_pr_active_orphan_with_pr_reason() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let epic = epic(&db, &project, "closed").await;
+        let _child = task(&db, &epic, "pr_review").await;
+
+        let section = closed_parent_open_children_section(db.pool()).await;
+        let finding = &section.get("findings").unwrap().as_array().unwrap()[0];
+        assert_eq!(
+            finding.get("recommended_action").unwrap().as_str(),
+            Some("park")
+        );
+        assert_eq!(
+            finding.get("recommended_reason").unwrap().as_str(),
+            Some("historical_parent_closed_pr_active")
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_parent_section_excludes_open_epic() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let epic = epic(&db, &project, "open").await;
+        task(&db, &epic, "open").await;
+
+        let section = closed_parent_open_children_section(db.pool()).await;
+        assert_eq!(section.get("total").unwrap().as_i64(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn closed_parent_section_retains_other_open_proposal_parent() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let epic = epic(&db, &project, "closed").await;
+        let open = proposal(&db, "building").await;
+        link_epic(&db, &open, &epic, &project).await;
+        let child = task(&db, &epic, "open").await;
+
+        let section = closed_parent_open_children_section(db.pool()).await;
+        let findings = section.get("findings").unwrap().as_array().unwrap();
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(finding.get("id").unwrap().as_str(), Some(child.as_str()));
+        assert_eq!(
+            finding.get("recommended_action").unwrap().as_str(),
+            Some("retain")
+        );
+        assert_eq!(
+            finding.get("recommended_reason").unwrap().as_str(),
+            Some("other_open_parent")
+        );
+        let other_parents = finding
+            .get("other_open_parent_ids")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(
+            other_parents
+                .iter()
+                .any(|p| p.as_str() == Some(open.as_str()))
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_parent_section_retains_external_open_dependent() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let closed_epic = epic(&db, &project, "closed").await;
+        let open_epic = epic(&db, &project, "open").await;
+        let child = task(&db, &closed_epic, "open").await;
+        let dependent = task(&db, &open_epic, "open").await;
+        blocker(&db, &dependent, &child).await;
+
+        let section = closed_parent_open_children_section(db.pool()).await;
+        let findings = section.get("findings").unwrap().as_array().unwrap();
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(finding.get("id").unwrap().as_str(), Some(child.as_str()));
+        assert_eq!(
+            finding.get("recommended_action").unwrap().as_str(),
+            Some("retain")
+        );
+        assert_eq!(
+            finding.get("recommended_reason").unwrap().as_str(),
+            Some("external_open_dependent")
+        );
+        let dependents = finding
+            .get("external_open_dependents")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(
+            dependents
+                .iter()
+                .any(|d| d.get("task_id").unwrap().as_str() == Some(dependent.as_str()))
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_parent_section_is_read_only() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let epic = epic(&db, &project, "closed").await;
+        let child = task(&db, &epic, "open").await;
+
+        let before: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = $1")
+            .bind(&child)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let before_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM activity_log")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+
+        closed_parent_open_children_section(db.pool()).await;
+        closed_parent_open_children_section(db.pool()).await;
+
+        let after: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = $1")
+            .bind(&child)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let after_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM activity_log")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(before.0, after.0);
+        assert_eq!(before_count.0, after_count.0);
+    }
+
+    #[tokio::test]
+    async fn terminal_proposal_makes_open_epic_orphan_when_no_other_open_proposal() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let epic = epic(&db, &project, "open").await;
+        let terminal = proposal(&db, "done").await;
+        link_epic(&db, &terminal, &epic, &project).await;
+        let child = task(&db, &epic, "open").await;
+
+        let section = closed_parent_open_children_section(db.pool()).await;
+        let findings = section.get("findings").unwrap().as_array().unwrap();
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(finding.get("id").unwrap().as_str(), Some(child.as_str()));
+        let terminal_proposals = finding
+            .get("terminal_proposal_ids")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(
+            terminal_proposals
+                .iter()
+                .any(|p| p.as_str() == Some(terminal.as_str()))
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_proposal_does_not_orphan_when_open_proposal_also_linked() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let epic = epic(&db, &project, "open").await;
+        let terminal = proposal(&db, "done").await;
+        let open = proposal(&db, "building").await;
+        link_epic(&db, &terminal, &epic, &project).await;
+        link_epic(&db, &open, &epic, &project).await;
+        let child = task(&db, &epic, "open").await;
+
+        let section = closed_parent_open_children_section(db.pool()).await;
+        let findings = section.get("findings").unwrap().as_array().unwrap();
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(finding.get("id").unwrap().as_str(), Some(child.as_str()));
+        assert_eq!(finding["recommended_disposition"]["action"], "retain");
+        assert_eq!(
+            finding["recommended_disposition"]["guard"],
+            "other_open_parent"
+        );
+        assert!(
+            finding["other_open_parent_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id.as_str() == Some(open.as_str()))
+        );
+        assert!(
+            finding["terminal_proposal_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id.as_str() == Some(terminal.as_str()))
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_proposal_multi_epic_internal_dependent_recommends_close() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let first_epic = epic(&db, &project, "open").await;
+        let second_epic = epic(&db, &project, "open").await;
+        let terminal = proposal(&db, "rejected").await;
+        link_epic(&db, &terminal, &first_epic, &project).await;
+        link_epic(&db, &terminal, &second_epic, &project).await;
+        let child = task(&db, &first_epic, "open").await;
+        let dependent = task(&db, &second_epic, "open").await;
+        blocker(&db, &dependent, &child).await;
+
+        let section = closed_parent_open_children_section(db.pool()).await;
+        let findings = section.get("findings").unwrap().as_array().unwrap();
+        assert_eq!(findings.len(), 2);
+        let child_finding = findings
+            .iter()
+            .find(|f| f.get("id").unwrap().as_str() == Some(child.as_str()))
+            .unwrap();
+        assert_eq!(
+            child_finding.get("recommended_action").unwrap().as_str(),
+            Some("close")
+        );
+        assert_eq!(
+            child_finding.get("recommended_reason").unwrap().as_str(),
+            Some("parent_closed")
+        );
+        let dependents = child_finding
+            .get("external_open_dependents")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(
+            dependents.is_empty(),
+            "dependent in same terminal-proposal scope is internal, not external"
+        );
+    }
+}

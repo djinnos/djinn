@@ -236,7 +236,8 @@ pub struct DispositionPlan {
 /// These are the snake_case DB wire strings for `TaskStatus::Open`,
 /// `TaskStatus::NeedsLeadIntervention`, and `TaskStatus::InLeadIntervention`
 /// (see `TaskStatus::as_str`). Kept as literals so the array can be `const`.
-const CLOSE_READY_STATUSES: &[&str] = &["open", "needs_lead_intervention", "in_lead_intervention"];
+pub(crate) const CLOSE_READY_STATUSES: &[&str] =
+    &["open", "needs_lead_intervention", "in_lead_intervention"];
 
 /// Park statuses: the child has in-flight work (review/PR) that requires lead
 /// reconciliation before a terminal move.
@@ -244,7 +245,7 @@ const CLOSE_READY_STATUSES: &[&str] = &["open", "needs_lead_intervention", "in_l
 /// These are the snake_case DB wire strings for `in_progress`,
 /// `needs_task_review`, `in_task_review`, `approved`, `pr_draft`, and
 /// `pr_review` (see `TaskStatus::as_str`).
-const PARK_STATUSES: &[&str] = &[
+pub(crate) const PARK_STATUSES: &[&str] = &[
     "in_progress",
     "needs_task_review",
     "in_task_review",
@@ -259,7 +260,8 @@ const PARK_STATUSES: &[&str] = &[
 /// `find_other_open_proposal_parents` SQL `NOT IN (...)` clause; kept as a
 /// named constant so the invariant is legible and testable.
 #[allow(dead_code)]
-const TERMINAL_PROPOSAL_STATUSES: &[&str] = &["archived", "superseded", "rejected", "done"];
+pub(crate) const TERMINAL_PROPOSAL_STATUSES: &[&str] =
+    &["archived", "superseded", "rejected", "done"];
 
 // ── Repository impl ──────────────────────────────────────────────────────────
 
@@ -770,6 +772,16 @@ fn park_reason_for_status(status: &str) -> &'static str {
     match status {
         "approved" | "pr_draft" | "pr_review" => "parent_closed_pr_active",
         _ => "parent_closed_in_flight",
+    }
+}
+
+/// Repair-specific park reason for historical closed-parent orphan repair.
+/// Mirrors [`park_reason_for_status`] but uses the `historical_*` namespace so
+/// doctor_fix can distinguish historical drift from fresh epic-close cascades.
+pub(crate) fn historical_park_reason_for_status(status: &str) -> &'static str {
+    match status {
+        "approved" | "pr_draft" | "pr_review" => "historical_parent_closed_pr_active",
+        _ => "historical_parent_closed_in_flight",
     }
 }
 
