@@ -441,6 +441,17 @@ impl CoordinatorActor {
             Arc::new(crate::doctor::live_mover::NoOpLiveMoverSource),
             Arc::clone(&stranded_ready_source) as Arc<dyn crate::doctor::StrandedReadySource>,
         );
+        let closed_parent_open_children_source = Arc::new(
+            crate::doctor::TaskRepositoryClosedParentOpenChildrenSource::new(
+                db.clone(), events_tx.clone(),
+            ),
+        );
+        crate::doctor::register_closed_parent_open_children_check(
+            djinn_core::doctor::registry(),
+            Arc::clone(&closed_parent_open_children_source)
+                as Arc<dyn crate::doctor::ClosedParentOpenChildrenSource>,
+        );
+        tokio::spawn(async move { closed_parent_open_children_source.refresh().await });
 
         Self {
             receiver,

@@ -17,6 +17,7 @@
 
 pub mod leader_tick;
 pub mod live_mover;
+pub mod closed_parent_open_children;
 pub mod stranded_ready;
 pub mod zombie_running_session;
 
@@ -25,6 +26,11 @@ use std::sync::Arc;
 use djinn_core::doctor::{DoctorCheck, DoctorRegistry};
 
 pub use live_mover::{ActiveTask, LiveMoverPredicateCheck, LiveMoverSource};
+pub use closed_parent_open_children::{
+    CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, ClosedParentOpenChildrenCheck,
+    ClosedParentOpenChildrenSource, MemoryClosedParentOpenChildrenSource,
+    TaskRepositoryClosedParentOpenChildrenSource,
+};
 pub use stranded_ready::{
     MemoryStrandedReadySource, STRANDED_READY_CHECK_NAME, StrandedReadyCandidate,
     StrandedReadyCheck, StrandedReadySource, TaskRepositoryStrandedReadySource,
@@ -66,6 +72,15 @@ pub fn register_doctor_checks(
         registered.push(previous);
     }
     registered
+}
+
+/// Register the closed-parent orphan dry-run check while preserving the older
+/// two-source registration API used by coordinator tests.
+pub fn register_closed_parent_open_children_check(
+    registry: &DoctorRegistry,
+    source: Arc<dyn ClosedParentOpenChildrenSource>,
+) -> Option<String> {
+    registry.register(Arc::new(ClosedParentOpenChildrenCheck::new(source)))
 }
 
 // ---------------------------------------------------------------------------
