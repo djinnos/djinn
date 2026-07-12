@@ -779,7 +779,7 @@ impl AppState {
     ) {
         *self.inner.setup_session.write().await = token.map(|token| SetupSession {
             digest: setup_authority_digest(&token),
-            expires_at: Instant::now() + ttl,
+            expires_at: SystemClockTrait::new().now_instant() + ttl,
         });
     }
 
@@ -790,7 +790,7 @@ impl AppState {
     /// invalidating one another when their Set-Cookie headers arrive out of
     /// order; each individual capability is still single-use.
     pub(crate) async fn issue_setup_launch_capability(&self, ttl: Duration) -> String {
-        let now = Instant::now();
+        let now = SystemClockTrait::new().now_instant();
         let token = crate::server::auth::random_token_b64();
         let digest = setup_authority_digest(&token);
         let mut guard = self.inner.setup_launch_capabilities.write().await;
@@ -812,7 +812,7 @@ impl AppState {
     /// sending the cookie after its `Max-Age` elapsed.
     pub(crate) async fn consume_setup_launch_capability(&self, candidate: &str) -> bool {
         let candidate_digest = setup_authority_digest(candidate);
-        let now = Instant::now();
+        let now = SystemClockTrait::new().now_instant();
         let mut guard = self.inner.setup_launch_capabilities.write().await;
         guard.retain(|capability| capability.expires_at > now);
         let Some(index) = guard.iter().position(|capability| {
@@ -839,7 +839,7 @@ impl AppState {
         let mut boot_token = self.inner.boot_token.write().await;
         *boot_token = None;
 
-        let now = Instant::now();
+        let now = SystemClockTrait::new().now_instant();
         let mut setup_session = self.inner.setup_session.write().await;
         if let Some(session) = setup_session.as_ref()
             && session.expires_at > now
@@ -886,7 +886,7 @@ impl AppState {
         let Some(session) = stored.as_ref() else {
             return false;
         };
-        if session.expires_at <= Instant::now() {
+        if session.expires_at <= SystemClockTrait::new().now_instant() {
             *stored = None;
             return false;
         }
@@ -976,7 +976,7 @@ impl AppState {
         // Store so `extract_setup_session` can validate the cookie against it.
         *self.inner.setup_session.write().await = Some(SetupSession {
             digest: setup_authority_digest(&session_token),
-            expires_at: Instant::now() + SETUP_SESSION_TTL,
+            expires_at: SystemClockTrait::new().now_instant() + SETUP_SESSION_TTL,
         });
         BootTokenExchangeResult::Ok(session_token)
     }
