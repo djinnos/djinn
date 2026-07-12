@@ -1266,26 +1266,57 @@ async fn over_budget_turn_increments_budget_trip_counter_by_one_when_residual_ov
 /// Regression: the structured `tracing::info!` event emitted by the turn-budget
 /// post-pass retains the required fields: `inline_chars_pre`,
 /// `inline_chars_post`, `tool_count`, `externalized_count`,
-/// `largest_result_chars`, and `tool_name_missing`. This is a source-level
-/// assertion on the production emission site rather than a log-capture test.
-#[test]
-fn budget_trip_structured_event_retains_required_fields() {
-    // The compile-time assertion is implicit in the `tracing::info!` call at
-    // the production emission site. To make the protection explicit, this
-    // test references the same field names so removal triggers a compilation
-    // failure here and in the production site.
-    let fields = [
-        "inline_chars_pre",
-        "inline_chars_post",
-        "tool_count",
-        "externalized_count",
-        "largest_result_chars",
-        "tool_name_missing",
+/// `largest_result_chars`, and `tool_name_missing`.
+#[tokio::test]
+async fn budget_trip_structured_event_retains_required_fields() {
+    use crate::test_helpers::{agent_context_from_db, create_test_db};
+    use tokio_util::sync::CancellationToken;
+
+    let db = create_test_db();
+    let ctx = agent_context_from_db(db, CancellationToken::new());
+    let worktree_path = std::path::Path::new("/tmp");
+    let tool_metadata = ToolRuntimeMetadataMap::new();
+    let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+    let config = TurnInlineBudgetConfig {
+        budget: 200,
+        preview_floor: 10,
+    };
+    let big_a = "A".repeat(5_000);
+    let big_b = "B".repeat(5_000);
+    let mut results = vec![
+        collected_text(0, "call-a", "shell", &big_a),
+        collected_text(1, "call-b", "read", &big_b),
     ];
-    assert!(
-        !fields.is_empty(),
-        "required structured event fields must remain emitted by the turn-budget pass"
-    );
+
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(logs.clone())
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+        .with_target(true)
+        .with_ansi(false)
+        .with_level(true)
+        .finish();
+    let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+
+    let output = logs.output();
+    for field in [
+        "inline_chars_pre=",
+        "inline_chars_post=",
+        "tool_count=",
+        "externalized_count=",
+        "largest_result_chars=",
+        "tool_name_missing=",
+    ] {
+        assert!(
+            output.contains(field),
+            "structured budget telemetry must contain field `{field}`. Got: {output}"
+        );
+    }
 }
 
 /// Regression: the production counter name used in `turn_budget.rs` matches the
