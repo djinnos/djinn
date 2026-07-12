@@ -1,0 +1,2790 @@
+[
+  {
+    "concurrent_safe": false,
+    "description": "Create a new specialist agent extending a base role (worker or reviewer). Use when existing agents lack capabilities for a specific domain.",
+    "destructive": true,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "base_role": {
+          "description": "Base role to extend: worker or reviewer",
+          "type": "string"
+        },
+        "description": {
+          "description": "Short description of what this agent specialises in",
+          "type": "string"
+        },
+        "model_preference": {
+          "description": "Preferred model ID (falls back to project default)",
+          "type": "string"
+        },
+        "name": {
+          "description": "Unique agent name within the project",
+          "type": "string"
+        },
+        "system_prompt_extensions": {
+          "description": "Additional system prompt content appended to the base role prompt",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "base_role"
+      ],
+      "type": "object"
+    },
+    "name": "agent_create",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Show execution quality metrics for a role to support prompt tuning and intervention decisions.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "role": {
+          "description": "Role name (worker, reviewer, lead, planner, architect)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role"
+      ],
+      "type": "object"
+    },
+    "name": "agent_metrics",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Apply a patch to one or more files using a custom LLM-friendly format. Uses content-based context matching (not line numbers). Format:\n\n*** Begin Patch\n*** Update File: path/to/file.rs\n@@ context_line_from_file\n context line (unchanged)\n-old line to remove\n+new line to add\n context line (unchanged)\n\n*** Add File: path/to/new_file.rs\n+line 1\n+line 2\n\n*** Delete File: path/to/old_file.rs\n*** End Patch\n\nRules: ' ' prefix = context (must match file), '-' = delete, '+' = add. The @@ line text is searched in the file to locate each chunk. Multiple @@ chunks per file are allowed. Files being updated or deleted must be read first.",
+    "destructive": true,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "patch": {
+          "description": "Patch content in the custom format (see tool description)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "patch"
+      ],
+      "type": "object"
+    },
+    "name": "apply_patch",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "job_id": {
+          "description": "The GitHub Actions job ID from the CI failure activity",
+          "type": "integer"
+        },
+        "step": {
+          "description": "Optional step name to filter the log to (e.g. 'Tests')",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "type": "object"
+    },
+    "name": "ci_job_log",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Query the SCIP-built repository dependency graph. Prefer `uid` as the stable exact node input; fall back to `name` + `file_path` + `kind` when a UID is unavailable; ambiguous names return ranked candidates. Agent-boundary traversal triage controls: `limit`, `offset`, `pageLimit`, `summaryOnly`, `byDepthCounts`. Partial pages and capped summaries are triage views; absence from a page or summary is NOT evidence a node/edge/pair is absent from the full graph. `workspaces` lists available-workspace slugs plus name/node_count/commit_sha/warmed_at/status; unknown workspace degradation includes `workspace_hint`. STALENESS: pass `current_head` (your current git commit SHA) when known — every successful response will then include an additive `graph_staleness` object comparing your commit against the cached graph blob. The flag is serve-stale-with-warning only: it NEVER blocks the query and NEVER triggers re-warming; you decide whether to trust the result, retry later, or ask the user to re-warm. WHEN TO USE: capabilities = cheap discovery of supported ops/params/defaults before spending graph budget; query_subgraph = ask a natural-language question in `query` and get a token-budgeted focused subgraph with narrowing hints; search = find candidate files/symbols by substring when you do not know a key; describe = inspect one exact file/symbol key; neighbors = direct callers/callees/imports around a known key; impact = bounded transitive dependents for what-breaks-if-this-changes; context = compact bucketed incoming/outgoing context for a symbol; ranked/cycles/orphans/path/edges = broader structural queries; symbols_at/diff_touches/detect_changes = line range to touched symbols; status/metrics_at/snapshot/workspaces = graph health/introspection; api_surface/dead_symbols/deprecated_callers = public surface health; boundary_check/blast_radius/touches_hot_path = change-impact analysis; hotspots/cochange/churn/coupling_hubs = git-coupling × PageRank centrality; complexity/refactor_candidates = budget-conscious discovery of code that may be costly to maintain; crate_graph = workspace dependency graph with crates as nodes and aggregated cross-crate edges, including per-crate rollups (LOC, node count, fan-in/out, edge weights). AFTER THIS: after capabilities call the chosen op with only required fields; after query_subgraph inspect returned seeds/budget/truncation and retry with context_filter, file_filter, edge_filters, max_depth/max_seeds, or token_budget if too broad; after search pass a returned key to describe, neighbors, context, or impact; after describe call neighbors or context for relationships, or impact for dependents; after neighbors call describe on important nodes or impact to expand beyond direct edges; after impact call blast_radius or boundary_check for review/test planning; after context call describe/impact on highlighted neighbors.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "changed_ranges": {
+          "description": "List of changed line ranges for diff_touches (parsed from `git diff --unified=0 base..head`)",
+          "items": {
+            "properties": {
+              "end_line": {
+                "description": "1-indexed inclusive last line of the hunk (defaults to start_line)",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "file": {
+                "description": "Repository-relative path of the changed file",
+                "type": "string"
+              },
+              "start_line": {
+                "description": "1-indexed inclusive first line of the hunk",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "file",
+              "start_line"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "description": "Confidence tier for dead_symbols (default high)",
+          "enum": [
+            "high",
+            "med",
+            "low"
+          ],
+          "type": "string"
+        },
+        "context_filter": {
+          "description": "Optional coarse subsystem/API/type/concern substring for operation='query_subgraph'. Use returned narrowing_hints to choose values when the first response is too broad.",
+          "type": "string"
+        },
+        "current_head": {
+          "description": "Optional caller HEAD / git commit SHA. When provided, every successful response includes an additive `graph_staleness` object comparing this commit against the cached graph blob's pinned commit (is_stale=true when they differ). The flag is serve-stale-with-warning only: the query is never blocked and graph re-warming is never auto-triggered. Omit when the caller does not know its current commit. `caller_commit` and `currentHead` are accepted as aliases.",
+          "type": "string"
+        },
+        "direction": {
+          "description": "Edge direction filter for neighbors (omit for both)",
+          "enum": [
+            "incoming",
+            "outgoing"
+          ],
+          "type": "string"
+        },
+        "edge_filters": {
+          "description": "Optional explicit edge kinds for operation='query_subgraph' traversal (for example calls, imports, returns, reads, writes, implements, extends). Omit to let the planner infer useful kinds from query; edge_kind is accepted as a single-kind alias.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "edge_kind": {
+          "description": "Edge-kind filter for edges; for query_subgraph, a single-kind compatibility alias when edge_filters is omitted",
+          "type": "string"
+        },
+        "end_line": {
+          "description": "1-indexed inclusive end line for symbols_at (defaults to start_line)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "file": {
+          "description": "Repository-relative file path (required for symbols_at)",
+          "type": "string"
+        },
+        "file_filter": {
+          "description": "Optional repository-relative path/file substring for operation='query_subgraph'. Narrows seed selection and traversal; file_glob is also accepted as a compatibility alias.",
+          "type": "string"
+        },
+        "file_glob": {
+          "description": "File-path glob restricting hotspots to a subset of files; for query_subgraph, compatibility alias for file_filter",
+          "type": "string"
+        },
+        "from": {
+          "description": "Source node for path",
+          "type": "string"
+        },
+        "from_glob": {
+          "description": "Source path glob for edges",
+          "type": "string"
+        },
+        "group_by": {
+          "description": "Group impact/neighbors results by file",
+          "enum": [
+            "file"
+          ],
+          "type": "string"
+        },
+        "key": {
+          "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe, context)",
+          "type": "string"
+        },
+        "kind_filter": {
+          "description": "Node kind filter for ranked/search/cycles/orphans and query_subgraph seed/traversal narrowing",
+          "enum": [
+            "file",
+            "symbol"
+          ],
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max results (ranked/search/orphans/edges) or max traversal depth (impact)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_depth": {
+          "description": "Maximum depth for path, or operation='query_subgraph' traversal depth from selected seeds (0 = seed nodes only; clamped to 0..=8 for query_subgraph)",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_seeds": {
+          "description": "Maximum seed count for operation='query_subgraph'. Omit for backend default (~6); positive values clamp to 1..=32. Seed debug metadata explains which seeds were selected.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "min_confidence": {
+          "description": "Minimum edge-confidence threshold for operation='impact'. Edges below this value are skipped during BFS traversal. Omit for the default (0.85), which excludes synthesized trait-dispatch edges (confidence ~0.70); lower to ~0.70 to include trait-dispatch callers in the blast radius.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "min_size": {
+          "description": "Minimum SCC size for cycles (default 2)",
+          "minimum": 2,
+          "type": "integer"
+        },
+        "mode": {
+          "description": "Search mode for the `search` op (PR B4). `name` runs the canonical-graph name index only (fast path); `hybrid` blends lexical + semantic + structural via RRF k=60 and stamps each hit with a `match_kind` tag for debug surfaces. Default reads `DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE` (env var; defaults to `name`).",
+          "enum": [
+            "name",
+            "hybrid"
+          ],
+          "type": "string"
+        },
+        "module_glob": {
+          "description": "File-path glob restricting api_surface to a subset of symbols",
+          "type": "string"
+        },
+        "operation": {
+          "description": "Graph query to perform. Start with capabilities for cheap supported-op discovery; use query_subgraph with natural-language query for a focused token-budgeted subgraph; use search when you need a key, describe/context for one key, neighbors for direct edges, and impact for bounded transitive dependents.",
+          "enum": [
+            "neighbors",
+            "ranked",
+            "impact",
+            "implementations",
+            "search",
+            "query_subgraph",
+            "cycles",
+            "orphans",
+            "path",
+            "edges",
+            "symbols_at",
+            "diff_touches",
+            "detect_changes",
+            "describe",
+            "context",
+            "api_surface",
+            "boundary_check",
+            "blast_radius",
+            "hotspots",
+            "complexity",
+            "refactor_candidates",
+            "cochange",
+            "churn",
+            "coupling_hubs",
+            "metrics_at",
+            "dead_symbols",
+            "deprecated_callers",
+            "touches_hot_path",
+            "status",
+            "snapshot",
+            "workspaces",
+            "capabilities",
+            "crate_graph"
+          ],
+          "type": "string"
+        },
+        "project": {
+          "description": "Project slug (owner/repo) or UUID. The handler resolves it to the server-managed clone path.",
+          "type": "string"
+        },
+        "query": {
+          "description": "Substring query for search, or the required natural-language question for operation='query_subgraph'. After search, feed returned keys to describe, neighbors, context, or impact.",
+          "type": "string"
+        },
+        "rules": {
+          "description": "Boundary rules for boundary_check. Every submitted rule is treated as a forbidden edge; matching edges are reported as violations.",
+          "items": {
+            "properties": {
+              "from_glob": {
+                "description": "Source path glob",
+                "type": "string"
+              },
+              "to_glob": {
+                "description": "Destination path glob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "from_glob",
+              "to_glob"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "seed_entries": {
+          "description": "Entry-point SCIP symbol keys for touches_hot_path",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "seed_sinks": {
+          "description": "Sink SCIP symbol keys for touches_hot_path",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sort_by": {
+          "description": "Sort key. For ranked: pagerank|in_degree|out_degree|total_degree (default pagerank). For complexity: cognitive|cyclomatic|nloc|max_nesting|param_count (default cognitive).",
+          "enum": [
+            "pagerank",
+            "in_degree",
+            "out_degree",
+            "total_degree",
+            "cognitive",
+            "cyclomatic",
+            "nloc",
+            "max_nesting",
+            "param_count"
+          ],
+          "type": "string"
+        },
+        "start_line": {
+          "description": "1-indexed inclusive start line (required for symbols_at)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "symbols": {
+          "description": "Queried symbol keys for touches_hot_path",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "target": {
+          "description": "Target tier for complexity (default functions). 'files' aggregates by file_path.",
+          "enum": [
+            "functions",
+            "files"
+          ],
+          "type": "string"
+        },
+        "tests": {
+          "description": "Test-file filter for snapshot: include (default, whole graph), exclude (drop test files/symbols), only (test nodes only). Uses the canonical is_test classification (file-path convention OR SCIP Test role).",
+          "enum": [
+            "include",
+            "exclude",
+            "only"
+          ],
+          "type": "string"
+        },
+        "to": {
+          "description": "Destination node for path",
+          "type": "string"
+        },
+        "to_glob": {
+          "description": "Destination path glob for edges",
+          "type": "string"
+        },
+        "token_budget": {
+          "description": "Approximate response token budget for operation='query_subgraph'. Omit for backend default (~2000); positive values clamp to 1024..=32000 and the response reports budget/truncation state plus narrowing_hints.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "visibility": {
+          "description": "Visibility filter for orphans (default any)",
+          "enum": [
+            "public",
+            "private",
+            "any"
+          ],
+          "type": "string"
+        },
+        "window_days": {
+          "description": "Churn look-back window in days for hotspots (default 90, clamped to 365)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workspace": {
+          "description": "Optional workspace slug. Empty string is treated as omitted. Use operation=workspaces to enumerate available slugs and metadata (name/node_count/commit_sha/warmed_at/status). Known workspaces hard-scope listing/bounded ops (ranked/orphans/snapshot/api_surface) and scope only seed/endpoint resolution for traversal ops (impact/path/touches_hot_path/blast_radius) so cross-workspace edges remain visible. Unknown non-empty slugs return unscoped results with workspace_hint available-workspace candidates where supported.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "project"
+      ],
+      "type": "object"
+    },
+    "name": "code_graph",
+    "openWorld": true,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Search code across registered repos with `git grep` (basic regex). Pass `project` to search one repo, or omit it to search ALL projects at once. Served from each repo's default branch (no checkout); use shell grep for local changes.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "ignore_case": {
+          "description": "Case-insensitive match",
+          "type": "boolean"
+        },
+        "max_results": {
+          "description": "Max hits per project (default 100)",
+          "type": "integer"
+        },
+        "path": {
+          "description": "Optional pathspec to scope the search (e.g. crates/ or *.rs)",
+          "type": "string"
+        },
+        "project": {
+          "description": "Limit to one project (UUID or owner/repo slug). Omit or \"*\" = all registered projects.",
+          "type": "string"
+        },
+        "query": {
+          "description": "Pattern (basic regex, like git grep)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "code_search",
+    "openWorld": true,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Edit a file by replacing text. Provide path, old_text, and new_text. Rescues common whitespace/indentation drift automatically; fails on ambiguous matches or safety-guard rejections.",
+    "destructive": true,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "new_text": {
+          "description": "Replacement text",
+          "type": "string"
+        },
+        "old_text": {
+          "description": "Text to find and replace (may differ from file in whitespace, indentation, or encoding; the matcher rescues common drift automatically)",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute or worktree-relative file path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "old_text",
+        "new_text"
+      ],
+      "type": "object"
+    },
+    "name": "edit",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "List the epics blocked BY a given epic (its dependents — epics whose breakdown waits on this one).",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "epic_blocked_list",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "List the epics that BLOCK a given epic (its dependencies — they must close before this epic's breakdown auto-dispatches).",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "epic_blockers_list",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Close an epic when all work is complete and no further task waves are needed. Marks the epic as done.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "epic_close",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — e.g. when decomposing a graduated proposal (Planner Mode D) or when a health sweep identifies a gap that needs its own delivery container. Returns the created epic.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "auto_breakdown": {
+          "description": "When false, the coordinator will NOT auto-dispatch a breakdown Planner for this epic (stage it without running). Defaults true.",
+          "type": "boolean"
+        },
+        "blocked_by": {
+          "description": "Epics (UUIDs or short_ids; may be in other repos) that must CLOSE before this epic's breakdown auto-dispatches. Use to sequence epics — e.g. a consumer epic blocked on a schema epic.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "description": "Epic description / problem statement",
+          "type": "string"
+        },
+        "memory_refs": {
+          "description": "Memory reference URLs (e.g. ADR permalinks) to attach to the epic",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "project": {
+          "description": "Target project (UUID or owner/repo slug) to create the epic on. Omit to use the current session's project. Set this to create an epic on a SIBLING repo when decomposing a multi-repo proposal.",
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal (UUID or short_id) this epic is decomposed from — records the proposal→epic link (Mode D).",
+          "type": "string"
+        },
+        "read_sources": {
+          "description": "Other registered projects (UUIDs or owner/repo slugs) this epic's tasks may READ while writing only to its own project (cross-repo context).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "Epic title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object"
+    },
+    "name": "epic_create",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Show full details of an epic by UUID or short ID, including its task breakdown and blocker status.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "epic_show",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "List tasks belonging to an epic, showing status and assignee. Supports pagination.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short ID",
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "epic_tasks",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Update epic fields (title/description/status), memory ref deltas, and epic dependencies (blocked_by) for planner workflows.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "blocked_by_add": {
+          "description": "Epics (UUIDs or short_ids) that must close before this epic's breakdown auto-dispatches.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "blocked_by_remove": {
+          "description": "Epic dependencies to remove.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "description": "Epic UUID or short ID",
+          "type": "string"
+        },
+        "memory_refs_add": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "memory_refs_remove": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "epic_update",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Return the committed proposal MDX block vocabulary as a lean list of (type, tag) pairs sourced from proposal_block_catalog.json.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_block_catalog",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Search GitHub code across public repositories using the GitHub Code Search API. Returns compact, navigable matches with snippets, file paths, URLs, and metadata. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "language": {
+          "description": "Programming language filter (e.g. \"Rust\", \"Python\", \"TypeScript\")",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path filter to search within specific directories (e.g. \"src/\")",
+          "type": "string"
+        },
+        "query": {
+          "description": "Search query. Supports GitHub code search syntax.",
+          "type": "string"
+        },
+        "repo": {
+          "description": "Repository filter in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "github_search",
+    "openWorld": true,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "character": {
+          "description": "1-based column number (required for hover, definition, references when symbol is omitted)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "depth": {
+          "description": "Maximum nesting depth for operation='symbols'. 0 = top-level only; omitted = unlimited",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file_path": {
+          "description": "Absolute or worktree-relative file path",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Comma-separated symbol kind filter for operation='symbols' (e.g. function,method,struct,class,interface,enum,variable,constant,module,field,property,constructor,type_parameter)",
+          "type": "string"
+        },
+        "line": {
+          "description": "1-based line number (required for hover, definition, references)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name_filter": {
+          "description": "Case-insensitive substring filter applied to symbol names and name paths for operation='symbols'",
+          "type": "string"
+        },
+        "operation": {
+          "description": "LSP operation to perform",
+          "enum": [
+            "hover",
+            "definition",
+            "references",
+            "symbols"
+          ],
+          "type": "string"
+        },
+        "symbol": {
+          "description": "Optional symbol name path for hover, definition, or references as an alternative to line+character",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "file_path"
+      ],
+      "type": "object"
+    },
+    "name": "lsp",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "folder": {
+          "description": "Optional folder filter (e.g. \"decisions\")",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_broken_links",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Relevant proposals are surfaced alongside notes so a planner/worker sees the motivating proposal.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "edge_kinds": {
+          "description": "Optional list of edge kinds to include in graph traversal scoring. When provided, only edges whose kind matches one of these values participate in spreading activation. Omit to use all edge kinds.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "description": "Maximum notes to include (default 8)",
+          "type": "integer"
+        },
+        "min_confidence": {
+          "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded.",
+          "type": "number"
+        },
+        "query": {
+          "description": "Optional free-text query to bias retrieval",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task ID to gather related memory for; defaults to current session task when omitted",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_build_context",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "New content to insert or replace with",
+          "type": "string"
+        },
+        "find_text": {
+          "description": "Required for find_replace: exact text to search for",
+          "type": "string"
+        },
+        "identifier": {
+          "description": "Note permalink or title",
+          "type": "string"
+        },
+        "operation": {
+          "description": "Edit operation: append, prepend, find_replace, replace_section",
+          "type": "string"
+        },
+        "section": {
+          "description": "Required for replace_section: heading text identifying the section",
+          "type": "string"
+        },
+        "type": {
+          "description": "If provided and different from current type, move the note to the new type's folder",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier",
+        "operation",
+        "content"
+      ],
+      "type": "object"
+    },
+    "name": "memory_edit",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Audit existing extracted case/pattern/pitfall notes against ADR-054 taxonomy and required structure. Returns grouped cleanup backlogs for merge candidates, underspecified notes, demotion-to-working-spec candidates, and archive candidates, plus rerun guidance.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "memory_extracted_audit",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Returns aggregate health report: total notes, broken link count, orphan note count, low-confidence note count, stale note count, stale notes by folder, lifecycle counts, and recent lifecycle sweep metrics.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "memory_health",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "List notes in project memory. Returns compact summaries without full content.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "depth": {
+          "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels",
+          "type": "integer"
+        },
+        "folder": {
+          "description": "Filter by folder (e.g. \"decisions\")",
+          "type": "string"
+        },
+        "status": {
+          "description": "Explicit lifecycle status filter. Defaults to active; use archived or deprecated to list non-live notes.",
+          "type": "string"
+        },
+        "type": {
+          "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_list",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Move a memory note to a different type via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem; do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "identifier": {
+          "description": "Note permalink or title",
+          "type": "string"
+        },
+        "title": {
+          "description": "Optional new title; keep current title if omitted.",
+          "type": "string"
+        },
+        "type": {
+          "description": "New note type. Use proposed_adr to relocate proposal drafts into decisions/proposed/.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier",
+        "type"
+      ],
+      "type": "object"
+    },
+    "name": "memory_move",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap).",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "folder": {
+          "description": "Optional folder filter (e.g. \"pitfalls\")",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_orphans",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Read a memory note by permalink or title from the database-backed memory store. Returns full content and metadata.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "identifier": {
+          "description": "Permalink or title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier"
+      ],
+      "type": "object"
+    },
+    "name": "memory_read",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Inspect persisted memory-retrieval traces for the current project. Use mode=list to triage compact trace summaries with optional filters and bounded pagination, or mode=detail with trace_id to inspect one trace and its bounded note excerpts. Allowed entry points: dispatch, jit_pitfalls, load_knowledge_context, format_knowledge_notes, memory_recall_trace. Allowed outcomes: injected, skipped. Allowed skipped reasons: not_top_k, min_confidence, budget_pruned, superseded_pruned, dedupe, search_error.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "oneOf": [
+        {
+          "not": {
+            "required": [
+              "trace_id"
+            ]
+          },
+          "properties": {
+            "entry_point": {
+              "description": "Retrieval entry point.",
+              "enum": [
+                "dispatch",
+                "jit_pitfalls",
+                "load_knowledge_context",
+                "format_knowledge_notes",
+                "memory_recall_trace"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "description": "Maximum compact trace summaries to return (1-100; default is server-defined).",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "mode": {
+              "const": "list"
+            },
+            "offset": {
+              "description": "Zero-based summary page offset.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "outcome": {
+              "description": "Candidate outcome filter.",
+              "enum": [
+                "injected",
+                "skipped"
+              ],
+              "type": "string"
+            },
+            "project": {
+              "description": "Optional project UUID or slug for direct control-plane callers; agent calls are always scoped to the current project.",
+              "type": "string"
+            },
+            "project_id": {
+              "description": "Optional project UUID compatibility alias for direct control-plane callers.",
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "skipped_reason": {
+              "description": "Skipped-candidate reason filter.",
+              "enum": [
+                "not_top_k",
+                "min_confidence",
+                "budget_pruned",
+                "superseded_pruned",
+                "dedupe",
+                "search_error"
+              ],
+              "type": "string"
+            },
+            "task_id": {
+              "type": "string"
+            },
+            "task_run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "session_id"
+                ]
+              },
+              {
+                "required": [
+                  "task_id"
+                ]
+              },
+              {
+                "required": [
+                  "task_run_id"
+                ]
+              },
+              {
+                "required": [
+                  "entry_point"
+                ]
+              },
+              {
+                "required": [
+                  "outcome"
+                ]
+              },
+              {
+                "required": [
+                  "skipped_reason"
+                ]
+              },
+              {
+                "required": [
+                  "limit"
+                ]
+              },
+              {
+                "required": [
+                  "offset"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "mode": {
+              "const": "detail"
+            },
+            "project": {
+              "description": "Optional project UUID or slug for direct control-plane callers; agent calls are always scoped to the current project.",
+              "type": "string"
+            },
+            "project_id": {
+              "description": "Optional project UUID compatibility alias for direct control-plane callers.",
+              "type": "string"
+            },
+            "trace_id": {
+              "description": "Trace ID returned from a list call.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "trace_id"
+          ]
+        }
+      ],
+      "type": "object"
+    },
+    "name": "memory_recall_trace",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Search notes and proposals in project memory. Returns a unified result set interleaved by relevance.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "edge_kinds": {
+          "description": "Optional list of edge kinds to include in graph traversal scoring. When provided, only edges whose kind matches one of these values participate in spreading activation. Omit to use all edge kinds.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "entity_types": {
+          "description": "Optional entity-type filter. Omit to return both notes and proposals (default). [\"note\"] for notes-only. [\"proposal\"] for proposals-only.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "folder": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "query": {
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task ID for affinity scoring; defaults to the current session task",
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "memory_search",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Optional explicit status. For ADRs, use \"proposed\" to mark it as an in-flight proposal.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Optional tags for categorisation",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "Note title",
+          "type": "string"
+        },
+        "type": {
+          "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "content",
+        "type"
+      ],
+      "type": "object"
+    },
+    "name": "memory_write",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "context_lines": {
+          "description": "Lines of context around each match (default 3)",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pattern": {
+          "description": "Regex pattern to search for",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "description": "The tool_use_id from the truncated result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_use_id",
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "name": "output_grep",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "description": "Number of lines to return (default 200)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Line offset (0-based, default 0)",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool_use_id": {
+          "description": "The tool_use_id from the truncated result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_use_id"
+      ],
+      "type": "object"
+    },
+    "name": "output_view",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Given a PR's changed line ranges (parsed from `git diff --unified=0 base..head`), assemble the base-graph signals that matter for review in one call: touched symbols with fan-in/out, blast radius, hotspot overlap, touched cycles, deprecated-caller hits, hot-path overlap, and architecture-boundary violations. Base-graph-only — does NOT build a head graph, detect newly-introduced cycles, or parse the diff text for removed-API detection. Every list is capped (defaults: touched_symbols=100, blast_radius=50, hotspot_overlap=20, touched_cycles=20, touched_boundary_violations=50, touched_deprecated=20, hot_path_overlap=20).",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "boundary_rules": {
+          "description": "Architecture boundary rules; when empty, boundary analysis is skipped",
+          "items": {
+            "properties": {
+              "forbidden": {
+                "type": "boolean"
+              },
+              "from_glob": {
+                "type": "string"
+              },
+              "to_glob": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from_glob",
+              "to_glob",
+              "forbidden"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "caps": {
+          "description": "Per-list result caps; missing fields use defaults",
+          "properties": {
+            "blast_radius": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hot_path_overlap": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hotspot_overlap": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "touched_boundary_violations": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "touched_cycles": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "touched_deprecated": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "touched_symbols": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "changed_ranges": {
+          "description": "List of changed line ranges parsed from `git diff --unified=0 base..head`",
+          "items": {
+            "properties": {
+              "end_line": {
+                "description": "1-indexed inclusive last line of the hunk (defaults to start_line)",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "file": {
+                "description": "Repository-relative path of the changed file",
+                "type": "string"
+              },
+              "start_line": {
+                "description": "1-indexed inclusive first line of the hunk",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "file",
+              "start_line"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "hotspots_window_days": {
+          "description": "Churn look-back window for hotspot overlap (default 90)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Project slug (owner/repo) or UUID. The handler resolves it to the server-managed clone path.",
+          "type": "string"
+        },
+        "seed_entries": {
+          "description": "Entry-point SCIP keys for hot-path overlap (optional)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "seed_sinks": {
+          "description": "Sink SCIP keys for hot-path overlap (optional)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "project",
+        "changed_ranges"
+      ],
+      "type": "object"
+    },
+    "name": "pr_review_context",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index with operation `rewrite`, `drop`, or `waive`; requires a non-empty reason. Bumps proposal revision, retains sign-offs. Use proposal_ac_set for met-flag reconciliation only.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "amendments": {
+          "description": "One or more spec amendments applied in order. Operations target zero-based acceptance-criteria indexes from proposal_show; drops affect later indexes, so order multi-drop operations carefully.",
+          "items": {
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "operation": {
+                      "const": "rewrite"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "criterion"
+                  ]
+                }
+              }
+            ],
+            "properties": {
+              "criterion": {
+                "description": "New criterion text; required and non-empty when operation is rewrite.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "index": {
+                "description": "Zero-based acceptance-criteria index to amend.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "operation": {
+                "description": "Amendment operation: rewrite replaces criterion text; drop removes the criterion; waive keeps it but marks it with waived: true.",
+                "enum": [
+                  "rewrite",
+                  "drop",
+                  "waive"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "operation",
+              "index"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "id": {
+          "description": "Proposal UUID or short ID",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Required non-empty explanation for the acceptance-criteria amendment audit trail",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "reason",
+        "amendments"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_ac_amend",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Reconcile a proposal's acceptance-criteria `met` flags (Planner Workflow E) as graduated epics land. Send the FULL list in order — one entry per criterion, each `{\"met\": true|false}` (criterion text is preserved automatically). A status annotation only: it does not edit the spec, bump a revision, or clear sign-offs. Returns {met, total}.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Full criteria list in the same order as proposal_show; each entry {\"met\": bool} (optionally with \"criterion\").",
+          "items": {
+            "properties": {
+              "criterion": {
+                "type": "string"
+              },
+              "met": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "Proposal UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "acceptance_criteria"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_ac_set",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Apply a single targeted MDX block patch to a proposal body. Locates a range via selector (heading_text, exact_text, or byte_range), then replaces or wraps it with the given block_mdx. Unrelated content is preserved. Each successful patch records one proposal revision with targeted-block-patch metadata.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "block_mdx": {
+          "description": "The MDX content to insert",
+          "type": "string"
+        },
+        "expected_latest_revision_seq": {
+          "description": "Stale-revision guard: reject if proposal seq differs",
+          "type": "integer"
+        },
+        "id": {
+          "description": "Proposal UUID or short_id",
+          "type": "string"
+        },
+        "native_skill_name": {
+          "description": "Name of the native skill producing this patch (e.g. visual-spec)",
+          "type": "string"
+        },
+        "native_skill_version": {
+          "description": "Pinned version of the native skill",
+          "type": "string"
+        },
+        "note": {
+          "description": "Optional free-form note persisted in revision metadata",
+          "type": "string"
+        },
+        "operation": {
+          "description": "replace replaces the selected range; wrap wraps it",
+          "enum": [
+            "replace",
+            "wrap"
+          ],
+          "type": "string"
+        },
+        "selector": {
+          "description": "Target selector: identifies the range in the body to patch",
+          "properties": {
+            "byte_range": {
+              "description": "Byte range selector: start inclusive, end exclusive",
+              "properties": {
+                "end": {
+                  "type": "integer"
+                },
+                "expected_text": {
+                  "description": "Verification text at the range (stale-range guard)",
+                  "type": "string"
+                },
+                "start": {
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "exact_text": {
+              "description": "Match a contiguous substring of the body (must occur once)",
+              "type": "string"
+            },
+            "heading_text": {
+              "description": "Match a markdown heading by text (without # prefix)",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "selector",
+        "operation",
+        "block_mdx"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_block_patch",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Return the v1 proposal MDX block registry, including stable block types, MDX tags, and field schemas.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "proposal_blocks",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Mark a `building` proposal as `done` (Planner Workflow E). Call this only after reviewing a proposal whose every graduated epic has closed and confirming the delivered work meets the acceptance criteria. If work remains instead, create more epics with epic_create(proposal_id=...) rather than completing.",
+    "destructive": true,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Proposal UUID or short ID",
+          "type": "string"
+        },
+        "summary": {
+          "description": "Short note on what shipped and how it satisfies the spec (recorded in logs).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_complete",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Record a tribunal debate-trail entry. This is the ONLY channel the refinement loop reads. `kind` is `objection` (Adversary), `verdict` (Judge), or `rebuttal`. `blocking=true` blocks readiness. Read `proposal_id`, `round`, `against_revision_seq` from your task description; `agent_role` is `adversary` or `judge`.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "against_revision_seq": {
+          "description": "The proposal revision this entry is written against (from your task description)",
+          "type": "integer"
+        },
+        "agent_role": {
+          "description": "Your tribunal role: adversary | judge",
+          "type": "string"
+        },
+        "blocking": {
+          "description": "True if this blocks readiness. Use for blocking objections and for a not-ready verdict. Default false.",
+          "type": "boolean"
+        },
+        "body": {
+          "description": "The objection/verdict text. For objections include summary, evidence, and a falsifiable resolution criterion.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "objection | rebuttal | verdict",
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id (from your task description)",
+          "type": "string"
+        },
+        "round": {
+          "description": "The 1-based debate round (from your task description)",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "kind",
+        "body",
+        "agent_role",
+        "against_revision_seq",
+        "round"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_debate_append",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "List the tribunal debate trail for a proposal: every objection, rebuttal, and verdict across all rounds. The Adversary reads this to avoid re-raising objections; the Advocate reads it to address objections; the Judge reads it to verify resolution.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "proposal_id": {
+          "description": "Proposal UUID or short_id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_debate_list",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Mark a debate-trail objection as resolved by entry `id` (from `proposal_debate_list`). The Judge or Advocate calls this for each blocking objection the revision genuinely satisfies. Pair with a `proposal_debate_append` rebuttal explaining how.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "The debate-trail entry id to resolve (from proposal_debate_list)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_debate_resolve",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Scoped teardown for one obsolete graduated epic. Blocks if any target task has merged work; otherwise applies the shared parent-disposition matrix to only the selected linked epic's children: disposed/closed, parked for lead intervention, retained for another open proposal parent, or retained for an external dependent. It then closes and unlinks only the selected epic, leaving unrelated graduated epics linked. Use instead of whole-build proposal_stop_build during Reconcile tasks.",
+    "destructive": true,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "epic_id": {
+          "description": "Obsolete graduated epic UUID or short ID to retire",
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short ID being reconciled",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Optional reconcile note explaining why this graduated epic is obsolete",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "epic_id"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_reconcile_obsolete_epic",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Demand a read-only evidence spike for an insufficiently-evidenced feasibility claim. The Judge calls this when in-session research cannot resolve a load-bearing claim. Checks the per-run cap (max 2), records the claim, and parks refinement until spike findings arrive.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "against_revision_seq": {
+          "description": "The proposal revision sequence the demand targets (from your task description)",
+          "type": "integer"
+        },
+        "expected_findings": {
+          "description": "What the evidence spike should produce to resolve the claim",
+          "type": "string"
+        },
+        "insufficient_in_session_research": {
+          "description": "Why in-session research was insufficient to resolve the claim",
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id",
+          "type": "string"
+        },
+        "question": {
+          "description": "The feasibility question the evidence spike must answer",
+          "type": "string"
+        },
+        "round": {
+          "description": "The 1-based debate round when the demand is issued (from your task description)",
+          "type": "integer"
+        },
+        "spec_unknown_anchor": {
+          "description": "What in the spec is unknown or unverified",
+          "type": "string"
+        },
+        "target_subsystem": {
+          "description": "The subsystem or module under investigation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "round",
+        "against_revision_seq",
+        "question",
+        "target_subsystem",
+        "spec_unknown_anchor",
+        "insufficient_in_session_research",
+        "expected_findings"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_refinement_demand_evidence",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Show a proposal's full detail by UUID or short_id. Use `fields` to select sections (proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all) and `revision_bodies` to control verbosity (excerpt/full/omit).",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "fields": {
+          "description": "Select which top-level sections to include. Accepted values: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status. Default: all. Invalid values return a validation error naming the accepted values.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Proposal UUID or short_id",
+          "type": "string"
+        },
+        "revision_bodies": {
+          "description": "Controls revision body verbosity when revisions is selected: excerpt (default, 512-char body_excerpt), full (complete body), omit (no body data). Ignored when fields omits revisions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_show",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Update a proposal (by UUID or short_id): title, body, acceptance_criteria, status (draft|shared|ready|archived|superseded), and superseded_by. Only provided fields change.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Acceptance criteria: plain strings or {criterion, met} objects",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "body": {
+          "description": "New proposal body text",
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: markdown (default) or mdx (block-aware)",
+          "type": "string"
+        },
+        "id": {
+          "description": "Proposal UUID or short_id",
+          "type": "string"
+        },
+        "status": {
+          "description": "draft | in_review | approved | building | done | rejected | archived | superseded",
+          "type": "string"
+        },
+        "superseded_by": {
+          "description": "UUID or short_id of superseding proposal",
+          "type": "string"
+        },
+        "title": {
+          "description": "New proposal title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_update",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Read a file with line numbers and pagination. Rejects binary files. Pass `project` (UUID or owner/repo slug) to read a file from ANOTHER registered repo — served read-only from its default branch (no checkout); omit it to read your task worktree.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "limit": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Other registered project to read from (UUID or owner/repo slug). Omit for your own task repo.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_path"
+      ],
+      "type": "object"
+    },
+    "name": "read",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs splitting/merging, or has failed multiple Lead interventions. Adds a comment and dispatches the Planner; your session should end after this call.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short_id",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why Planner escalation is needed (e.g. task mis-shaped, duplicates other work, needs splitting, repeated Lead failures with no clear next step)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "name": "request_planner",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Execute shell commands in the task worktree. Commands always run from the worktree root.",
+    "destructive": true,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "command": {
+          "description": "Shell command to execute",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "description": "Timeout in milliseconds (default 120000)",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "name": "shell",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Load the full content of an assigned skill by name. Under progressive skill disclosure the system prompt lists each non-required skill's name and description only; call this to fetch the complete skill body on demand. Errors if the name is not an assigned skill.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "description": "Name of the skill to load (as shown in the Available Skills section)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "skill_read",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Submit the Lead/arbiter intervention decision. This is the ONLY way to end your session and is what applies the board transition — do not call task_transition yourself. Your session ends after this call.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "created_tasks": {
+          "description": "Required for supersede: IDs (short_id or UUID) of the replacement subtasks created during this intervention that carry the work forward. Must be non-empty for a supersede decision.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "decision": {
+          "description": "The decision: approve (work is complete + correct — the worker just couldn't self-certify; requires evidence citation), approve_conflict (correct but a merge conflict exists — approve then send for conflict retry; requires evidence citation), reopen (send back to a fresh worker with a directive and verification command), park (hold the task for human review with a structured dossier), supersede (you decomposed the work into replacement subtasks that carry it forward — the source task and its PR are force-closed as superseded automatically; requires a non-empty created_tasks array)",
+          "enum": [
+            "approve",
+            "approve_conflict",
+            "reopen",
+            "park",
+            "supersede"
+          ],
+          "type": "string"
+        },
+        "directive": {
+          "description": "Required for reopen. Non-empty directive injected verbatim into the next worker prompt.",
+          "type": "string"
+        },
+        "evidence": {
+          "description": "Required for approve and approve_conflict. Evidence citation pointing at concrete verification/review/git evidence.",
+          "properties": {
+            "reference_id": {
+              "description": "Optional reference ID (CI run ID, session ID, commit SHA, etc.)",
+              "type": "string"
+            },
+            "source": {
+              "description": "Evidence source type: 'ci_run', 'review_round', 'git_log', 'test_output', or 'manual_review'",
+              "type": "string"
+            },
+            "summary": {
+              "description": "Human-readable summary of the evidence and why it supports the approval",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "summary"
+          ],
+          "type": "object"
+        },
+        "exclude_models": {
+          "description": "Optional for reopen. Model IDs excluded from the next dispatch.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "park_dossier": {
+          "description": "Required for park. Structured dossier for the human-review hold.",
+          "properties": {
+            "attempted_decisions": {
+              "description": "Optional list of decisions attempted before parking",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "failure_analysis": {
+              "description": "Analysis of why the task failed and needs human review",
+              "type": "string"
+            },
+            "hold_description": {
+              "description": "Description of the hold for human reviewers",
+              "type": "string"
+            },
+            "recommended_action": {
+              "description": "Optional recommended action for the human reviewer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "hold_description",
+            "failure_analysis"
+          ],
+          "type": "object"
+        },
+        "rationale": {
+          "description": "Explanation for the decision",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task UUID or short_id",
+          "type": "string"
+        },
+        "verification_command": {
+          "description": "Required for reopen. Executable command the next worker must run to verify the fix.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "decision"
+      ],
+      "type": "object"
+    },
+    "name": "submit_decision",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "blocked_on": {
+          "description": "Epics (UUID or short_id) that block this epic. If you conclude the epic cannot proceed until another epic closes and you therefore created NO worker tasks, list the blocking epic(s) here (use decision='escalate'). This durably parks this epic's planning until every listed epic closes — the coordinator wakes it automatically then. Reference the blocking EPIC, not a task (if a task blocks you, reference the epic that owns it). Do NOT re-run planning to restate a known block: declare it here once.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "decision": {
+          "description": "Outcome decision: 'execute' = wave was created or board work continues (coordinator dispatches the new tasks); 'close' = epic is complete and the planning task should close (set `reason` in summary); 'escalate' = board state needs human attention. Optional — defaults to 'execute' when omitted.",
+          "enum": [
+            "execute",
+            "close",
+            "escalate"
+          ],
+          "type": "string"
+        },
+        "summary": {
+          "description": "Optional overall summary of the grooming session",
+          "type": "string"
+        },
+        "tasks_reviewed": {
+          "description": "Per-task grooming entries",
+          "items": {
+            "properties": {
+              "action": {
+                "description": "Action taken on this task",
+                "enum": [
+                  "promoted",
+                  "improved",
+                  "skipped"
+                ],
+                "type": "string"
+              },
+              "changes": {
+                "description": "Description of changes made to this task",
+                "type": "string"
+              },
+              "task_id": {
+                "description": "Task UUID or short_id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "task_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "name": "submit_grooming",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Submit the task review outcome with per-criterion AC verdicts. This atomically sets acceptance criteria met/unmet state on the task. Your session ends after this call.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Per-criterion verdicts that atomically set AC met/unmet state on the task",
+          "items": {
+            "properties": {
+              "criterion": {
+                "description": "Text of the criterion",
+                "type": "string"
+              },
+              "met": {
+                "description": "Whether this criterion is met",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "criterion",
+              "met"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "feedback": {
+          "description": "Feedback or rejection reason for the worker",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task UUID or short_id",
+          "type": "string"
+        },
+        "verdict": {
+          "description": "Overall review verdict",
+          "enum": [
+            "approved",
+            "rejected"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "verdict"
+      ],
+      "type": "object"
+    },
+    "name": "submit_review",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "commit_title": {
+          "description": "Short imperative-mood git commit subject line, max 72 characters. Example: 'add rate limiting to auth middleware'",
+          "maxLength": 72,
+          "type": "string"
+        },
+        "files_changed": {
+          "description": "List of files modified during this session",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "remaining_concerns": {
+          "description": "Any outstanding concerns or caveats for the reviewer",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "description": "Longer description of the work completed, used as the commit body",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task UUID or short_id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "commit_title",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "name": "submit_work",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, and other events. Use to inspect Lead guidance, reviewer feedback, or history.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "actor_role": {
+          "description": "Filter by actor: lead, reviewer, worker, system",
+          "type": "string"
+        },
+        "event_type": {
+          "description": "Filter by event type: comment, status_changed, commands_run, merge_conflict, task_review_start",
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max entries to return (default 30, max 50)",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_activity_list",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
+    "destructive": true,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_archive_activity",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_blocked_list",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Add a comment or strategic observation to a task's activity log.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "body": {
+          "description": "Comment body to add to the activity log",
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "body"
+      ],
+      "type": "object"
+    },
+    "name": "task_comment_add",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Required. Each item is either a plain string or an object with 'criterion' (string) and optional 'met' (bool) fields. Tasks without acceptance criteria cannot be dispatched.",
+          "items": {},
+          "minItems": 1,
+          "type": "array"
+        },
+        "blocked_by": {
+          "description": "Task IDs (UUID or short_id) that must complete before this task can be dispatched.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "design": {
+          "type": "string"
+        },
+        "epic_id": {
+          "description": "Parent epic UUID or short ID",
+          "type": "string"
+        },
+        "issue_type": {
+          "description": "Task type: 'task' (default for worker-routed code work), 'planning' for epic metadata operations (epic_update, epic_close, memory_refs management, roadmap/AC changes, or other metadata-only maintenance), 'spike' for research, 'review' for code review. Use 'planning' when the work requires epic management tools or primarily updates epic metadata instead of code.",
+          "type": "string"
+        },
+        "labels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "epic_id",
+        "title",
+        "acceptance_criteria"
+      ],
+      "type": "object"
+    },
+    "name": "task_create",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
+    "destructive": true,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_delete_branch",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
+    "destructive": true,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_kill_session",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "List tasks with optional filters for status, priority, label, and text search. Supports pagination.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "issue_type": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "parent": {
+          "description": "Epic ID to filter by",
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "sort": {
+          "description": "priority (default), created, created_desc, updated, updated_desc, closed (closed_at DESC then created_at DESC).",
+          "type": "string"
+        },
+        "status": {
+          "description": "Positive (\"open\") or negative (\"!closed\") status filter. A leading \"!\" matches every task whose status differs from the given value. The pseudo-status \"merged\" matches closed tasks that actually merged (have a merge-commit SHA, or opened a PR and closed as completed) — this is what backs the Kanban Merged column.",
+          "type": "string"
+        },
+        "text": {
+          "description": "Free-text search in title/description",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "task_list",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
+    "destructive": true,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_reset_counters",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Show details of a work item including recent activity and blockers.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_show",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Transition a task to a new status using a named workflow action. Valid transitions depend on the current status.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "description": "Transition action name",
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Reason for the transition. Required for force_close when no replacement_task_ids are provided.",
+          "type": "string"
+        },
+        "replacement_task_ids": {
+          "description": "UUIDs or short IDs of replacement tasks. Required for force_close when no reason is provided.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "action"
+      ],
+      "type": "object"
+    },
+    "name": "task_transition",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Update task fields and manage blocker relationships. Use blocked_by_add/blocked_by_remove to enforce task sequencing — a task with unresolved blockers will not be dispatched.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Each item is either a plain string or an object with 'criterion' (string) and optional 'met' (bool) fields.",
+          "items": {},
+          "type": "array"
+        },
+        "blocked_by_add": {
+          "description": "Task IDs (UUID or short_id) to add as blockers. Task will not be dispatched until all blockers are resolved.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "blocked_by_remove": {
+          "description": "Task IDs (UUID or short_id) to remove as blockers.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "design": {
+          "type": "string"
+        },
+        "epic_id": {
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        },
+        "memory_refs_add": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "memory_refs_remove": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_update",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.",
+    "destructive": true,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "File content to write",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute or worktree-relative file path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    },
+    "name": "write",
+    "openWorld": false,
+    "readOnly": false
+  }
+]
