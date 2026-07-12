@@ -120,6 +120,12 @@ pub(super) fn apply_turn_inline_budget_pass_with_config(
         // Under-budget: leave the turn byte-for-byte unchanged.
         return;
     }
+    // The budget tripped: increment the production counter exactly once for
+    // this over-budget invocation, regardless of how many results are
+    // externalized or whether the pass can fully fit (preview-floor and
+    // non-shrinking constraints may leave residual overflow). Rich per-turn
+    // details remain in the structured event emitted below.
+    djinn_telemetry::reply_loop::increment_inline_char_budget_trip();
     let largest_result_chars = results.iter().map(result_inline_chars).max().unwrap_or(0);
 
     // Compute the group-level `tool_name_missing` flag across ALL collected
