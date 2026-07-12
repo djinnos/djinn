@@ -13,6 +13,7 @@ const FIXTURE_PATH: &str = concat!(
     "/tests/fixtures/tool_surface_baseline.json"
 );
 
+#[allow(clippy::print_stdout)]
 fn main() {
     // This is deliberately the same public generation API used by the
     // integration regression test. Do not duplicate inventory collection or
@@ -25,5 +26,5 @@ fn main() {
     std::fs::write(FIXTURE_PATH, baseline)
         .unwrap_or_else(|error| panic!("failed to write {FIXTURE_PATH}: {error}"));
 
-    eprintln!("regenerated {tool_count} MCP tools at {FIXTURE_PATH}");
+    println!("regenerated {tool_count} MCP tools at {FIXTURE_PATH}");
 }
