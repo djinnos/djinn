@@ -3,6 +3,8 @@ use super::super::turn_budget::{
     apply_turn_inline_budget_pass_with_config, read_positive_env_usize,
 };
 use super::*;
+use djinn_telemetry::render;
+use std::sync::{Mutex, MutexGuard};
 fn test_tool_schema(
     name: &str,
     read_only: Option<bool>,
@@ -1084,5 +1086,260 @@ async fn budget_trip_reports_tool_name_missing_for_unselected_nameless_result() 
         "telemetry must report tool_name_missing=true when a nameless result \
          exists in the batch, even if it was not selected for externalization. \
          Got: {output}"
+    );
+}
+
+// ─── Telemetry/metric regressions: r3bd counter behavior ────────────────
+
+/// Serialize access to the process-global metrics recorder so parallel tests
+/// do not race each other when initializing/rendering telemetry. Mirrors the
+/// `test_guard` convention in `djinn-telemetry/src/lib.rs`.
+static TURN_BUDGET_TELEMETRY_MUTEX: Mutex<()> = Mutex::new(());
+
+fn turn_budget_telemetry_guard() -> MutexGuard<'static, ()> {
+    TURN_BUDGET_TELEMETRY_MUTEX
+        .lock()
+        .expect("turn-budget telemetry test mutex poisoned")
+}
+
+fn budget_trip_counter_value(rendered: &str) -> f64 {
+    rendered
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("djinn_reply_loop_inline_char_budget_trips_total")
+                .and_then(|suffix| suffix.strip_prefix(' '))
+                .and_then(|value| value.parse::<f64>().ok())
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "missing unlabelled sample djinn_reply_loop_inline_char_budget_trips_total in:\n{rendered}"
+            )
+        })
+}
+
+/// Regression: an under-budget turn must not increment the production
+/// `djinn_reply_loop_inline_char_budget_trips_total` counter.
+#[tokio::test]
+async fn under_budget_turn_does_not_increment_budget_trip_counter() {
+    use crate::test_helpers::{agent_context_from_db, create_test_db};
+    use tokio_util::sync::CancellationToken;
+
+    let _guard = turn_budget_telemetry_guard();
+    djinn_telemetry::init().expect("telemetry init");
+
+    let db = create_test_db();
+    let ctx = agent_context_from_db(db, CancellationToken::new());
+    let worktree_path = std::path::Path::new("/tmp");
+    let tool_metadata = ToolRuntimeMetadataMap::new();
+    let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+    let before = render().expect("render metrics");
+    let before_value = budget_trip_counter_value(&before);
+
+    let config = TurnInlineBudgetConfig {
+        budget: 100_000_000,
+        preview_floor: 10_000,
+    };
+    let body = "x".repeat(1_000);
+    let mut results = vec![collected_text(0, "call-0", "read", &body)];
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+
+    let after = render().expect("render metrics after under-budget pass");
+    let after_value = budget_trip_counter_value(&after);
+    assert_eq!(
+        after_value, before_value,
+        "under-budget turn must not increment the budget-trip counter:\n{after}"
+    );
+}
+
+/// Regression: a single over-budget turn increments the production counter
+/// by exactly one, even though the externalization selection externalizes more
+/// than one result (proving the counter counts trips, not externalized
+/// results).
+#[tokio::test]
+async fn over_budget_turn_increments_budget_trip_counter_by_one_for_multiple_externalizations() {
+    use crate::test_helpers::{agent_context_from_db, create_test_db};
+    use tokio_util::sync::CancellationToken;
+
+    let _guard = turn_budget_telemetry_guard();
+    djinn_telemetry::init().expect("telemetry init");
+
+    let db = create_test_db();
+    let ctx = agent_context_from_db(db, CancellationToken::new());
+    let worktree_path = std::path::Path::new("/tmp");
+    let tool_metadata = ToolRuntimeMetadataMap::new();
+    let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+    let before = render().expect("render metrics");
+    let before_value = budget_trip_counter_value(&before);
+
+    let config = TurnInlineBudgetConfig {
+        budget: 200,
+        preview_floor: 10,
+    };
+    let big_a = "A".repeat(5_000);
+    let big_b = "B".repeat(5_000);
+    let mut results = vec![
+        collected_text(0, "call-a", "shell", &big_a),
+        collected_text(1, "call-b", "read", &big_b),
+    ];
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+
+    // Both results must be externalized to fit the tiny 200-char budget.
+    let externalized = results
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.content.first(),
+                Some(ContentBlock::Text { text }) if text.starts_with("[djinn-output-stash")
+            )
+        })
+        .count();
+    assert!(
+        externalized >= 2,
+        "expected both oversized results to be externalized, got {externalized}"
+    );
+
+    let after = render().expect("render metrics after over-budget pass");
+    let after_value = budget_trip_counter_value(&after);
+    assert_eq!(
+        after_value,
+        before_value + 1.0,
+        "one over-budget pass must increment the budget-trip counter by exactly one, regardless of externalized count:\n{after}"
+    );
+}
+
+/// Regression: a single over-budget turn increments the production counter by
+/// exactly one even when the preview floor prevents any externalization and
+/// residual overflow remains. This proves the counter counts threshold trips,
+/// not remediation success.
+#[tokio::test]
+async fn over_budget_turn_increments_budget_trip_counter_by_one_when_residual_overflow_remains() {
+    use crate::test_helpers::{agent_context_from_db, create_test_db};
+    use tokio_util::sync::CancellationToken;
+
+    let _guard = turn_budget_telemetry_guard();
+    djinn_telemetry::init().expect("telemetry init");
+
+    let db = create_test_db();
+    let ctx = agent_context_from_db(db, CancellationToken::new());
+    let worktree_path = std::path::Path::new("/tmp");
+    let tool_metadata = ToolRuntimeMetadataMap::new();
+    let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+    let before = render().expect("render metrics");
+    let before_value = budget_trip_counter_value(&before);
+
+    let config = TurnInlineBudgetConfig {
+        budget: 100,
+        preview_floor: 10_000,
+    };
+    let body_a = "A".repeat(500);
+    let body_b = "B".repeat(500);
+    let mut results = vec![
+        collected_text(0, "call-0", "read", &body_a),
+        collected_text(1, "call-1", "read", &body_b),
+    ];
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+
+    // Both results remain unchanged because the floor blocks any shrinking.
+    for result in &results {
+        let text = match result.content.first() {
+            Some(ContentBlock::Text { text }) => text.as_str(),
+            _ => panic!("expected text block"),
+        };
+        assert!(
+            !text.starts_with("[djinn-output-stash"),
+            "floor-limited candidates must not be externalized: {text}"
+        );
+    }
+
+    let after = render().expect("render metrics after over-budget pass with residual overflow");
+    let after_value = budget_trip_counter_value(&after);
+    assert_eq!(
+        after_value,
+        before_value + 1.0,
+        "one over-budget pass must increment the budget-trip counter by exactly one even when residual overflow remains:\n{after}"
+    );
+}
+
+/// Regression: the structured `tracing::info!` event emitted by the turn-budget
+/// post-pass retains the required fields: `inline_chars_pre`,
+/// `inline_chars_post`, `tool_count`, `externalized_count`,
+/// `largest_result_chars`, and `tool_name_missing`.
+#[tokio::test]
+async fn budget_trip_structured_event_retains_required_fields() {
+    use crate::test_helpers::{agent_context_from_db, create_test_db};
+    use tokio_util::sync::CancellationToken;
+
+    let db = create_test_db();
+    let ctx = agent_context_from_db(db, CancellationToken::new());
+    let worktree_path = std::path::Path::new("/tmp");
+    let tool_metadata = ToolRuntimeMetadataMap::new();
+    let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+    let config = TurnInlineBudgetConfig {
+        budget: 200,
+        preview_floor: 10,
+    };
+    let big_a = "A".repeat(5_000);
+    let big_b = "B".repeat(5_000);
+    let mut results = vec![
+        collected_text(0, "call-a", "shell", &big_a),
+        collected_text(1, "call-b", "read", &big_b),
+    ];
+
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(logs.clone())
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+        .with_target(true)
+        .with_ansi(false)
+        .with_level(true)
+        .finish();
+    let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+
+    let output = logs.output();
+    for field in [
+        "inline_chars_pre=",
+        "inline_chars_post=",
+        "tool_count=",
+        "externalized_count=",
+        "largest_result_chars=",
+        "tool_name_missing=",
+    ] {
+        assert!(
+            output.contains(field),
+            "structured budget telemetry must contain field `{field}`. Got: {output}"
+        );
+    }
+}
+
+/// Regression: the production counter name used in `turn_budget.rs` matches the
+/// exported `djinn_telemetry` constant so renaming in either place breaks the
+/// other. This is a compilation coupling, not a runtime metric check.
+#[test]
+fn budget_trip_counter_name_is_coupled_to_telemetry_constant() {
+    // The production code calls `djinn_telemetry::reply_loop::increment_inline_char_budget_trip()`;
+    // this test simply exercises that helper, ensuring the public name and
+    // the internal counter name remain aligned.
+    let _guard = turn_budget_telemetry_guard();
+    djinn_telemetry::init().expect("telemetry init");
+
+    let before = render().expect("render metrics");
+    let before_value = budget_trip_counter_value(&before);
+
+    djinn_telemetry::reply_loop::increment_inline_char_budget_trip();
+
+    let after = render().expect("render metrics after explicit increment");
+    let after_value = budget_trip_counter_value(&after);
+    assert_eq!(
+        after_value,
+        before_value + 1.0,
+        "explicit increment should match the counter used by the turn-budget pass"
     );
 }
