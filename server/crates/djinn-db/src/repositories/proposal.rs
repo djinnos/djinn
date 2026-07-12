@@ -2213,6 +2213,17 @@ impl ProposalRepository {
         Ok(())
     }
 
+    pub async fn unlink_epics_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        proposal_id: &str,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM proposal_epics WHERE proposal_id = $1")
+            .bind(proposal_id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
     /// Drop one graduated-epic link for a proposal. Idempotent.
     ///
     /// This is the scoped counterpart to [`Self::unlink_epics`], used by
@@ -2224,6 +2235,19 @@ impl ProposalRepository {
             .bind(proposal_id)
             .bind(epic_id)
             .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unlink_epic_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        proposal_id: &str,
+        epic_id: &str,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM proposal_epics WHERE proposal_id = $1 AND epic_id = $2")
+            .bind(proposal_id)
+            .bind(epic_id)
+            .execute(&mut **tx)
             .await?;
         Ok(())
     }
@@ -2621,6 +2645,14 @@ impl ProposalRepository {
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&proposal));
         Ok(proposal)
+    }
+
+    pub async fn revert_to_approved_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        proposal_id: &str,
+    ) -> Result<()> {
+        sqlx::query("UPDATE proposals SET status = 'approved', build_owner_user_id = NULL, build_breakdown_task_id = NULL, build_frozen = false WHERE id = $1").bind(proposal_id).execute(&mut **tx).await?;
+        Ok(())
     }
 
     /// Mark a proposal as building, recording the build owner.

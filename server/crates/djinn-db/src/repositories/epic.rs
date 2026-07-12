@@ -103,6 +103,23 @@ impl EpicRepository {
         Self { db, events }
     }
 
+    /// Close a set of epics inside an existing lifecycle transaction.
+    pub async fn close_scoped_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        epic_ids: &[String],
+    ) -> Result<()> {
+        sqlx::query(
+            r#"UPDATE epics SET status = 'closed',
+                    closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id = ANY($1)"#,
+        )
+        .bind(epic_ids)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
     pub async fn list(&self) -> Result<Vec<Epic>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(

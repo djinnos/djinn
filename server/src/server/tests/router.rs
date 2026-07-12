@@ -1,5 +1,5 @@
 use axum::body::Body;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use djinn_core::clock::{Clock, SystemClock};
@@ -125,6 +125,150 @@ async fn health_provider_catalog_serialize_error_status() {
     assert!(json["provider_catalog"]["fetched_at"].is_null());
     assert!(json["provider_catalog"]["age_seconds"].is_null());
     assert_eq!(json["provider_catalog"]["refresh_interval_seconds"], 3600);
+}
+
+/// After a successful refresh, `/health` should expose a non-null RFC3339
+/// `fetched_at` and a non-null `age_seconds`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_provider_catalog_serializes_fetched_at_after_success() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let catalog = state.catalog().clone();
+
+    // Use a fixed wall-clock instant and a recent monotonic instant so the
+    // response is deterministic and the source tier is live.
+    let fetched_at_wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let fetched_at_mono = SystemClock::new().now_instant();
+    catalog.set_last_success_times_for_tests(
+        Some(fetched_at_mono),
+        Some(fetched_at_wall),
+        djinn_provider::catalog::RefreshStatus::Success,
+        None,
+    );
+
+    let app = server::router(state, false);
+    let req = axum::http::Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["provider_catalog"]["source_tier"], "live");
+    assert_eq!(json["provider_catalog"]["last_refresh_status"], "success");
+    assert!(json["provider_catalog"]["last_refresh_error"].is_null());
+
+    let fetched_at = json["provider_catalog"]["fetched_at"]
+        .as_str()
+        .expect("fetched_at should be a non-null RFC3339 string");
+    let parsed =
+        time::OffsetDateTime::parse(fetched_at, &time::format_description::well_known::Rfc3339)
+            .expect("fetched_at must be a valid RFC3339 timestamp");
+    assert_eq!(parsed.unix_timestamp(), 1_700_000_000);
+
+    let age = json["provider_catalog"]["age_seconds"]
+        .as_u64()
+        .expect("age_seconds should be non-null after a successful fetch");
+    assert!(age < 5, "age should be recent; got {age}");
+}
+
+/// After a successful refresh followed by a failure, `/health` should retain
+/// the prior `fetched_at` and `age_seconds` while reporting error status/text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_provider_catalog_retains_fetched_at_after_success_then_error() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let catalog = state.catalog().clone();
+
+    let fetched_at_wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let fetched_at_mono = SystemClock::new().now_instant();
+    catalog.set_last_success_times_for_tests(
+        Some(fetched_at_mono),
+        Some(fetched_at_wall),
+        djinn_provider::catalog::RefreshStatus::Success,
+        None,
+    );
+
+    // Now transition to an error state without clearing the success timestamps.
+    catalog.set_last_success_times_for_tests(
+        Some(fetched_at_mono),
+        Some(fetched_at_wall),
+        djinn_provider::catalog::RefreshStatus::Error,
+        Some("models.dev returned HTTP 503".to_string()),
+    );
+
+    let app = server::router(state, false);
+    let req = axum::http::Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // Because the monotonic timestamp is recent, the source tier is still live.
+    assert_eq!(json["provider_catalog"]["source_tier"], "live");
+    assert_eq!(json["provider_catalog"]["last_refresh_status"], "error");
+    assert_eq!(
+        json["provider_catalog"]["last_refresh_error"],
+        "models.dev returned HTTP 503"
+    );
+
+    let fetched_at = json["provider_catalog"]["fetched_at"]
+        .as_str()
+        .expect("fetched_at should be retained as a non-null RFC3339 string");
+    let parsed =
+        time::OffsetDateTime::parse(fetched_at, &time::format_description::well_known::Rfc3339)
+            .expect("retained fetched_at must still be valid RFC3339");
+    assert_eq!(parsed.unix_timestamp(), 1_700_000_000);
+
+    let age = json["provider_catalog"]["age_seconds"]
+        .as_u64()
+        .expect("age_seconds should be retained after an error");
+    assert!(
+        age < 5,
+        "age should still reflect the recent success; got {age}"
+    );
+}
+
+/// Ensure the health endpoint stays resilient even if the catalog wall-clock
+/// timestamp is out of RFC3339 range: the rest of the response is still served.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_provider_catalog_fetched_at_degrades_safely_on_invalid_wall_time() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let catalog = state.catalog().clone();
+
+    // An out-of-range wall time should not be representable as RFC3339, so
+    // `fetched_at` serializes as null while the monotonic age remains available.
+    // `SystemTime::UNIX_EPOCH + u64::MAX` panics at runtime, so use a slightly
+    // smaller value that still overflows `OffsetDateTime::from_unix_timestamp`.
+    let fetched_at_wall = SystemTime::UNIX_EPOCH + Duration::from_secs(i64::MAX as u64);
+    let fetched_at_mono = SystemClock::new().now_instant();
+    catalog.set_last_success_times_for_tests(
+        Some(fetched_at_mono),
+        Some(fetched_at_wall),
+        djinn_provider::catalog::RefreshStatus::Success,
+        None,
+    );
+
+    let app = server::router(state, false);
+    let req = axum::http::Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["provider_catalog"]["source_tier"], "live");
+    assert_eq!(json["provider_catalog"]["last_refresh_status"], "success");
+    assert!(json["provider_catalog"]["fetched_at"].is_null());
+    assert!(
+        json["provider_catalog"]["age_seconds"].is_number(),
+        "age_seconds should still be present when formatting fails"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
