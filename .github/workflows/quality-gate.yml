@@ -476,19 +476,86 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
+  nextest-plan:
+    name: Plan Server Test Shards
+    needs: preflight
+    if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+        working-directory: server
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: false
+      - uses: taiki-e/install-action@nextest
+      - name: Restore latest successful timing data when available
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: quality-gate.yml
+          workflow_conclusion: success
+          name: nextest-timing
+          path: nextest-timing
+          if_no_artifact_found: ignore
+          search_artifacts: true
+      - name: Discover current nextest tests and plan exact-once shards
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request) profile=pull-request ;;
+            merge_group) profile=merge-group ;;
+            *) profile=full-validation ;;
+          esac
+          mkdir -p nextest-plan
+          (
+            cd server
+            cargo nextest list --workspace --all-targets --features qdrant --message-format json
+          ) > nextest-plan/discovery.json
+          args=(
+            --discovery nextest-plan/discovery.json
+            --profile "$profile"
+            --event "$EVENT_NAME"
+            --output nextest-plan/plan.json
+            --matrix nextest-plan/matrix.json
+            --proof nextest-plan/proof.json
+          )
+          if [ -f nextest-timing/timing.json ]; then
+            args+=(--timing nextest-timing/timing.json)
+          else
+            echo "::notice::No prior timing artifact found; using cold-start balancing."
+          fi
+          node scripts/ci-nextest-plan.mjs "${args[@]}"
+          jq -e '.exactOnce == true and .discoveredCount == .assignedCount and .assignedCount == .uniqueAssignedCount' nextest-plan/proof.json
+          echo '::group::Nextest exact-once proof'
+          cat nextest-plan/proof.json
+          echo '::endgroup::'
+          echo "matrix=$(jq -c '{include: .shards}' nextest-plan/matrix.json)" >> "$GITHUB_OUTPUT"
+      - name: Upload discovery, plan, and exact-once proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-plan-${{ github.run_id }}
+          path: nextest-plan/
+          if-no-files-found: error
+          retention-days: 30
   server-test:
     name: Server Test
-    needs: preflight
+    needs:
+      - preflight
+      - nextest-plan
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        shard:
-          - 1
-          - 2
-          - 3
-          - 4
+      matrix: ${{ fromJSON(needs.nextest-plan.outputs.matrix) }}
     defaults:
       run:
         working-directory: server
@@ -548,8 +615,67 @@ jobs:
         run: |
           git config --global user.email "ci@test.local"
           git config --global user.name "CI Test"
-      - name: Tests
-        run: cargo nextest run --workspace --all-targets --features qdrant --profile ci --partition count:${{ matrix.shard }}/4
+      - name: Run planner-emitted test filter and record shard timing
+        env:
+          NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
+          NEXTEST_FILTER: ${{ matrix.filter }}
+          NEXTEST_TEST_IDS: ${{ toJSON(matrix.testIds) }}
+        run: |
+          set -uo pipefail
+          started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          started_seconds=$(date +%s)
+          set +e
+          cargo nextest run --workspace --all-targets --features qdrant --profile "$NEXTEST_PROFILE" --filter-expr "$NEXTEST_FILTER"
+          status=$?
+          set -e
+          elapsed_seconds=$(( $(date +%s) - started_seconds ))
+          mkdir -p nextest-timing
+          jq --arg generated_at "$started_at" --argjson elapsed "$elapsed_seconds" --argjson ids "$NEXTEST_TEST_IDS" '
+            ($ids | length) as $count |
+            {
+              version: "ci-nextest-timing/v1",
+              generated_at: $generated_at,
+              tests: (reduce $ids[] as $id ({}; .[$id] = (if $count > 0 then ($elapsed / $count) else 0 end)))
+            }
+          ' > "nextest-timing/timing-${{ matrix.shardIndex }}.json"
+          exit "$status"
+      - name: Upload retained shard timing data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-timing-${{ github.run_id }}-${{ matrix.shard }}
+          path: server/nextest-timing/timing-${{ matrix.shardIndex }}.json
+          if-no-files-found: warn
+          retention-days: 30
+  nextest-timing-publish:
+    name: Publish Nextest Timing
+    needs:
+      - preflight
+      - server-test
+    if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push' && needs.server-test.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download current shard timing data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nextest-timing-${{ github.run_id }}-*
+          path: nextest-timing-shards
+          merge-multiple: true
+      - name: Merge current successful shard timings
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(nextest-timing-shards/*.json)
+          [ ${#files[@]} -gt 0 ] || { echo '::error::No shard timing artifacts were produced'; exit 1; }
+          mkdir -p nextest-timing
+          jq -s '{version: "ci-nextest-timing/v1", generated_at: (now | todateiso8601), tests: (reduce .[] as $timing ({}; . * $timing.tests))}' "${files[@]}" > nextest-timing/timing.json
+      - name: Upload latest compatible timing candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-timing
+          path: nextest-timing/timing.json
+          if-no-files-found: error
+          retention-days: 30
   server-sqlx-freshness:
     name: Server sqlx Freshness
     needs: preflight
