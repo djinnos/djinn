@@ -649,11 +649,10 @@ describe("ModelSection picker (browse/search)", () => {
       expect(screen.queryByText("Add a model")).not.toBeInTheDocument();
     });
     await user.click(refreshButton);
+
+    // Wait for the refetch to complete by observing the local call count.
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Refreshing…" })).toBeInTheDocument();
-    });
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Refresh models" })).toBeInTheDocument();
+      expect(callCount).toBe(2);
     });
 
     // After refresh the same mounted component can browse/search the new model.

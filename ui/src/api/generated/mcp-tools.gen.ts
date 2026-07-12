@@ -7398,7 +7398,7 @@ export namespace ProposalReconcileObsoleteEpicInputSchema {
    */
   id?: string
   /**
-   * When true, compute blast radius without closing tasks, closing/unlinking the epic, or killing sessions.
+   * When true, classify disposition without closing/unlinking the epic.
    */
   preview?: boolean
   /**
@@ -7406,7 +7406,7 @@ export namespace ProposalReconcileObsoleteEpicInputSchema {
    */
   proposal_id?: string
   /**
-   * Why obsolete work is being force-closed. Defaults to a reconcile teardown reason.
+   * Why obsolete work is being reconciled. Defaults to a reconcile reason.
    */
   reason?: string
   [k: string]: any
@@ -7422,6 +7422,7 @@ export namespace ProposalReconcileObsoleteEpicOutputSchema {
   blocked: boolean
   blocked_feedback_body?: string
   blocked_feedback_id?: string
+  disposition?: ProposalDispositionSummary
   epic_id?: string
   /**
    * Target epic closed, or that would be closed in preview.
@@ -7439,13 +7440,26 @@ export namespace ProposalReconcileObsoleteEpicOutputSchema {
   preview: boolean
   proposal_id?: string
   /**
-   * Running target-epic worker sessions killed, or live sessions in preview.
+   * Retained for wire compatibility. Proposal disposition never kills sessions
+   * directly; normal task status-change handling reconciles worker state.
    */
   sessions_killed: number
   /**
-   * Target-epic tasks force-closed, or open target-epic tasks in preview.
+   * Target-epic tasks disposed (closed), or that would be disposed in preview.
    */
   tasks_closed: number
+  [k: string]: any
+  }
+  /**
+   * Child-disposition outcomes for the selected epic. Retained findings do
+   * not make the reconciliation fail.
+   */
+  export interface ProposalDispositionSummary {
+  disposed: number
+  parked: number
+  retained_already_terminal: number
+  retained_external_dependent: number
+  retained_other_parent: number
   [k: string]: any
   }
 
@@ -8976,13 +8990,13 @@ export namespace ProposalStopBuildInputSchema {
    */
   mode: string
   /**
-   * When true on `abort`, compute and return the blast radius (epics, open
-   * tasks, running sessions) WITHOUT mutating anything.
+   * When true on `abort`, classify linked epic children and return their
+   * disposition outcomes WITHOUT mutating anything.
    */
   preview?: boolean
   /**
-   * Why the build is being stopped. Recorded as the force-close reason on
-   * each torn-down task. Required for `abort`.
+   * Why the build is being stopped. Recorded with proposal terminal
+   * disposition activity. Required for `abort`.
    */
   reason?: string
   [k: string]: any
@@ -8992,6 +9006,7 @@ export namespace ProposalStopBuildInputSchema {
 export type ProposalStopBuildInput = ProposalStopBuildInputSchema.ProposalStopBuildInput;
 export namespace ProposalStopBuildOutputSchema {
   export interface ProposalStopBuildOutput {
+  disposition?: ProposalDispositionSummary
   /**
    * Epics torn down (abort) or that would be (preview).
    */
@@ -9005,7 +9020,8 @@ export namespace ProposalStopBuildOutputSchema {
   preview: boolean
   proposal_id?: string
   /**
-   * Running worker sessions killed (abort) or live now (preview).
+   * Retained for wire compatibility. Proposal disposition never kills
+   * sessions directly; normal status-change handling reconciles them.
    */
   sessions_killed: number
   /**
@@ -9014,9 +9030,21 @@ export namespace ProposalStopBuildOutputSchema {
    */
   status?: string
   /**
-   * Worker tasks force-closed (abort) or open right now (preview).
+   * Worker tasks disposed (closed) by the parent-disposition matrix.
    */
   tasks_closed: number
+  [k: string]: any
+  }
+  /**
+   * Child-disposition outcomes for all linked epics. Retention findings do
+   * not cause abort to fail.
+   */
+  export interface ProposalDispositionSummary {
+  disposed: number
+  parked: number
+  retained_already_terminal: number
+  retained_external_dependent: number
+  retained_other_parent: number
   [k: string]: any
   }
 
