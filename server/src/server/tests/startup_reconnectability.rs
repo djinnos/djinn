@@ -179,6 +179,117 @@ async fn connected_worker_has_numerator_one_before_startup_interruption() {
     );
 }
 
+/// When the startup reconnectability measurement reports a connected worker,
+/// `interrupt_stale_sessions_on_startup` must preserve that running session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_preserves_connected_running_session() {
+    let db = create_test_db();
+    let events = test_events();
+    let task_run_id = "test-run-preserve-1";
+
+    seed_running_session_with_task_run(&db, &events, task_run_id).await;
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let state = AppState::new(db.clone(), cancel);
+    state
+        .rpc_registry()
+        .register_connected_for_test(task_run_id)
+        .await;
+
+    // Drive the full startup interruption path. The method is private and
+    // only reachable from the integration-style test via crate-internal
+    // visibility; this test file lives under the crate's `tests` module.
+    state.interrupt_stale_sessions_on_startup().await;
+
+    let running_after = SessionRepository::new(db.clone(), events.clone())
+        .list_active()
+        .await
+        .expect("list_active after startup interruption");
+    assert_eq!(
+        running_after.len(),
+        1,
+        "the connected running session must be preserved"
+    );
+    assert_eq!(
+        running_after[0].task_run_id.as_deref(),
+        Some(task_run_id),
+        "preserved session must retain its task_run_id"
+    );
+}
+
+/// When no running sessions are reconnectable, the startup interruption path
+/// must behave like the old blanket `interrupt_all_running()` and interrupt
+/// every running session, including rows with a NULL task_run_id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_reconnectable_startup_interrupts_all_running_sessions() {
+    let db = create_test_db();
+    let events = test_events();
+    let task_run_id = "test-run-stale-1";
+
+    let project_id = seed_running_session_with_task_run(&db, &events, task_run_id).await;
+
+    // Add a second running session with no task_run_id to prove NULL
+    // identities are not preserved when the reconnectability set is empty.
+    // Go through the repository layer so test setup obeys the server raw-SQL
+    // boundary just like production code.
+    let session_repo = SessionRepository::new(db.clone(), events.clone());
+    session_repo
+        .create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: None,
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("create NULL task_run_id session");
+
+    let running_before = session_repo
+        .list_active()
+        .await
+        .expect("list_active before startup interruption");
+    assert_eq!(
+        running_before.len(),
+        2,
+        "fixture must have two running sessions"
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let state = AppState::new(db.clone(), cancel);
+    // Do NOT register any connected workers; reconnectability is zero.
+
+    // Drive the full startup interruption path. The 10-second grace probe is
+    // included but finds no connected workers, so the blanket path runs.
+    state.interrupt_stale_sessions_on_startup().await;
+
+    let running_after = session_repo
+        .list_active()
+        .await
+        .expect("list_active after startup interruption");
+    assert!(
+        running_after.is_empty(),
+        "all running sessions must be interrupted when reconnectability is zero"
+    );
+
+    // Verify every previously-running session is now interrupted.
+    for session in running_before {
+        let after = SessionRepository::new(db.clone(), events.clone())
+            .get(&session.id)
+            .await
+            .expect("fetch session after interruption")
+            .expect("session must exist");
+        assert_eq!(
+            after.status,
+            djinn_core::models::SessionStatus::Interrupted.as_str(),
+            "session {} must be interrupted",
+            session.id
+        );
+    }
+}
+
 /// Verify reconnectability is derived from unique task-run identities rather
 /// than incrementing once per running session row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
