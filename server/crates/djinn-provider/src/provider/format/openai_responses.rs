@@ -1764,4 +1764,114 @@ data: [DONE]\n\n";
         assert!(events.iter().any(|e| matches!(e, StreamEvent::Usage(_))));
         assert!(events.iter().any(|e| matches!(e, StreamEvent::Done)));
     }
+
+    // ── Shared Anthropic-oriented variants do not leak into Responses requests ──
+
+    /// The Responses request (`build_request`) must skip the shared
+    /// Anthropic-oriented `ContentBlock` variants — Thinking, RedactedThinking,
+    /// and Unknown — rather than serializing them as empty `output_text` items
+    /// or otherwise altering the established Responses input shape. Guards the
+    /// shared `ContentBlock` expansion from regressing non-Anthropic provider
+    /// request content.
+    #[test]
+    fn test_build_request_drops_anthropic_thinking_and_unknown_blocks() {
+        let provider = test_provider();
+        let mut conv = Conversation::new();
+        conv.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "internal reasoning".to_string(),
+                    signature: Some("sig_abc".to_string()),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "opaque_data_blob".to_string(),
+                },
+                ContentBlock::Unknown {
+                    content_type: "custom_provider_block".to_string(),
+                    extra: {
+                        let mut m = serde_json::Map::new();
+                        m.insert("foo".to_string(), json!("bar"));
+                        m
+                    },
+                },
+                ContentBlock::text("visible output"),
+            ],
+            metadata: None,
+        });
+
+        let req = provider.build_request(&conv, &[], None);
+        let input = req["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "assistant");
+        let content = input[0]["content"].as_array().unwrap();
+        // Only the visible text survives as output_text.
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "output_text");
+        assert_eq!(content[0]["text"], "visible output");
+        // No empty-text placeholder anywhere in the input.
+        assert!(input.iter().all(|item| {
+            item.get("content")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    !arr.iter().any(|b| {
+                        b.get("type") == Some(&json!("output_text"))
+                            && b.get("text") == Some(&json!(""))
+                    })
+                })
+                .unwrap_or(true)
+        }));
+    }
+
+    /// When an assistant message contains only provider-internal Anthropic
+    /// variants, the Responses request must not emit any item for it — no
+    /// empty-text fallback and no spurious reasoning/function items.
+    #[test]
+    fn test_build_request_all_anthropic_internal_blocks_dropped() {
+        let provider = test_provider();
+        let mut conv = Conversation::new();
+        conv.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "internal reasoning".to_string(),
+                    signature: Some("sig_abc".to_string()),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "opaque".to_string(),
+                },
+            ],
+            metadata: None,
+        });
+
+        let req = provider.build_request(&conv, &[], None);
+        let input = req["input"].as_array().expect("input array");
+        // No input items emitted for the all-internal assistant message.
+        assert_eq!(input.len(), 0);
+    }
+
+    /// Unsigned thinking (historical JSON shape lacking `signature`) is also
+    /// skipped by the Responses path, confirming backward-compatible handling
+    /// does not surface as content in non-Anthropic requests.
+    #[test]
+    fn test_build_request_drops_unsigned_thinking_block() {
+        let provider = test_provider();
+        // Simulate a historical unsigned thinking block from DB storage.
+        let block: ContentBlock =
+            serde_json::from_value(json!({"type": "thinking", "thinking": "legacy"})).unwrap();
+        let mut conv = Conversation::new();
+        conv.push(Message {
+            role: Role::Assistant,
+            content: vec![block, ContentBlock::text("visible")],
+            metadata: None,
+        });
+
+        let req = provider.build_request(&conv, &[], None);
+        let input = req["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 1);
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "output_text");
+        assert_eq!(content[0]["text"], "visible");
+    }
 }
