@@ -11,6 +11,12 @@ on:
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main' || github.event_name == 'merge_group' && format('ci-merge-group-{0}', github.event.merge_group.head_sha || github.ref) || format('ci-dispatch-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+# actions: write lets the guard jobs' "Fail fast" steps (`gh run cancel`)
+# actually cancel the run — without it the cancel dies with HTTP 403 and
+# the expensive test/clippy jobs run to completion behind a failed gate.
+permissions:
+  contents: read
+  actions: write
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"

@@ -496,11 +496,12 @@ pub fn normalize_objection_signature(body: &str) -> String {
     let lowered = body.to_lowercase();
     let collapsed: String = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = collapsed.trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace());
-    // Truncate to keep signature storage bounded.
-    if trimmed.len() > 200 {
-        trimmed[..200].to_string()
-    } else {
-        trimmed.to_string()
+    // Truncate to keep signature storage bounded. Cut on a char boundary:
+    // a byte-index slice panics when byte 200 lands inside a multi-byte
+    // char (e.g. a curly quote in an objection body), killing the actor.
+    match trimmed.char_indices().nth(200) {
+        Some((byte_idx, _)) => trimmed[..byte_idx].to_string(),
+        None => trimmed.to_string(),
     }
 }
 
@@ -1022,6 +1023,15 @@ mod tests {
         let long_body = "a".repeat(500);
         let sig = normalize_objection_signature(&long_body);
         assert!(sig.len() <= 200);
+    }
+
+    #[test]
+    fn normalization_truncates_on_char_boundary_with_multibyte_chars() {
+        // A multi-byte char straddling the 200-char cut must not panic
+        // (byte-index slicing inside '”' killed the coordinator actor).
+        let sig = normalize_objection_signature(&format!("{}”{}", "a".repeat(199), "b".repeat(300)));
+        assert_eq!(sig.chars().count(), 200);
+        assert!(sig.ends_with('”'));
     }
 
     // ── StopReason tag ───────────────────────────────────────────────────

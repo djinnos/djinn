@@ -24,7 +24,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use djinn_core::clock::{Clock, SystemClock};
 
@@ -47,6 +48,134 @@ const WATCH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// the cluster-side cost; this is a belt-and-braces guard against watcher
 /// leaks if the apiserver returns persistent errors.
 const WATCH_DEADLINE: Duration = Duration::from_secs(3600);
+
+/// Default quiet-window for the merge-storm debounce (`DJINN_WARM_DEBOUNCE_SECONDS`).
+/// A few minutes: long enough that a burst of PRs landing on `main` every
+/// couple of minutes collapses into a single warm run, short enough that a
+/// genuinely idle main is re-warmed promptly.
+const DEFAULT_WARM_DEBOUNCE_SECONDS: u64 = 180;
+/// Default anti-starvation cap (`DJINN_WARM_DEBOUNCE_MAX_WAIT_SECONDS`). A
+/// continuously-advancing `main` (a long merge storm) must still be warmed
+/// eventually; once the head has been advancing for this long we stop deferring
+/// and warm the current tip.
+const DEFAULT_WARM_DEBOUNCE_MAX_WAIT_SECONDS: u64 = 900;
+
+/// Temporal debounce policy for automatic head-advance warm triggers.
+///
+/// This is purely a *scheduling* control — it changes only WHEN an automatic
+/// trigger dispatches a warm Job, never WHETHER one is warranted (every
+/// existing gate — TTL freshness, current-commit, in-flight, image-readiness —
+/// is still enforced at dispatch time). Capacity/slot gating (deferring warms
+/// while build pods are busy) is deliberately out of scope; that belongs to the
+/// in-refinement "compilation slots" proposal.
+///
+/// `quiet == 0` disables debouncing entirely: every trigger dispatches
+/// immediately, exactly reproducing the pre-debounce behaviour.
+#[derive(Clone, Copy, Debug)]
+pub struct WarmDebounceConfig {
+    /// Quiet window: after a head-advance trigger, defer the warm until `main`
+    /// has been quiet (no further trigger) for this long. Each new trigger in
+    /// the burst re-arms the window (last-wins), so a storm collapses into one
+    /// run after it settles.
+    pub quiet: Duration,
+    /// Hard cap on total deferral, measured from the FIRST trigger of a burst.
+    /// A continuously-advancing head would otherwise re-arm the quiet window
+    /// forever; once this elapses we warm the current tip regardless.
+    pub max_wait: Duration,
+}
+
+impl WarmDebounceConfig {
+    /// Debounce disabled — every trigger dispatches immediately (pre-debounce
+    /// behaviour). Used by the test constructors so existing tests keep their
+    /// synchronous semantics; production reads [`Self::from_env`].
+    pub const DISABLED: Self = Self {
+        quiet: Duration::ZERO,
+        max_wait: Duration::ZERO,
+    };
+
+    /// Load the debounce policy from the environment, falling back to the
+    /// few-minutes / 15-minute defaults. A malformed value is logged at `warn`
+    /// and the default is kept so the warmer still boots.
+    pub fn from_env() -> Self {
+        Self {
+            quiet: Duration::from_secs(env_secs(
+                "DJINN_WARM_DEBOUNCE_SECONDS",
+                DEFAULT_WARM_DEBOUNCE_SECONDS,
+            )),
+            max_wait: Duration::from_secs(env_secs(
+                "DJINN_WARM_DEBOUNCE_MAX_WAIT_SECONDS",
+                DEFAULT_WARM_DEBOUNCE_MAX_WAIT_SECONDS,
+            )),
+        }
+    }
+
+    /// True when the quiet window is non-zero, i.e. debouncing is active.
+    fn enabled(&self) -> bool {
+        !self.quiet.is_zero()
+    }
+
+    /// Effective max-wait, floored at `quiet` so a misconfiguration where
+    /// `max_wait < quiet` can never make the hard deadline fire *before* the
+    /// first quiet window would.
+    fn effective_max_wait(&self) -> Duration {
+        self.max_wait.max(self.quiet)
+    }
+}
+
+/// Parse a `u64` seconds value from `key`, warning and returning `default` on
+/// absence or a parse error.
+fn env_secs(key: &str, default: u64) -> u64 {
+    match std::env::var(key) {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(
+                    key,
+                    value = %v,
+                    error = %e,
+                    "warm debounce: env var is not a valid u64 (seconds) — keeping default"
+                );
+                default
+            }
+        },
+        Err(_) => default,
+    }
+}
+
+/// Live counters for the debounce coalescer. Cheap relaxed atomics — read via
+/// [`K8sGraphWarmer::debounce_metrics`] for observability/tests.
+#[derive(Default)]
+struct WarmDebounceMetrics {
+    /// Every automatic head-advance trigger received (`K8sGraphWarmer::trigger`).
+    triggers_received: AtomicU64,
+    /// Triggers folded into an already-pending debounce window (a storm merge
+    /// that did not itself launch a warm).
+    triggers_coalesced: AtomicU64,
+    /// Debounce windows that collapsed into exactly one dispatched warm run.
+    warms_debounced: AtomicU64,
+}
+
+/// Point-in-time snapshot of [`WarmDebounceMetrics`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WarmDebounceMetricsSnapshot {
+    pub triggers_received: u64,
+    pub triggers_coalesced: u64,
+    pub warms_debounced: u64,
+}
+
+/// Per-project pending debounce window. Exactly one exists (and exactly one
+/// driver task runs) for a project between the first trigger of a burst and the
+/// window's collapse into a dispatch.
+struct PendingWarm {
+    /// When the (extendable) quiet window currently expires. Re-armed to
+    /// `now + quiet` on each trigger, clamped to `hard_deadline`.
+    fire_at: Instant,
+    /// `first_trigger + max_wait` — the ceiling `fire_at` can never exceed, so
+    /// a continuous storm still warms within the anti-starvation bound.
+    hard_deadline: Instant,
+    /// How many triggers have folded into this window (for the collapse log).
+    coalesced: u64,
+}
 
 /// Abstraction used by [`K8sGraphWarmer`] to actually create a Job in the
 /// cluster. Factored into a trait so unit tests can supply a mock that
@@ -308,12 +437,15 @@ impl WarmJobLister for NoopWarmJobLister {
     }
 }
 
-/// Kubernetes-backed canonical-graph warmer.
+/// Immediate warm-dispatch core: every field the actual Job-launch path needs,
+/// grouped so it can be cheaply cloned into the debounce driver task.
 ///
-/// Single-flight + Notify-based fan-out semantics are enforced here; the
-/// underlying Job is dispatched via the [`WarmJobDispatcher`] abstraction
-/// so unit tests can run without a live cluster.
-pub struct K8sGraphWarmer {
+/// This holds all the pre-debounce single-flight + freshness + cluster-dedupe
+/// machinery. [`K8sGraphWarmer`] wraps it with the temporal debounce layer; the
+/// architect-facing `await_fresh` path and the disabled-debounce path call
+/// [`WarmDispatch::dispatch_warm_now`] directly for synchronous semantics.
+#[derive(Clone)]
+struct WarmDispatch {
     config: KubernetesConfig,
     db: Database,
     dispatcher: Arc<dyn WarmJobDispatcher>,
@@ -327,73 +459,12 @@ pub struct K8sGraphWarmer {
     /// In-process hook fired after a warm Job succeeds so the server can
     /// converge its canonical-graph RAM slot to the freshly persisted blob
     /// without a restart. `None` under the test/mock path and for non-K8s
-    /// wiring; production sets it via [`Self::with_completion_sink`].
+    /// wiring; production sets it via [`K8sGraphWarmer::with_completion_sink`].
     completion_sink: Option<Arc<dyn WarmCompletionSink>>,
     in_flight: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
-    /// Live kube client for Pod/Service/Job ops that the (Job-only) dispatcher
-    /// abstraction doesn't cover — e.g. backing-service provisioning. `None`
-    /// under the test/mock-dispatcher path (those ops then error/no-op).
-    client: Option<kube::Client>,
 }
 
-impl K8sGraphWarmer {
-    /// Construct a warmer backed by a live `kube::Client` (production
-    /// path).
-    pub fn new(client: kube::Client, config: KubernetesConfig, db: Database) -> Self {
-        let dispatcher = Arc::new(KubeClientDispatcher::new(client.clone()));
-        let watcher = Arc::new(KubeClientJobWatcher::new(client.clone()));
-        let lister: Arc<dyn WarmJobLister> = Arc::new(KubeClientWarmJobLister::new(client.clone()));
-        let mut w = Self::with_dispatcher_and_lister(config, db, dispatcher, watcher, Some(lister));
-        w.client = Some(client);
-        w
-    }
-
-    /// Construct a warmer with a caller-supplied dispatcher and watcher.
-    /// Unit tests use this to inject mocks.
-    pub fn with_dispatcher(
-        config: KubernetesConfig,
-        db: Database,
-        dispatcher: Arc<dyn WarmJobDispatcher>,
-        watcher: Arc<dyn WarmJobWatcher>,
-    ) -> Self {
-        Self::with_dispatcher_and_lister(config, db, dispatcher, watcher, None)
-    }
-
-    /// Construct a warmer with a caller-supplied dispatcher, watcher,
-    /// and cluster lister. Production always supplies all three; tests
-    /// that want to exercise the cluster-side dedupe pass a
-    /// programmable lister; tests that only care about the in-process
-    /// single-flight pass `None` (or [`NoopWarmJobLister`] via
-    /// [`Self::with_dispatcher`]) and skip the cluster check.
-    pub fn with_dispatcher_and_lister(
-        config: KubernetesConfig,
-        db: Database,
-        dispatcher: Arc<dyn WarmJobDispatcher>,
-        watcher: Arc<dyn WarmJobWatcher>,
-        lister: Option<Arc<dyn WarmJobLister>>,
-    ) -> Self {
-        Self {
-            config,
-            db,
-            dispatcher,
-            watcher,
-            lister,
-            completion_sink: None,
-            in_flight: Arc::new(Mutex::new(HashMap::new())),
-            client: None,
-        }
-    }
-
-    /// Attach the in-process warm-completion sink (builder style). Production
-    /// wires a sink that clears `djinn_graph`'s canonical-graph RAM slot; tests
-    /// inject a recording mock. Returns `self` for chaining off
-    /// [`Self::new`]/[`Self::with_dispatcher`].
-    #[must_use]
-    pub fn with_completion_sink(mut self, sink: Arc<dyn WarmCompletionSink>) -> Self {
-        self.completion_sink = Some(sink);
-        self
-    }
-
+impl WarmDispatch {
     /// Resolve the image the warm Job should run in, honouring catalog-image
     /// precedence (migration 46): a project on a shared catalog image warms
     /// inside that image; otherwise its own per-project build. Returns `None`
@@ -458,7 +529,7 @@ impl K8sGraphWarmer {
     /// commit-aligned (`commits_since_pin == 0`) and a re-index would
     /// produce the identical graph.
     ///
-    /// Unlike [`cache_is_fresh`] this ignores row age: a graph built for
+    /// Unlike [`Self::cache_is_fresh`] this ignores row age: a graph built for
     /// the current commit stays valid no matter how old, so the proactive
     /// refresh / mirror-tick path must not re-warm it just because some
     /// wall-clock TTL elapsed. Returns `false` (→ caller dispatches a warm)
@@ -473,21 +544,9 @@ impl K8sGraphWarmer {
         matches!(repo.get(project_id, &tip).await, Ok(Some(_)))
     }
 
-    /// Kubernetes namespace used by this warmer.
-    pub fn namespace(&self) -> &str {
-        &self.config.namespace
-    }
-
-    /// Expose the Kubernetes warm-job lister so the coordinator can build a
-    /// production [`WarmJobGuard`] that shares the same non-terminal Job
-    /// semantics.
-    pub fn warm_job_lister(&self) -> Option<Arc<dyn WarmJobLister>> {
-        self.lister.clone()
-    }
-
     /// Cross-process dedupe query: `true` if the cluster (any process)
     /// currently holds at least one non-terminal warm Job for
-    /// `project_id`. Centralised so the two `trigger` call sites
+    /// `project_id`. Centralised so the two `dispatch_warm_now` call sites
     /// (pre-slot + post-slot race-safe re-check) stay in lock-step
     /// and the test mock can substitute a single hook instead of two
     /// duplicated branches. Returns `false` when no lister is wired
@@ -514,55 +573,18 @@ impl K8sGraphWarmer {
             None => false,
         }
     }
-}
 
-/// Best-effort lookup of the project's `origin/main` tip inside the
-/// server's bare-mirror root. Returns `None` on any error (missing
-/// mirror, `git` failure, invalid UTF-8, or empty output). The `K8sGraphWarmer`
-/// treats `None` as "cache unknown" → it proceeds to trigger + wait.
-async fn discover_mirror_main_tip(project_id: &str) -> Option<String> {
-    let mirror_path = djinn_workspace::mirror_path_for(project_id);
-    let output = djinn_git::run_git_command_in(
-        &mirror_path,
-        vec!["rev-parse".into(), "refs/heads/main".into()],
-    )
-    .await
-    .ok()?;
-    let sha = output.stdout.trim().to_string();
-    if sha.is_empty() { None } else { Some(sha) }
-}
-
-#[async_trait]
-impl GraphWarmerService for K8sGraphWarmer {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), WarmerError> {
-        let client = self.client.as_ref().ok_or_else(|| {
-            WarmerError::Backend("task-run Job teardown requires a live kube client".to_string())
-        })?;
-        crate::runtime::delete_taskrun_job_foreground(client, &self.config.namespace, task_run_id)
-            .await
-            .map_err(|e| WarmerError::Backend(format!("delete task-run Job: {e}")))
-    }
-
-    async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, WarmerError> {
-        let client = self.client.as_ref().ok_or_else(|| {
-            WarmerError::Backend("task-run Job inventory requires a live kube client".to_string())
-        })?;
-        crate::runtime::list_taskrun_jobs(client, &self.config.namespace)
-            .await
-            .map_err(|e| WarmerError::Backend(format!("list task-run Jobs: {e}")))
-    }
-
-    async fn trigger(&self, project_id: &str) {
+    /// Launch a warm Job *now*, preserving every gate (commit-freshness,
+    /// image-readiness, in-process single-flight, cluster dedupe). This is the
+    /// pre-debounce `trigger` body verbatim; the temporal debounce lives one
+    /// level up in [`K8sGraphWarmer::trigger`].
+    async fn dispatch_warm_now(&self, project_id: &str) {
         {
             let guard = self.in_flight.lock().await;
             if guard.contains_key(project_id) {
                 debug!(
                     project_id,
-                    "K8sGraphWarmer::trigger: warm already in flight, coalescing"
+                    "K8sGraphWarmer: warm already in flight, coalescing"
                 );
                 return;
             }
@@ -581,7 +603,7 @@ impl GraphWarmerService for K8sGraphWarmer {
         if self.cache_has_current_commit(project_id).await {
             debug!(
                 project_id,
-                "K8sGraphWarmer::trigger: graph already current for origin/main tip; skipping warm"
+                "K8sGraphWarmer: graph already current for origin/main tip; skipping warm"
             );
             return;
         }
@@ -589,7 +611,7 @@ impl GraphWarmerService for K8sGraphWarmer {
         let Some(image_tag) = self.resolve_project_image_tag(project_id).await else {
             info!(
                 project_id,
-                "K8sGraphWarmer::trigger: no ready project image; skipping warm \
+                "K8sGraphWarmer: no ready project image; skipping warm \
                  (devcontainer image not built yet)"
             );
             return;
@@ -609,7 +631,7 @@ impl GraphWarmerService for K8sGraphWarmer {
             debug!(
                 project_id,
                 namespace = %self.config.namespace,
-                "K8sGraphWarmer::trigger: cluster has non-terminal warm Job for project; coalescing"
+                "K8sGraphWarmer: cluster has non-terminal warm Job for project; coalescing"
             );
             return;
         }
@@ -622,7 +644,7 @@ impl GraphWarmerService for K8sGraphWarmer {
             if guard.contains_key(project_id) {
                 debug!(
                     project_id,
-                    "K8sGraphWarmer::trigger: warm already in flight (race-lost), coalescing"
+                    "K8sGraphWarmer: warm already in flight (race-lost), coalescing"
                 );
                 return;
             }
@@ -644,7 +666,7 @@ impl GraphWarmerService for K8sGraphWarmer {
             debug!(
                 project_id,
                 namespace = %self.config.namespace,
-                "K8sGraphWarmer::trigger: cluster warm Job appeared between first check and slot acquisition; releasing slot and coalescing"
+                "K8sGraphWarmer: cluster warm Job appeared between first check and slot acquisition; releasing slot and coalescing"
             );
             let mut guard = self.in_flight.lock().await;
             if let Some(n) = guard.remove(project_id) {
@@ -683,7 +705,7 @@ impl GraphWarmerService for K8sGraphWarmer {
                 warn!(
                     project_id,
                     error = %e,
-                    "K8sGraphWarmer::trigger: Job dispatch failed"
+                    "K8sGraphWarmer: Job dispatch failed"
                 );
                 // Drop the in-flight slot + wake any waiters so await_fresh
                 // doesn't hang on our failure.
@@ -700,7 +722,7 @@ impl GraphWarmerService for K8sGraphWarmer {
             job = %job_name,
             namespace = %namespace,
             image = %image_tag,
-            "K8sGraphWarmer::trigger: warm Job created"
+            "K8sGraphWarmer: warm Job created"
         );
 
         let watcher = self.watcher.clone();
@@ -739,6 +761,307 @@ impl GraphWarmerService for K8sGraphWarmer {
             );
         });
     }
+}
+
+/// Kubernetes-backed canonical-graph warmer.
+///
+/// Wraps a [`WarmDispatch`] (single-flight + Notify-based fan-out + cluster
+/// dedupe) with a merge-storm **debounce** layer over the automatic
+/// head-advance trigger path: a storm of `main` advances collapses into a
+/// single warm run once it settles (see [`WarmDebounceConfig`]). The underlying
+/// Job is dispatched via the [`WarmJobDispatcher`] abstraction so unit tests can
+/// run without a live cluster.
+pub struct K8sGraphWarmer {
+    dispatch: WarmDispatch,
+    /// Live kube client for Pod/Service/Job ops that the (Job-only) dispatcher
+    /// abstraction doesn't cover — e.g. backing-service provisioning. `None`
+    /// under the test/mock-dispatcher path (those ops then error/no-op).
+    client: Option<kube::Client>,
+    /// Temporal debounce policy for the automatic head-advance trigger path.
+    debounce: WarmDebounceConfig,
+    /// Per-project pending debounce windows. An entry exists (and one driver
+    /// task runs) between the first trigger of a burst and the window's
+    /// collapse into a dispatch.
+    pending_warms: Arc<Mutex<HashMap<String, PendingWarm>>>,
+    /// Live coalescer counters (triggers received / coalesced / debounced).
+    metrics: Arc<WarmDebounceMetrics>,
+}
+
+impl K8sGraphWarmer {
+    /// Construct a warmer backed by a live `kube::Client` (production
+    /// path). Reads the merge-storm debounce policy from the environment.
+    pub fn new(client: kube::Client, config: KubernetesConfig, db: Database) -> Self {
+        let dispatcher = Arc::new(KubeClientDispatcher::new(client.clone()));
+        let watcher = Arc::new(KubeClientJobWatcher::new(client.clone()));
+        let lister: Arc<dyn WarmJobLister> = Arc::new(KubeClientWarmJobLister::new(client.clone()));
+        let mut w = Self::with_dispatcher_and_lister(config, db, dispatcher, watcher, Some(lister));
+        w.client = Some(client);
+        w.debounce = WarmDebounceConfig::from_env();
+        w
+    }
+
+    /// Construct a warmer with a caller-supplied dispatcher and watcher.
+    /// Unit tests use this to inject mocks. Debounce defaults to
+    /// [`WarmDebounceConfig::DISABLED`] so tests keep synchronous dispatch;
+    /// opt into debouncing with [`Self::with_debounce`].
+    pub fn with_dispatcher(
+        config: KubernetesConfig,
+        db: Database,
+        dispatcher: Arc<dyn WarmJobDispatcher>,
+        watcher: Arc<dyn WarmJobWatcher>,
+    ) -> Self {
+        Self::with_dispatcher_and_lister(config, db, dispatcher, watcher, None)
+    }
+
+    /// Construct a warmer with a caller-supplied dispatcher, watcher,
+    /// and cluster lister. Production always supplies all three; tests
+    /// that want to exercise the cluster-side dedupe pass a
+    /// programmable lister; tests that only care about the in-process
+    /// single-flight pass `None` (or [`NoopWarmJobLister`] via
+    /// [`Self::with_dispatcher`]) and skip the cluster check. Debounce
+    /// defaults to [`WarmDebounceConfig::DISABLED`].
+    pub fn with_dispatcher_and_lister(
+        config: KubernetesConfig,
+        db: Database,
+        dispatcher: Arc<dyn WarmJobDispatcher>,
+        watcher: Arc<dyn WarmJobWatcher>,
+        lister: Option<Arc<dyn WarmJobLister>>,
+    ) -> Self {
+        Self {
+            dispatch: WarmDispatch {
+                config,
+                db,
+                dispatcher,
+                watcher,
+                lister,
+                completion_sink: None,
+                in_flight: Arc::new(Mutex::new(HashMap::new())),
+            },
+            client: None,
+            debounce: WarmDebounceConfig::DISABLED,
+            pending_warms: Arc::new(Mutex::new(HashMap::new())),
+            metrics: Arc::new(WarmDebounceMetrics::default()),
+        }
+    }
+
+    /// Attach the in-process warm-completion sink (builder style). Production
+    /// wires a sink that clears `djinn_graph`'s canonical-graph RAM slot; tests
+    /// inject a recording mock. Returns `self` for chaining off
+    /// [`Self::new`]/[`Self::with_dispatcher`].
+    #[must_use]
+    pub fn with_completion_sink(mut self, sink: Arc<dyn WarmCompletionSink>) -> Self {
+        self.dispatch.completion_sink = Some(sink);
+        self
+    }
+
+    /// Override the merge-storm debounce policy (builder style). Production
+    /// takes it from the environment via [`Self::new`]; tests use this to
+    /// exercise the quiet-window / max-wait / disabled behaviours with short
+    /// real durations.
+    #[must_use]
+    pub fn with_debounce(mut self, debounce: WarmDebounceConfig) -> Self {
+        self.debounce = debounce;
+        self
+    }
+
+    /// Snapshot the live debounce coalescer counters.
+    pub fn debounce_metrics(&self) -> WarmDebounceMetricsSnapshot {
+        WarmDebounceMetricsSnapshot {
+            triggers_received: self.metrics.triggers_received.load(Ordering::Relaxed),
+            triggers_coalesced: self.metrics.triggers_coalesced.load(Ordering::Relaxed),
+            warms_debounced: self.metrics.warms_debounced.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Kubernetes namespace used by this warmer.
+    pub fn namespace(&self) -> &str {
+        &self.dispatch.config.namespace
+    }
+
+    /// Expose the Kubernetes warm-job lister so the coordinator can build a
+    /// production [`WarmJobGuard`] that shares the same non-terminal Job
+    /// semantics.
+    pub fn warm_job_lister(&self) -> Option<Arc<dyn WarmJobLister>> {
+        self.dispatch.lister.clone()
+    }
+
+    /// Arm (or re-arm) the debounce window for `project_id` in response to an
+    /// automatic head-advance trigger, spawning the driver task on the first
+    /// trigger of a burst. Returns whether a new driver was spawned (unused in
+    /// production; asserted by tests). The caller has already confirmed
+    /// debouncing is enabled.
+    async fn arm_debounce(&self, project_id: &str) {
+        let now = SystemClock::new().now_instant();
+        let mut map = self.pending_warms.lock().await;
+        if let Some(entry) = map.get_mut(project_id) {
+            // Coalesce into the pending window: extend the quiet window but
+            // never past the hard max-wait deadline (last-wins).
+            entry.fire_at = (now + self.debounce.quiet).min(entry.hard_deadline);
+            entry.coalesced += 1;
+            self.metrics.triggers_coalesced.fetch_add(1, Ordering::Relaxed);
+            debug!(
+                project_id,
+                coalesced = entry.coalesced,
+                "K8sGraphWarmer: head-advance trigger coalesced into pending debounce window"
+            );
+            return;
+        }
+        // First trigger of a new burst: open a window and spawn its driver.
+        let hard_deadline = now + self.debounce.effective_max_wait();
+        let fire_at = (now + self.debounce.quiet).min(hard_deadline);
+        map.insert(
+            project_id.to_string(),
+            PendingWarm {
+                fire_at,
+                hard_deadline,
+                coalesced: 1,
+            },
+        );
+        drop(map);
+        debug!(
+            project_id,
+            quiet_secs = self.debounce.quiet.as_secs(),
+            max_wait_secs = self.debounce.effective_max_wait().as_secs(),
+            "K8sGraphWarmer: opened debounce window for head-advance trigger"
+        );
+        let pending = self.pending_warms.clone();
+        let metrics = self.metrics.clone();
+        let dispatch = self.dispatch.clone();
+        let project = project_id.to_string();
+        tokio::spawn(async move {
+            run_debounce_driver(project, pending, metrics, dispatch).await;
+        });
+    }
+}
+
+/// Debounce driver: owns a single project's pending window from the first
+/// trigger of a burst until it dispatches exactly one warm run.
+///
+/// State machine:
+/// 1. **Quiet wait** — sleep until `fire_at`. Each trigger extends `fire_at`
+///    (capped at `hard_deadline`), so a storm keeps the driver asleep until it
+///    settles; a continuous storm still fires at `hard_deadline`.
+/// 2. **In-flight drain** — if a warm is already running (an earlier burst, an
+///    architect `await_fresh`), wait for it to finish so the follow-up coalesces
+///    into ONE dispatch at the latest tip rather than queueing a stale SHA.
+/// 3. **Collapse** — remove the pending entry, log how many triggers folded in,
+///    and dispatch the current tip. `dispatch_warm_now` re-checks every gate, so
+///    a no-op (nothing changed) is cheap and safe.
+async fn run_debounce_driver(
+    project_id: String,
+    pending: Arc<Mutex<HashMap<String, PendingWarm>>>,
+    metrics: Arc<WarmDebounceMetrics>,
+    dispatch: WarmDispatch,
+) {
+    // 1. Quiet wait (re-reads fire_at each iteration to observe extensions).
+    loop {
+        let remaining = {
+            let map = pending.lock().await;
+            let Some(entry) = map.get(&project_id) else {
+                // Entry vanished — defensive, shouldn't happen. Nothing to do.
+                return;
+            };
+            entry
+                .fire_at
+                .checked_duration_since(SystemClock::new().now_instant())
+        };
+        match remaining {
+            Some(d) if !d.is_zero() => tokio::time::sleep(d).await,
+            _ => break,
+        }
+    }
+
+    // 2. Drain any in-flight warm so we coalesce into a single follow-up at the
+    //    latest tip (never a queue of stale SHAs).
+    loop {
+        let notify = { dispatch.in_flight.lock().await.get(&project_id).cloned() };
+        match notify {
+            Some(n) => n.notified().await,
+            None => break,
+        }
+    }
+
+    // 3. Collapse the window and dispatch the current tip.
+    let coalesced = {
+        let mut map = pending.lock().await;
+        map.remove(&project_id).map(|e| e.coalesced).unwrap_or(0)
+    };
+    metrics.warms_debounced.fetch_add(1, Ordering::Relaxed);
+    info!(
+        project_id = %project_id,
+        coalesced_triggers = coalesced,
+        "K8sGraphWarmer: debounce window collapsed {coalesced} head-advance trigger(s) into one warm run"
+    );
+    dispatch.dispatch_warm_now(&project_id).await;
+}
+
+/// Best-effort lookup of the project's `origin/main` tip inside the
+/// server's bare-mirror root. Returns `None` on any error (missing
+/// mirror, `git` failure, invalid UTF-8, or empty output). The `K8sGraphWarmer`
+/// treats `None` as "cache unknown" → it proceeds to trigger + wait.
+async fn discover_mirror_main_tip(project_id: &str) -> Option<String> {
+    let mirror_path = djinn_workspace::mirror_path_for(project_id);
+    let output = djinn_git::run_git_command_in(
+        &mirror_path,
+        vec!["rev-parse".into(), "refs/heads/main".into()],
+    )
+    .await
+    .ok()?;
+    let sha = output.stdout.trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+#[async_trait]
+impl GraphWarmerService for K8sGraphWarmer {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), WarmerError> {
+        let client = self.client.as_ref().ok_or_else(|| {
+            WarmerError::Backend("task-run Job teardown requires a live kube client".to_string())
+        })?;
+        crate::runtime::delete_taskrun_job_foreground(
+            client,
+            &self.dispatch.config.namespace,
+            task_run_id,
+        )
+        .await
+        .map_err(|e| WarmerError::Backend(format!("delete task-run Job: {e}")))
+    }
+
+    async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, WarmerError> {
+        let client = self.client.as_ref().ok_or_else(|| {
+            WarmerError::Backend("task-run Job inventory requires a live kube client".to_string())
+        })?;
+        crate::runtime::list_taskrun_jobs(client, &self.dispatch.config.namespace)
+            .await
+            .map_err(|e| WarmerError::Backend(format!("list task-run Jobs: {e}")))
+    }
+
+    /// Automatic head-advance trigger entry point.
+    ///
+    /// This is the merge-storm debounce layer. Every automatic caller — the
+    /// coordinator's periodic `refresh_canonical_graphs_if_stale`, the
+    /// post-build `image_build_watcher`, and (transitively) the mirror-fetch
+    /// tick — funnels through here. With debouncing enabled we coalesce a burst
+    /// of `main` advances into ONE warm run after the storm settles (see
+    /// [`run_debounce_driver`]); with it disabled (`quiet == 0`) we dispatch
+    /// immediately, exactly reproducing the pre-debounce behaviour. The
+    /// architect-facing `await_fresh` path bypasses debouncing and dispatches
+    /// synchronously — it is a manual, latency-sensitive warm, not a storm
+    /// trigger.
+    async fn trigger(&self, project_id: &str) {
+        self.metrics
+            .triggers_received
+            .fetch_add(1, Ordering::Relaxed);
+        if self.debounce.enabled() {
+            self.arm_debounce(project_id).await;
+        } else {
+            // Debounce disabled → preserve the exact pre-debounce semantics.
+            self.dispatch.dispatch_warm_now(project_id).await;
+        }
+    }
 
     async fn await_fresh(
         &self,
@@ -746,25 +1069,27 @@ impl GraphWarmerService for K8sGraphWarmer {
         ttl: Duration,
         timeout: Duration,
     ) -> Result<(), WarmerError> {
-        if self.cache_is_fresh(project_id, ttl).await {
+        if self.dispatch.cache_is_fresh(project_id, ttl).await {
             return Ok(());
         }
 
         // If a warm is already in flight, grab its Notify before triggering
         // so we don't race a completion.
         let existing_notify = {
-            let guard = self.in_flight.lock().await;
+            let guard = self.dispatch.in_flight.lock().await;
             guard.get(project_id).cloned()
         };
 
         let notify = if let Some(n) = existing_notify {
             n
         } else {
-            // Kick off a warm (fire-and-forget semantics); if the trigger
-            // succeeds the in-flight map holds a Notify we can re-subscribe
-            // to.
-            self.trigger(project_id).await;
-            let guard = self.in_flight.lock().await;
+            // Kick off a warm synchronously (NOT via the debounce path): the
+            // architect is actively blocked on this graph, so we must not defer
+            // it behind a quiet window. `dispatch_warm_now` is the immediate
+            // launch path; if it succeeds the in-flight map holds a Notify we
+            // re-subscribe to.
+            self.dispatch.dispatch_warm_now(project_id).await;
+            let guard = self.dispatch.in_flight.lock().await;
             match guard.get(project_id).cloned() {
                 Some(n) => n,
                 None => {
