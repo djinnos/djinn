@@ -507,7 +507,7 @@ pub fn tool_proposal_blocks() -> RmcpTool {
 pub fn tool_proposal_reconcile_obsolete_epic() -> RmcpTool {
     RmcpTool::new(
         "proposal_reconcile_obsolete_epic".to_string(),
-        "Scoped teardown for one obsolete graduated epic. Blocks if any target task has merged work; otherwise applies the shared parent-disposition matrix to only the selected linked epic's children: disposed and closed, parked for lead intervention, retained for another open proposal parent, or retained for an external dependent. It then closes and unlinks only the selected epic, leaving unrelated graduated epics linked. Use instead of whole-build proposal_stop_build during Reconcile tasks.".to_string(),
+        "Scoped teardown for one obsolete graduated epic. Blocks if any target task has merged work; otherwise applies the shared parent-disposition matrix to only the selected linked epic's children: disposed/closed, parked for lead intervention, retained for another open proposal parent, or retained for an external dependent. It then closes and unlinks only the selected epic, leaving unrelated graduated epics linked. Use instead of whole-build proposal_stop_build during Reconcile tasks.".to_string(),
         object!({
             "type": "object",
             "required": ["proposal_id", "epic_id"],

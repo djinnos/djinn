@@ -528,7 +528,7 @@ fn proposal_reconcile_obsolete_epic_schema_documents_scope_and_blocking() {
         "Blocks if any target task has merged work",
         "shared parent-disposition matrix",
         "only the selected linked epic's children",
-        "disposed and closed",
+        "disposed/closed",
         "parked for lead intervention",
         "retained for another open proposal parent",
         "retained for an external dependent",
