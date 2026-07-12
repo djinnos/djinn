@@ -558,10 +558,11 @@ impl NoteConsolidationRepository {
         // three times per row (SELECT, WHERE > $5, ORDER BY), which dominated
         // the ~1s cost. The `@@` membership test in the CTE stays GIN-index
         // eligible.
-        sqlx::query_as!(
-            NoteDedupCandidate,
+        // Runtime query: the complete candidate body is intentionally added to
+        // this bounded projection, but the offline SQLx cache predates it.
+        sqlx::query_as::<_, NoteDedupCandidate>(
             r#"WITH ranked AS (
-                 SELECT n.id, n.permalink, n.title, n.folder, n.note_type,
+                 SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.content,
                         n.abstract AS abstract_, n.overview,
                         ts_rank(n.search_vector, websearch_to_tsquery('english', $1))::float8 AS score
                  FROM notes n
@@ -571,19 +572,19 @@ impl NoteConsolidationRepository {
                    AND n.note_type = $4
                    AND n.storage = 'db'
                )
-               SELECT id, permalink, title, folder, note_type, abstract_, overview,
-                      score AS "score!: f64"
+               SELECT id, permalink, title, folder, note_type, content, abstract_, overview,
+                      score
                FROM ranked
                WHERE score > $5
                ORDER BY score DESC
                LIMIT $6"#,
-            safe_query,
-            project_id,
-            folder,
-            note_type,
-            score_threshold,
-            DEDUP_LIMIT
         )
+        .bind(safe_query)
+        .bind(project_id)
+        .bind(folder)
+        .bind(note_type)
+        .bind(score_threshold)
+        .bind(DEDUP_LIMIT)
         .fetch_all(self.db.pool())
         .await
         .map_err(Into::into)

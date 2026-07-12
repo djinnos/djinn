@@ -1,7 +1,38 @@
 #[cfg(test)]
 mod tests {
-    use crate::tools::memory_tools::write_dedup_prompt::parse_memory_write_dedup_decision;
-    use crate::tools::memory_tools::write_dedup_types::MemoryWriteDedupDecision;
+    use djinn_memory::NoteDedupCandidate;
+
+    use crate::tools::memory_tools::write_dedup_prompt::{
+        MEMORY_WRITE_DEDUP_CANDIDATE_CONTENT_CHAR_CAP, parse_memory_write_dedup_decision,
+        render_memory_write_dedup_prompt,
+    };
+    use crate::tools::memory_tools::write_dedup_types::{
+        MemoryWriteDedupDecision, MemoryWriteDedupDecisionInput,
+    };
+
+    fn candidate(content: String) -> NoteDedupCandidate {
+        NoteDedupCandidate {
+            id: "note_123".to_string(),
+            permalink: "patterns/candidate".to_string(),
+            title: "Candidate".to_string(),
+            folder: "patterns".to_string(),
+            note_type: "pattern".to_string(),
+            content,
+            abstract_: Some("abstract metadata".to_string()),
+            overview: Some("overview metadata".to_string()),
+            score: 0.9,
+        }
+    }
+
+    fn render(candidate: &NoteDedupCandidate) -> String {
+        render_memory_write_dedup_prompt(&MemoryWriteDedupDecisionInput {
+            project_path: "owner/repo",
+            title: "Incoming",
+            content: "Incoming body",
+            note_type: "pattern",
+            candidates: std::slice::from_ref(candidate),
+        })
+    }
 
     #[test]
     fn parses_reuse_decision() {
@@ -33,5 +64,40 @@ mod tests {
                 merged_content: "Combined".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn renders_full_candidate_body_below_cap_with_summary_as_metadata() {
+        let prompt = render(&candidate("Authoritative candidate body.".to_string()));
+
+        assert!(prompt.contains("  body:\nAuthoritative candidate body."));
+        assert!(prompt.contains("  summary: overview metadata"));
+        assert!(!prompt.contains("  body:\noverview metadata"));
+    }
+
+    #[test]
+    fn truncates_candidate_body_deterministically_at_named_cap() {
+        let content = "a".repeat(MEMORY_WRITE_DEDUP_CANDIDATE_CONTENT_CHAR_CAP + 10);
+        let prompt = render(&candidate(content));
+        let expected_body = "a".repeat(MEMORY_WRITE_DEDUP_CANDIDATE_CONTENT_CHAR_CAP);
+
+        assert!(prompt.contains(&format!(
+            "  body:\n{expected_body}\n… [truncated at {MEMORY_WRITE_DEDUP_CANDIDATE_CONTENT_CHAR_CAP} characters]"
+        )));
+    }
+
+    #[test]
+    fn truncates_candidate_body_on_unicode_character_boundary() {
+        let content = format!(
+            "{}Z",
+            "é".repeat(MEMORY_WRITE_DEDUP_CANDIDATE_CONTENT_CHAR_CAP)
+        );
+        let prompt = render(&candidate(content));
+        let expected_body = "é".repeat(MEMORY_WRITE_DEDUP_CANDIDATE_CONTENT_CHAR_CAP);
+
+        assert!(prompt.contains(&format!(
+            "  body:\n{expected_body}\n… [truncated at {MEMORY_WRITE_DEDUP_CANDIDATE_CONTENT_CHAR_CAP} characters]"
+        )));
+        assert!(!prompt.contains(&format!("{expected_body}Z")));
     }
 }

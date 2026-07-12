@@ -42,8 +42,8 @@
 //!    one trailing newline.
 
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::tool_defs::{
     tool_schemas_adversary, tool_schemas_advocate, tool_schemas_architect,
@@ -57,6 +57,277 @@ use crate::tool_defs::{
 pub struct ToolSurfaceConflict {
     pub name: String,
     pub message: String,
+}
+
+/// A reviewed exception for a description mention that is not an operation.
+/// Every exception needs an explicit approval rationale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationDescriptionAllowlistEntry {
+    pub value: &'static str,
+    pub approved_rationale: &'static str,
+}
+
+/// Reviewed operation-description exceptions. This intentionally starts empty:
+/// adding an exception is a contract decision, not a parser escape hatch.
+pub const OPERATION_DESCRIPTION_ALLOWLIST: &[OperationDescriptionAllowlistEntry] = &[];
+
+/// A description-promised operation absent from a matching schema enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationEnumDiagnostic {
+    pub tool_name: String,
+    /// Dot-separated JSON-schema path rooted at `inputSchema`.
+    pub field_path: String,
+    pub missing_mentioned_value: String,
+    /// At most three values ordered by edit distance, then bytewise name.
+    pub nearest_enum_values: Vec<String>,
+}
+
+impl std::fmt::Display for OperationEnumDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tool `{}` field `{}` mentions operation `{}` absent from enum; nearest enum values: [{}]",
+            self.tool_name,
+            self.field_path,
+            self.missing_mentioned_value,
+            self.nearest_enum_values.join(", ")
+        )
+    }
+}
+
+/// Check all recursive string `operation` properties with enum arrays against
+/// narrowly extracted promises in the owning tool's description.
+///
+/// Extraction accepts Markdown code spans in an operation context and clear
+/// slash/comma lists near operation language (or substantially overlapping the
+/// enum). It deliberately does not tokenize ordinary natural-language prose.
+pub fn validate_operation_description_enums(tools: &[Value]) -> Vec<OperationEnumDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for tool in tools {
+        let Some(object) = tool.as_object() else {
+            continue;
+        };
+        let (Some(name), Some(description), Some(schema)) = (
+            object.get("name").and_then(Value::as_str),
+            object.get("description").and_then(Value::as_str),
+            object.get("inputSchema"),
+        ) else {
+            continue;
+        };
+        collect_operation_diagnostics(schema, "inputSchema", name, description, &mut diagnostics);
+    }
+    diagnostics.sort_by(|left, right| {
+        (
+            &left.tool_name,
+            &left.field_path,
+            &left.missing_mentioned_value,
+        )
+            .cmp(&(
+                &right.tool_name,
+                &right.field_path,
+                &right.missing_mentioned_value,
+            ))
+    });
+    diagnostics
+}
+
+fn collect_operation_diagnostics(
+    schema: &Value,
+    path: &str,
+    tool_name: &str,
+    description: &str,
+    diagnostics: &mut Vec<OperationEnumDiagnostic>,
+) {
+    let Some(object) = schema.as_object() else {
+        return;
+    };
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        if let Some(operation_schema) = properties.get("operation")
+            && let Some(enum_values) = string_enum(operation_schema)
+        {
+            let enum_set: BTreeSet<&str> = enum_values.iter().map(String::as_str).collect();
+            for candidate in extract_operation_candidates(description, &enum_set) {
+                if !enum_set.contains(candidate.as_str()) && !is_allowlisted(&candidate) {
+                    diagnostics.push(OperationEnumDiagnostic {
+                        tool_name: tool_name.to_string(),
+                        field_path: format!("{path}.properties.operation"),
+                        nearest_enum_values: nearest_enum_values(&candidate, &enum_values),
+                        missing_mentioned_value: candidate,
+                    });
+                }
+            }
+        }
+        for (property_name, property_schema) in properties {
+            collect_operation_diagnostics(
+                property_schema,
+                &format!("{path}.properties.{property_name}"),
+                tool_name,
+                description,
+                diagnostics,
+            );
+        }
+    }
+    for (key, value) in object {
+        if key == "properties" {
+            continue;
+        }
+        match value {
+            Value::Object(_) => collect_operation_diagnostics(
+                value,
+                &format!("{path}.{key}"),
+                tool_name,
+                description,
+                diagnostics,
+            ),
+            Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    if value.is_object() {
+                        collect_operation_diagnostics(
+                            value,
+                            &format!("{path}.{key}[{index}]"),
+                            tool_name,
+                            description,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn string_enum(schema: &Value) -> Option<Vec<String>> {
+    let object = schema.as_object()?;
+    if object.get("type").and_then(Value::as_str) != Some("string") {
+        return None;
+    }
+    object
+        .get("enum")?
+        .as_array()?
+        .iter()
+        .map(|value| value.as_str().map(str::to_owned))
+        .collect()
+}
+
+fn is_allowlisted(candidate: &str) -> bool {
+    OPERATION_DESCRIPTION_ALLOWLIST
+        .iter()
+        .any(|entry| entry.value == candidate)
+}
+
+fn extract_operation_candidates(
+    description: &str,
+    enum_values: &BTreeSet<&str>,
+) -> BTreeSet<String> {
+    let mut candidates = BTreeSet::new();
+    let mut remainder = description;
+    let mut consumed = 0;
+    while let Some(start) = remainder.find('`') {
+        let after_start = &remainder[start + 1..];
+        let Some(end) = after_start.find('`') else {
+            break;
+        };
+        let candidate = &after_start[..end];
+        let span_start = consumed + start;
+        let span_end = consumed + start + 1 + end;
+        let before = description[..span_start]
+            .chars()
+            .rev()
+            .take(48)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        let after = description[span_end..].chars().take(48).collect::<String>();
+        let operation_context = before.to_ascii_lowercase().contains("operation")
+            || after.to_ascii_lowercase().contains("operation");
+        if is_operation_token(candidate) && (operation_context || enum_values.contains(candidate)) {
+            candidates.insert(candidate.to_string());
+        }
+        consumed += start + end + 2;
+        remainder = &after_start[end + 1..];
+    }
+
+    for list in description.split([';', '.', '\n']) {
+        let mut values = list_values(list);
+        if values.len() < 2 {
+            continue;
+        }
+        values.retain(|value| value != "operation" && value != "operations");
+        let lower_list = list.to_ascii_lowercase();
+        let operation_context = lower_list.contains("operation:")
+            || lower_list.contains("operations:")
+            || lower_list.contains("operation=");
+        let enum_overlap = values
+            .iter()
+            .filter(|value| enum_values.contains(value.as_str()))
+            .count();
+        if operation_context || enum_overlap >= 2 {
+            candidates.extend(values)
+        }
+    }
+    candidates
+}
+
+fn list_values(text: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    // Slash catalogues are intentionally restricted to one whitespace-delimited
+    // run, so prose after `ranked/cycles/... = ...` is never treated as values.
+    for run in text.split_whitespace().filter(|run| run.contains('/')) {
+        values.extend(run.split('/').filter_map(clean_operation_token));
+    }
+
+    // Comma catalogues require an explicit operation label. This accepts the
+    // conventional `operations: foo, bar` form without promoting a prose comma.
+    let lower = text.to_ascii_lowercase();
+    let marker = ["operations:", "operation:", "operation="]
+        .into_iter()
+        .find_map(|marker| lower.find(marker).map(|index| index + marker.len()));
+    if let Some(marker) = marker {
+        values.extend(text[marker..].split(',').filter_map(clean_operation_token));
+    }
+    values
+}
+
+fn clean_operation_token(value: &str) -> Option<String> {
+    let token = value.trim_matches(|character: char| {
+        !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+    });
+    is_operation_token(token).then(|| token.to_string())
+}
+
+fn is_operation_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn nearest_enum_values(candidate: &str, enum_values: &[String]) -> Vec<String> {
+    let mut values = enum_values.to_vec();
+    values.sort_by(|left, right| {
+        levenshtein(candidate, left)
+            .cmp(&levenshtein(candidate, right))
+            .then_with(|| left.cmp(right))
+    });
+    values.into_iter().take(3).collect()
+}
+
+fn levenshtein(left: &str, right: &str) -> usize {
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    for (left_index, left_byte) in left.bytes().enumerate() {
+        let mut current = vec![left_index + 1];
+        for (right_index, right_byte) in right.bytes().enumerate() {
+            current.push(
+                (previous[right_index + 1] + 1)
+                    .min(current[right_index] + 1)
+                    .min(previous[right_index] + usize::from(left_byte != right_byte)),
+            );
+        }
+        previous = current;
+    }
+    previous[right.len()]
 }
 
 /// Collect the unique advertised tool union from all active role/session
@@ -280,15 +551,15 @@ mod tests {
         let p2 = project_tool_schema(second);
         by_name.insert(name.clone(), p1);
         // force the second to conflict by checking against the inserted content
-        if let Some(existing) = by_name.get(&name) {
-            if *existing != p2 {
-                return Err(ToolSurfaceConflict {
-                    name: name.clone(),
-                    message: format!(
-                        "same name advertised with different schemas; first={existing}, second={p2}"
-                    ),
-                });
-            }
+        if let Some(existing) = by_name.get(&name)
+            && *existing != p2
+        {
+            return Err(ToolSurfaceConflict {
+                name: name.clone(),
+                message: format!(
+                    "same name advertised with different schemas; first={existing}, second={p2}"
+                ),
+            });
         }
         Ok(())
     }
@@ -362,5 +633,95 @@ mod tests {
         assert!(names.contains("code_graph"));
         assert!(names.contains("submit_work"));
         assert!(names.contains("task_show"));
+    }
+
+    fn operation_tool(description: &str, input_schema: Value) -> Value {
+        json!({
+            "name": "example_tool",
+            "description": description,
+            "inputSchema": input_schema,
+        })
+    }
+
+    #[test]
+    fn operation_guard_accepts_complete_slash_catalogue() {
+        let tool = operation_tool(
+            "ranked/cycles/orphans/path/edges",
+            json!({"type": "object", "properties": {
+                "operation": {"type": "string", "enum": ["ranked", "cycles", "orphans", "path", "edges"]}
+            }}),
+        );
+        assert!(validate_operation_description_enums(&[tool]).is_empty());
+    }
+
+    #[test]
+    fn operation_guard_reports_a7qo_style_catalogue_mismatch() {
+        let tool = operation_tool(
+            "api_surface/dead_symbols/deprecated_callers/route_map/shape_check/api_impact/flow",
+            json!({"type": "object", "properties": {
+                "operation": {"type": "string", "enum": ["api_surface", "dead_symbols", "deprecated_callers"]}
+            }}),
+        );
+        let diagnostics = validate_operation_description_enums(&[tool]);
+        let missing: Vec<&str> = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.missing_mentioned_value.as_str())
+            .collect();
+        assert_eq!(missing, ["api_impact", "flow", "route_map", "shape_check"]);
+        assert!(diagnostics.iter().all(|diagnostic| {
+            diagnostic.tool_name == "example_tool"
+                && diagnostic.field_path == "inputSchema.properties.operation"
+                && diagnostic.nearest_enum_values.len() == 3
+        }));
+        assert!(diagnostics[2].to_string().contains("route_map"));
+    }
+
+    #[test]
+    fn operation_guard_recognizes_trailing_operation_context() {
+        let tool = operation_tool(
+            "Choose `Run` as the operation.",
+            json!({"type": "object", "properties": {
+                "operation": {"type": "string", "enum": ["run", "stop"]}
+            }}),
+        );
+        let diagnostics = validate_operation_description_enums(&[tool]);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].missing_mentioned_value, "Run");
+        assert_eq!(
+            diagnostics[0].field_path,
+            "inputSchema.properties.operation"
+        );
+        assert_eq!(diagnostics[0].nearest_enum_values, ["run", "stop"]);
+    }
+
+    #[test]
+    fn operation_guard_recurses_and_preserves_candidate_case() {
+        let tool = operation_tool(
+            "Select operation `Run`.",
+            json!({"type": "object", "properties": {
+                "config": {"type": "array", "items": {"type": "object", "properties": {
+                    "operation": {"type": "string", "enum": ["run", "stop"]}
+                }}}
+            }}),
+        );
+        let diagnostics = validate_operation_description_enums(&[tool]);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].missing_mentioned_value, "Run");
+        assert_eq!(
+            diagnostics[0].field_path,
+            "inputSchema.properties.config.items.properties.operation"
+        );
+        assert_eq!(diagnostics[0].nearest_enum_values, ["run", "stop"]);
+    }
+
+    #[test]
+    fn operation_guard_ignores_ordinary_prose() {
+        let tool = operation_tool(
+            "This operation can route requests through a flow, but users choose it naturally.",
+            json!({"type": "object", "properties": {
+                "operation": {"type": "string", "enum": ["start", "stop"]}
+            }}),
+        );
+        assert!(validate_operation_description_enums(&[tool]).is_empty());
     }
 }
