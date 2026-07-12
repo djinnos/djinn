@@ -203,15 +203,27 @@ Zot: zot-retention-gc-observation.md.
 
 ### 1. `zot_retention`
 
+Stage: [Stage 0](SHARED_CACHE_CLEANUP_ROLLOUT.md#stage-0--zot-dry-run-and-selected-image-preflight).
+
 ### 2. `sccache`
+
+Stage: [Stage 1](SHARED_CACHE_CLEANUP_ROLLOUT.md#stage-1--prove-build-pods-do-not-rely-on-sccache) and [Stage 2](SHARED_CACHE_CLEANUP_ROLLOUT.md#stage-2--operator-owned-one-time-cachesccache-deletion).
 
 ### 3. `cargo_target_runs_debris`
 
+Stage: [Stage 3](SHARED_CACHE_CLEANUP_ROLLOUT.md#stage-3--recurring-sccache-guard-and-run-root-debris-cleanup).
+
 ### 4. `warm_idle`
+
+Stage: [Stage 4](SHARED_CACHE_CLEANUP_ROLLOUT.md#stage-4--warm-base-idle-eviction-then-pressure-eviction).
 
 ### 5. `warm_pressure`
 
+Stage: [Stage 4](SHARED_CACHE_CLEANUP_ROLLOUT.md#stage-4--warm-base-idle-eviction-then-pressure-eviction).
+
 ### 6. `warm_fingerprint` (gated, last)
+
+Stage: [Fingerprint-last hold](SHARED_CACHE_CLEANUP_ROLLOUT.md#fingerprint-last-hold).
 
 > Fail-safe and last. This references the w06b gate and cannot be read as
 > proof that destructive fingerprint cleanup already exists or is enabled.
@@ -420,6 +432,27 @@ sh "$GUARD" > "$FIXTURE_DIR/t11_real.log.out" 2>&1
 t11_rc=$?
 set -e
 assert_exit "T11 real checked-in docs pass" 0 "$t11_rc" "$FIXTURE_DIR/t11_real.log.out"
+
+# ── T12: broken checklist anchor targets fail ────────────────────────
+# Reproduces the reviewer failure mode: every checklist stage target is
+# rewritten to a nonexistent anchor while the runbook headings and text stay
+# intact. The generic link resolver must catch this.
+write_good_runbook
+write_good_checklist
+write_good_run_dir
+write_good_zot
+# Rewrite the fragment parts of every checklist link that points to a runbook
+# stage or to the fingerprint hold. Keep the surrounding Markdown and the
+# destination file unchanged so only the anchor is broken.
+sed -i 's/#stage-[^)]*/#broken-stage/g; s/#fingerprint-last-hold/#broken-fingerprint/g' "$F_CHECKLIST"
+set +e
+run_guard t12_broken_anchor
+t12_rc=$?
+set -e
+assert_exit "T12 broken checklist anchor targets fail" 1 "$t12_rc" "$FIXTURE_DIR/t12_broken_anchor.log.out"
+assert_output_contains "T12 reports broken link fragment" \
+    "link fragment not found" \
+    "$FIXTURE_DIR/t12_broken_anchor.log.out"
 
 # ── summary ─────────────────────────────────────────────────────────
 printf -- '------------------------------------------\n'

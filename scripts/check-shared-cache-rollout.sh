@@ -31,6 +31,20 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 cd "$REPO_ROOT"
 
+# Use a writable scratch directory for intermediate files. The sandbox may not
+# allow writes to /tmp, so prefer /var/tmp or the per-run Djinn cache.
+SCRATCH_DIR=''
+cleanup() {
+    if [ -n "${SCRATCH_DIR:-}" ] && [ -d "$SCRATCH_DIR" ]; then
+        rm -rf -- "$SCRATCH_DIR" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+SCRATCH_DIR=$(mktemp -d /var/tmp/djinn-rollout-guard.XXXXXX 2>/dev/null || \
+              mktemp -d "$HOME/.cache/djinn/djinn-rollout-guard.XXXXXX" 2>/dev/null || \
+              mktemp -d "${TMPDIR:-.}/djinn-rollout-guard.XXXXXX")
+
 # Paths are overridable via environment so the self-test harness can point the
 # guard at synthetic fixture files without touching the checked-in docs.
 RUNBOOK="${SHARED_CACHE_ROLLOUT_RUNBOOK:-docs/SHARED_CACHE_CLEANUP_ROLLOUT.md}"
@@ -102,6 +116,19 @@ djinn_cache_cleanup_reclaimed_bytes_total
 # order. zot_retention is the externally executed registry action; the next four
 # are coordinator-owned; warm_fingerprint is gated and last.
 CHECKLIST_COMPONENTS='zot_retention sccache cargo_target_runs_debris warm_idle warm_pressure warm_fingerprint'
+
+# Exact Markdown destinations the checklist must use to link each component row
+# to the canonical runbook stage. The generic anchor resolver below also checks
+# that every fragment resolves, but these exact strings are the operator-stage
+# cross-link contract and must not drift.
+CHECKLIST_RUNBOOK_LINKS='
+SHARED_CACHE_CLEANUP_ROLLOUT.md#stage-0--zot-dry-run-and-selected-image-preflight
+SHARED_CACHE_CLEANUP_ROLLOUT.md#stage-1--prove-build-pods-do-not-rely-on-sccache
+SHARED_CACHE_CLEANUP_ROLLOUT.md#stage-2--operator-owned-one-time-cachesccache-deletion
+SHARED_CACHE_CLEANUP_ROLLOUT.md#stage-3--recurring-sccache-guard-and-run-root-debris-cleanup
+SHARED_CACHE_CLEANUP_ROLLOUT.md#stage-4--warm-base-idle-eviction-then-pressure-eviction
+SHARED_CACHE_CLEANUP_ROLLOUT.md#fingerprint-last-hold
+'
 
 # Helm value paths that the runbook's Stage 0 example must reference.
 ZOT_HELM_VALUES='
@@ -234,12 +261,14 @@ check_file_links() {
     src_dir=$(CDPATH= cd -- "$(dirname -- "$src")" && pwd)
 
     _links_ok=1
-    _link_tmp=$(mktemp)
+    _link_tmp="$SCRATCH_DIR/links.$label_prefix"
     awk '
     {
         line = $0
         while (match(line, /\[[^]]+\]\([^)]+\)/)) {
             link = substr(line, RSTART, RLENGTH)
+            _link_rstart = RSTART
+            _link_rlength = RLENGTH
             p1 = index(link, "(")
             p2 = index(link, ")")
             url = substr(link, p1 + 1, p2 - p1 - 1)
@@ -249,7 +278,7 @@ check_file_links() {
             # breaks quote escaping, so we only handle double-quoted titles here.
             if (match(url, /[ \t]+".*"$/)) url = substr(url, 1, RSTART - 1)
             if (url != "") print url
-            line = substr(line, RSTART + RLENGTH)
+            line = substr(line, _link_rstart + _link_rlength)
         }
     }
     ' "$src" > "$_link_tmp"
@@ -333,6 +362,27 @@ IFS="$_prev_ifs"
 printf '\n-- cross-link anchor resolution --\n'
 check_file_links "runbook" "$RUNBOOK"
 check_file_links "checklist" "$CHECKLIST"
+
+# ── Checklist exact stage-link destinations ──────────────────────────
+# The generic resolver above catches broken fragments, but the operator-stage
+# cross-link contract is a fixed set of exact Markdown destinations. Verify
+# each one is present in the checklist and resolves to a real runbook anchor.
+printf '\n-- checklist exact stage links --\n'
+_prev_ifs="$IFS"
+IFS='
+'
+for link in $CHECKLIST_RUNBOOK_LINKS; do
+    [ -z "$link" ] && continue
+    assert_contains "checklist contains exact stage link: $link" "$CHECKLIST" "$link"
+    fragment="${link##*#}"
+    if extract_anchors "$RUNBOOK" | grep -qxF -- "$fragment"; then
+        pass "checklist stage link resolves: $link"
+    else
+        fail "checklist stage link resolves: $link" \
+            "fragment '$fragment' not present in $RUNBOOK"
+    fi
+done
+IFS="$_prev_ifs"
 
 # Keep a separate guard that the runbook still contains the literal stage
 # headings the checklist expects to link to, so a heading rename cannot be
