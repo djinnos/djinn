@@ -1162,87 +1162,61 @@ fn set_custom_providers_then_refresh_does_not_resurrect() {
 
 // ── Freshness / source-tier metadata tests ──────────────────────────────────
 
-/// A freshly-seeded service exposes `Never` status, no error, no successful
-/// fetch age, and an `Embedded` source tier regardless of the requested max age.
 #[test]
 fn freshness_initial_state_is_never_and_embedded() {
     let catalog = CatalogService::new();
     assert_eq!(catalog.last_refresh_status(), RefreshStatus::Never);
     assert!(catalog.last_refresh_error().is_none());
-    assert!(
-        catalog.last_successful_fetch_age().is_none(),
-        "no live fetch has occurred yet"
-    );
-    assert_eq!(
-        catalog.source_tier(Duration::from_secs(60)),
-        SourceTier::Embedded,
-        "with no successful fetch the tier must be Embedded even for a large max age"
-    );
+    assert!(catalog.last_successful_fetch_time().is_none());
+    assert!(catalog.last_successful_fetch_age().is_none());
+    assert_eq!(catalog.source_tier(Duration::from_secs(60)), SourceTier::Embedded);
 }
 
-/// After a successful refresh, the status is `Success`, the error is cleared,
-/// a successful-fetch age is recorded, and the source tier is `Live` within the
-/// freshness window.  This exercises the accessors end-to-end without a network
-/// call by composing directly under the write lock (mirroring `refresh()`).
 #[test]
-fn freshness_after_success_is_live_with_age() {
+fn freshness_after_success_exposes_wall_time_and_monotonic_freshness() {
     let catalog = CatalogService::new();
-    {
-        let mut data = catalog.inner.write();
-        let providers = vec![mk_custom_provider("openai")];
-        let mut models_idx = HashMap::new();
-        models_idx.insert("openai".to_string(), vec![mk_seed_model("gpt-x", "openai")]);
-        compose_catalog(&mut data, providers, models_idx);
-        data.fetched_at = Some(SystemClock::new().now_instant());
-        data.last_refresh_status = RefreshStatus::Success;
-        data.last_refresh_error = None;
-    }
+    let monotonic_success = SystemClock::new().now_instant() - Duration::from_secs(30);
+    let expected_wall_success = SystemTime::UNIX_EPOCH + Duration::from_secs(1_735_689_600);
+    catalog.set_last_success_times_for_tests(
+        Some(monotonic_success),
+        Some(expected_wall_success),
+        RefreshStatus::Success,
+        None,
+    );
 
     assert_eq!(catalog.last_refresh_status(), RefreshStatus::Success);
     assert!(catalog.last_refresh_error().is_none());
+    assert_eq!(catalog.last_successful_fetch_time(), Some(expected_wall_success));
 
     let age = catalog
         .last_successful_fetch_age()
         .expect("age must be Some after a successful fetch");
-    assert!(
-        age <= Duration::from_secs(5),
-        "age should be near-zero immediately after success; got {age:?}"
-    );
-    assert_eq!(
-        catalog.source_tier(Duration::from_secs(60)),
-        SourceTier::Live,
-        "within the freshness window the tier is Live"
-    );
+    assert!(age >= Duration::from_secs(30), "got {age:?}");
+    assert_eq!(catalog.source_tier(Duration::from_secs(60)), SourceTier::Live);
+    assert_eq!(catalog.source_tier(Duration::from_secs(20)), SourceTier::Stale);
 }
 
-/// A successful refresh followed by a failing refresh must keep serving the
-/// previous catalog data and transition the status to `Error` with a message,
-/// while the previously-recorded fetch age stays non-None (so the tier can be
-/// computed as Stale once the age exceeds the window).
 #[test]
 fn freshness_success_then_failure_preserves_catalog_and_records_error() {
     let catalog = CatalogService::new();
-    // Seed a successful refresh.
-    {
-        let mut data = catalog.inner.write();
-        let providers = vec![mk_custom_provider("openai")];
-        let mut models_idx = HashMap::new();
-        models_idx.insert("openai".to_string(), vec![mk_seed_model("gpt-x", "openai")]);
-        compose_catalog(&mut data, providers, models_idx);
-        data.fetched_at = Some(SystemClock::new().now_instant());
-        data.last_refresh_status = RefreshStatus::Success;
-        data.last_refresh_error = None;
-    }
-    assert!(catalog.list_providers().iter().any(|p| p.id == "openai"));
+    catalog.add_custom_provider(
+        mk_custom_provider("openai"),
+        vec![mk_seed_model("gpt-x", "openai")],
+    );
+    let monotonic_success = SystemClock::new().now_instant() - Duration::from_secs(90);
+    let expected_wall_success = SystemTime::UNIX_EPOCH + Duration::from_secs(1_735_689_600);
+    catalog.set_last_success_times_for_tests(
+        Some(monotonic_success),
+        Some(expected_wall_success),
+        RefreshStatus::Success,
+        None,
+    );
+    assert_eq!(catalog.source_tier(Duration::from_secs(60)), SourceTier::Stale);
 
-    // Now simulate a failing refresh (the Err arm): status flips to Error, an
-    // error message is recorded, but the active catalog is left untouched.
     {
         let mut data = catalog.inner.write();
         data.last_refresh_status = RefreshStatus::Error;
         data.last_refresh_error = Some("models.dev returned HTTP 503".to_string());
-        // fetched_at is intentionally NOT cleared — the last *successful* fetch
-        // time persists so the tier can be computed as Stale.
     }
 
     assert_eq!(catalog.last_refresh_status(), RefreshStatus::Error);
@@ -1250,16 +1224,13 @@ fn freshness_success_then_failure_preserves_catalog_and_records_error() {
         catalog.last_refresh_error().as_deref(),
         Some("models.dev returned HTTP 503")
     );
-    // The active catalog survived.
-    assert!(
-        catalog.list_providers().iter().any(|p| p.id == "openai"),
-        "the previous successful catalog must still be served after a failure"
-    );
-    // The last successful fetch age is still available.
-    assert!(
-        catalog.last_successful_fetch_age().is_some(),
-        "fetch age must persist after a failure so the tier can be computed"
-    );
+    assert!(catalog.list_providers().iter().any(|p| p.id == "openai"));
+    assert_eq!(catalog.last_successful_fetch_time(), Some(expected_wall_success));
+    let age = catalog
+        .last_successful_fetch_age()
+        .expect("the monotonic success timestamp must persist after a failure");
+    assert!(age >= Duration::from_secs(90), "got {age:?}");
+    assert_eq!(catalog.source_tier(Duration::from_secs(60)), SourceTier::Stale);
 }
 
 /// `source_tier` reports `Stale` when a fetch previously succeeded but the
