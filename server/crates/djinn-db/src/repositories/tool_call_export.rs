@@ -257,16 +257,56 @@ pub fn normalize_persisted_transcript(input: &PersistedTranscript) -> Vec<Normal
 mod tests {
     use super::*;
 
-    fn session(id: &str, model_id: &str, agent_type: &str, task_id: Option<&str>, started_at: &str) -> SessionRecord {
-        SessionRecord { id: id.into(), project_id: None, task_id: task_id.map(str::to_owned), model_id: model_id.into(), agent_type: agent_type.into(), started_at: started_at.into(), ended_at: None, status: "completed".into(), tokens_in: 0, tokens_out: 0, cache_read_tokens: 0, cache_write_tokens: 0, task_run_id: None, title: None, parked_reason: None, cost_usd: None, input_price_per_million_snapshot: None, output_price_per_million_snapshot: None, cache_read_price_per_million_snapshot: None, cache_write_price_per_million_snapshot: None, cost_basis: "unpriced".into(), billing_source: None }
+    fn session(
+        id: &str,
+        model_id: &str,
+        agent_type: &str,
+        task_id: Option<&str>,
+        started_at: &str,
+    ) -> SessionRecord {
+        SessionRecord {
+            id: id.into(),
+            project_id: None,
+            task_id: task_id.map(str::to_owned),
+            model_id: model_id.into(),
+            agent_type: agent_type.into(),
+            started_at: started_at.into(),
+            ended_at: None,
+            status: "completed".into(),
+            tokens_in: 0,
+            tokens_out: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            task_run_id: None,
+            title: None,
+            parked_reason: None,
+            cost_usd: None,
+            input_price_per_million_snapshot: None,
+            output_price_per_million_snapshot: None,
+            cache_read_price_per_million_snapshot: None,
+            cache_write_price_per_million_snapshot: None,
+            cost_basis: "unpriced".into(),
+            billing_source: None,
+        }
     }
 
     fn message(position: usize, role: &str, content: serde_json::Value) -> SessionMessage {
-        SessionMessage { id: format!("message-{position}"), session_id: "session-1".into(), role: role.into(), content_json: content.to_string(), token_count: None, created_at: format!("2026-02-03T00:00:{position:02}Z") }
+        SessionMessage {
+            id: format!("message-{position}"),
+            session_id: "session-1".into(),
+            role: role.into(),
+            content_json: content.to_string(),
+            token_count: None,
+            created_at: format!("2026-02-03T00:00:{position:02}Z"),
+        }
     }
 
     fn dimensions() -> ExportDimensions {
-        ExportDimensions { provider_id: Some("anthropic".into()), format_family: Some("anthropic_messages".into()), tool_surface_family: Some("native".into()) }
+        ExportDimensions {
+            provider_id: Some("anthropic".into()),
+            format_family: Some("anthropic_messages".into()),
+            tool_surface_family: Some("native".into()),
+        }
     }
     #[test]
     fn hash_is_key_order_stable() {
@@ -287,42 +327,192 @@ mod tests {
     fn persisted_transcript_fixture_pairs_calls_and_normalizes_complete_rows() {
         // Ordering has an unrelated pre-call result and reverse-ordered identified results.
         let transcript = PersistedTranscript {
-            session: session("session-1", "claude-test", "worker", Some("task-1"), "2026-02-03T04:05:06Z"), dimensions: dimensions(),
+            session: session(
+                "session-1",
+                "claude-test",
+                "worker",
+                Some("task-1"),
+                "2026-02-03T04:05:06Z",
+            ),
+            dimensions: dimensions(),
             messages: vec![
-                message(0, "user", serde_json::json!([{"type":"tool_result","tool_use_id":"unrelated","content":[{"type":"text","text":"ignore me"}],"is_error":false}])),
-                message(1, "assistant", serde_json::json!([{"type":"tool_use","id":"call-a","name":"read","input":{"path":"src/lib.rs"}}])),
-                message(2, "assistant", serde_json::json!([{"type":"tool_use","id":"call-b","name":"apply_patch","input":{"patch":"x"}}])),
-                message(3, "user", serde_json::json!([{"type":"tool_result","tool_use_id":"call-b","content":[{"type":"text","text":"Provider rate limit"},{"type":"unknown","content_type":"provider_payload","has_more":true}],"is_error":true}])),
-                message(4, "user", serde_json::json!([{"type":"tool_result","tool_use_id":"call-a","content":[{"type":"text","text":"output was truncated"}],"is_error":false}])),
-                message(5, "assistant", serde_json::json!([{"type":"tool_use","id":"call-missing","name":"write","input":{}}])),
-                message(6, "assistant", serde_json::json!([{"type":"tool_use","id":"","name":"shell","input":{"command":"sleep"}}])),
-                message(7, "user", serde_json::json!([{"type":"tool_result","tool_use_id":"","content":[{"type":"text","text":"cancelled by user"}],"is_error":true}])),
+                message(
+                    0,
+                    "user",
+                    serde_json::json!([{"type":"tool_result","tool_use_id":"unrelated","content":[{"type":"text","text":"ignore me"}],"is_error":false}]),
+                ),
+                message(
+                    1,
+                    "assistant",
+                    serde_json::json!([{"type":"tool_use","id":"call-a","name":"read","input":{"path":"src/lib.rs"}}]),
+                ),
+                message(
+                    2,
+                    "assistant",
+                    serde_json::json!([{"type":"tool_use","id":"call-b","name":"apply_patch","input":{"patch":"x"}}]),
+                ),
+                message(
+                    3,
+                    "user",
+                    serde_json::json!([{"type":"tool_result","tool_use_id":"call-b","content":[{"type":"text","text":"Provider rate limit"},{"type":"unknown","content_type":"provider_payload","has_more":true}],"is_error":true}]),
+                ),
+                message(
+                    4,
+                    "user",
+                    serde_json::json!([{"type":"tool_result","tool_use_id":"call-a","content":[{"type":"text","text":"output was truncated"}],"is_error":false}]),
+                ),
+                message(
+                    5,
+                    "assistant",
+                    serde_json::json!([{"type":"tool_use","id":"call-missing","name":"write","input":{}}]),
+                ),
+                message(
+                    6,
+                    "assistant",
+                    serde_json::json!([{"type":"tool_use","id":"","name":"shell","input":{"command":"sleep"}}]),
+                ),
+                message(
+                    7,
+                    "user",
+                    serde_json::json!([{"type":"tool_result","tool_use_id":"","content":[{"type":"text","text":"cancelled by user"}],"is_error":true}]),
+                ),
             ],
         };
-        let row = |tool_call_id: Option<String>, turn_index: usize, tool_name: &str, args_hash: &str, result_status: &str, error_class: Option<String>, error_text: Option<String>, read_truncated: bool, diagnostics: Vec<String>| NormalizedToolCallRow {
-            provider_id: Some("anthropic".into()), model_id: Some("claude-test".into()), format_family: Some("anthropic_messages".into()), tool_surface_family: Some("native".into()), agent_role: Some("worker".into()), session_id: "session-1".into(), task_id: Some("task-1".into()), calendar_day: Some("2026-02-03".into()), window_start: Some("2026-02-03T00:00:00Z".into()), tool_call_id, turn_index, tool_name: tool_name.into(), args_hash: args_hash.into(), result_status: result_status.into(), error_class, error_text, read_truncated, diagnostics,
+        let row = |tool_call_id: Option<String>,
+                   turn_index: usize,
+                   tool_name: &str,
+                   args_hash: &str,
+                   result_status: &str,
+                   error_class: Option<String>,
+                   error_text: Option<String>,
+                   read_truncated: bool,
+                   diagnostics: Vec<String>| NormalizedToolCallRow {
+            provider_id: Some("anthropic".into()),
+            model_id: Some("claude-test".into()),
+            format_family: Some("anthropic_messages".into()),
+            tool_surface_family: Some("native".into()),
+            agent_role: Some("worker".into()),
+            session_id: "session-1".into(),
+            task_id: Some("task-1".into()),
+            calendar_day: Some("2026-02-03".into()),
+            window_start: Some("2026-02-03T00:00:00Z".into()),
+            tool_call_id,
+            turn_index,
+            tool_name: tool_name.into(),
+            args_hash: args_hash.into(),
+            result_status: result_status.into(),
+            error_class,
+            error_text,
+            read_truncated,
+            diagnostics,
         };
-        assert_eq!(normalize_persisted_transcript(&transcript), vec![
-            row(Some("call-a".into()), 1, "read", "sha256:54047b442992a19c4f9c11c7c70f2fe9a8344276b07cdbe6b65c218cffa37ecd", "success", None, None, true, vec![]),
-            row(Some("call-b".into()), 2, "apply_patch", "sha256:a23f7741869867d034a8f266ef420b0dff344e51a78d3f9cff0314826ce1c084", "error", Some("provider".into()), Some("Provider rate limit".into()), true, vec![]),
-            row(Some("call-missing".into()), 5, "write", "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a", "missing", None, None, false, vec!["missing_matching_tool_result".into()]),
-            row(None, 6, "shell", "sha256:ca47c539409bc50021fbcfdfd5991b9a5eaf304e39c62fe6715f643bf5fa0ead", "error", Some("cancelled".into()), Some("cancelled by user".into()), false, vec!["missing_tool_call_id".into(), "tool_result_paired_by_transcript_position".into()]),
-        ]);
+        assert_eq!(
+            normalize_persisted_transcript(&transcript),
+            vec![
+                row(
+                    Some("call-a".into()),
+                    1,
+                    "read",
+                    "sha256:54047b442992a19c4f9c11c7c70f2fe9a8344276b07cdbe6b65c218cffa37ecd",
+                    "success",
+                    None,
+                    None,
+                    true,
+                    vec![]
+                ),
+                row(
+                    Some("call-b".into()),
+                    2,
+                    "apply_patch",
+                    "sha256:a23f7741869867d034a8f266ef420b0dff344e51a78d3f9cff0314826ce1c084",
+                    "error",
+                    Some("provider".into()),
+                    Some("Provider rate limit".into()),
+                    true,
+                    vec![]
+                ),
+                row(
+                    Some("call-missing".into()),
+                    5,
+                    "write",
+                    "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                    "missing",
+                    None,
+                    None,
+                    false,
+                    vec!["missing_matching_tool_result".into()]
+                ),
+                row(
+                    None,
+                    6,
+                    "shell",
+                    "sha256:ca47c539409bc50021fbcfdfd5991b9a5eaf304e39c62fe6715f643bf5fa0ead",
+                    "error",
+                    Some("cancelled".into()),
+                    Some("cancelled by user".into()),
+                    false,
+                    vec![
+                        "missing_tool_call_id".into(),
+                        "tool_result_paired_by_transcript_position".into()
+                    ]
+                ),
+            ]
+        );
     }
 
     #[test]
     fn persisted_fixture_keeps_missing_dimensions_null_and_bounds_timeout_error() {
         let error = format!(" timeout\n {}", "x".repeat(600));
         let transcript = PersistedTranscript {
-            session: session("session-missing", "", "", None, ""), dimensions: ExportDimensions::default(),
+            session: session("session-missing", "", "", None, ""),
+            dimensions: ExportDimensions::default(),
             messages: vec![
-                message(0, "assistant", serde_json::json!([{"type":"tool_use","id":"call-timeout","name":"shell","input":{}}])),
-                message(1, "user", serde_json::json!([{"type":"tool_result","tool_use_id":"call-timeout","content":[{"type":"text","text":error}],"is_error":true}])),
+                message(
+                    0,
+                    "assistant",
+                    serde_json::json!([{"type":"tool_use","id":"call-timeout","name":"shell","input":{}}]),
+                ),
+                message(
+                    1,
+                    "user",
+                    serde_json::json!([{"type":"tool_result","tool_use_id":"call-timeout","content":[{"type":"text","text":error}],"is_error":true}]),
+                ),
             ],
         };
-        let expected_error = format!("timeout {}", "x".repeat(600)).chars().take(512).collect();
-        assert_eq!(normalize_persisted_transcript(&transcript), vec![NormalizedToolCallRow {
-            provider_id: None, model_id: None, format_family: None, tool_surface_family: None, agent_role: None, session_id: "session-missing".into(), task_id: None, calendar_day: None, window_start: None, tool_call_id: Some("call-timeout".into()), turn_index: 0, tool_name: "shell".into(), args_hash: "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a".into(), result_status: "error".into(), error_class: Some("timeout".into()), error_text: Some(expected_error), read_truncated: false, diagnostics: vec!["missing_agent_role".into(), "missing_format_family".into(), "missing_model_id".into(), "missing_provider_id".into(), "missing_task_id".into(), "missing_tool_surface_family".into()],
-        }]);
+        let expected_error = format!("timeout {}", "x".repeat(600))
+            .chars()
+            .take(512)
+            .collect();
+        assert_eq!(
+            normalize_persisted_transcript(&transcript),
+            vec![NormalizedToolCallRow {
+                provider_id: None,
+                model_id: None,
+                format_family: None,
+                tool_surface_family: None,
+                agent_role: None,
+                session_id: "session-missing".into(),
+                task_id: None,
+                calendar_day: None,
+                window_start: None,
+                tool_call_id: Some("call-timeout".into()),
+                turn_index: 0,
+                tool_name: "shell".into(),
+                args_hash:
+                    "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a".into(),
+                result_status: "error".into(),
+                error_class: Some("timeout".into()),
+                error_text: Some(expected_error),
+                read_truncated: false,
+                diagnostics: vec![
+                    "missing_agent_role".into(),
+                    "missing_format_family".into(),
+                    "missing_model_id".into(),
+                    "missing_provider_id".into(),
+                    "missing_task_id".into(),
+                    "missing_tool_surface_family".into()
+                ],
+            }]
+        );
     }
 }

@@ -805,53 +805,99 @@ async fn doctor_run_persists_jk7v_aligned_classifier_evidence() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn closed_parent_open_children_dry_run_persists_all_matrix_rows_without_fixing() {
+async fn closed_parent_open_children_db_dry_run_is_read_only() {
     use djinn_agent::doctor::{
-        CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, MemoryClosedParentOpenChildrenSource,
+        CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, TaskRepositoryClosedParentOpenChildrenSource,
         register_closed_parent_open_children_check,
     };
-
+    use djinn_core::events::DjinnEventEnvelope;
+    use djinn_db::EpicRepository;
+    use sqlx::Row;
     let harness = doctor_test_harness().await;
-    let source = Arc::new(MemoryClosedParentOpenChildrenSource::new(json!({
-        "total": 4,
-        "findings": [
-            {"id":"orphan-close","short_id":"close","title":"Close","status":"open",
-             "terminal_epic_ids":["epic-1"],"recommended_disposition":{"action":"close","status":"closed","guard":"parent_closed"}},
-            {"id":"orphan-in-flight","short_id":"flight","title":"In flight","status":"in_progress",
-             "terminal_epic_ids":["epic-1"],"recommended_disposition":{"action":"park","status":"needs_lead_intervention","guard":"historical_parent_closed_in_flight"}},
-            {"id":"orphan-pr","short_id":"pr","title":"PR active","status":"pr_review",
-             "terminal_epic_ids":["epic-1"],"recommended_disposition":{"action":"park","status":"needs_lead_intervention","guard":"historical_parent_closed_pr_active"}},
-            {"id":"orphan-skip","short_id":"skip","title":"Guarded","status":"open",
-             "terminal_epic_ids":["epic-1"],"other_open_parent_ids":["epic-open"],"recommended_disposition":{"action":"retain","status":"none","guard":"other_open_parent"}}
-        ]
-    })));
-    register_closed_parent_open_children_check(registry(), source);
-
+    let project = common::create_test_project(harness.db()).await;
+    let epics = EpicRepository::new(harness.db().clone(), common::test_events());
+    let mut ids = Vec::new();
+    for status in ["open", "in_progress", "pr_review", "open"] {
+        let epic = common::create_test_epic(harness.db(), &project.id).await;
+        let task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
+        sqlx::query("UPDATE tasks SET status=$1, pr_url=CASE WHEN $1='pr_review' THEN 'https://github.com/djinnos/djinn/pull/999999' ELSE pr_url END WHERE id=$2").bind(status).bind(&task.id).execute(harness.db().pool()).await.unwrap();
+        epics.set_status_raw(&epic.id, "closed").await.unwrap();
+        ids.push(task.id);
+    }
+    let proposal = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO proposals(id,short_id,title,status) VALUES($1,$2,'live parent','ready')",
+    )
+    .bind(&proposal)
+    .bind(format!("p{}", &proposal[..7]))
+    .execute(harness.db().pool())
+    .await
+    .unwrap();
+    let epic: String = sqlx::query_scalar("SELECT epic_id FROM tasks WHERE id=$1")
+        .bind(&ids[3])
+        .fetch_one(harness.db().pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO proposal_epics(proposal_id,epic_id,project_id) VALUES($1,$2,$3)")
+        .bind(&proposal)
+        .bind(epic)
+        .bind(&project.id)
+        .execute(harness.db().pool())
+        .await
+        .unwrap();
+    let rows = |rs: Vec<sqlx::postgres::PgRow>| {
+        rs.into_iter()
+            .map(|r| r.get::<String, _>(0))
+            .collect::<Vec<_>>()
+    };
+    let task_sql = "SELECT to_jsonb(t)::text FROM tasks t WHERE id=ANY($1) ORDER BY id";
+    let act_sql = "SELECT to_jsonb(a)::text FROM activity_log a WHERE task_id=ANY($1) ORDER BY id";
+    let tasks_before = rows(
+        sqlx::query(task_sql)
+            .bind(&ids)
+            .fetch_all(harness.db().pool())
+            .await
+            .unwrap(),
+    );
+    let activity_before = rows(
+        sqlx::query(act_sql)
+            .bind(&ids)
+            .fetch_all(harness.db().pool())
+            .await
+            .unwrap(),
+    );
+    let (tx, _) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    register_closed_parent_open_children_check(
+        registry(),
+        Arc::new(TaskRepositoryClosedParentOpenChildrenSource::new(
+            harness.db().clone(),
+            tx,
+        )),
+    );
     let response = harness
         .call_tool(
             "doctor_run",
-            json!({"check_names": [CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME]}),
+            json!({"check_names":[CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME]}),
         )
         .await
-        .expect("doctor run dispatches");
+        .unwrap();
     assert_eq!(response["ok"], true);
-    let findings = response["results"][0]["findings"]
-        .as_array()
-        .expect("four findings");
+    let findings = response["results"][0]["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 4);
-
     let repo = DoctorFindingRepository::new(harness.db().clone());
     let mut guards = Vec::new();
-    for entry in findings {
+    let mut owners = Vec::new();
+    for result in findings {
         let finding = repo
-            .get(entry["finding_id"].as_str().unwrap())
+            .get(result["finding_id"].as_str().unwrap())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(finding.check_name, CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME);
-        assert!(
-            finding.resolver_snapshot.is_some(),
-            "dry-run resolver evidence persists"
+        let owner = finding.entity_ids["task_id"].as_str().unwrap();
+        assert_eq!(finding.evidence["board_health_finding"]["id"], owner);
+        assert_eq!(
+            finding.resolver_snapshot.as_ref().unwrap()["inputs"]["board_health_finding"]["id"],
+            owner
         );
         guards.push(
             finding.evidence["selected_disposition"]["guard"]
@@ -859,10 +905,7 @@ async fn closed_parent_open_children_dry_run_persists_all_matrix_rows_without_fi
                 .unwrap()
                 .to_owned(),
         );
-        assert_eq!(
-            finding.evidence["board_health_finding"]["id"], finding.entity_ids["task_id"],
-            "persisted evidence remains owned by its finding task"
-        );
+        owners.push(owner.to_owned());
     }
     guards.sort();
     assert_eq!(
@@ -871,7 +914,26 @@ async fn closed_parent_open_children_dry_run_persists_all_matrix_rows_without_fi
             "historical_parent_closed_in_flight",
             "historical_parent_closed_pr_active",
             "other_open_parent",
-            "parent_closed",
+            "parent_closed"
         ]
     );
+    owners.sort();
+    ids.sort();
+    assert_eq!(owners, ids);
+    let tasks_after = rows(
+        sqlx::query(task_sql)
+            .bind(&ids)
+            .fetch_all(harness.db().pool())
+            .await
+            .unwrap(),
+    );
+    let activity_after = rows(
+        sqlx::query(act_sql)
+            .bind(&ids)
+            .fetch_all(harness.db().pool())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(tasks_before, tasks_after);
+    assert_eq!(activity_before, activity_after);
 }
