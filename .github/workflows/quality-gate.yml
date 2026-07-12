@@ -8,12 +8,12 @@ on:
   merge_group:
   workflow_dispatch:
 
-# Cancel superseded PR runs when new commits are pushed (e.g. by coding
-# agents). Merge-queue runs each have a distinct ref and must run to
-# completion, so only pull_request runs are cancellable.
+# PR heads and main pushes are deliberately coalesced. Merge-queue candidates
+# must never be cancelled by a later candidate; dispatch runs are isolated.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: >-
+    ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main' || github.event_name == 'merge_group' && format('ci-merge-group-{0}', github.event.merge_group.head_sha || github.ref) || format('ci-dispatch-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 # Shared environment for all jobs.
 #
@@ -40,80 +40,84 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  # ── Change detection ────────────────────────────────────────────────
-  changes:
-    name: Detect changes
+  # ── Routed preflight ─────────────────────────────────────────────────
+  # The checked-in router is the sole source of lane decisions.
+  preflight:
+    name: Preflight routing
     runs-on: ubuntu-latest
     outputs:
-      server: ${{ steps.filter.outputs.server }}
-      sandbox: ${{ steps.filter.outputs.sandbox }}
-      ui: ${{ steps.filter.outputs.ui }}
-      memory-ranking: ${{ steps.filter.outputs.memory-ranking }}
+      cargoDeny: ${{ steps.router.outputs.cargoDeny }}
+      clippy: ${{ steps.router.outputs.clippy }}
+      aarch64: ${{ steps.router.outputs.aarch64 }}
+      size: ${{ steps.router.outputs.size }}
+      migrations: ${{ steps.router.outputs.migrations }}
+      rawSql: ${{ steps.router.outputs.rawSql }}
+      capability: ${{ steps.router.outputs.capability }}
+      boundaries: ${{ steps.router.outputs.boundaries }}
+      serverTest: ${{ steps.router.outputs.serverTest }}
+      sqlxFreshness: ${{ steps.router.outputs.sqlxFreshness }}
+      memoryEval: ${{ steps.router.outputs.memoryEval }}
+      ui: ${{ steps.router.outputs.ui }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
         with:
-          filters: |
-            server:
-              # Boundary checker rule-only, checker-only, and workflow-only
-              # edits must select the server gate: server/boundary_rules.toml,
-              # scripts/check_boundaries.py, and this workflow are all covered.
-              - '.djinn/skills.json'
-              - '.claude/skills/**'
-              - '.opencode/skills/**'
-              - '.djinn/skills/**'
-              - 'server/Cargo.toml'
-              - 'server/Cargo.lock'
-              - 'server/deny.toml'
-              - 'server/boundary_rules.toml'
-              - 'scripts/check_boundaries.py'
-              - 'server/rust-toolchain.toml'
-              - 'server/.cargo/**'
-              - 'server/.config/**'
-              - 'server/.sqlx/**'
-              - 'server/crates/**/Cargo.toml'
-              - 'server/crates/**/migrations_postgres/**'
-              - 'server/crates/**/*.rs'
-              - 'server/src/**/*.rs'
-              - '.github/workflows/quality-gate.yml'
-              - 'scripts/test-capability-boundaries.sh'
-              - 'scripts/check-capability-boundaries.sh'
-              - 'scripts/check-git-boundary.sh'
-              - 'scripts/check-http-boundary.sh'
-              - 'scripts/check-k8s-boundary.sh'
-              - 'scripts/capability-boundary-allowlist.toml'
-            # aarch64 cross-check trigger. The ONLY arch-conditional code
-            # (cfg(target_arch) seccomp/landlock syscall constants) lives in
-            # djinn-sandbox, so the ~400s cold cross-compile only needs to run
-            # when that crate — or anything that reshapes its aarch64 build
-            # (dep graph via Cargo.lock / workspace-hack, cargo/toolchain
-            # config) — changes. Every other server change skips it. This
-            # keeps the single most expensive job off the ~99% of PRs and
-            # merge-queue runs that never touch the sandbox.
-            sandbox:
-              - 'server/crates/djinn-sandbox/**'
-              - 'server/crates/workspace-hack/**'
-              - 'server/Cargo.lock'
-              - 'server/.cargo/**'
-              - 'server/rust-toolchain.toml'
-              - '.github/workflows/quality-gate.yml'
-            ui:
-              - 'ui/**'
-              # Re-run the UI gate when its own workflow changes, so edits to
-              # the build/test steps are exercised on the PR that makes them.
-              - '.github/workflows/quality-gate.yml'
-            # Deterministic Phase 1 memory-rank benchmark gate. Triggers only
-            # on ranking-path changes and eval-crate fixture/baseline edits —
-            # the benchmark re-runs against the committed corpus so it must
-            # fire whenever the production ranking code or its fixtures move.
-            memory-ranking:
-              - 'server/crates/djinn-db/src/repositories/note/search.rs'
-              - 'server/crates/djinn-db/src/repositories/note/rrf.rs'
-              - 'server/crates/djinn-db/src/repositories/note/scoring.rs'
-              - 'server/crates/djinn-db/src/repositories/note/context.rs'
-              - 'server/crates/djinn-memory-eval/**'
-              - '.github/workflows/quality-gate.yml'
+          fetch-depth: 0
+      - name: Verify routed-scope contract
+        run: node --test scripts/ci-changed-scope.test.mjs
+      - name: Compute safe event diff and route it
+        id: router
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MERGE_BASE: ${{ github.event.merge_group.base_sha }}
+          MERGE_HEAD: ${{ github.event.merge_group.head_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          zero=0000000000000000000000000000000000000000
+          full_validation=false
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE"; head="$PR_HEAD" ;;
+            merge_group) base="$MERGE_BASE"; head="$MERGE_HEAD" ;;
+            push)
+              base="$PUSH_BEFORE"; head="$PUSH_AFTER"
+              if [ -z "$head" ] || [ "$head" = "$zero" ]; then head="$GITHUB_SHA"; fi
+              if [ -z "$base" ] || [ "$base" = "$zero" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then base="$head"; full_validation=true; fi
+              ;;
+            workflow_dispatch) base="$GITHUB_SHA"; head="$GITHUB_SHA"; full_validation=true ;;
+            *) echo "::error::unsupported event $EVENT_NAME"; exit 1 ;;
+          esac
+          [ -n "$base" ] && [ -n "$head" ] || { echo '::error::missing explicit revisions'; exit 1; }
+          git cat-file -e "$base^{commit}"
+          git cat-file -e "$head^{commit}"
+          if [ "$full_validation" = true ]; then
+            git ls-tree -r --name-only "$head" > changed-files.txt
+          elif [ "$EVENT_NAME" = pull_request ] || [ "$EVENT_NAME" = merge_group ]; then
+            git diff --name-only "$base...$head" > changed-files.txt
+          else
+            git diff --name-only "$base..$head" > changed-files.txt
+          fi
+          args=(--event "$EVENT_NAME" --base "$base" --head "$head" --files-file changed-files.txt --github-output "$GITHUB_OUTPUT")
+          if [ "$full_validation" = true ]; then args+=(--full-validation); fi
+          mkdir -p preflight
+          node scripts/ci-changed-scope.mjs "${args[@]}" > preflight/manifest.json
+      - name: Upload routing manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: preflight-manifest
+          path: preflight/manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  main-admission:
+    name: Main admission delay
+    needs: preflight
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 90
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Cache Warming (main push only)                                 ║
@@ -126,8 +130,8 @@ jobs:
 
   warm-cache-quality:
     name: Warm Cache (Quality)
-    needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.server == 'true'
+    needs: [preflight, main-admission]
+    if: github.event_name == 'push' && needs.preflight.outputs.clippy == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -169,8 +173,8 @@ jobs:
 
   warm-cache-test:
     name: Warm Cache (Test)
-    needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.server == 'true'
+    needs: [preflight, main-admission]
+    if: github.event_name == 'push' && needs.preflight.outputs.serverTest == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -216,8 +220,8 @@ jobs:
 
   server-cargo-deny:
     name: Server cargo-deny
-    needs: changes
-    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    needs: preflight
+    if: needs.preflight.outputs.cargoDeny == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -272,8 +276,8 @@ jobs:
 
   server-clippy:
     name: Server Clippy
-    needs: changes
-    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    needs: preflight
+    if: needs.preflight.outputs.clippy == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -330,13 +334,13 @@ jobs:
   # arch-conditional syscall/landlock code.
   server-aarch64-check:
     name: Server aarch64 Check
-    needs: changes
+    needs: preflight
     # Gated on the `sandbox` filter, NOT `server`: the arch-conditional code
     # this job protects is confined to djinn-sandbox, so a full cold aarch64
     # cross-compile is only warranted when the sandbox crate (or the inputs
     # that reshape its aarch64 build) change. Skipped → Quality Gate treats it
     # as success, so unrelated PRs no longer pay the ~400s cold build.
-    if: needs.changes.outputs.sandbox == 'true' && github.event_name != 'push'
+    if: needs.preflight.outputs.aarch64 == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -404,8 +408,8 @@ jobs:
   # `./scripts/check-file-size.sh --all`.
   server-size-guard:
     name: Server Size Guard
-    needs: changes
-    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    needs: preflight
+    if: needs.preflight.outputs.size == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       # fetch-depth: 0 is required so `git diff` can resolve the merge base
@@ -466,8 +470,8 @@ jobs:
   # migration. Wired into the Quality Gate below so it is a hard blocker.
   server-migrations-guard:
     name: Server Migrations Guard
-    needs: changes
-    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    needs: preflight
+    if: needs.preflight.outputs.migrations == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       # fetch-depth: 0 so `git diff` can resolve the merge base against the
@@ -502,8 +506,8 @@ jobs:
   # Wired into the Quality Gate below so it is a hard blocker.
   server-raw-sql-boundary:
     name: Server Raw-SQL Boundary
-    needs: changes
-    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    needs: preflight
+    if: needs.preflight.outputs.rawSql == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       # fetch-depth: 0 is required so `git diff` can resolve the merge base
@@ -542,8 +546,8 @@ jobs:
   # Wired into the Quality Gate below as a hard blocker.
   server-capability-boundaries:
     name: Server Capability Boundaries
-    needs: changes
-    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    needs: preflight
+    if: needs.preflight.outputs.capability == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       # fetch-depth: 0 is required so `git diff` can resolve the merge base
@@ -589,8 +593,8 @@ jobs:
   # a hard blocker.
   server-boundaries:
     name: Server Architectural Boundaries
-    needs: changes
-    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    needs: preflight
+    if: needs.preflight.outputs.boundaries == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -638,8 +642,8 @@ jobs:
     # possible), preserving that economy. Cache is still saved on main only
     # (save-if below), so PR/merge_group runs read the warm cache without
     # writing divergent entries.
-    needs: changes
-    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    needs: preflight
+    if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -743,15 +747,15 @@ jobs:
   # ║  the schema and fails if the committed cache is out of date.     ║
   # ╚══════════════════════════════════════════════════════════════════╝
 
-  server-sqlx-cache:
-    name: Server sqlx Cache
+  server-sqlx-freshness:
+    name: Server sqlx Freshness
     # Runs in PARALLEL with clippy (no longer `needs: server-clippy`). Both
     # compile the workspace off the same `server-quality` warm cache, so
     # serializing them doubled the wall-clock of the server path on every PR
     # (clippy ~261s THEN sqlx ~135s) for no correctness benefit — this is a
     # self-contained freshness check, not a downstream consumer of clippy.
-    needs: changes
-    if: needs.changes.outputs.server == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
+    needs: preflight
+    if: needs.preflight.outputs.sqlxFreshness == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -838,8 +842,8 @@ jobs:
 
   memory-eval:
     name: Memory Eval Phase 1
-    needs: changes
-    if: needs.changes.outputs.memory-ranking == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
+    needs: preflight
+    if: needs.preflight.outputs.memoryEval == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -978,8 +982,8 @@ jobs:
 
   ui-frontend:
     name: UI Frontend
-    needs: changes
-    if: needs.changes.outputs.ui == 'true' && github.event_name != 'push'
+    needs: preflight
+    if: needs.preflight.outputs.ui == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -1037,35 +1041,14 @@ jobs:
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
 
   # ── Quality gate ────────────────────────────────────────────────────
-  # FAIL FAST: most jobs above end with a `Fail fast` step (if: failure())
-  # that cancels this whole run the moment that job fails, instead of letting
-  # the remaining jobs burn runners for minutes before this gate can even
-  # start (a 14s boundary-guard failure used to wait ~7 min for the test
-  # shards). Cancellation semantics make this safe: the failing job keeps its
-  # red conclusion + logs (it fails before issuing the cancel), sibling jobs
-  # flip to `cancelled`, and this gate — `if: always()` — still RUNS after
-  # the cancellation (GitHub re-evaluates job `if` conditions on cancel and
-  # lets true ones proceed), sees the non-success results below, and
-  # concludes `failure` like any other red run. Server Test shards carry no
-  # fail-fast step on purpose: they fail near the END of their runs (after
-  # compile), so cancelling siblings would hide the other shards' failures
-  # and feed the rework loop partial results while saving almost nothing.
-  #
-  # If you change this job's name, also update the branch-protection rule
-  # (and the merge-queue config) that requires "Quality Gate" as THE
-  # single required status check. The individual jobs above must NOT be
-  # listed as required — they are skipped on PRs, and a skipped required
-  # check blocks merges. "Quality Gate" treats skipped as success, so a
-  # PR passes on lint alone while the heavy suite runs in the merge queue.
+  # `quality-gate` is the required check. A selected lane must succeed; skips
+  # are neutral only when the manifest explicitly left the lane unselected.
   quality-gate:
     name: Quality Gate
     runs-on: ubuntu-latest
     if: always() && github.event_name != 'push'
     needs:
-      # `changes` is listed so a paths-filter failure cannot silently skip
-      # every gated job (skipped needs read as success below) and let the
-      # gate go green on a run where no CI actually executed.
-      - changes
+      - preflight
       - server-cargo-deny
       - server-clippy
       - server-aarch64-check
@@ -1075,31 +1058,35 @@ jobs:
       - server-capability-boundaries
       - server-boundaries
       - server-test
-      - server-sqlx-cache
+      - server-sqlx-freshness
       - memory-eval
       - ui-frontend
     steps:
-      - name: Check results
+      - name: Fail closed on selected work
+        env:
+          PREFLIGHT: ${{ needs.preflight.result }}
+          CARGO_DENY: ${{ needs.preflight.outputs.cargoDeny }}:${{ needs.server-cargo-deny.result }}
+          CLIPPY: ${{ needs.preflight.outputs.clippy }}:${{ needs.server-clippy.result }}
+          AARCH64: ${{ needs.preflight.outputs.aarch64 }}:${{ needs.server-aarch64-check.result }}
+          SIZE: ${{ needs.preflight.outputs.size }}:${{ needs.server-size-guard.result }}
+          MIGRATIONS: ${{ needs.preflight.outputs.migrations }}:${{ needs.server-migrations-guard.result }}
+          RAW_SQL: ${{ needs.preflight.outputs.rawSql }}:${{ needs.server-raw-sql-boundary.result }}
+          CAPABILITY: ${{ needs.preflight.outputs.capability }}:${{ needs.server-capability-boundaries.result }}
+          BOUNDARIES: ${{ needs.preflight.outputs.boundaries }}:${{ needs.server-boundaries.result }}
+          SERVER_TEST: ${{ needs.preflight.outputs.serverTest }}:${{ needs.server-test.result }}
+          SQLX: ${{ needs.preflight.outputs.sqlxFreshness }}:${{ needs.server-sqlx-freshness.result }}
+          MEMORY: ${{ needs.preflight.outputs.memoryEval }}:${{ needs.memory-eval.result }}
+          UI: ${{ needs.preflight.outputs.ui }}:${{ needs.ui-frontend.result }}
         run: |
-          results=(
-            "${{ needs.changes.result }}"
-            "${{ needs.server-cargo-deny.result }}"
-            "${{ needs.server-clippy.result }}"
-            "${{ needs.server-aarch64-check.result }}"
-            "${{ needs.server-size-guard.result }}"
-            "${{ needs.server-migrations-guard.result }}"
-            "${{ needs.server-raw-sql-boundary.result }}"
-            "${{ needs.server-capability-boundaries.result }}"
-            "${{ needs.server-boundaries.result }}"
-            "${{ needs.server-test.result }}"
-            "${{ needs.server-sqlx-cache.result }}"
-            "${{ needs.memory-eval.result }}"
-            "${{ needs.ui-frontend.result }}"
-          )
-          for r in "${results[@]}"; do
-            if [[ "$r" != "success" && "$r" != "skipped" ]]; then
-              echo "Quality gate failed: found result '$r'"
-              exit 1
-            fi
-          done
-          echo "All checks passed (or were skipped)"
+          set -euo pipefail
+          [ "$PREFLIGHT" = success ] || { echo "preflight ended $PREFLIGHT"; exit 1; }
+          check() {
+            local lane=$1 pair=$2 selected=${2%%:*} result=${2#*:}
+            if [ "$selected" = true ] && [ "$result" = success ]; then return; fi
+            if [ "$selected" = false ] && [ "$result" = skipped ]; then return; fi
+            echo "lane $lane selected=$selected result=$result"; return 1
+          }
+          check cargo-deny "$CARGO_DENY"; check clippy "$CLIPPY"; check aarch64 "$AARCH64"
+          check size "$SIZE"; check migrations "$MIGRATIONS"; check raw-sql "$RAW_SQL"
+          check capability "$CAPABILITY"; check boundaries "$BOUNDARIES"; check server-test "$SERVER_TEST"
+          check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"; check ui "$UI"
