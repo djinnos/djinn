@@ -513,45 +513,65 @@ jobs:
           # Restore the latest successful timing artifact. This can fail because of
           # missing artifacts, stale/incompatible data, or GitHub API rate limits;
           # in every failure case the planner cold-starts safely from current discovery.
-          # We request a bounded result set ordered newest-first and pick the first
-          # artifact whose producing workflow concluded successfully, then best-effort
-          # download and validate it. If the newest artifact came from a failed run,
-          # an older successful candidate is still considered.
+          # We paginate a bounded number of pages newest-first. For each successful
+          # workflow candidate we independently attempt download, extraction, and
+          # structural validation. Any candidate-specific failure causes us to continue
+          # to the next older successful candidate; we only cold-start once the bounded
+          # search is exhausted or the API cannot be queried.
+          MAX_PAGES=5
           mkdir -p nextest-timing
-          set +e
-          gh api "repos/${{ github.repository }}/actions/artifacts?name=nextest-timing&per_page=10" \
-            --jq '[.artifacts[] | select(.workflow_run.conclusion == "success")] | first(.[]).id // empty' > nextest-timing/artifact-id.txt 2> nextest-timing/restore.log
-          api_status=$?
-          set -e
-          if [ "$api_status" -ne 0 ] || [ ! -s nextest-timing/artifact-id.txt ]; then
-            echo "::notice::No compatible prior timing artifact found; using cold-start balancing."
-          else
-            artifact_id="$(cat nextest-timing/artifact-id.txt)"
-            if [ -n "$artifact_id" ]; then
+          restored=0
+          for page in $(seq 1 "$MAX_PAGES"); do
+            page_candidates="$(mktemp)"
+            set +e
+            gh api "repos/${{ github.repository }}/actions/artifacts?name=nextest-timing&per_page=10&page=$page" \
+              --jq '.artifacts[] | select(.workflow_run.conclusion == "success") | .id' > "$page_candidates" 2> nextest-timing/restore.log
+            api_status=$?
+            set -e
+            if [ "$api_status" -ne 0 ]; then
+              echo "::notice::GitHub API query for timing artifacts failed; using cold-start balancing."
+              rm -f "$page_candidates"
+              break
+            fi
+            if [ ! -s "$page_candidates" ]; then
+              rm -f "$page_candidates"
+              break
+            fi
+            while IFS= read -r artifact_id && [ -n "$artifact_id" ]; do
+              rm -f nextest-timing/timing.zip nextest-timing/timing.json
               set +e
               gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > nextest-timing/timing.zip 2>> nextest-timing/restore.log
               dl_status=$?
               set -e
-              if [ "$dl_status" -eq 0 ] && [ -s nextest-timing/timing.zip ]; then
-                set +e
-                unzip -p nextest-timing/timing.zip timing.json > nextest-timing/timing.json 2>> nextest-timing/restore.log
-                unzip_status=$?
-                set -e
-                if [ "$unzip_status" -eq 0 ] && [ -s nextest-timing/timing.json ]; then
-                  # Reject obviously malformed or stale data best-effort; planner also validates.
-                  if jq -e '.version == "ci-nextest-timing/v1" and (.tests | type) == "object"' nextest-timing/timing.json > /dev/null 2>&1; then
-                    echo "::notice::Restored compatible timing artifact $artifact_id for shard balancing."
-                  else
-                    echo "::notice::Timing artifact $artifact_id is malformed or incompatible; using cold-start balancing."
-                    rm -f nextest-timing/timing.json
-                  fi
-                else
-                  echo "::notice::Could not extract timing artifact $artifact_id; using cold-start balancing."
-                fi
-              else
-                echo "::notice::Could not download timing artifact $artifact_id; using cold-start balancing."
+              if [ "$dl_status" -ne 0 ] || [ ! -s nextest-timing/timing.zip ]; then
+                echo "::notice::Could not download timing artifact $artifact_id; trying next older candidate."
+                continue
               fi
-            fi
+              set +e
+              unzip -p nextest-timing/timing.zip timing.json > nextest-timing/timing.json 2>> nextest-timing/restore.log
+              unzip_status=$?
+              set -e
+              if [ "$unzip_status" -ne 0 ] || [ ! -s nextest-timing/timing.json ]; then
+                echo "::notice::Could not extract timing artifact $artifact_id; trying next older candidate."
+                continue
+              fi
+              # Structural validation is a shallow guard; full planner compatibility
+              # (freshness, schema, version) is validated when the planner loads the
+              # timing document. If the planner rejects it, that candidate is abandoned
+              # and we fall through to the next older successful candidate.
+              if ! jq -e '.version == "ci-nextest-timing/v1" and (.tests | type) == "object" and (.generated_at | type) == "string"' nextest-timing/timing.json > /dev/null 2>&1; then
+                echo "::notice::Timing artifact $artifact_id is malformed or incompatible; trying next older candidate."
+                rm -f nextest-timing/timing.json
+                continue
+              fi
+              echo "::notice::Restored compatible timing artifact $artifact_id for shard balancing."
+              restored=1
+              break 2
+            done < "$page_candidates"
+            rm -f "$page_candidates"
+          done
+          if [ "$restored" -ne 1 ]; then
+            echo "::notice::No compatible prior timing artifact found; using cold-start balancing."
           fi
           mkdir -p nextest-plan
           (
@@ -576,8 +596,10 @@ jobs:
           echo '::group::Nextest exact-once proof'
           cat nextest-plan/proof.json
           echo '::endgroup::'
-          echo "matrix=$(jq -c '{include: .shards}' nextest-plan/matrix.json)" >> "$GITHUB_OUTPUT"
           echo "coldStart=$(jq -r '.coldStart' nextest-plan/proof.json)" >> "$GITHUB_OUTPUT"
+          # Compact shard/index matrix only; full plan travels via artifact because a large
+          # GITHUB_OUTPUT value can cause the planning job to be skipped silently.
+          echo "matrix=$(jq -c '{include: [.shards[] | {shard, shardIndex}]}' nextest-plan/matrix.json)" >> "$GITHUB_OUTPUT"
       - name: Upload discovery, plan, and exact-once proof
         uses: actions/upload-artifact@v4
         with:
@@ -654,11 +676,30 @@ jobs:
         run: |
           git config --global user.email "ci@test.local"
           git config --global user.name "CI Test"
+      - name: Download full plan and resolve shard filter
+        env:
+          PLAN_RUN_ID: ${{ github.run_id }}
+          SHARD_INDEX: ${{ matrix.shardIndex }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p nextest-plan
+          gh api "repos/${{ github.repository }}/actions/artifacts" \
+            --jq "[.artifacts[] | select(.name == \"nextest-plan-$PLAN_RUN_ID\")] | first(.[]).id" > nextest-plan/artifact-id.txt
+          artifact_id="$(cat nextest-plan/artifact-id.txt)"
+          [ -n "$artifact_id" ] || { echo "::error::Could not find nextest-plan artifact for run $PLAN_RUN_ID"; exit 1; }
+          gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > nextest-plan/plan.zip
+          unzip -q nextest-plan/plan.zip -d nextest-plan
+          filter="$(jq -r --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .filter' nextest-plan/matrix.json)"
+          test_ids="$(jq -c --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .testIds' nextest-plan/matrix.json)"
+          [ -n "$filter" ] || { echo "::error::Could not resolve filter for shard $SHARD_INDEX"; exit 1; }
+          echo "NEXTEST_FILTER=$filter" >> "$GITHUB_ENV"
+          echo "NEXTEST_TEST_IDS=$test_ids" >> "$GITHUB_ENV"
       - name: Run planner-emitted test filter and record shard timing
         env:
           NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
-          NEXTEST_FILTER: ${{ matrix.filter }}
-          NEXTEST_TEST_IDS: ${{ toJSON(matrix.testIds) }}
+          NEXTEST_FILTER: ${{ env.NEXTEST_FILTER }}
+          NEXTEST_TEST_IDS: ${{ env.NEXTEST_TEST_IDS }}
         run: |
           set -uo pipefail
           started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
