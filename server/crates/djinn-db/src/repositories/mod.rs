@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod audit_sampler;
+pub mod chat_interruption_notice;
 pub mod code_chunk;
 pub mod commit_file_changes;
 pub mod dispatch_pause;
