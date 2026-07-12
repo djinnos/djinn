@@ -218,6 +218,35 @@ spec:
               value: {{ include "djinn.serviceAccountName.controller" . | quote }}
             - name: DJINN_IMAGE_REGISTRY_AUTH_SECRET
               value: {{ include "djinn.imagePipeline.registryAuthSecretName" . | quote }}
+            # Retention is disabled and dry-run by default. Keep these runtime
+            # settings adjacent to the Zot registry wiring so a destructive
+            # Zot policy cannot be rendered without the server's startup
+            # preflight receiving the same mode and newest-tag count.
+            - name: DJINN_ZOT_RETENTION_ENABLED
+              value: {{ .Values.imagePipeline.zot.retention.enabled | quote }}
+            - name: DJINN_ZOT_RETENTION_DRY_RUN
+              value: {{ .Values.imagePipeline.zot.retention.dryRun | quote }}
+            - name: DJINN_ZOT_RETENTION_NEWEST_TAGS
+              value: {{ .Values.imagePipeline.zot.retention.newestTags | quote }}
+            - name: DJINN_ZOT_RETENTION_ENDPOINT
+              value: {{ printf "http://%s" (include "djinn.imagePipeline.registryHost" .) | quote }}
+            # The preflight HTTP client needs the same basic-auth credentials
+            # as Zot. Both chart-generated and caller-owned auth Secrets use
+            # the `username` and `password` keys; values never land in a
+            # ConfigMap or a literal env value. Omit refs when in-cluster Zot
+            # is disabled because retention is necessarily non-destructive.
+            {{- if .Values.imagePipeline.zot.enabled }}
+            - name: DJINN_ZOT_RETENTION_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.imagePipeline.registryAuthSecretName" . | quote }}
+                  key: username
+            - name: DJINN_ZOT_RETENTION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.imagePipeline.registryAuthSecretName" . | quote }}
+                  key: password
+            {{- end }}
             - name: DJINN_IMAGE_MIRROR_PVC
               value: {{ include "djinn.pvcName.mirrors" . | quote }}
             # Cluster-wide cap on concurrent project-image build Jobs. The
