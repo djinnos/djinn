@@ -528,18 +528,22 @@ jobs:
           mkdir -p nextest-timing
           restored=0
           for page in $(seq 1 "$MAX_PAGES"); do
+            page_response="$(mktemp)"
             page_candidates="$(mktemp)"
             set +e
             gh api "repos/${{ github.repository }}/actions/artifacts?name=nextest-timing&per_page=10&page=$page" \
-              --jq '.artifacts[] | select(.workflow_run.conclusion == "success") | .id' > "$page_candidates" 2> nextest-timing/restore.log
+              > "$page_response" 2> nextest-timing/restore.log
             api_status=$?
             set -e
             if [ "$api_status" -ne 0 ]; then
               echo "::notice::GitHub API query for timing artifacts failed; using cold-start balancing."
-              rm -f "$page_candidates"
+              rm -f "$page_response" "$page_candidates"
               break
             fi
-            if [ ! -s "$page_candidates" ]; then
+            jq -r '.artifacts[] | select(.workflow_run.conclusion == "success") | .id' "$page_response" > "$page_candidates"
+            artifact_count="$(jq '.artifacts | length' "$page_response")"
+            rm -f "$page_response"
+            if [ "$artifact_count" -eq 0 ]; then
               rm -f "$page_candidates"
               break
             fi
@@ -561,11 +565,14 @@ jobs:
                 echo "::notice::Could not extract timing artifact $artifact_id; trying next older candidate."
                 continue
               fi
-              # Structural validation is a shallow guard; full planner compatibility
-              # (freshness, schema, version) is validated when the planner loads the
-              # timing document. If the planner rejects it, that candidate is abandoned
-              # and we fall through to the next older successful candidate.
-              if ! jq -e '.version == "ci-nextest-timing/v1" and (.tests | type) == "object" and (.generated_at | type) == "string"' nextest-timing/timing.json > /dev/null 2>&1; then
+              # Apply the planner's seven-day freshness policy before acceptance.
+              if ! jq -e '
+                .version == "ci-nextest-timing/v1" and
+                (.tests | type) == "object" and
+                (.generated_at | type) == "string" and
+                ((.generated_at | fromdateiso8601) as $generated |
+                  $generated <= now and (now - $generated) <= (7 * 24 * 60 * 60))
+              ' nextest-timing/timing.json > /dev/null 2>&1; then
                 echo "::notice::Timing artifact $artifact_id is malformed or incompatible; trying next older candidate."
                 rm -f nextest-timing/timing.json
                 continue
