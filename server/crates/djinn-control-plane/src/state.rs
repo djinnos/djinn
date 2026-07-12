@@ -7,7 +7,7 @@ use djinn_db::{
     Database,
     repositories::note::{NoteEmbeddingProvider, NoteVectorStore},
 };
-use djinn_provider::catalog::{CatalogService, HealthTracker};
+use djinn_provider::catalog::{CatalogService, HealthTracker, builtin};
 
 use crate::bridge::{
     CoordinatorOps, GitOps, LspOps, MemoryEnrichmentOps, RepoGraphOps, RuntimeOps,
@@ -223,11 +223,12 @@ impl McpState {
             .collect()
     }
 
-    /// Validate that every model in `models` belongs to a provider connected
-    /// *for `user_id`* (their own credential or the org-shared fallback) AND is
-    /// not a subscription blocked by org policy. Used by `user_settings_set` so
-    /// a user can't select a model on a provider they haven't connected, nor on
-    /// a subscription an admin has blocked. Empty selection is always valid.
+    /// Validate that every model in `models` is present in the catalog exposed
+    /// by a provider connected *for `user_id`* (their own credential or the
+    /// org-shared fallback) and is not a subscription blocked by org policy.
+    /// Used by `user_settings_set` so a user can't select a model on a provider
+    /// they haven't connected, an invented model ID, or a subscription an admin
+    /// has blocked. Empty selection is always valid.
     pub async fn validate_models_for_user(
         &self,
         models: &[String],
@@ -295,12 +296,64 @@ impl McpState {
             .cloned()
             .collect();
         missing.sort();
-        if missing.is_empty() {
+        if !missing.is_empty() {
+            return Err(format!(
+                "models reference providers you haven't connected: {}",
+                missing.join(", ")
+            ));
+        }
+
+        // `provider_models_connected` folds a merged child (such as
+        // `chatgpt_codex`) into its parent namespace. Mirror that exact
+        // presentation here so a surfaced `openai/...` child model remains
+        // valid while arbitrary IDs under a connected provider do not.
+        let catalog_contains = |full_model_id: &str| {
+            let Some((provider_id, _)) = full_model_id.split_once('/') else {
+                return false;
+            };
+
+            std::iter::once(provider_id.to_string())
+                .chain(
+                    builtin::merged_provider_ids()
+                        .into_iter()
+                        .filter(|child_id| {
+                            builtin::find_builtin_provider(child_id)
+                                .and_then(|provider| provider.merge_into)
+                                == Some(provider_id)
+                        }),
+                )
+                .any(|source_provider_id| {
+                    self.catalog
+                        .list_models(&source_provider_id)
+                        .into_iter()
+                        .any(|model| {
+                            let source_prefix = format!("{source_provider_id}/");
+                            let source_model_id =
+                                model.id.strip_prefix(&source_prefix).unwrap_or(&model.id);
+                            let surfaced_id = format!("{provider_id}/{source_model_id}");
+                            surfaced_id == full_model_id
+                        })
+                })
+        };
+
+        let mut absent: Vec<String> = models
+            .iter()
+            .filter_map(|model| {
+                if catalog_contains(model.as_str()) {
+                    None
+                } else {
+                    Some(model.clone())
+                }
+            })
+            .collect();
+        absent.sort_unstable();
+        absent.dedup();
+        if absent.is_empty() {
             Ok(())
         } else {
             Err(format!(
-                "models reference providers you haven't connected: {}",
-                missing.join(", ")
+                "models are not available in the connected provider catalog: {}",
+                absent.join(", ")
             ))
         }
     }
