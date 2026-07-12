@@ -17,6 +17,7 @@ mod persistence;
 mod streaming;
 mod tool_dispatch;
 mod turn;
+mod turn_budget;
 
 pub use compaction_guard::CompactionCriticalSection;
 pub use turn::{ReplyLoopContext, run_reply_loop};
