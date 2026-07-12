@@ -947,7 +947,11 @@ pub(crate) async fn execute_stage(
     let _ = services
         .report_stage_step(djinn_runtime::stage_step::CONTEXT_BUILD)
         .await;
-    let PromptContext { system_prompt, .. } = assemble_prompt_context(PromptContextInputs {
+    let PromptContext {
+        system_prompt,
+        system_prompt_hash,
+        ..
+    } = assemble_prompt_context(PromptContextInputs {
         task,
         runtime_role: runtime_role.as_ref(),
         role_for_epic_check: role.as_ref(),
@@ -1007,6 +1011,18 @@ pub(crate) async fn execute_stage(
         .await
         .map_err(StageError::SessionCreate)?;
     let session_id = session_record.id.clone();
+    // 7ry9: Emit session-start structured telemetry with the provider-facing
+    // prompt hash. The hash is already computed from the final truncated
+    // system prompt; no prompt contents are emitted.
+    tracing::info!(
+        event = "session_start",
+        session_id = %session_id,
+        task_id = %task.short_id,
+        agent_type = %runtime_role_name,
+        prompt_hash = %system_prompt_hash,
+        prompt_hash_input = "rendered_system_prompt_v1",
+        "Supervisor stage: session started with rendered system prompt hash"
+    );
     // The session row now exists — the first reply-loop turn is reached. This
     // marker (and the `sessions` row itself) disarms the host-side pre-session
     // liveness deadline; from here liveness is owned by the coordinator's
