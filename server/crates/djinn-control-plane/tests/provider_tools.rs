@@ -234,7 +234,7 @@ async fn org_policy_blocks_subscription_from_connected_and_validation() {
     );
     harness
         .state()
-        .validate_models_for_user(&["minimax-coding-plan/MiniMax-M3".to_string()], None)
+        .validate_models_for_user(&["minimax-coding-plan/MiniMax-M2.5".to_string()], None)
         .await
         .expect("model on connected subscription validates before block");
 
@@ -296,7 +296,7 @@ async fn org_policy_blocks_subscription_from_connected_and_validation() {
 
     let err = harness
         .state()
-        .validate_models_for_user(&["minimax-coding-plan/MiniMax-M3".to_string()], None)
+        .validate_models_for_user(&["minimax-coding-plan/MiniMax-M2.5".to_string()], None)
         .await
         .expect_err("model on blocked subscription must be rejected");
     assert!(
@@ -960,10 +960,7 @@ async fn non_recommended_connected_model_persists_and_validates_including_org_ov
     let rejected_set = SESSION_USER_ID
         .scope(Some(user_id.clone()), async {
             harness
-                .call_tool(
-                    "user_settings_set",
-                    json!({"lanes": {"plan": [absent]}}),
-                )
+                .call_tool("user_settings_set", json!({"lanes": {"plan": [absent]}}))
                 .await
         })
         .await

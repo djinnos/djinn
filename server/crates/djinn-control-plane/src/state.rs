@@ -7,7 +7,7 @@ use djinn_db::{
     Database,
     repositories::note::{NoteEmbeddingProvider, NoteVectorStore},
 };
-use djinn_provider::catalog::{builtin, CatalogService, HealthTracker};
+use djinn_provider::catalog::{CatalogService, HealthTracker, builtin};
 
 use crate::bridge::{
     CoordinatorOps, GitOps, LspOps, MemoryEnrichmentOps, RepoGraphOps, RuntimeOps,
@@ -328,20 +328,23 @@ impl McpState {
                         .into_iter()
                         .any(|model| {
                             let source_prefix = format!("{source_provider_id}/");
-                            let source_model_id = model
-                                .id
-                                .strip_prefix(&source_prefix)
-                                .unwrap_or(&model.id);
+                            let source_model_id =
+                                model.id.strip_prefix(&source_prefix).unwrap_or(&model.id);
                             let surfaced_id = format!("{provider_id}/{source_model_id}");
                             surfaced_id == full_model_id
                         })
                 })
         };
 
-        let mut absent: Vec<&str> = models
+        let mut absent: Vec<String> = models
             .iter()
-            .map(String::as_str)
-            .filter(|model| !catalog_contains(model))
+            .filter_map(|model| {
+                if catalog_contains(model.as_str()) {
+                    None
+                } else {
+                    Some(model.clone())
+                }
+            })
             .collect();
         absent.sort_unstable();
         absent.dedup();
