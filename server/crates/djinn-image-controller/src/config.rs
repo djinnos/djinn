@@ -290,4 +290,80 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn for_testing_zot_retention_defaults() {
+        let cfg = ImageControllerConfig::for_testing();
+        assert!(!cfg.zot_retention.enabled, "disabled by default");
+        assert!(cfg.zot_retention.dry_run, "dry-run by default");
+        assert_eq!(cfg.zot_retention.newest_tags, 5);
+        assert!(cfg.zot_retention.endpoint.starts_with("http://"));
+        assert!(cfg.zot_retention.username.is_none());
+        assert!(cfg.zot_retention.password.is_none());
+    }
+
+    #[test]
+    fn from_env_honors_zot_retention_vars() {
+        // SAFETY: single-threaded unit test.
+        unsafe {
+            std::env::set_var(env::ZOT_RETENTION_ENABLED, "true");
+            std::env::set_var(env::ZOT_RETENTION_DRY_RUN, "false");
+            std::env::set_var(env::ZOT_RETENTION_NEWEST_TAGS, "10");
+            std::env::set_var(env::ZOT_RETENTION_ENDPOINT, "http://zot.example:5000");
+            std::env::set_var(env::ZOT_RETENTION_USERNAME, "alice");
+            std::env::set_var(env::ZOT_RETENTION_PASSWORD, "secret");
+        }
+        let cfg = ImageControllerConfig::from_env();
+        assert!(cfg.zot_retention.enabled);
+        assert!(!cfg.zot_retention.dry_run);
+        assert_eq!(cfg.zot_retention.newest_tags, 10);
+        assert_eq!(cfg.zot_retention.endpoint, "http://zot.example:5000");
+        assert_eq!(cfg.zot_retention.username.as_deref(), Some("alice"));
+        assert_eq!(cfg.zot_retention.password.as_deref(), Some("secret"));
+        unsafe {
+            std::env::remove_var(env::ZOT_RETENTION_ENABLED);
+            std::env::remove_var(env::ZOT_RETENTION_DRY_RUN);
+            std::env::remove_var(env::ZOT_RETENTION_NEWEST_TAGS);
+            std::env::remove_var(env::ZOT_RETENTION_ENDPOINT);
+            std::env::remove_var(env::ZOT_RETENTION_USERNAME);
+            std::env::remove_var(env::ZOT_RETENTION_PASSWORD);
+        }
+    }
+
+    #[test]
+    fn from_env_invalid_zot_retention_bools_fall_back() {
+        // SAFETY: single-threaded unit test.
+        unsafe {
+            std::env::set_var(env::ZOT_RETENTION_ENABLED, "maybe");
+            std::env::set_var(env::ZOT_RETENTION_DRY_RUN, "42");
+        }
+        let cfg = ImageControllerConfig::from_env();
+        assert!(
+            !cfg.zot_retention.enabled,
+            "invalid enabled falls back to false"
+        );
+        assert!(
+            cfg.zot_retention.dry_run,
+            "invalid dry_run falls back to true"
+        );
+        unsafe {
+            std::env::remove_var(env::ZOT_RETENTION_ENABLED);
+            std::env::remove_var(env::ZOT_RETENTION_DRY_RUN);
+        }
+    }
+
+    #[test]
+    fn from_env_invalid_zot_retention_newest_tags_falls_back() {
+        unsafe {
+            std::env::set_var(env::ZOT_RETENTION_NEWEST_TAGS, "not-a-number");
+        }
+        let cfg = ImageControllerConfig::from_env();
+        assert_eq!(
+            cfg.zot_retention.newest_tags, 5,
+            "non-numeric newest-tags falls back to default"
+        );
+        unsafe {
+            std::env::remove_var(env::ZOT_RETENTION_NEWEST_TAGS);
+        }
+    }
 }
