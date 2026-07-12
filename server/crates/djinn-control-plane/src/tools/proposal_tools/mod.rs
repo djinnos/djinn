@@ -159,13 +159,6 @@ pub(super) fn err_single(error: impl Into<String>) -> ProposalSingleResponse {
     }
 }
 
-// End-to-end planner refinement loop tests — extracted to
-// `end_to_end_planner_tests.rs` to meet the 1500-line file-size guard.
-// These are the only remaining cross-cutting regressions in `proposal_tools/`;
-// they span create, update, signoff, and lifecycle tools.
-#[cfg(test)]
-include!("end_to_end_planner_tests.rs");
-
 // ── Router composition ────────────────────────────────────────────────────────
 
 impl DjinnMcpServer {
@@ -181,3 +174,10 @@ impl DjinnMcpServer {
             + Self::proposal_lifecycle_tool_router()
     }
 }
+
+// End-to-end planner refinement loop tests — extracted to
+// `end_to_end_planner_tests.rs` to meet the 1500-line file-size guard.
+// These are the only remaining cross-cutting regressions in `proposal_tools/`;
+// they span create, update, signoff, and lifecycle tools.
+#[cfg(test)]
+include!("end_to_end_planner_tests.rs");

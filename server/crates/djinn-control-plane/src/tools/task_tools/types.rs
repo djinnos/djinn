@@ -1000,6 +1000,52 @@ pub struct BoardHealthStrandedReady {
     pub findings: Vec<BoardHealthStrandedReadyFinding>,
 }
 
+/// Bounded rollup of closed-parent orphan findings on `board_health`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthClosedParentOpenChildren {
+    pub total: i64,
+    #[serde(default)]
+    pub findings: Vec<BoardHealthClosedParentOpenChildrenFinding>,
+}
+
+/// One closed-parent orphan finding: a non-closed task whose parent scopes are
+/// terminal and that has no other open parent. The finding carries the full
+/// evidence a later repair snapshot needs.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthClosedParentOpenChildrenFinding {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub status: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epic_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epic_short_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epic_status: Option<String>,
+    #[serde(default)]
+    pub terminal_epic_ids: Vec<String>,
+    #[serde(default)]
+    pub terminal_proposal_ids: Vec<String>,
+    #[serde(default)]
+    pub other_open_parent_ids: Vec<String>,
+    #[serde(default)]
+    pub external_open_dependents: Vec<BoardHealthClosedParentDependent>,
+    pub recommended_action: String,
+    pub recommended_status: String,
+    pub recommended_reason: String,
+}
+
+/// External open task that depends on a closed-parent orphan.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthClosedParentDependent {
+    pub task_id: String,
+    pub short_id: String,
+    pub title: String,
+    pub status: String,
+}
+
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BoardHealthResponse {
     pub epic_stats: Vec<BoardHealthEpicStat>,
@@ -1038,6 +1084,11 @@ pub struct BoardHealthResponse {
     /// evidence attached.
     #[serde(default)]
     pub stranded_ready: BoardHealthStrandedReady,
+    /// Closed-parent orphans: non-closed tasks whose parent scopes are
+    /// terminal, with terminal parent evidence, external-dependent evidence,
+    /// and the recommended repair disposition.
+    #[serde(default)]
+    pub closed_parent_open_children: BoardHealthClosedParentOpenChildren,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]

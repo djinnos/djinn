@@ -536,3 +536,130 @@ async fn board_health_stranded_ready_matches_seeded_task() {
         "rate_limited must be false for a fresh task"
     );
 }
+
+/// Closed-parent orphan section is surfaced through the MCP board_health tool
+/// with the additive default behavior: present, empty when no drift, and
+/// deserializable into the typed response struct.
+#[tokio::test]
+async fn board_health_closed_parent_open_children_empty_by_default() {
+    let harness = McpTestHarness::new().await;
+    let project = common::create_test_project(harness.db()).await;
+
+    let response = harness
+        .call_tool("board_health", json!({ "project": project.slug() }))
+        .await
+        .expect("board_health should dispatch");
+
+    let section = response
+        .get("closed_parent_open_children")
+        .expect("closed_parent_open_children section must be present");
+    assert_eq!(section.get("total").and_then(|v| v.as_i64()), Some(0));
+    assert!(section.get("findings").and_then(|v| v.as_array()).is_some());
+}
+
+/// Closed-parent orphan section reports a non-closed child whose epic is
+/// closed, with the recommended repair disposition and parent evidence.
+#[tokio::test]
+async fn board_health_closed_parent_open_children_reports_closed_epic_orphan() {
+    let harness = McpTestHarness::new().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epic = common::create_test_epic(harness.db(), &project.id).await;
+    let task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
+
+    // Close the epic directly via SQL to simulate historical drift.
+    sqlx::query("UPDATE epics SET status = 'closed', updated_at = now() WHERE id = $1")
+        .bind(&epic.id)
+        .execute(harness.db().pool())
+        .await
+        .unwrap();
+
+    let response = harness
+        .call_tool("board_health", json!({ "project": project.slug() }))
+        .await
+        .expect("board_health should dispatch");
+
+    let section = response
+        .get("closed_parent_open_children")
+        .expect("closed_parent_open_children section must be present");
+    assert_eq!(section.get("total").and_then(|v| v.as_i64()), Some(1));
+    let findings = section.get("findings").unwrap().as_array().unwrap();
+    let finding = findings
+        .iter()
+        .find(|f| f.get("id").and_then(|v| v.as_str()) == Some(&task.id))
+        .expect("task must appear in closed-parent orphan findings");
+    assert_eq!(finding.get("status").and_then(|v| v.as_str()), Some("open"));
+    assert_eq!(
+        finding.get("recommended_action").and_then(|v| v.as_str()),
+        Some("close")
+    );
+    assert_eq!(
+        finding.get("recommended_status").and_then(|v| v.as_str()),
+        Some("closed")
+    );
+    assert_eq!(
+        finding.get("recommended_reason").and_then(|v| v.as_str()),
+        Some("parent_closed")
+    );
+    let terminal_epics = finding
+        .get("terminal_epic_ids")
+        .and_then(|v| v.as_array())
+        .expect("terminal_epic_ids must be present");
+    assert!(
+        terminal_epics
+            .iter()
+            .any(|id| id.as_str() == Some(&epic.id))
+    );
+}
+
+/// Closed-parent orphan section is read-only: calling board_health must not
+/// mutate the task status or emit activity.
+#[tokio::test]
+async fn board_health_closed_parent_open_children_is_read_only() {
+    let harness = McpTestHarness::new().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epic = common::create_test_epic(harness.db(), &project.id).await;
+    let task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
+    sqlx::query("UPDATE epics SET status = 'closed', updated_at = now() WHERE id = $1")
+        .bind(&epic.id)
+        .execute(harness.db().pool())
+        .await
+        .unwrap();
+
+    let before: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = $1")
+        .bind(&task.id)
+        .fetch_one(harness.db().pool())
+        .await
+        .unwrap();
+    let before_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM activity_log")
+        .fetch_one(harness.db().pool())
+        .await
+        .unwrap();
+
+    harness
+        .call_tool("board_health", json!({ "project": project.slug() }))
+        .await
+        .expect("board_health should dispatch");
+    harness
+        .call_tool("board_health", json!({ "project": project.slug() }))
+        .await
+        .expect("board_health should dispatch again");
+
+    let after: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = $1")
+        .bind(&task.id)
+        .fetch_one(harness.db().pool())
+        .await
+        .unwrap();
+    let after_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM activity_log")
+        .fetch_one(harness.db().pool())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        before.0, after.0,
+        "board_health must not mutate task status"
+    );
+    assert_eq!(
+        before_count.0, after_count.0,
+        "board_health must not emit activity"
+    );
+}
