@@ -5,6 +5,7 @@ use djinn_core::models::{Epic, Task};
 use djinn_db::{Database, EpicCreateInput, EpicRepository, TaskRepository};
 use tokio_util::sync::CancellationToken;
 
+use crate::roles::AgentRole;
 use crate::test_helpers::{agent_context_from_db, create_test_project, test_tempdir};
 
 pub(crate) async fn create_epic(
