@@ -15302,7 +15302,7 @@ expression: signatures
           ]
         },
         "preview": {
-          "description": "When true, compute blast radius without closing tasks, closing/unlinking the epic, or killing sessions.",
+          "description": "When true, classify disposition without closing/unlinking the epic.",
           "type": [
             "boolean",
             "null"
@@ -15316,7 +15316,7 @@ expression: signatures
           ]
         },
         "reason": {
-          "description": "Why obsolete work is being force-closed. Defaults to a reconcile teardown reason.",
+          "description": "Why obsolete work is being reconciled. Defaults to a reconcile reason.",
           "type": [
             "string",
             "null"
@@ -15329,6 +15329,41 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ProposalDispositionSummary": {
+          "description": "Auditable aggregate of the shared parent-terminal disposition matrix.\nBoth proposal abort and obsolete-epic reconciliation return this in preview\nand mutation modes so callers can distinguish disposal from safe retention.",
+          "properties": {
+            "disposed": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "parked": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "retained_already_terminal": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "retained_external_dependent": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "retained_other_parent": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "disposed",
+            "parked",
+            "retained_other_parent",
+            "retained_external_dependent",
+            "retained_already_terminal"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "blocked": {
@@ -15346,6 +15381,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "disposition": {
+          "$ref": "#/$defs/ProposalDispositionSummary",
+          "default": {
+            "disposed": 0,
+            "parked": 0,
+            "retained_already_terminal": 0,
+            "retained_external_dependent": 0,
+            "retained_other_parent": 0
+          },
+          "description": "Child-disposition outcomes for the selected epic. Retained findings do\nnot make the reconciliation fail."
         },
         "epic_id": {
           "type": [
@@ -15386,12 +15432,12 @@ expression: signatures
           ]
         },
         "sessions_killed": {
-          "description": "Running target-epic worker sessions killed, or live sessions in preview.",
+          "description": "Retained for wire compatibility. Proposal disposition never kills sessions\ndirectly; normal task status-change handling reconciles worker state.",
           "format": "int64",
           "type": "integer"
         },
         "tasks_closed": {
-          "description": "Target-epic tasks force-closed, or open target-epic tasks in preview.",
+          "description": "Target-epic tasks disposed (closed), or that would be disposed in preview.",
           "format": "int64",
           "type": "integer"
         }
@@ -18116,14 +18162,14 @@ expression: signatures
           "type": "string"
         },
         "preview": {
-          "description": "When true on `abort`, compute and return the blast radius (epics, open\ntasks, running sessions) WITHOUT mutating anything.",
+          "description": "When true on `abort`, classify linked epic children and return their\ndisposition outcomes WITHOUT mutating anything.",
           "type": [
             "boolean",
             "null"
           ]
         },
         "reason": {
-          "description": "Why the build is being stopped. Recorded as the force-close reason on\neach torn-down task. Required for `abort`.",
+          "description": "Why the build is being stopped. Recorded with proposal terminal\ndisposition activity. Required for `abort`.",
           "type": [
             "string",
             "null"
@@ -18137,8 +18183,54 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ProposalDispositionSummary": {
+          "description": "Auditable aggregate of the shared parent-terminal disposition matrix.\nBoth proposal abort and obsolete-epic reconciliation return this in preview\nand mutation modes so callers can distinguish disposal from safe retention.",
+          "properties": {
+            "disposed": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "parked": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "retained_already_terminal": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "retained_external_dependent": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "retained_other_parent": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "disposed",
+            "parked",
+            "retained_other_parent",
+            "retained_external_dependent",
+            "retained_already_terminal"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "disposition": {
+          "$ref": "#/$defs/ProposalDispositionSummary",
+          "default": {
+            "disposed": 0,
+            "parked": 0,
+            "retained_already_terminal": 0,
+            "retained_external_dependent": 0,
+            "retained_other_parent": 0
+          },
+          "description": "Child-disposition outcomes for all linked epics. Retention findings do\nnot cause abort to fail."
+        },
         "epics_closed": {
           "description": "Epics torn down (abort) or that would be (preview).",
           "format": "int64",
@@ -18167,7 +18259,7 @@ expression: signatures
           ]
         },
         "sessions_killed": {
-          "description": "Running worker sessions killed (abort) or live now (preview).",
+          "description": "Retained for wire compatibility. Proposal disposition never kills\nsessions directly; normal status-change handling reconciles them.",
           "format": "int64",
           "type": "integer"
         },
@@ -18179,7 +18271,7 @@ expression: signatures
           ]
         },
         "tasks_closed": {
-          "description": "Worker tasks force-closed (abort) or open right now (preview).",
+          "description": "Worker tasks disposed (closed) by the parent-disposition matrix.",
           "format": "int64",
           "type": "integer"
         }
