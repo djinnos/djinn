@@ -10,6 +10,7 @@ use serde::Deserialize;
 use crate::catalog::builtin::{BUILTIN_PROVIDERS, BuiltinProvider};
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
+const CATALOG_URL_ENV: &str = "DJINN_PROVIDER_CATALOG_URL";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default freshness window used when computing the source tier for structured
@@ -245,10 +246,11 @@ impl CatalogService {
     }
 
     /// Deterministic test seam that drives the same normalize/compose/swap path
-    /// as a live `refresh()` but with a caller-supplied JSON payload. This lets
-    /// cross-crate integration tests prove catalog freshness behavior without
-    /// hitting models.dev or waiting for a production refresh interval.
-    pub async fn refresh_from_json(&self, value: serde_json::Value) {
+    /// as a live `refresh()` but with a caller-supplied JSON payload. Kept as an
+    /// internal helper so the only public entry point to the live refresh path is
+    /// [`refresh`](Self::refresh); integration tests should drive that public path
+    /// with a mocked upstream URL rather than bypassing it here.
+    async fn refresh_from_json(&self, value: serde_json::Value) {
         let raw = match serde_json::from_value::<HashMap<String, RawProvider>>(value) {
             Ok(raw) => raw,
             Err(e) => {
@@ -305,17 +307,26 @@ impl CatalogService {
         );
     }
 
+    /// Test-only override surface for the upstream models.dev URL. Production
+    /// code always falls back to `CATALOG_URL`; integration tests can set
+    /// `DJINN_PROVIDER_CATALOG_URL` to a local mock server so the real
+    /// `refresh()` loop fetches a mocked payload instead of calling the live
+    /// internet endpoint.
+    fn catalog_url() -> String {
+        std::env::var(CATALOG_URL_ENV)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| CATALOG_URL.to_string())
+    }
+
     async fn fetch_remote(&self) -> Result<serde_json::Value, String> {
         let client = reqwest::Client::builder()
             .timeout(FETCH_TIMEOUT)
             .build()
             .map_err(|e| e.to_string())?;
 
-        let resp = client
-            .get(CATALOG_URL)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+        let url = Self::catalog_url();
+        let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
 
         if !resp.status().is_success() {
             return Err(format!("models.dev returned HTTP {}", resp.status()));
