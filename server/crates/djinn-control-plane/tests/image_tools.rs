@@ -8,7 +8,10 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use djinn_control_plane::test_support::McpTestHarness;
+use std::sync::Arc;
+
+use djinn_control_plane::test_support::{McpTestHarness, StubRuntime};
+use djinn_db::{Database, ImageRepository};
 use serde_json::json;
 
 /// A minimal valid EnvironmentConfig JSON that includes a `lifecycle.pre_task`
@@ -516,4 +519,45 @@ async fn config_without_lifecycle_defaults_to_empty_pre_task() {
     );
     // system_packages still present.
     assert_eq!(img["config"]["system_packages"], json!(["curl"]));
+}
+
+#[tokio::test]
+async fn project_set_image_keeps_success_when_build_enqueue_is_deferred() {
+    let db = Database::open_in_memory().expect("open test database");
+    let runtime =
+        Arc::new(StubRuntime::default().with_image_enqueue_error("synthetic controller outage"));
+    let harness = McpTestHarness::from_db_with_runtime(db.clone(), runtime);
+    let project = common::create_test_project(&db).await;
+
+    let created = harness
+        .call_tool(
+            "image_create",
+            json!({
+                "name": "Deferred-build",
+                "config": { "schema_version": 1 }
+            }),
+        )
+        .await
+        .expect("image_create");
+    assert_eq!(created["status"], "ok");
+    let image_id = created["id"].as_str().expect("image id");
+
+    let assigned = harness
+        .call_tool(
+            "project_set_image",
+            json!({ "project": project.id.clone(), "image_id": image_id }),
+        )
+        .await
+        .expect("project_set_image");
+    assert_eq!(
+        assigned["status"], "ok",
+        "durable assignment must not be reported as failed: {assigned}"
+    );
+
+    let selected = ImageRepository::new(db)
+        .resolve_for_project(&project.id)
+        .await
+        .expect("resolve assignment")
+        .expect("assigned image");
+    assert_eq!(selected.id, image_id);
 }
