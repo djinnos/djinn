@@ -3108,4 +3108,57 @@ async fn sweep_cargo_warm_base_guard(
         projected_bytes = result.projected_bytes,
         "warm-base idle GC completed"
     );
+
+    let pressure_inventory = match gc::inventory_under(Path::new(gc::CARGO_WARM_BASE_ROOT)) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            tracing::warn!(component = metrics::COMPONENT_CARGO_WARM_BASE, mode = config.mode.as_metric_label(), error = %error, "warm-base pressure GC inventory failed; retaining bases");
+            metrics::increment_cleanup_total(
+                metrics::COMPONENT_CARGO_WARM_BASE,
+                metrics::OUTCOME_ERROR,
+                config.mode.as_metric_label(),
+            );
+            return;
+        }
+    };
+    let activity = gc::DbActivityGuard::new(db.clone());
+    let planning_locks = gc::BaseLockPlanningAdapter::new(gc::FlockBaseLock);
+    let dry_run_planning_locks = gc::NoopLockGuard;
+    // Flock creates a lock file, so a dry-run must use the non-mutating
+    // availability policy and leave base mtimes untouched.
+    let planning_locks: &dyn gc::BaseLockGuard = match config.mode {
+        crate::context::CacheCleanupMode::DryRun => &dry_run_planning_locks,
+        crate::context::CacheCleanupMode::Delete => &planning_locks,
+    };
+    let capacity = gc::StatvfsFilesystemCapacity;
+    let plan = gc::plan_pressure_eviction(
+        pressure_inventory,
+        &activity,
+        guard.as_ref(),
+        planning_locks,
+        &capacity,
+        config,
+        &clock,
+    )
+    .await;
+    if !plan.candidates.is_empty() {
+        metrics::increment_candidates(
+            metrics::COMPONENT_CARGO_WARM_BASE,
+            config.mode.as_metric_label(),
+            plan.candidates.len() as u64,
+        );
+    }
+    let pressure = gc::execute_pressure_eviction(
+        plan,
+        &activity,
+        guard.as_ref(),
+        &locks,
+        &capacity,
+        config,
+        &clock,
+        config.mode,
+        Path::new(gc::CARGO_WARM_BASE_ROOT),
+    )
+    .await;
+    gc::log_pressure_eviction_completion(&pressure, config.mode);
 }
