@@ -238,7 +238,7 @@ async fn zero_reconnectable_startup_interrupts_all_running_sessions() {
             project_id: &project_id,
             task_id: None,
             model: "openai/gpt-5.5",
-            agent_type: "chat",
+            agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
             pricing: None,
