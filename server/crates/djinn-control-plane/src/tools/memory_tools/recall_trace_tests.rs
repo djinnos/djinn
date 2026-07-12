@@ -397,6 +397,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_recall_trace_list_rejects_oversized_limit_at_tool_boundary() {
+        let setup = setup_server().await;
+        let response = ops::memory_recall_trace(
+            &setup.server,
+            RecallTraceParams {
+                mode: "list".to_string(),
+                project: Some(setup.project_slug.clone()),
+                project_id: None,
+                session_id: None,
+                task_id: None,
+                task_run_id: None,
+                entry_point: None,
+                outcome: None,
+                skipped_reason: None,
+                limit: Some(2_147_483_647),
+                offset: None,
+                trace_id: None,
+            },
+        )
+        .await;
+        assert_eq!(response.error.as_deref(), Some("limit must be at most 100"));
+        assert!(response.traces.is_empty());
+        assert!(response.trace.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_recall_trace_list_filters_by_outcome_and_skipped_reason() {
         let setup = setup_server().await;
         let id_injected = insert_trace(

@@ -6,10 +6,12 @@ use djinn_db::repositories::retrieval_trace::{
 };
 use rmcp::{Json, handler::server::wrapper::Parameters, tool, tool_router};
 const EXCERPT: usize = 1000;
+/// Maximum number of retained traces a single list request may retrieve.
+pub(crate) const MAX_RECALL_TRACE_LIST_LIMIT: i32 = 100;
 #[tool_router(router = memory_recall_trace_router, vis = "pub(super)")]
 impl DjinnMcpServer {
     #[tool(
-        description = "Browse persisted memory retrieval traces. Use mode=list with project or project_id and filters, or mode=detail with trace_id. Lists are compact; detail returns one trace with bounded note excerpts."
+        description = "Browse persisted memory retrieval traces. Use mode=list with project or project_id and filters (limit maximum: 100), or mode=detail with trace_id. Lists are compact; detail returns one trace with bounded note excerpts."
     )]
     pub async fn memory_recall_trace(
         &self,
@@ -58,6 +60,13 @@ pub(super) async fn recall(s: &DjinnMcpServer, p: RecallTraceParams) -> MemoryRe
     };
     let repo = RetrievalTraceRepository::new(s.state.db().clone());
     if p.mode == "list" {
+        if p.limit
+            .is_some_and(|limit| limit > MAX_RECALL_TRACE_LIST_LIMIT)
+        {
+            return err(format!(
+                "limit must be at most {MAX_RECALL_TRACE_LIST_LIMIT}"
+            ));
+        }
         let ep = match entry(p.entry_point.as_deref()) {
             Ok(x) => x,
             Err(e) => return err(e),
