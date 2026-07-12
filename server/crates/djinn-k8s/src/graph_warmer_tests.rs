@@ -240,12 +240,12 @@ async fn trigger_coalesces_duplicate_calls_for_same_project() {
     release.notify_one();
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(5)).await;
-        if !warmer.in_flight.lock().await.contains_key(&project_id) {
+        if !warmer.dispatch.in_flight.lock().await.contains_key(&project_id) {
             break;
         }
     }
     assert!(
-        !warmer.in_flight.lock().await.contains_key(&project_id),
+        !warmer.dispatch.in_flight.lock().await.contains_key(&project_id),
         "watcher should have dropped the in-flight entry after release"
     );
 
@@ -651,6 +651,245 @@ async fn trigger_consults_lister_before_dispatching_with_empty_cluster() {
         !calls.lock().await.is_empty(),
         "lister must be consulted even when the cluster is empty (to keep the dedupe path exercised)"
     );
+}
+
+// ── Merge-storm debounce tests ────────────────────────────────────────
+//
+// The automatic head-advance trigger path (`K8sGraphWarmer::trigger`) is
+// debounced: a storm of `main` advances collapses into ONE warm run once it
+// settles, a continuous storm still warms within the max-wait bound, and
+// `quiet == 0` reproduces the pre-debounce synchronous behaviour. These tests
+// use short real durations (matching the sleep-based style elsewhere in this
+// module) and the `RecordingDispatcher` to count dispatches.
+
+/// Poll up to `attempts` × 5ms for the captured-Job count to reach `want`,
+/// returning the final observed count. Keeps the storm assertions robust to
+/// scheduler jitter without a fixed oversized sleep.
+async fn wait_for_captured(captured: &CapturedJobs, want: usize, attempts: usize) -> usize {
+    for _ in 0..attempts {
+        if captured_len(captured).await >= want {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    captured_len(captured).await
+}
+
+/// A storm of triggers arriving within the quiet window must collapse into
+/// exactly ONE warm dispatch after the storm settles — the core anti-churn
+/// guarantee (11 warms in 79 min → 1).
+#[tokio::test]
+async fn debounce_collapses_storm_into_single_dispatch() {
+    let db = Database::open_in_memory().expect("in-memory db");
+    let project_id = seed_project_with_ready_image(&db, "proj-storm").await;
+
+    let (dispatcher, captured, _count) = RecordingDispatcher::new("warm");
+    let warmer = K8sGraphWarmer::with_dispatcher(
+        test_config(),
+        db,
+        Arc::new(dispatcher),
+        Arc::new(NoopJobWatcher),
+    )
+    .with_debounce(WarmDebounceConfig {
+        quiet: Duration::from_millis(200),
+        max_wait: Duration::from_secs(5),
+    });
+
+    // Fire 5 triggers 20ms apart (all inside the 200ms quiet window).
+    for _ in 0..5 {
+        warmer.trigger(&project_id).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Nothing should have dispatched yet — the quiet window has not elapsed.
+    assert_eq!(
+        captured_len(&captured).await,
+        0,
+        "no warm may dispatch while the quiet window is still open"
+    );
+
+    // After the window collapses, exactly one warm dispatches.
+    let dispatched = wait_for_captured(&captured, 1, 120).await;
+    assert_eq!(
+        dispatched, 1,
+        "a storm of triggers must collapse into exactly one warm run"
+    );
+    // Give any stray driver a beat and re-assert it stayed at one.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(captured_len(&captured).await, 1, "still exactly one warm");
+
+    let m = warmer.debounce_metrics();
+    assert_eq!(m.triggers_received, 5, "all 5 triggers counted");
+    assert_eq!(m.triggers_coalesced, 4, "4 of 5 folded into the first window");
+    assert_eq!(m.warms_debounced, 1, "one window collapsed into one dispatch");
+}
+
+/// A continuously-advancing head (each trigger re-arming the quiet window
+/// before it can elapse) must still warm within the max-wait bound rather than
+/// deferring forever.
+#[tokio::test]
+async fn debounce_max_wait_fires_under_continuous_advance() {
+    let db = Database::open_in_memory().expect("in-memory db");
+    let project_id = seed_project_with_ready_image(&db, "proj-maxwait").await;
+
+    let (dispatcher, captured, _count) = RecordingDispatcher::new("warm");
+    // Quiet (100ms) is always re-armed by the 40ms trigger cadence, so without
+    // the max-wait bound this would never fire. max_wait=300ms forces it.
+    let warmer = Arc::new(
+        K8sGraphWarmer::with_dispatcher(
+            test_config(),
+            db,
+            Arc::new(dispatcher),
+            Arc::new(NoopJobWatcher),
+        )
+        .with_debounce(WarmDebounceConfig {
+            quiet: Duration::from_millis(100),
+            max_wait: Duration::from_millis(300),
+        }),
+    );
+
+    let started = Instant::now();
+    // Drive a continuous storm: a trigger every 40ms (< quiet) for ~600ms.
+    let driver = {
+        let warmer = warmer.clone();
+        let pid = project_id.clone();
+        tokio::spawn(async move {
+            for _ in 0..15 {
+                warmer.trigger(&pid).await;
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        })
+    };
+
+    let dispatched = wait_for_captured(&captured, 1, 200).await;
+    let elapsed = started.elapsed();
+    driver.await.expect("storm driver");
+
+    assert!(
+        dispatched >= 1,
+        "max-wait must force a dispatch under a continuous storm; got {dispatched}"
+    );
+    // It must NOT have fired immediately (proves it waited) and must fire around
+    // the max-wait bound, not never.
+    assert!(
+        elapsed >= Duration::from_millis(250),
+        "dispatch should be deferred until ~max_wait, not immediate; fired at {elapsed:?}"
+    );
+    assert!(
+        warmer.debounce_metrics().warms_debounced >= 1,
+        "max-wait collapse must count as a debounced warm"
+    );
+}
+
+/// With debouncing disabled (`quiet == 0`) every trigger dispatches
+/// immediately, exactly reproducing the pre-debounce behaviour, and the
+/// debounce driver path is never taken.
+#[tokio::test]
+async fn debounce_disabled_dispatches_immediately() {
+    let db = Database::open_in_memory().expect("in-memory db");
+    let project_id = seed_project_with_ready_image(&db, "proj-disabled").await;
+
+    let (dispatcher, captured, _count) = RecordingDispatcher::new("warm");
+    let warmer = K8sGraphWarmer::with_dispatcher(
+        test_config(),
+        db,
+        Arc::new(dispatcher),
+        Arc::new(NoopJobWatcher),
+    )
+    .with_debounce(WarmDebounceConfig::DISABLED);
+
+    warmer.trigger(&project_id).await;
+    // No quiet window — the Job is dispatched synchronously within trigger.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        captured_len(&captured).await,
+        1,
+        "disabled debounce must dispatch immediately (pre-debounce behaviour)"
+    );
+
+    let m = warmer.debounce_metrics();
+    assert_eq!(m.triggers_received, 1);
+    assert_eq!(
+        m.warms_debounced, 0,
+        "the debounce driver path must not run when disabled"
+    );
+    assert_eq!(m.triggers_coalesced, 0);
+}
+
+/// Triggers arriving while a warm is in flight must coalesce into exactly ONE
+/// follow-up dispatch (at the latest tip) once the in-flight warm drains — never
+/// a queue of stale per-trigger dispatches.
+#[tokio::test]
+async fn debounce_coalesces_triggers_during_inflight_warm() {
+    let db = Database::open_in_memory().expect("in-memory db");
+    let project_id = seed_project_with_ready_image(&db, "proj-inflight-coalesce").await;
+
+    // ControlledWatcher keeps the first warm "in flight" until we release it,
+    // so follow-up triggers must coalesce behind it rather than dispatch.
+    let release = Arc::new(Notify::new());
+    let (dispatcher, captured, _count) = RecordingDispatcher::new("warm");
+    let warmer = Arc::new(
+        K8sGraphWarmer::with_dispatcher(
+            test_config(),
+            db,
+            Arc::new(dispatcher),
+            Arc::new(ControlledWatcher {
+                release: release.clone(),
+            }),
+        )
+        .with_debounce(WarmDebounceConfig {
+            quiet: Duration::from_millis(80),
+            max_wait: Duration::from_secs(5),
+        }),
+    );
+
+    // First trigger → debounce window → dispatches warm #1 (stays in flight).
+    warmer.trigger(&project_id).await;
+    let dispatched = wait_for_captured(&captured, 1, 60).await;
+    assert_eq!(dispatched, 1, "first debounce window dispatches warm #1");
+    // Confirm it is genuinely in flight (watcher blocked on `release`).
+    assert!(
+        warmer
+            .dispatch
+            .in_flight
+            .lock()
+            .await
+            .contains_key(&project_id),
+        "warm #1 must be in flight before the follow-up storm"
+    );
+
+    // Two more triggers arrive while warm #1 is in flight — they must coalesce
+    // into a single pending follow-up, not two dispatches.
+    warmer.trigger(&project_id).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    warmer.trigger(&project_id).await;
+
+    // Let the follow-up window elapse; nothing may dispatch while #1 is in
+    // flight (the driver is draining behind it).
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        captured_len(&captured).await,
+        1,
+        "no follow-up may dispatch while warm #1 is still in flight"
+    );
+
+    // Release warm #1 → it drains → the coalesced follow-up dispatches exactly
+    // one more warm.
+    release.notify_waiters();
+    let dispatched = wait_for_captured(&captured, 2, 120).await;
+    assert_eq!(
+        dispatched, 2,
+        "exactly one follow-up warm dispatches after the in-flight warm drains"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        captured_len(&captured).await,
+        2,
+        "follow-up must be a single coalesced run, not one per trigger"
+    );
+
+    // Clean up the second warm's watcher (also blocked on `release`).
+    release.notify_waiters();
 }
 
 /// Event-driven convergence: when a warm Job completes successfully the
