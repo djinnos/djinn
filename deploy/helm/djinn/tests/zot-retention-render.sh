@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# Helm rendering test for Zot catalog retention policy.
+# Helm rendering test for Zot catalog retention policy and server preflight.
 #
-# Renders the zot-configmap template with retention enabled and disabled, then
-# validates the extracted config.json structure with the Python standard
-# library. Proves:
-#   1. Enabled retention renders valid JSON with the catalog-only policy,
-#      deleteUntagged, the configured newestTags count, and dry-run semantics.
-#   2. Disabled retention renders valid JSON with no storage.retention block.
-#   3. Required rendering and parsing tools cannot silently skip this test.
+# Renders the Zot ConfigMap and server Deployment for disabled, dry-run, and
+# destructive settings. Python's standard library verifies that the policy and
+# the runtime startup-preflight environment stay coupled.
 #
 # Usage: bash deploy/helm/djinn/tests/zot-retention-render.sh
 set -euo pipefail
@@ -28,34 +24,35 @@ require_tool python3
 TMPDIR_RENDER=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_RENDER"' EXIT
 
-render_zot_configmap() {
+render_manifests() {
     local output=$1
     shift
 
     helm template test-release "$CHART_DIR" \
         --show-only templates/zot-configmap.yaml \
+        --show-only templates/deployment-server.yaml \
         --set imagePipeline.enabled=true \
         --set imagePipeline.zot.enabled=true \
         "$@" \
         > "$output"
 }
 
-assert_config() {
+assert_manifests() {
     local render=$1
     local retention_enabled=$2
-    local dry_run=${3:-unused}
-    local newest_tags=${4:-unused}
+    local dry_run=$3
+    local newest_tags=$4
+    local expected_secret=$5
 
-    python3 - "$render" "$retention_enabled" "$dry_run" "$newest_tags" <<'PY'
+    python3 - "$render" "$retention_enabled" "$dry_run" "$newest_tags" "$expected_secret" <<'PY'
 import json
+import re
 import sys
 
-render_path, retention_enabled, expected_dry_run, expected_newest = sys.argv[1:]
+render_path, retention_enabled, expected_dry_run, expected_newest, expected_secret = sys.argv[1:]
 rendered = open(render_path, encoding="utf-8").read().splitlines()
 
-# Helm emits config.json as a YAML literal block. Extract that block directly
-# so this focused test requires only Python's standard library, rather than an
-# optionally-installed YAML package. Reject missing or malformed blocks.
+# Extract Zot's YAML literal block without requiring a third-party YAML parser.
 try:
     config_start = rendered.index("  config.json: |") + 1
 except ValueError:
@@ -65,21 +62,51 @@ config_lines = []
 for line in rendered[config_start:]:
     if line and not line.startswith("    "):
         break
-    if line:
-        config_lines.append(line[4:])
-    else:
-        config_lines.append("")
-
-if not config_lines:
-    raise AssertionError("zot ConfigMap data.config.json was empty")
-
+    config_lines.append(line[4:] if line else "")
 config = json.loads("\n".join(config_lines))
 storage = config.get("storage")
 assert isinstance(storage, dict), "storage configuration missing"
 
+def env_block(name):
+    start = next(i for i, line in enumerate(rendered)
+                 if line == f"            - name: {name}")
+    end = next((i for i in range(start + 1, len(rendered))
+                if rendered[i].startswith("            - name: ")), len(rendered))
+    return "\n".join(rendered[start:end])
+
+def assert_value(name, expected):
+    block = env_block(name)
+    match = re.search(r"^              value: (.+)$", block, re.MULTILINE)
+    assert match, f"{name} must use a literal non-secret value"
+    assert match.group(1).strip('"') == expected, (
+        f"{name} should be {expected}, got {match.group(1)}"
+    )
+
+# These values are the startup preflight's destructive-mode gate input and
+# must exactly follow the rendered Zot policy settings in every scenario.
+assert_value("DJINN_ZOT_RETENTION_ENABLED", retention_enabled)
+assert_value("DJINN_ZOT_RETENTION_DRY_RUN", expected_dry_run)
+assert_value("DJINN_ZOT_RETENTION_NEWEST_TAGS", expected_newest)
+assert_value(
+    "DJINN_ZOT_RETENTION_ENDPOINT",
+    "http://test-release-djinn-zot.default.svc.cluster.local:5000",
+)
+
+for name, key in (("DJINN_ZOT_RETENTION_USERNAME", "username"),
+                  ("DJINN_ZOT_RETENTION_PASSWORD", "password")):
+    block = env_block(name)
+    assert "valueFrom:" in block and "secretKeyRef:" in block, (
+        f"{name} must use a SecretKeyRef"
+    )
+    assert f'name: "{expected_secret}"' in block, (
+        f"{name} must reference {expected_secret}"
+    )
+    assert f"key: {key}" in block, f"{name} must use the {key} key"
+    assert "value:" not in block, f"{name} must not render a secret literal"
+
 if retention_enabled == "false":
     assert "retention" not in storage, "retention block present when disabled"
-    print("PASS: disabled config.json parses and has no retention block")
+    print("PASS: disabled policy and non-destructive server preflight env agree")
     sys.exit(0)
 
 retention = storage.get("retention")
@@ -87,49 +114,65 @@ assert isinstance(retention, dict), "storage.retention missing when enabled"
 assert retention.get("dryRun") is (expected_dry_run == "true"), (
     f"dryRun should be {expected_dry_run}, got {retention.get('dryRun')}"
 )
-
-policies = retention.get("policies")
-assert isinstance(policies, list) and len(policies) == 1, "expected exactly one retention policy"
-policy = policies[0]
-assert policy.get("repositories") == ["djinn-image-*"], (
-    f"retention must target only catalog repositories, got {policy.get('repositories')}"
-)
+policy = retention.get("policies", [None])[0]
+assert isinstance(policy, dict), "expected exactly one retention policy"
+assert policy.get("repositories") == ["djinn-image-*"], "retention must target catalog repos only"
 assert policy.get("deleteUntagged") is True, "deleteUntagged should be true"
-keep_tags = policy.get("keepTags")
-assert isinstance(keep_tags, list) and len(keep_tags) == 1, "expected exactly one keepTags rule"
-assert keep_tags[0].get("newest") == int(expected_newest), (
-    f"newestTags should be {expected_newest}, got {keep_tags[0].get('newest')}"
+assert policy.get("keepTags", [{}])[0].get("newest") == int(expected_newest), (
+    f"newestTags should be {expected_newest}"
 )
-
-print(
-    "PASS: enabled config.json parses with catalog-only selector, "
-    f"deleteUntagged=true, newestTags={expected_newest}, dryRun={expected_dry_run}"
-)
+print(f"PASS: policy and server preflight env agree; newestTags={expected_newest}, dryRun={expected_dry_run}")
 PY
 }
 
 echo "=== Test 1: retention disabled ==="
-render_zot_configmap "$TMPDIR_RENDER/disabled.yaml" \
+render_manifests "$TMPDIR_RENDER/disabled.yaml" \
     --set imagePipeline.zot.retention.enabled=false
-assert_config "$TMPDIR_RENDER/disabled.yaml" false
+assert_manifests "$TMPDIR_RENDER/disabled.yaml" false true 5 test-release-djinn-zot-auth
 
 echo ""
 echo "=== Test 2: retention enabled with dryRun=true ==="
-render_zot_configmap "$TMPDIR_RENDER/enabled.yaml" \
+render_manifests "$TMPDIR_RENDER/dry-run.yaml" \
     --set imagePipeline.zot.retention.enabled=true \
     --set imagePipeline.zot.retention.dryRun=true \
     --set imagePipeline.zot.retention.newestTags=3 \
     --set imagePipeline.zot.retention.deleteUntagged=true
-assert_config "$TMPDIR_RENDER/enabled.yaml" true true 3
+assert_manifests "$TMPDIR_RENDER/dry-run.yaml" true true 3 test-release-djinn-zot-auth
 
 echo ""
-echo "=== Test 3: retention enabled with dryRun=false (destructive) ==="
-render_zot_configmap "$TMPDIR_RENDER/destructive.yaml" \
+echo "=== Test 3: destructive retention ==="
+render_manifests "$TMPDIR_RENDER/destructive.yaml" \
     --set imagePipeline.zot.retention.enabled=true \
     --set imagePipeline.zot.retention.dryRun=false \
     --set imagePipeline.zot.retention.newestTags=10 \
     --set imagePipeline.zot.retention.deleteUntagged=true
-assert_config "$TMPDIR_RENDER/destructive.yaml" true false 10
+assert_manifests "$TMPDIR_RENDER/destructive.yaml" true false 10 test-release-djinn-zot-auth
+
+echo ""
+echo "=== Test 4: caller-owned existingSecret auth ==="
+render_manifests "$TMPDIR_RENDER/existing-secret.yaml" \
+    --set imagePipeline.zot.retention.enabled=true \
+    --set imagePipeline.zot.retention.dryRun=true \
+    --set imagePipeline.zot.auth.existingSecret=operator-zot-auth \
+    --set imagePipeline.zot.auth.password=caller-secret-value
+assert_manifests "$TMPDIR_RENDER/existing-secret.yaml" true true 5 operator-zot-auth
+if grep -Fq 'caller-secret-value' "$TMPDIR_RENDER/existing-secret.yaml"; then
+    echo "FAIL: caller-owned Zot password leaked into rendered manifests" >&2
+    exit 1
+fi
+
+echo ""
+echo "=== Test 5: destructive retention requires an enabled Zot endpoint ==="
+if helm template test-release "$CHART_DIR" \
+    --show-only templates/zot-configmap.yaml \
+    --set imagePipeline.enabled=true \
+    --set imagePipeline.zot.enabled=false \
+    --set imagePipeline.zot.retention.enabled=true \
+    --set imagePipeline.zot.retention.dryRun=false \
+    > "$TMPDIR_RENDER/invalid.yaml" 2>&1; then
+    echo "FAIL: destructive retention rendered without an enabled Zot endpoint" >&2
+    exit 1
+fi
 
 echo ""
 echo "=== All Helm rendering tests passed ==="
