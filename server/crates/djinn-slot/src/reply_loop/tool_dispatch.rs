@@ -1486,49 +1486,79 @@ mod tests {
         use std::sync::Arc;
         use tokio_util::sync::CancellationToken;
 
+        fn large_extension_output(
+            _: Option<&serde_json::Map<String, serde_json::Value>>,
+        ) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({"output": "E".repeat(5_000)}))
+        }
+
+        fn large_mcp_output(
+            _: Option<&serde_json::Map<String, serde_json::Value>>,
+        ) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({"output": "M".repeat(5_000)}))
+        }
+
         let db = create_test_db();
         let mut handlers: HashMap<String, ToolHandlerFn> = HashMap::new();
-        handlers.insert(
-            "mcp_fetch".to_string(),
-            (|_| Ok(serde_json::json!({"ok": true}))) as ToolHandlerFn,
-        );
+        handlers.insert("mcp_fetch".to_string(), large_mcp_output as ToolHandlerFn);
         handlers.insert(
             "extension_compute".to_string(),
-            (|_| Ok(serde_json::json!({"result": 42}))) as ToolHandlerFn,
+            large_extension_output as ToolHandlerFn,
         );
-        handlers.insert(
-            "read_mcp_resource".to_string(),
-            (|_| Ok(serde_json::json!({"content": "native resource output"}))) as ToolHandlerFn,
+        let dispatcher = Arc::new(
+            ConfigurableToolDispatcher::new(vec!["mcp_fetch".to_string()], handlers)
+                .with_resource_results(HashMap::from([(
+                    "read_mcp_resource".to_string(),
+                    "R".repeat(5_000),
+                )])),
         );
-        let dispatcher = Arc::new(ConfigurableToolDispatcher::new(
-            vec!["mcp_fetch".to_string(), "read_mcp_resource".to_string()],
-            handlers,
-        ));
         let ctx =
             agent_context_from_db_with_dispatcher(db, CancellationToken::new(), Some(dispatcher));
         let worktree_path = std::path::Path::new("/tmp");
         let tool_metadata = ToolRuntimeMetadataMap::new();
         let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
 
-        let config = TurnInlineBudgetConfig {
-            budget: 200,
-            preview_floor: 10,
-        };
-
-        // Large extension result, large MCP result, and large native resource result.
-        let ext = "E".repeat(5_000);
-        let mcp = "M".repeat(5_000);
-        let res = "R".repeat(5_000);
-        let mut results = vec![
-            collected_text(0, "call-ext", "extension_compute", &ext),
-            collected_text(1, "call-mcp", "mcp_fetch", &mcp),
-            collected_text(2, "call-res", "read_mcp_resource", &res),
+        // Exercise the public merge/sort/post-pass boundary. The configurable
+        // dispatcher reaches each real dispatch branch: extension rendering,
+        // MCP rendering, and the native resource text callback respectively.
+        // The tiny configured budget ensures all three successful large results
+        // are externalized through the canonical host seam.
+        unsafe {
+            std::env::set_var("DJINN_TURN_INLINE_CHAR_BUDGET", "200");
+            std::env::set_var("DJINN_TURN_INLINE_PREVIEW_FLOOR", "10");
+        }
+        let turn_tool_calls = vec![
+            ContentBlock::ToolUse {
+                id: "call-ext".into(),
+                name: "extension_compute".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolUse {
+                id: "call-mcp".into(),
+                name: "mcp_fetch".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolUse {
+                id: "call-res".into(),
+                name: "read_mcp_resource".into(),
+                input: serde_json::json!({}),
+            },
         ];
-        apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+        let results = collect_tool_results(
+            &turn_tool_calls,
+            Vec::new(),
+            &std::collections::HashSet::new(),
+            &tool_metadata,
+            &dispatch_ctx,
+        )
+        .await;
+        unsafe {
+            std::env::remove_var("DJINN_TURN_INLINE_CHAR_BUDGET");
+            std::env::remove_var("DJINN_TURN_INLINE_PREVIEW_FLOOR");
+        }
 
-        // All three candidates are larger than the budget headroom and are
-        // eligible for externalization. The mock seam emits the canonical header
-        // for every externalized result, so each real tool_name is recoverable.
+        // All three dispatched results are larger than the budget headroom and
+        // must emit recovery metadata suitable for output_view/output_grep.
         for (expected_id, expected_name) in [
             ("call-ext", "extension_compute"),
             ("call-mcp", "mcp_fetch"),
@@ -1536,11 +1566,19 @@ mod tests {
         ] {
             let result = results
                 .iter()
-                .find(|r| r.tool_use_id == expected_id)
+                .find(|block| matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == expected_id))
                 .unwrap_or_else(|| panic!("missing result for {expected_id}"));
-            let text = match &result.content[0] {
-                ContentBlock::Text { text } => text.clone(),
-                _ => panic!("expected text"),
+            let text = match result {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    assert!(!is_error, "{expected_name} should dispatch successfully");
+                    match &content[0] {
+                        ContentBlock::Text { text } => text.clone(),
+                        _ => panic!("expected text"),
+                    }
+                }
+                _ => panic!("expected tool result"),
             };
             assert!(
                 text.starts_with("[djinn-output-stash"),

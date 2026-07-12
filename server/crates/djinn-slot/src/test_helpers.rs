@@ -126,6 +126,8 @@ pub type ToolHandlerFn =
 pub struct ConfigurableToolDispatcher {
     /// Tool names that should be treated as MCP tools.
     mcp_tools: Vec<String>,
+    /// Native MCP resource tool names and their successful text results.
+    resource_results: HashMap<String, String>,
     /// Map from tool name → handler that returns the dispatch result.
     /// Extension tools not in this map get a generic error.
     handlers: HashMap<String, ToolHandlerFn>,
@@ -135,8 +137,17 @@ impl ConfigurableToolDispatcher {
     pub fn new(mcp_tools: Vec<String>, handlers: HashMap<String, ToolHandlerFn>) -> Self {
         Self {
             mcp_tools,
+            resource_results: HashMap::new(),
             handlers,
         }
+    }
+
+    /// Configure successful native MCP resource results for dispatch tests.
+    /// Resource tools return text directly, unlike extension and MCP tools,
+    /// which render JSON values through `render_result`.
+    pub fn with_resource_results(mut self, resource_results: HashMap<String, String>) -> Self {
+        self.resource_results = resource_results;
+        self
     }
 }
 
@@ -211,19 +222,22 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
             None
         }
     }
-    fn is_resource_tool(&self, _tool_name: &str) -> bool {
-        false
+    fn is_resource_tool(&self, tool_name: &str) -> bool {
+        self.resource_results.contains_key(tool_name)
     }
     fn dispatch_resource_tool<'a>(
         &'a self,
         tool_name: &'a str,
         _arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>> {
-        Box::pin(async move {
-            Err(format!(
-                "ConfigurableToolDispatcher: resource tool '{tool_name}' not configured"
-            ))
-        })
+        let result = self
+            .resource_results
+            .get(tool_name)
+            .cloned()
+            .ok_or_else(|| {
+                format!("ConfigurableToolDispatcher: resource tool '{tool_name}' not configured")
+            });
+        Box::pin(async move { result })
     }
     fn clear_stash(&self) {}
 }
