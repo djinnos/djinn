@@ -20,6 +20,12 @@ pub const CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME: &str = "closed_parent_open_chi
 pub trait ClosedParentOpenChildrenSource: Send + Sync {
     /// Return the raw `closed_parent_open_children` section from board health.
     fn snapshot(&self) -> serde_json::Value;
+
+    /// Refresh immediately before a synchronous doctor run.
+    ///
+    /// In-memory sources are already current. The production implementation
+    /// overrides this so direct MCP runs cannot observe a prior tick's cache.
+    fn refresh_for_run(&self) {}
 }
 
 /// Read-only doctor check that persists the board-health evidence verbatim.
@@ -85,6 +91,9 @@ impl DoctorCheck for ClosedParentOpenChildrenCheck {
     }
 
     fn run(&self) -> DoctorResult<Vec<Finding>> {
+        // Keep direct MCP runs current as well as the periodic cheap run.
+        // Refreshing this adapter is read-only and never invokes repair.
+        self.source.refresh_for_run();
         let snapshot = self.source.snapshot();
         let findings = snapshot
             .get("findings")
@@ -172,6 +181,28 @@ impl ClosedParentOpenChildrenSource for TaskRepositoryClosedParentOpenChildrenSo
                     "closed_parent_open_children doctor: cache locked during snapshot read; returning empty"
                 );
                 json!({})
+            }
+        }
+    }
+
+    fn refresh_for_run(&self) {
+        let source = self.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle)
+                if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+            {
+                tokio::task::block_in_place(|| handle.block_on(source.refresh()));
+            }
+            Ok(_) => {
+                let _ = std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Runtime::new().expect("create refresh runtime");
+                    runtime.block_on(source.refresh());
+                })
+                .join();
+            }
+            Err(_) => {
+                let runtime = tokio::runtime::Runtime::new().expect("create refresh runtime");
+                runtime.block_on(source.refresh());
             }
         }
     }
