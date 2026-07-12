@@ -112,6 +112,11 @@ pub(super) struct CoordinatorActor {
     /// that construct the actor directly and do not need the stranded check.
     pub(super) stranded_ready_source:
         Option<Arc<crate::doctor::stranded_ready::TaskRepositoryStrandedReadySource>>,
+    /// Cached board-health source for the closed-parent orphan doctor check.
+    /// Refreshed immediately before cheap checks so newly terminal parents are
+    /// visible without allowing the synchronous check to read the database.
+    pub(super) closed_parent_open_children_source:
+        Option<Arc<crate::doctor::TaskRepositoryClosedParentOpenChildrenSource>>,
     /// Per-task state of the PR poller's offloaded clean-merge fast path. The
     /// heavy mechanical merge (fetch + ephemeral clone + merge + push) runs in a
     /// spawned background task instead of inline on this tick; the poller reads
@@ -441,6 +446,17 @@ impl CoordinatorActor {
             Arc::new(crate::doctor::live_mover::NoOpLiveMoverSource),
             Arc::clone(&stranded_ready_source) as Arc<dyn crate::doctor::StrandedReadySource>,
         );
+        let closed_parent_open_children_source = Arc::new(
+            crate::doctor::TaskRepositoryClosedParentOpenChildrenSource::new(
+                db.clone(),
+                events_tx.clone(),
+            ),
+        );
+        crate::doctor::register_closed_parent_open_children_check(
+            djinn_core::doctor::registry(),
+            Arc::clone(&closed_parent_open_children_source)
+                as Arc<dyn crate::doctor::ClosedParentOpenChildrenSource>,
+        );
 
         Self {
             receiver,
@@ -466,6 +482,9 @@ impl CoordinatorActor {
             dispatch_failure_streak: HashMap::new(),
             background_work_tracker,
             stranded_ready_source: Some(Arc::clone(&stranded_ready_source)),
+            closed_parent_open_children_source: Some(Arc::clone(
+                &closed_parent_open_children_source,
+            )),
             auto_merge_tracker: Arc::new(std::sync::Mutex::new(HashMap::new())),
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
@@ -812,6 +831,9 @@ impl CoordinatorActor {
         // The run_id is monotonic per-tick so a future `doctor_list_findings`
         // call can scope its query back to one leader-tick invocation.
         if let Some(source) = self.stranded_ready_source.as_ref() {
+            source.refresh().await;
+        }
+        if let Some(source) = self.closed_parent_open_children_source.as_ref() {
             source.refresh().await;
         }
         let doctor_run_id = format!("leader-tick-{}", self.prune_tick_counter.wrapping_add(1));
