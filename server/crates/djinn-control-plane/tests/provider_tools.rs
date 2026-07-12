@@ -1446,20 +1446,6 @@ impl Drop for RestoreCatalogUrl {
     }
 }
 
-/// Yield only to in-flight I/O until the owner applies an observed response.
-async fn wait_for_catalog_model_after_request(
-    catalog: &djinn_provider::catalog::CatalogService,
-    id: &str,
-) {
-    for _ in 0..10_000 {
-        if catalog.find_model(id).is_some() {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-    panic!("owner did not apply observed response for {id}");
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_restart() {
     let _guard = CATALOG_URL_LOCK.lock().await;
@@ -1542,16 +1528,24 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
         })
     };
 
-    // The boot phase refreshes immediately; wait for its proof-only model.
-    wait_for_catalog_model_after_request(harness.state().catalog(), "openai/refresh-proof.initial")
-        .await;
+    // Releasing a manual tick also proves the boot phase completed, because the
+    // owner cannot receive periodic ticks until after its initial refresh.
+    let (boot_barrier_tx, boot_barrier_rx) = tokio::sync::oneshot::channel();
+    tick_tx
+        .send(boot_barrier_tx)
+        .await
+        .expect("release boot-completion barrier tick");
+    boot_barrier_rx
+        .await
+        .expect("owner should complete the barrier tick after boot");
     assert_eq!(
         server
             .received_requests()
             .await
             .expect("boot request")
             .len(),
-        1
+        2,
+        "boot and its completion-barrier tick should each make one initial request"
     );
     assert_eq!(
         harness.state().catalog().last_refresh_status(),
@@ -1603,9 +1597,23 @@ async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_r
     // The test never calls `catalog().refresh()` directly. The new model only
     // appears because the refresh owner's periodic branch (manual tick →
     // `catalog.refresh()`) re-fetches the mock and swaps in the updated catalog.
-    // If that tick stopped invoking refresh, this wait would time out.
-    tick_tx.send(()).await.expect("release exactly one tick");
-    wait_for_catalog_model_after_request(harness.state().catalog(), "openai/gpt-5.2.nano").await;
+    // The acknowledgement is sent only after that branch finishes refresh.
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    tick_tx
+        .send(completion_tx)
+        .await
+        .expect("release exactly one changed-response tick");
+    completion_rx
+        .await
+        .expect("canonical owner should complete the released periodic tick");
+    assert!(
+        harness
+            .state()
+            .catalog()
+            .find_model("openai/gpt-5.2.nano")
+            .is_some(),
+        "exactly one changed-response tick should apply the new model"
+    );
     assert_eq!(
         server
             .received_requests()

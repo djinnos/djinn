@@ -23,23 +23,23 @@ use tokio_util::sync::CancellationToken;
 pub enum ProviderCatalogRefreshTicks {
     /// Tokio's production interval.
     Interval,
-    /// Explicit releases used by deterministic integration tests.
-    Manual(tokio::sync::mpsc::Receiver<()>),
+    /// Explicit releases with completion acknowledgements for deterministic tests.
+    Manual(tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<()>>),
 }
 
 enum ActiveRefreshTicks {
     Interval(tokio::time::Interval),
-    Manual(tokio::sync::mpsc::Receiver<()>),
+    Manual(tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<()>>),
 }
 
 impl ActiveRefreshTicks {
-    async fn next(&mut self) -> bool {
+    async fn next(&mut self) -> Option<Option<tokio::sync::oneshot::Sender<()>>> {
         match self {
             Self::Interval(ticker) => {
                 ticker.tick().await;
-                true
+                Some(None)
             }
-            Self::Manual(receiver) => receiver.recv().await.is_some(),
+            Self::Manual(receiver) => receiver.recv().await.map(Some),
         }
     }
 }
@@ -236,12 +236,13 @@ pub async fn run_provider_catalog_refresh_loop(
     loop {
         tokio::select! {
             () = cancel.cancelled() => return,
-            released = ticks.next() => {
-                if !released {
-                    return;
-                }
+            completion = ticks.next() => {
+                let Some(completion) = completion else { return };
                 catalog.refresh().await;
                 log_refresh_outcome(&catalog, interval, "periodic");
+                if let Some(completion) = completion {
+                    let _ = completion.send(());
+                }
             }
         }
     }
