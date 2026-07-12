@@ -17,5 +17,7 @@ use request::AnthropicSystemBlock;
 #[cfg(test)]
 pub(crate) use serde_json::{Value, json};
 #[allow(unused_imports)]
-pub(crate) use streaming::{ToolAcc, classify_anthropic_error_event, parse_anthropic_event};
+pub(crate) use streaming::{
+    ContentBlockAcc, classify_anthropic_error_event, parse_anthropic_event,
+};
 pub(crate) use tools::convert_tool;
