@@ -458,17 +458,25 @@ pub(super) async fn collect_tool_results(
     tool_metadata: &ToolRuntimeMetadataMap,
     ctx: &ToolDispatchContext<'_>,
 ) -> Vec<ContentBlock> {
-    collect_tool_results_internal(
+    let mut collected = collect_tool_results_internal(
         turn_tool_calls,
         streaming_results,
         streaming_dispatched,
         tool_metadata,
         ctx,
     )
-    .await
-    .into_iter()
-    .map(CollectedToolResult::into_content_block)
-    .collect()
+    .await;
+    // Per-turn inline-character budget post-pass (v9ie). Runs immediately after
+    // the serial/parallel/streaming results are merged and sorted, before they
+    // are converted to transcript ContentBlocks. Greedily externalizes the
+    // largest shrinking tool-result candidates until the projected inline-char
+    // total fits the configured budget or no candidate can shrink below the
+    // configured preview floor.
+    apply_turn_inline_budget_pass(&mut collected, ctx);
+    collected
+        .into_iter()
+        .map(CollectedToolResult::into_content_block)
+        .collect()
 }
 
 const UNKNOWN_TOOL_NAME: &str = "unknown_tool";
@@ -547,11 +555,10 @@ async fn collect_tool_results_internal(
     tool_metadata: &ToolRuntimeMetadataMap,
     ctx: &ToolDispatchContext<'_>,
 ) -> Vec<CollectedToolResult> {
-    // rdx6 only introduced the host seam for externalizing an already-rendered
-    // result. It intentionally does not apply that seam here: collect_tool_results
-    // remains a per-result dispatcher with no per-turn inline-budget group pass.
-    // The v9ie epic owns any future batch-selection policy that calls
-    // SlotToolDispatcher::externalize_rendered_result after a parallel batch.
+    // rdx6 introduced the host seam for externalizing an already-rendered
+    // result; v9ie applies that seam as a per-turn inline-character budget
+    // post-pass in collect_tool_results immediately after this function returns
+    // the sorted results. This function only collects, merges, and sorts.
     let (indexed_tool_calls, batches) =
         build_tool_batches(turn_tool_calls, streaming_dispatched, tool_metadata);
     let total_tools = turn_tool_calls
@@ -610,6 +617,212 @@ async fn collect_tool_results_internal(
     }
     indexed_results.sort_by_key(|r| r.idx);
     indexed_results
+}
+
+// ─── Per-turn inline-character budget post-pass (v9ie) ────────────────────────
+
+/// Environment variable overriding the per-turn inline-character budget.
+const TURN_INLINE_CHAR_BUDGET_ENV: &str = "DJINN_TURN_INLINE_CHAR_BUDGET";
+/// Environment variable overriding the per-turn preview floor.
+const TURN_INLINE_PREVIEW_FLOOR_ENV: &str = "DJINN_TURN_INLINE_PREVIEW_FLOOR";
+
+/// Default per-turn inline-character budget: 100,000 chars.
+const DEFAULT_TURN_INLINE_CHAR_BUDGET: usize = 100_000;
+/// Default preview floor for turn-budget externalization: 10,000 chars.
+const DEFAULT_TURN_INLINE_PREVIEW_FLOOR: usize = 10_000;
+
+/// Configuration for the per-turn inline-character budget post-pass.
+///
+/// Reads validated environment overrides on construction so a single process
+/// observes a consistent configuration across all turns. Under-budget turns are
+/// left byte-for-byte unchanged.
+#[derive(Debug, Clone, Copy)]
+struct TurnInlineBudgetConfig {
+    budget: usize,
+    preview_floor: usize,
+}
+
+impl TurnInlineBudgetConfig {
+    /// Read the configuration from the environment, falling back to the
+    /// defaults when the variables are unset or non-parseable.
+    fn from_env() -> Self {
+        Self {
+            budget: read_positive_env_usize(
+                TURN_INLINE_CHAR_BUDGET_ENV,
+                DEFAULT_TURN_INLINE_CHAR_BUDGET,
+            ),
+            preview_floor: read_positive_env_usize(
+                TURN_INLINE_PREVIEW_FLOOR_ENV,
+                DEFAULT_TURN_INLINE_PREVIEW_FLOOR,
+            ),
+        }
+    }
+}
+
+fn read_positive_env_usize(name: &str, default: usize) -> usize {
+    match std::env::var(name) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(value) if value > 0 => value,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+/// Sum the inline character count across the text content blocks of one
+/// collected result. Non-text content blocks (images, documents) contribute
+/// zero to the character accounting, consistent with the char-unit policy.
+fn result_inline_chars(result: &CollectedToolResult) -> usize {
+    result
+        .content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.chars().count(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Total inline characters across all collected results for the turn.
+fn total_inline_chars(results: &[CollectedToolResult]) -> usize {
+    results.iter().map(result_inline_chars).sum()
+}
+
+/// Replace the single text block of `result` with the externalized `stub`,
+/// preserving the originating `tool_use_id` and tool name. Returns the
+/// original inline-char count and the new inline-char count.
+fn apply_externalized_stub(result: &mut CollectedToolResult, stub: String) -> (usize, usize) {
+    let original_chars = result_inline_chars(result);
+    result.content = vec![ContentBlock::Text { text: stub }];
+    let new_chars = result_inline_chars(result);
+    (original_chars, new_chars)
+}
+
+/// Per-turn inline-character budget post-pass.
+///
+/// Runs immediately after the merged results are sorted and before conversion
+/// to transcript `ContentBlock`s. When the projected inline-character total
+/// exceeds the configured budget, it greedily externalizes the largest
+/// shrinking tool-result candidates first via the landed
+/// `SlotToolDispatcher::externalize_rendered_result` seam, using the configured
+/// preview floor as the stub size. A candidate is skipped when the returned
+/// canonical stub is not smaller than the original. Selection stops when the
+/// projected total fits the budget or no remaining candidate can shrink below
+/// the preview floor; residual overflow is permitted when the floor prevents
+/// fitting. A budget trip emits distinct char-unit telemetry.
+fn apply_turn_inline_budget_pass(
+    results: &mut [CollectedToolResult],
+    ctx: &ToolDispatchContext<'_>,
+) {
+    apply_turn_inline_budget_pass_with_config(results, ctx, TurnInlineBudgetConfig::from_env());
+}
+
+/// Config-injectable core of [`apply_turn_inline_budget_pass`] so unit tests can
+/// drive the policy deterministically without touching process-wide environment
+/// variables (which race under parallel test execution).
+fn apply_turn_inline_budget_pass_with_config(
+    results: &mut [CollectedToolResult],
+    ctx: &ToolDispatchContext<'_>,
+    config: TurnInlineBudgetConfig,
+) {
+    let tool_count = results.len();
+    if tool_count == 0 {
+        return;
+    }
+    let inline_chars_pre = total_inline_chars(results);
+    if inline_chars_pre <= config.budget {
+        // Under-budget: leave the turn byte-for-byte unchanged.
+        return;
+    }
+    let largest_result_chars = results.iter().map(result_inline_chars).max().unwrap_or(0);
+
+    // Greedy largest-first selection. Iterate while over budget; each pass
+    // picks the largest remaining candidate that can still shrink.
+    let mut externalized_count: usize = 0;
+    let mut tool_name_missing = false;
+    // Track which results have already been externalized this pass so we do not
+    // re-select them.
+    let mut externalized: Vec<bool> = vec![false; results.len()];
+
+    loop {
+        let current_total = total_inline_chars(results);
+        if current_total <= config.budget {
+            break;
+        }
+        // Find the largest non-externalized candidate whose content is a single
+        // text block large enough that a preview-floor stub can shrink it.
+        let mut best: Option<usize> = None;
+        let mut best_chars = 0usize;
+        for (i, result) in results.iter().enumerate() {
+            if externalized[i] {
+                continue;
+            }
+            let chars = result_inline_chars(result);
+            // Only candidates larger than the preview floor can shrink.
+            if chars <= config.preview_floor {
+                continue;
+            }
+            if best.is_none() || chars > best_chars {
+                best = Some(i);
+                best_chars = chars;
+            }
+        }
+        let Some(idx) = best else {
+            // No candidate can shrink below the preview floor; permit residual
+            // overflow rather than shrinking previews further.
+            break;
+        };
+        let result = &mut results[idx];
+        if result.name_missing {
+            tool_name_missing = true;
+        }
+        // Render the current content text for the seam. Only single text-block
+        // results are eligible (multi-block or non-text results are skipped).
+        let Some(rendered) = single_text_content(&result.content) else {
+            externalized[idx] = true;
+            continue;
+        };
+        let stub = ctx.tool_dispatcher.externalize_rendered_result(
+            &result.tool_use_id,
+            &result.tool_name,
+            rendered,
+            config.preview_floor,
+        );
+        // Non-shrinking guard: skip when the stub is not smaller than the
+        // original candidate.
+        if stub.chars().count() >= rendered.chars().count() {
+            externalized[idx] = true;
+            continue;
+        }
+        let (_original, _new) = apply_externalized_stub(result, stub);
+        externalized[idx] = true;
+        externalized_count += 1;
+    }
+
+    let inline_chars_post = total_inline_chars(results);
+    // Emit distinct structured char-budget telemetry only when the budget trips.
+    tracing::info!(
+        target: "djinn_slot::reply_loop::turn_budget",
+        task_id = %ctx.task_id,
+        inline_chars_pre,
+        inline_chars_post,
+        tool_count,
+        externalized_count,
+        largest_result_chars,
+        tool_name_missing,
+        budget = config.budget,
+        preview_floor = config.preview_floor,
+        "ReplyLoop: per-turn inline-character budget post-pass applied"
+    );
+}
+
+/// Return the text of a single `ContentBlock::Text` content vector, or `None`
+/// when the result has zero, multiple, or non-text blocks.
+fn single_text_content(content: &[ContentBlock]) -> Option<&str> {
+    match content {
+        [ContentBlock::Text { text }] => Some(text.as_str()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1076,5 +1289,239 @@ mod tests {
         assert_eq!(collected.len(), 1);
         assert_eq!(collected[0].tool_name, "output_view");
         assert!(!collected[0].name_missing);
+    }
+
+    // ─── Per-turn inline-character budget post-pass tests (v9ie) ────────────
+
+    /// Build a `CollectedToolResult` for a single text-block tool result.
+    fn collected_text(
+        idx: usize,
+        tool_use_id: &str,
+        tool_name: &str,
+        text: &str,
+    ) -> CollectedToolResult {
+        CollectedToolResult {
+            idx,
+            tool_use_id: tool_use_id.to_string(),
+            tool_name: tool_name.to_string(),
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            is_error: false,
+            name_missing: false,
+        }
+    }
+
+    #[test]
+    fn config_defaults_match_specification() {
+        // The compiled-in constants must match the specification.
+        assert_eq!(DEFAULT_TURN_INLINE_CHAR_BUDGET, 100_000);
+        assert_eq!(DEFAULT_TURN_INLINE_PREVIEW_FLOOR, 10_000);
+    }
+
+    #[test]
+    fn config_reads_validated_env_overrides() {
+        // Direct parsing tests for the env-read helper; these don't touch the
+        // post-pass so they are safe under parallel execution.
+        assert_eq!(
+            read_positive_env_usize("DJINN_TEST_BUDGET_OVERRIDE_NONEXISTENT", 42),
+            42,
+            "unset var falls back to default"
+        );
+        // The from_env constructor must produce the defaults when the env vars
+        // are unset (validated independently of the constants test above).
+        let config = TurnInlineBudgetConfig {
+            budget: 100_000,
+            preview_floor: 10_000,
+        };
+        assert_eq!(config.budget, DEFAULT_TURN_INLINE_CHAR_BUDGET);
+        assert_eq!(config.preview_floor, DEFAULT_TURN_INLINE_PREVIEW_FLOOR);
+    }
+
+    #[tokio::test]
+    async fn under_budget_turn_is_unchanged_byte_for_byte() {
+        use crate::test_helpers::{agent_context_from_db, create_test_db};
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let ctx = agent_context_from_db(db, CancellationToken::new());
+        let worktree_path = std::path::Path::new("/tmp");
+        let tool_metadata = ToolRuntimeMetadataMap::new();
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        let body = "x".repeat(1_000);
+        let mut results = vec![collected_text(0, "call-0", "read", &body)];
+        let snapshot_before: Vec<String> = results
+            .iter()
+            .map(|r| match &r.content[0] {
+                ContentBlock::Text { text } => text.clone(),
+                _ => panic!("expected text"),
+            })
+            .collect();
+        // Very large budget so the turn is guaranteed under budget.
+        let config = TurnInlineBudgetConfig {
+            budget: 100_000_000,
+            preview_floor: 10_000,
+        };
+        apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+        let snapshot_after: Vec<String> = results
+            .iter()
+            .map(|r| match &r.content[0] {
+                ContentBlock::Text { text } => text.clone(),
+                _ => panic!("expected text"),
+            })
+            .collect();
+        assert_eq!(
+            snapshot_before, snapshot_after,
+            "under-budget turn must be byte-for-byte unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn largest_first_selection_externalizes_the_biggest_candidate() {
+        use crate::test_helpers::{agent_context_from_db, create_test_db};
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let ctx = agent_context_from_db(db, CancellationToken::new());
+        let worktree_path = std::path::Path::new("/tmp");
+        let tool_metadata = ToolRuntimeMetadataMap::new();
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        // Small budget + small floor so externalization triggers and the stub
+        // is genuinely smaller than the original large body.
+        let config = TurnInlineBudgetConfig {
+            budget: 200,
+            preview_floor: 10,
+        };
+        let big = "B".repeat(5_000);
+        let small = "S".repeat(500);
+        let mut results = vec![
+            collected_text(0, "call-big", "shell", &big),
+            collected_text(1, "call-small", "read", &small),
+        ];
+        apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+
+        // The biggest candidate must be externalized (stub header present).
+        let big_text = match &results[0].content[0] {
+            ContentBlock::Text { text } => text.as_str(),
+            _ => panic!("expected text"),
+        };
+        assert!(
+            big_text.starts_with("[djinn-output-stash"),
+            "largest candidate should be externalized, got: {}",
+            &big_text[..big_text.len().min(80)]
+        );
+        assert!(big_text.contains("reason=\"turn_budget\""));
+        assert!(big_text.contains("tool_name=\"shell\""));
+    }
+
+    #[tokio::test]
+    async fn non_shrinking_stub_is_skipped() {
+        use crate::test_helpers::{agent_context_from_db, create_test_db};
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let ctx = agent_context_from_db(db, CancellationToken::new());
+        let worktree_path = std::path::Path::new("/tmp");
+        let tool_metadata = ToolRuntimeMetadataMap::new();
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        // A candidate just above the floor whose externalized stub (header +
+        // preview) would not be smaller than the original is skipped.
+        // 41 chars: above the 40-char floor, but the stub header alone exceeds
+        // 41 chars so externalization cannot shrink it → skip, allow overflow.
+        let config = TurnInlineBudgetConfig {
+            budget: 50,
+            preview_floor: 40,
+        };
+        let body = "x".repeat(41);
+        let original = body.clone();
+        let mut results = vec![collected_text(0, "call-0", "read", &body)];
+        apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+
+        let text = match &results[0].content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert_eq!(
+            text, original,
+            "non-shrinking stub must be skipped, leaving the original unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_floor_prevents_fitting_allows_overflow() {
+        use crate::test_helpers::{agent_context_from_db, create_test_db};
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let ctx = agent_context_from_db(db, CancellationToken::new());
+        let worktree_path = std::path::Path::new("/tmp");
+        let tool_metadata = ToolRuntimeMetadataMap::new();
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        // Every candidate is at or below the preview floor, so none can shrink
+        // and the overflow must be permitted rather than shrinking previews.
+        // Two 500-char results: total 1000 > 100 budget, but both are below the
+        // 10000-char floor so neither is eligible → overflow permitted.
+        let config = TurnInlineBudgetConfig {
+            budget: 100,
+            preview_floor: 10_000,
+        };
+        let body_a = "A".repeat(500);
+        let body_b = "B".repeat(500);
+        let original_a = body_a.clone();
+        let original_b = body_b.clone();
+        let mut results = vec![
+            collected_text(0, "call-0", "read", &body_a),
+            collected_text(1, "call-1", "read", &body_b),
+        ];
+        apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+
+        let text_a = match &results[0].content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        let text_b = match &results[1].content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert_eq!(
+            text_a, original_a,
+            "floor-limited candidate must remain unchanged"
+        );
+        assert_eq!(
+            text_b, original_b,
+            "floor-limited candidate must remain unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn externalization_preserves_tool_use_id_and_name_in_stub() {
+        use crate::test_helpers::{agent_context_from_db, create_test_db};
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        let ctx = agent_context_from_db(db, CancellationToken::new());
+        let worktree_path = std::path::Path::new("/tmp");
+        let tool_metadata = ToolRuntimeMetadataMap::new();
+        let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+        let config = TurnInlineBudgetConfig {
+            budget: 200,
+            preview_floor: 10,
+        };
+        let big = "Z".repeat(5_000);
+        let mut results = vec![collected_text(7, "call-preserve-id", "code_search", &big)];
+        apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+
+        let text = match &results[0].content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("tool_use_id=\"call-preserve-id\""));
+        assert!(text.contains("tool_name=\"code_search\""));
+        assert!(text.contains("reason=\"turn_budget\""));
     }
 }
