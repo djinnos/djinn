@@ -3,7 +3,7 @@ use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Epic;
 
 use crate::database::Database;
-use crate::repositories::task::{apply_parent_disposition_tx, DispositionScope, TaskRepository};
+use crate::repositories::task::{DispositionScope, TaskRepository, apply_parent_disposition_tx};
 use crate::{Error, Result};
 
 // Inlined EPIC_COLS projection for each `query_as!(Epic, ...)` call site.
@@ -333,9 +333,14 @@ impl EpicRepository {
 
         // ── Post-commit events ─────────────────────────────────────────────
         let task_repo = TaskRepository::new(self.db.clone(), self.events.clone());
-        for finding in disposition_plan.findings.iter().filter(|finding| finding.disposition.applies_change()) {
+        for finding in disposition_plan
+            .findings
+            .iter()
+            .filter(|finding| finding.disposition.applies_change())
+        {
             if let Some(task) = task_repo.get(&finding.task_id).await? {
-                self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+                self.events
+                    .send(DjinnEventEnvelope::task_updated(&task, false));
             }
         }
 
@@ -1084,7 +1089,6 @@ async fn short_id_exists(pool: &sqlx::PgPool, table: &str, short_id: &str) -> Re
     .fetch_one(pool)
     .await?)
 }
-
 
 #[cfg(test)]
 mod tests {

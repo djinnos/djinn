@@ -376,12 +376,18 @@ fn test_build_request_replays_signed_thinking_in_original_position() {
     assert_eq!(messages.len(), 1);
     let content = messages[0]["content"].as_array().unwrap();
     assert_eq!(content.len(), 3);
-    assert_eq!(content[0], json!({"type": "text", "text": "before thinking"}));
+    assert_eq!(
+        content[0],
+        json!({"type": "text", "text": "before thinking"})
+    );
     assert_eq!(
         content[1],
         json!({"type": "thinking", "thinking": "internal reasoning", "signature": "sig_abc"})
     );
-    assert_eq!(content[2], json!({"type": "text", "text": "visible output"}));
+    assert_eq!(
+        content[2],
+        json!({"type": "text", "text": "visible output"})
+    );
     assert!(
         !content
             .iter()
@@ -411,7 +417,10 @@ fn test_build_request_replays_redacted_thinking_without_empty_text() {
         content[0],
         json!({"type": "redacted_thinking", "data": "opaque_data_blob"})
     );
-    assert_eq!(content[1], json!({"type": "text", "text": "visible output"}));
+    assert_eq!(
+        content[1],
+        json!({"type": "text", "text": "visible output"})
+    );
     assert!(
         !content
             .iter()
@@ -445,7 +454,10 @@ fn test_build_request_replays_unknown_passthrough_without_type_override() {
         content[0],
         json!({"type": "custom_provider_block", "foo": "bar"})
     );
-    assert_eq!(content[1], json!({"type": "text", "text": "visible output"}));
+    assert_eq!(
+        content[1],
+        json!({"type": "text", "text": "visible output"})
+    );
     assert!(
         !content
             .iter()
