@@ -1716,6 +1716,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "axum 0.8.9",
  "djinn-compaction",
  "djinn-control-plane",
  "djinn-core",
