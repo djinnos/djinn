@@ -23,7 +23,10 @@ use djinn_db::{
     QdrantCodeChunkVectorStore, QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
-use djinn_image_controller::{ImageBuildWatcher, ImageController, ImageControllerConfig};
+use djinn_image_controller::{
+    ImageBuildWatcher, ImageController, ImageControllerConfig, RetentionPreflightConfig,
+    ZotHttpAuth, ZotHttpConfig, ZotHttpStateSource, adapt_selected_images, run_preflight,
+};
 use djinn_k8s::{K8sGraphWarmer, KubernetesConfig, TokenReviewer, WarmCompletionSink};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::embeddings::{EmbeddingService, default_embedding_cache_dir};
@@ -519,6 +522,43 @@ impl AppState {
         );
         *self.inner.image_build_watcher.lock().await = Some(handle);
         tracing::info!("image_build_watcher: spawned");
+    }
+
+    async fn run_zot_retention_preflight(
+        &self,
+        config: &ImageControllerConfig,
+    ) -> anyhow::Result<()> {
+        let retention = &config.zot_retention;
+        if !retention.enabled {
+            return Ok(());
+        }
+        let selected_rows = djinn_db::ImageRepository::new(self.db().clone())
+            .list_selected_catalog_images()
+            .await
+            .map_err(|error: djinn_db::Error| {
+                anyhow::anyhow!("load selected catalog images for Zot retention preflight: {error}")
+            })?;
+        let auth = match (&retention.username, &retention.password) {
+            (Some(username), Some(password)) => ZotHttpAuth::Basic {
+                username: username.clone(),
+                password: password.clone(),
+            },
+            _ => ZotHttpAuth::None,
+        };
+        let source = ZotHttpStateSource::new(ZotHttpConfig::new(&retention.endpoint, auth))
+            .map_err(|error| anyhow::anyhow!("construct Zot retention state source: {error}"))?;
+        let outcome = run_preflight(
+            &source,
+            &adapt_selected_images(&selected_rows),
+            &RetentionPreflightConfig {
+                destructive_enabled: !retention.dry_run,
+                newest_tags: retention.newest_tags,
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("Zot retention preflight failed: {error}"))?;
+        tracing::info!(destructive = !retention.dry_run, newest_tags = retention.newest_tags, report = %outcome.report, "Zot catalog retention preflight report");
+        Ok(())
     }
 
     /// Abort + await the image-build watcher task if it was spawned.
@@ -1560,6 +1600,12 @@ impl AppState {
     pub async fn become_leader(&self) {
         tracing::info!("become_leader: starting active coordinator subsystems");
 
+        let retention_config = ImageControllerConfig::from_env();
+        if let Err(error) = self.run_zot_retention_preflight(&retention_config).await {
+            tracing::error!(%error, "Zot retention preflight failed; refusing leader startup");
+            std::process::exit(1);
+        }
+
         // Finalize any sessions left in `running` from a previous leader. Safe
         // now (and only now): we hold the lock, so the previous leader is gone
         // and any `running` row is genuinely orphaned.
@@ -1780,15 +1826,36 @@ impl AppState {
         }
     }
 
+    /// On startup, reconcile then interrupt stale sessions.
+    ///
+    /// If the reconnectability measurement is zero, we keep the legacy blanket
+    /// `interrupt_all_running()` behavior. If one or more sessions are
+    /// reconnectable, we interrupt running sessions *except* the measured
+    /// reconnectable `task_run_id` set, so reconnectable workers survive
+    /// rolling restart (proposal `phif` AC 8).
+    ///
+    /// The test build uses `pub(crate)` visibility so the same logic can be
+    /// exercised from crate-internal tests without requiring the public API to
+    /// expose the startup interruption seam.
+    #[cfg(not(test))]
     async fn interrupt_stale_sessions_on_startup(&self) {
+        self.interrupt_stale_sessions_on_startup_impl().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn interrupt_stale_sessions_on_startup(&self) {
+        self.interrupt_stale_sessions_on_startup_impl().await
+    }
+
+    /// Shared implementation for [`Self::interrupt_stale_sessions_on_startup`].
+    async fn interrupt_stale_sessions_on_startup_impl(&self) {
         use djinn_db::SessionRepository;
         let repo = SessionRepository::new(self.db().clone(), self.event_bus());
 
         // ── Measurement (proposal phif AC 7/8) ─────────────────────────────
-        // Observe reconnectability *before* the blanket interruption mutation
-        // so the structured event reflects the pre-mutation state.
+        // Observe reconnectability *before* the selective/blanket interruption
+        // mutation so the structured event reflects the pre-mutation state.
         let measurement = self.measure_startup_reconnectability(&repo).await;
-        let _reconnectable_task_run_ids = measurement.reconnectable_task_run_ids();
 
         tracing::info!(
             target: "djinn_startup_running_session_reconnectability",
@@ -1799,8 +1866,19 @@ impl AppState {
             "startup reconnectability measurement"
         );
 
-        // ── Mutation (existing blanket path) ────────────────────────────────
-        match repo.interrupt_all_running().await {
+        // ── Mutation (proposal phif AC 8) ─────────────────────────────────────
+        // Use the exact reconnectable identity set to preserve reconnectable
+        // running sessions while still interrupting stale ones (NULL task_run_id
+        // and disconnected identities are not preserved).
+        let reconnectable_ids = measurement.reconnectable_task_run_ids();
+        let result = if reconnectable_ids.is_empty() {
+            repo.interrupt_all_running().await
+        } else {
+            repo.interrupt_running_except_task_run_ids(reconnectable_ids)
+                .await
+        };
+
+        match result {
             Ok(0) => {}
             Ok(n) => tracing::info!(count = n, "interrupted stale sessions from previous run"),
             Err(e) => tracing::warn!(error = %e, "failed to interrupt stale sessions"),

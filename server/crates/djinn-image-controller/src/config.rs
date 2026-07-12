@@ -53,6 +53,22 @@ pub mod env {
     pub const REGISTRY_AUTH_SECRET: &str = "DJINN_IMAGE_REGISTRY_AUTH_SECRET";
     pub const MIRROR_PVC: &str = "DJINN_IMAGE_MIRROR_PVC";
     pub const BUILD_SERVICE_ACCOUNT: &str = "DJINN_IMAGE_BUILD_SERVICE_ACCOUNT";
+    pub const ZOT_RETENTION_ENABLED: &str = "DJINN_ZOT_RETENTION_ENABLED";
+    pub const ZOT_RETENTION_DRY_RUN: &str = "DJINN_ZOT_RETENTION_DRY_RUN";
+    pub const ZOT_RETENTION_NEWEST_TAGS: &str = "DJINN_ZOT_RETENTION_NEWEST_TAGS";
+    pub const ZOT_RETENTION_ENDPOINT: &str = "DJINN_ZOT_RETENTION_ENDPOINT";
+    pub const ZOT_RETENTION_USERNAME: &str = "DJINN_ZOT_RETENTION_USERNAME";
+    pub const ZOT_RETENTION_PASSWORD: &str = "DJINN_ZOT_RETENTION_PASSWORD";
+}
+
+fn parse_bool(value: &str, default: bool, variable: &str) -> bool {
+    match value.parse::<bool>() {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%value, %error, "{variable} invalid; keeping default");
+            default
+        }
+    }
 }
 
 /// Runtime configuration for [`crate::ImageController`].
@@ -102,6 +118,17 @@ pub struct ImageControllerConfig {
     /// to `djinn-controller` so behavior matches the rest of the chart's
     /// controller-dispatched Jobs.
     pub build_service_account: String,
+    pub zot_retention: ZotRetentionConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZotRetentionConfig {
+    pub enabled: bool,
+    pub dry_run: bool,
+    pub newest_tags: usize,
+    pub endpoint: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 impl ImageControllerConfig {
@@ -118,6 +145,14 @@ impl ImageControllerConfig {
             mirror_pvc: DEFAULT_MIRROR_PVC.into(),
             max_concurrent: DEFAULT_MAX_CONCURRENT,
             build_service_account: DEFAULT_BUILD_SERVICE_ACCOUNT.into(),
+            zot_retention: ZotRetentionConfig {
+                enabled: false,
+                dry_run: true,
+                newest_tags: 5,
+                endpoint: format!("http://{DEFAULT_REGISTRY_HOST}"),
+                username: None,
+                password: None,
+            },
         }
     }
 
@@ -167,6 +202,31 @@ impl ImageControllerConfig {
                 ),
             }
         }
+        if let Ok(v) = std::env::var(env::ZOT_RETENTION_ENABLED) {
+            cfg.zot_retention.enabled = parse_bool(&v, false, env::ZOT_RETENTION_ENABLED);
+        }
+        if let Ok(v) = std::env::var(env::ZOT_RETENTION_DRY_RUN) {
+            cfg.zot_retention.dry_run = parse_bool(&v, true, env::ZOT_RETENTION_DRY_RUN);
+        }
+        if let Ok(v) = std::env::var(env::ZOT_RETENTION_NEWEST_TAGS) {
+            match v.parse::<usize>().and_then(validate_positive) {
+                Ok(n) => cfg.zot_retention.newest_tags = n,
+                Err(e) => {
+                    tracing::warn!(value = %v, error = %e, "Zot retention newest-tag count invalid; keeping default")
+                }
+            }
+        }
+        if let Ok(v) = std::env::var(env::ZOT_RETENTION_ENDPOINT)
+            && !v.trim().is_empty()
+        {
+            cfg.zot_retention.endpoint = v;
+        }
+        cfg.zot_retention.username = std::env::var(env::ZOT_RETENTION_USERNAME)
+            .ok()
+            .filter(|v| !v.is_empty());
+        cfg.zot_retention.password = std::env::var(env::ZOT_RETENTION_PASSWORD)
+            .ok()
+            .filter(|v| !v.is_empty());
         cfg
     }
 }
