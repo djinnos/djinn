@@ -152,6 +152,17 @@ pub(crate) async fn apply_dedup_decision(
                 .map_err(|error| error.to_string())?;
             Ok(Some(MemoryNoteResponse::deduplicated_from_note(&note)))
         }
+        MemoryWriteDedupDecision::SupersedeExisting {
+            candidate_id,
+            reason,
+        } => {
+            // Contract slice only: the follow-up task applies lifecycle, edge,
+            // response parity, and observability. Treat supersede as create-new
+            // for now so the enum remains exhaustive and the public response
+            // shape does not change.
+            let _ = (candidate_id, reason);
+            Ok(None)
+        }
     }
 }
 
