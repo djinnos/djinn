@@ -20,7 +20,8 @@ mod tests {
     use djinn_provider::{CompletionRequest, CompletionResponse};
 
     use crate::tools::memory_tools::write_dedup::{
-        LlmMemoryWriteDedupDecider, apply_dedup_decision, maybe_apply_write_dedup,
+        LlmMemoryWriteDedupDecider, WriteDedupOutcome, apply_created_note_supersede,
+        apply_dedup_decision, maybe_apply_write_dedup,
     };
     use crate::tools::memory_tools::write_dedup_runtime::LlmMemoryWriteProviderRuntime;
     use crate::tools::memory_tools::write_dedup_runtime::MemoryWriteProviderRuntime;
@@ -115,9 +116,11 @@ mod tests {
                 tags_json: "[]",
             },
         )
-        .await
-        .unwrap();
+        .await;
 
+        let WriteDedupOutcome::Respond(response) = response else {
+            panic!("exact hash match should reuse the existing note");
+        };
         assert_eq!(response.id.as_deref(), Some(existing.id.as_str()));
         assert!(response.deduplicated);
     }
@@ -152,8 +155,10 @@ mod tests {
             },
         )
         .await
-        .unwrap()
         .unwrap();
+        let WriteDedupOutcome::Respond(response) = response else {
+            panic!("merge should return the existing note response");
+        };
 
         let updated = repo.get(&existing.id).await.unwrap().unwrap();
         assert_eq!(response.id.as_deref(), Some(existing.id.as_str()));
@@ -296,8 +301,63 @@ mod tests {
         .await;
 
         assert!(
-            response.is_none(),
+            matches!(response, WriteDedupOutcome::CreateNew),
             "unscoped dedup must safely choose CreateNew instead of using another user's credential"
         );
+    }
+
+    #[tokio::test]
+    async fn supersede_deprecates_active_target_and_is_benign_for_stale_targets() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let project = create_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, EventBus::noop());
+
+        for status in ["active", "archived", "deprecated"] {
+            let target = repo
+                .create_with_status_and_retrieval_anchor(
+                    &project.id,
+                    &format!("Target {status}"),
+                    "prior coverage",
+                    "pattern",
+                    Some(status),
+                    "[]",
+                    None,
+                )
+                .await
+                .unwrap();
+            let incoming = repo
+                .create(
+                    &project.id,
+                    &format!("Incoming {status}"),
+                    "replacement coverage",
+                    "pattern",
+                    "[]",
+                )
+                .await
+                .unwrap();
+
+            apply_created_note_supersede(&repo, &incoming.id, &target.id, "replacement")
+                .await
+                .unwrap();
+            // A repeated decision is an association upsert and an inactive-status no-op.
+            apply_created_note_supersede(&repo, &incoming.id, &target.id, "replacement")
+                .await
+                .unwrap();
+
+            let stored = repo.get(&target.id).await.unwrap().unwrap();
+            let expected = if status == "active" {
+                "deprecated"
+            } else {
+                status
+            };
+            assert_eq!(stored.status, expected);
+            assert_eq!(
+                repo.get_association_kind(&incoming.id, &target.id)
+                    .await
+                    .unwrap(),
+                Some((1.0, "supersedes".to_string()))
+            );
+        }
     }
 }
