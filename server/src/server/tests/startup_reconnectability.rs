@@ -226,29 +226,26 @@ async fn zero_reconnectable_startup_interrupts_all_running_sessions() {
     let events = test_events();
     let task_run_id = "test-run-stale-1";
 
-    let _project_id = seed_running_session_with_task_run(&db, &events, task_run_id).await;
+    let project_id = seed_running_session_with_task_run(&db, &events, task_run_id).await;
 
-    // Add a second running chat session with no task_run_id to prove NULL
+    // Add a second running session with no task_run_id to prove NULL
     // identities are not preserved when the reconnectability set is empty.
-    // Chat sessions are project-scoped outside any project, so use the raw
-    // repository insert rather than the high-level create() helper.
+    // Go through the repository layer so test setup obeys the server raw-SQL
+    // boundary just like production code.
     let session_repo = SessionRepository::new(db.clone(), events.clone());
-    let null_session_id = uuid::Uuid::now_v7().to_string();
-    db.ensure_initialized()
+    session_repo
+        .create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: None,
+            model: "openai/gpt-5.5",
+            agent_type: "chat",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
         .await
-        .expect("ensure db initialized");
-    sqlx::query(
-        "INSERT INTO sessions \
-         (id, project_id, task_id, model_id, agent_type, status, \
-          started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, \
-          cost_usd, cost_basis) \
-         VALUES ($1, NULL, NULL, 'openai/gpt-5.5', 'chat', 'running', \
-                 NOW(), 0, 0, 0, 0, NULL, 'unpriced')",
-    )
-    .bind(&null_session_id)
-    .execute(db.pool())
-    .await
-    .expect("create NULL task_run_id chat session");
+        .expect("create NULL task_run_id session");
 
     let running_before = session_repo
         .list_active()
