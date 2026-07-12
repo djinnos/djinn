@@ -887,6 +887,37 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, vec!["call-0", "call-1", "call-2", "call-3"]);
+
+        let rendered_results: Vec<(String, String, bool)> = blocks
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
+                    let [ContentBlock::Text { text }] = content.as_slice() else {
+                        panic!("expected a ToolResult containing one text block");
+                    };
+                    (tool_use_id.clone(), text.clone(), *is_error)
+                }
+                _ => panic!("expected a ToolResult containing one text block"),
+            })
+            .collect();
+        assert_eq!(
+            rendered_results,
+            vec![
+                (
+                    "call-0".to_string(),
+                    "{\n  \"ok\": true,\n  \"exit_code\": 0,\n  \"stdout\": \"mock shell output\\n\",\n  \"stderr\": \"\",\n  \"workdir\": \"/tmp\"\n}"
+                        .to_string(),
+                    false,
+                ),
+                ("call-1".to_string(), "{\n  \"ok\": true\n}".to_string(), false),
+                ("call-2".to_string(), "{\n  \"ok\": true\n}".to_string(), false),
+                ("call-3".to_string(), "streamed write ok".to_string(), false),
+            ]
+        );
     }
 
     #[tokio::test]
