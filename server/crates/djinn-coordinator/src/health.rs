@@ -2952,6 +2952,7 @@ mod cache_cleanup_cross_path_tests {
             sccache_max_age_hours: 1,
             cargo_debris_enabled: true,
             cargo_debris_max_age_days: 7,
+            ..CacheCleanupConfig::default()
         };
         assert_eq!(
             sweep_sccache_guard_under(&dry_run, &sccache).await,

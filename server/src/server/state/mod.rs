@@ -1,7 +1,10 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -32,6 +35,7 @@ use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve
 use djinn_workspace::{MirrorManager, WorkspaceStore, mirrors_root, workspaces_root};
 
 mod canonical_graph_refresh_planner;
+mod provider_catalog_refresh;
 mod settings;
 
 use crate::memory_fs::MemoryViewSelection;
@@ -210,6 +214,11 @@ struct Inner {
     pub git_actors: Arc<Mutex<HashMap<PathBuf, GitActorHandle>>>,
     /// models.dev catalog + custom providers (in-memory, refreshed on startup).
     pub catalog: CatalogService,
+    /// Parsed once at startup so the catalog refresh loop and health endpoint
+    /// share the exact same cadence contract.
+    pub provider_catalog_refresh_interval: std::time::Duration,
+    /// Ensures repeated startup hooks cannot create concurrent refresh loops.
+    pub provider_catalog_refresh_started: AtomicBool,
     /// Per-model circuit-breaker health tracker.
     pub health_tracker: HealthTracker,
     pub role_registry: Arc<RoleRegistry>,
@@ -368,6 +377,9 @@ impl AppState {
                 events,
                 git_actors: Arc::new(Mutex::new(HashMap::new())),
                 catalog: CatalogService::new(),
+                provider_catalog_refresh_interval:
+                    provider_catalog_refresh::refresh_interval_from_env(),
+                provider_catalog_refresh_started: AtomicBool::new(false),
                 health_tracker: HealthTracker::new(),
                 role_registry: Arc::new(RoleRegistry::new()),
                 coordinator: Arc::new(tokio::sync::Mutex::new(None)),
@@ -1156,6 +1168,16 @@ impl AppState {
         &self.inner.catalog
     }
 
+    /// Configured provider catalog refresh cadence, parsed once from
+    /// `DJINN_PROVIDER_CATALOG_REFRESH_INTERVAL_SECS` at state construction.
+    pub fn provider_catalog_refresh_interval(&self) -> std::time::Duration {
+        self.inner.provider_catalog_refresh_interval
+    }
+
+    pub fn provider_catalog_refresh_interval_secs(&self) -> u64 {
+        self.provider_catalog_refresh_interval().as_secs()
+    }
+
     pub fn health_tracker(&self) -> &HealthTracker {
         &self.inner.health_tracker
     }
@@ -1457,14 +1479,26 @@ impl AppState {
         use djinn_provider::catalog::builtin::BUILTIN_PROVIDERS;
         self.catalog().inject_builtin_providers(BUILTIN_PROVIDERS);
 
-        // Kick off background refresh from models.dev.
-        // Note: the refresh compose/swap path now injects builtins and re-applies
-        // retained custom providers itself, so no post-refresh re-injection is
-        // needed (n5jj).
-        let catalog = self.catalog().clone();
-        tokio::spawn(async move {
-            catalog.refresh().await;
-        });
+        // One task owns both retrying boot refresh and steady periodic refresh.
+        // It starts only after custom-provider reconciliation and builtin
+        // injection, and `refresh` preserves both overlays on every live swap.
+        if self
+            .inner
+            .provider_catalog_refresh_started
+            .swap(true, Ordering::AcqRel)
+        {
+            tracing::debug!("provider catalog refresh loop already started");
+        } else {
+            let catalog = self.catalog().clone();
+            let interval = self.provider_catalog_refresh_interval();
+            let cancel = self.cancel().clone();
+            tokio::spawn(async move {
+                provider_catalog_refresh::run_provider_catalog_refresh_loop(
+                    catalog, interval, cancel,
+                )
+                .await;
+            });
+        }
 
         self.restore_model_health_state().await;
 
