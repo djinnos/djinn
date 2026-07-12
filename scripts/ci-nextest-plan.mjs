@@ -4,10 +4,13 @@
 // Current nextest discovery is the sole authority: timing data may only influence
 // load balancing, never add, remove, or select tests.
 
-import { readFile, writeFile } from 'node:fs/promises';
-import { stdin } from 'node:process';
+import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
+import { stdin, stderr, stdout } from 'node:process';
+import { randomUUID } from 'node:crypto';
+import { dirname, join, basename } from 'node:path';
 
 export const TIMING_VERSION = 'ci-nextest-timing/v1';
+export const PROOF_VERSION = 'ci-nextest-plan/v1';
 export const FALLBACK_DURATION_SECONDS = 30;
 export const DEFAULT_MAX_AGE_DAYS = 7;
 export const PR_DEFAULT_SHARDS = 2;
@@ -37,6 +40,13 @@ function parseIsoOrNumber(value) {
     if (!Number.isNaN(d)) return d;
   }
   return null;
+}
+
+function parseNow(value) {
+  if (typeof value === 'number') return value;
+  const parsed = parseIsoOrNumber(value);
+  if (parsed === null) throw new Error(`Invalid timestamp: ${value}`);
+  return parsed;
 }
 
 function median(values) {
@@ -203,6 +213,51 @@ function pickShardCount({ tests, timings, profile, prWidenThreshold }) {
   return widenByCount || widenByDuration ? PR_MAX_SHARDS : PR_DEFAULT_SHARDS;
 }
 
+function escapeFilterLiteral(value) {
+  // Rust identifiers and nextest binary IDs are safe, but defensively handle
+  // characters that would terminate or alter the exact-match syntax.
+  if (value.includes(')') || value.includes('=')) {
+    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return `/^${escaped}$/`;
+  }
+  return `=${value}`;
+}
+
+/**
+ * Build a nextest --filter-expr expression that matches exactly the tests in a
+ * shard. Tests are grouped by binary ID to keep the expression compact and to
+ * avoid ambiguous substring matches. Empty shards produce an expression that
+ * matches no tests.
+ */
+export function buildFilterExpression(shard) {
+  if (!shard.tests || shard.tests.length === 0) {
+    return 'not (binary_id(/./))';
+  }
+  const byBinary = new Map();
+  for (const test of shard.tests) {
+    if (!byBinary.has(test.binaryId)) {
+      byBinary.set(test.binaryId, []);
+    }
+    byBinary.get(test.binaryId).push(test.testName);
+  }
+
+  const binaryFilters = [];
+  for (const [binaryId, names] of byBinary) {
+    const binaryExpr = `binary_id(${escapeFilterLiteral(binaryId)})`;
+    const testExprs = names
+      .map((name) => `test(${escapeFilterLiteral(name)})`)
+      .join(' | ');
+    binaryFilters.push(
+      names.length === 1 ? `${binaryExpr} & ${testExprs}` : `${binaryExpr} & (${testExprs})`,
+    );
+  }
+
+  if (binaryFilters.length === 1) {
+    return binaryFilters[0];
+  }
+  return `(${binaryFilters.join(') | (')})`;
+}
+
 /**
  * Produce a deterministic shard plan.
  *
@@ -213,10 +268,12 @@ export function planTests({
   tests,
   timings = new Map(),
   profile = 'pull-request',
+  event = null,
   prWidenThreshold = {
     tests: PR_WIDEN_TEST_THRESHOLD,
     duration: PR_WIDEN_DURATION_THRESHOLD_SECONDS,
   },
+  generatedAt = new Date().toISOString(),
 } = {}) {
   if (!Array.isArray(tests)) {
     throw new Error('tests must be an array');
@@ -271,11 +328,19 @@ export function planTests({
 
   const assignedIds = assignments.map((a) => a.id);
   const uniqueIds = new Set(assignedIds);
+  const discoveredIds = tests.map((t) => t.id);
+
   const proof = {
+    version: PROOF_VERSION,
+    generatedAt,
+    event,
+    profile,
     discoveredCount: tests.length,
     assignedCount: assignments.length,
     uniqueAssignedCount: uniqueIds.size,
     exactOnce: tests.length === assignments.length && assignments.length === uniqueIds.size,
+    discoveredIds: discoveredIds.slice().sort(),
+    assignedIds: assignedIds.slice().sort(),
     shardCount,
     coldStart,
     timingUsed: !coldStart,
@@ -287,9 +352,13 @@ export function planTests({
     count: shard.tests.length,
     duration: shard.totalDuration,
     testIds: shard.tests.map((t) => t.id),
+    filter: buildFilterExpression(shard),
   }));
 
   return {
+    version: PROOF_VERSION,
+    generatedAt,
+    event,
     profile,
     shardCount,
     coldStart,
@@ -327,33 +396,114 @@ async function readInput(path) {
   return readFile(path, 'utf8');
 }
 
-async function main() {
-  const args = process.argv.slice(2);
-  const options = { profile: 'pull-request' };
+async function atomicWriteFile(filePath, data) {
+  const dir = dirname(filePath);
+  await mkdir(dir, { recursive: true });
+  const tmp = join(dir, `.${basename(filePath)}.${randomUUID()}.tmp`);
+  await writeFile(tmp, data);
+  await rename(tmp, filePath);
+}
+
+function requireArg(args, i, flag) {
+  if (i >= args.length) {
+    throw new Error(`Missing argument for ${flag}`);
+  }
+  return args[i];
+}
+
+export function parseArgs(argv) {
+  const args = argv.slice(2);
+  const options = {
+    profile: 'pull-request',
+    event: null,
+    maxAgeDays: DEFAULT_MAX_AGE_DAYS,
+    now: Date.now(),
+    fullValidation: false,
+  };
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case '--discovery':
-        options.discoveryPath = args[++i];
+      case '-d':
+        options.discoveryPath = requireArg(args, ++i, '--discovery');
         break;
       case '--timing':
-        options.timingPath = args[++i];
+      case '-t':
+        options.timingPath = requireArg(args, ++i, '--timing');
         break;
       case '--profile':
-        options.profile = args[++i];
+      case '-p':
+        options.profile = requireArg(args, ++i, '--profile');
+        break;
+      case '--event':
+      case '-e':
+        options.event = requireArg(args, ++i, '--event');
         break;
       case '--max-age-days':
-        options.maxAgeDays = Number(args[++i]);
+        options.maxAgeDays = Number(requireArg(args, ++i, '--max-age-days'));
         break;
       case '--now':
-        options.now = Date.parse(args[++i]);
+        options.now = parseNow(requireArg(args, ++i, '--now'));
         break;
       case '--output':
-        options.outputPath = args[++i];
+      case '-o':
+        options.outputPath = requireArg(args, ++i, '--output');
+        break;
+      case '--matrix':
+      case '-m':
+        options.matrixPath = requireArg(args, ++i, '--matrix');
+        break;
+      case '--proof':
+        options.proofPath = requireArg(args, ++i, '--proof');
+        break;
+      case '--full-validation':
+        options.fullValidation = true;
+        break;
+      case '--help':
+      case '-h':
+        options.help = true;
         break;
       default:
         throw new Error(`Unknown argument: ${args[i]}`);
     }
+  }
+
+  if (options.fullValidation) {
+    options.profile = 'full-validation';
+  }
+  if (Number.isNaN(options.maxAgeDays)) {
+    throw new Error('Invalid --max-age-days');
+  }
+  if (Number.isNaN(options.now)) {
+    throw new Error('Invalid --now');
+  }
+
+  return options;
+}
+
+export function formatHelp() {
+  return `Usage: ci-nextest-plan [options]
+
+Options:
+  -d, --discovery <path>     Path to nextest discovery JSON (default: stdin)
+  -t, --timing <path>        Path to optional timing JSON (default: none)
+  -p, --profile <name>       pull-request | merge-group | full-validation
+      --full-validation      Shorthand for --profile full-validation
+  -e, --event <name>         Event name stored in matrix/proof metadata
+      --max-age-days <n>     Timing freshness window (default: 7)
+      --now <timestamp>      Reference timestamp for freshness checks
+  -o, --output <path>        Write full plan JSON
+  -m, --matrix <path>        Write machine-readable shard matrix JSON
+      --proof <path>         Write exact-once proof JSON
+  -h, --help                 Show this help
+`;
+}
+
+export async function main(argv = process.argv) {
+  const options = parseArgs(argv);
+  if (options.help) {
+    stdout.write(formatHelp());
+    return;
   }
 
   const discoveryText = await readInput(options.discoveryPath);
@@ -373,24 +523,48 @@ async function main() {
     });
   }
 
+  const generatedAt = new Date(options.now).toISOString();
   const plan = planTests({
     tests,
     timings: timingResult.timings,
     profile: options.profile,
+    event: options.event,
+    generatedAt,
   });
   validateExactOnce(plan);
 
-  const output = JSON.stringify(plan, null, 2);
+  const planJson = JSON.stringify(plan, null, 2);
+  const matrixArtifact = {
+    version: PROOF_VERSION,
+    generatedAt,
+    event: options.event,
+    profile: options.profile,
+    shardCount: plan.shardCount,
+    shards: plan.matrix,
+  };
+  const matrixJson = JSON.stringify(matrixArtifact, null, 2);
+  const proofJson = JSON.stringify(plan.proof, null, 2);
+
+  const writes = [];
   if (options.outputPath) {
-    await writeFile(options.outputPath, output);
-  } else {
-    process.stdout.write(output);
+    writes.push(atomicWriteFile(options.outputPath, planJson));
+  }
+  if (options.matrixPath) {
+    writes.push(atomicWriteFile(options.matrixPath, matrixJson));
+  }
+  if (options.proofPath) {
+    writes.push(atomicWriteFile(options.proofPath, proofJson));
+  }
+  await Promise.all(writes);
+
+  if (!options.outputPath) {
+    stdout.write(planJson);
   }
 }
 
 if (process.argv[1] === import.meta.url.replace('file://', '')) {
-  main().catch((err) => {
-    process.stderr.write(`ci-nextest-plan: ${err.message}\n`);
+  main(process.argv).catch((err) => {
+    stderr.write(`ci-nextest-plan: ${err.message}\n`);
     process.exit(1);
   });
 }
