@@ -406,7 +406,7 @@ const KNOWLEDGE_NOTE_TYPES: &[&str] = &["pattern", "pitfall", "case"];
 ///   `exceeded`=`len>=cap`.
 /// - **Fail-open:** trace errors are logged and swallowed; the rendered context
 ///   is produced from the production query alone.
-async fn load_knowledge_context(
+pub(crate) async fn load_knowledge_context(
     task: &Task,
     epic_context: Option<&str>,
     app_state: &AgentContext,

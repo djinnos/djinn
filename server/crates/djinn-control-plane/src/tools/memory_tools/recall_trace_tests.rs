@@ -23,19 +23,21 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_db::{
-        Database, NoteRepository, ProjectRepository,
+        Database, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository,
+        TaskRepository,
         repositories::retrieval_trace::{
             CandidateOutcome, CreateRetrievalTraceParams, RetrievalTraceEntryPoint,
             RetrievalTraceRepository, SkippedReason, TraceCandidate,
         },
     };
     use tokio::sync::broadcast;
+    use tokio_util::sync::CancellationToken;
 
     use crate::server::DjinnMcpServer;
     use crate::state::McpState;
@@ -224,98 +226,137 @@ mod tests {
         .unwrap()
     }
 
-    async fn set_note_confidence_and_updated_at(
+    // Build a task whose description contains a code path so that the real
+    // dispatch path derives a scope that overlaps with the seeded notes.
+    async fn create_task_with_scope(
         server: &DjinnMcpServer,
-        note_id: &str,
-        confidence: f64,
-        updated_at: &str,
-    ) {
-        sqlx::query("UPDATE notes SET confidence = $1, updated_at = $2 WHERE id = $3")
-            .bind(confidence)
-            .bind(updated_at)
-            .bind(note_id)
-            .execute(server.state.db().pool())
+        project_id: &str,
+        description: &str,
+    ) -> djinn_core::models::Task {
+        let db = server.state.db().clone();
+        let events = server.state.event_bus();
+        let epic_repo = EpicRepository::new(db.clone(), events.clone());
+        let epic = epic_repo
+            .create_for_project(
+                project_id,
+                EpicCreateInput {
+                    title: "test-epic",
+                    description: "test epic description",
+                    emoji: "🧪",
+                    color: "blue",
+                    owner: "test-owner",
+                    memory_refs: None,
+                    status: None,
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                    blocked_by: None,
+                },
+            )
             .await
             .unwrap();
+        let task_repo = TaskRepository::new(db, events);
+        task_repo
+            .create_in_project(
+                project_id,
+                Some(&epic.id),
+                "test-task",
+                description,
+                "test design",
+                "task",
+                2,
+                "test-owner",
+                None,
+                None,
+            )
+            .await
+            .unwrap()
     }
 
-    fn classify_scope_candidate(
-        candidate: &djinn_db::repositories::note::ScopeOverlapTraceCandidate,
-        injected_ids: &HashSet<String>,
-        min_confidence: f64,
-    ) -> TraceCandidate {
-        let scope_value = serde_json::from_str::<serde_json::Value>(&candidate.scope_paths)
-            .unwrap_or_else(|_| serde_json::Value::String(candidate.scope_paths.clone()));
-        let scope_object = serde_json::json!({
-            "scope_paths": scope_value,
-            "note_type": candidate.note_type,
-            "folder": candidate.folder,
-        });
-
-        if injected_ids.contains(&candidate.id) {
-            TraceCandidate {
-                note_id: candidate.id.clone(),
-                permalink: Some(candidate.permalink.clone()),
-                title: Some(candidate.title.clone()),
-                outcome: CandidateOutcome::Injected,
-                rank: Some(candidate.rank as i32),
-                confidence: Some(candidate.confidence),
-                skipped_reason: None,
-                source: Some("scope_overlap".to_string()),
-                scope: Some(scope_object),
-            }
-        } else if candidate.confidence < min_confidence {
-            TraceCandidate {
-                note_id: candidate.id.clone(),
-                permalink: Some(candidate.permalink.clone()),
-                title: Some(candidate.title.clone()),
-                outcome: CandidateOutcome::Skipped,
-                rank: Some(candidate.rank as i32),
-                confidence: Some(candidate.confidence),
-                skipped_reason: Some(SkippedReason::MinConfidence),
-                source: Some("scope_overlap".to_string()),
-                scope: Some(scope_object),
-            }
-        } else {
-            TraceCandidate {
-                note_id: candidate.id.clone(),
-                permalink: Some(candidate.permalink.clone()),
-                title: Some(candidate.title.clone()),
-                outcome: CandidateOutcome::Skipped,
-                rank: Some(candidate.rank as i32),
-                confidence: Some(candidate.confidence),
-                skipped_reason: Some(SkippedReason::NotTopK),
-                source: Some("scope_overlap".to_string()),
-                scope: Some(scope_object),
-            }
-        }
-    }
-
+    // Integration proof for proposal ykkj: seed a bounded scope-overlap
+    // universe with one below-threshold note and one above-threshold candidate
+    // outside the production limit, exercise the real dispatch
+    // `load_knowledge_context` path, then drill into the persisted trace
+    // through `memory_recall_trace` detail and list filters.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_recall_trace_list_returns_compact_summaries_without_note_bodies() {
+    async fn memory_recall_trace_detail_classifies_scope_overlap_candidates_with_min_confidence_and_not_top_k()
+     {
         let setup = setup_server().await;
-        let note = create_note(
+        let project_id = &setup.project_id;
+        let scope = r#"["server/src/server/state/mod.rs"]"#;
+
+        // Create a task whose description includes a code path that overlaps
+        // with the note scope. The real dispatch path derives `server` from
+        // `server/src/server/state/mod.rs`.
+        let task = create_task_with_scope(
             &setup.server,
-            &setup.project_id,
-            "Long Note",
-            &(0..2000).map(|i| format!("word{i} ")).collect::<String>(),
-        )
-        .await;
-        let trace_id = insert_trace(
-            &setup.server,
-            &setup.project_id,
-            RetrievalTraceEntryPoint::Dispatch,
-            Some("sess-1"),
-            Some("task-1"),
-            Some("run-1"),
-            vec![
-                injected_candidate(&note.id, 1, 0.95),
-                skipped_candidate("missing-note", 2, 0.10, SkippedReason::NotTopK),
-            ],
+            project_id,
+            "Touched server/src/server/state/mod.rs during this change.",
         )
         .await;
 
-        let response = ops::memory_recall_trace(
+        // Seed 10 high-confidence notes that will be injected (top-K within the
+        // 10-note production limit), one above-threshold note outside the top
+        // 10, and one below-threshold note.
+        for i in 0..10 {
+            let confidence = 0.90 - (i as f64 * 0.01);
+            let note = create_scoped_note(
+                &setup.server,
+                project_id,
+                &format!("Injected note {}", i + 1),
+                "short content",
+                scope,
+            )
+            .await;
+            let repo = NoteRepository::new(
+                setup.server.state.db().clone(),
+                setup.server.state.event_bus(),
+            );
+            repo.set_confidence(&note.id, confidence).await.unwrap();
+        }
+
+        let over_limit = create_scoped_note(
+            &setup.server,
+            project_id,
+            "Over production limit",
+            &(0..1200).map(|i| format!("word{i} ")).collect::<String>(),
+            scope,
+        )
+        .await;
+        let repo = NoteRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        );
+        repo.set_confidence(&over_limit.id, 0.80).await.unwrap();
+
+        let below_threshold = create_scoped_note(
+            &setup.server,
+            project_id,
+            "Below threshold",
+            "low content body",
+            scope,
+        )
+        .await;
+        let repo = NoteRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        );
+        repo.set_confidence(&below_threshold.id, 0.10)
+            .await
+            .unwrap();
+
+        // Invoke the real production dispatch path. This runs the production
+        // scope-overlap query, the capped trace-candidate query, deterministic
+        // classification, prompt packing, and fail-open trace persistence.
+        let app_state = djinn_agent::test_helpers::agent_context_from_db(
+            setup.server.state.db().clone(),
+            CancellationToken::new(),
+        );
+        let _rendered =
+            djinn_agent::test_helpers::run_load_knowledge_context_for_test(&task, None, &app_state)
+                .await;
+
+        // List the persisted trace by its entry point; keep the response compact.
+        let list_resp = ops::memory_recall_trace(
             &setup.server,
             RecallTraceParams {
                 mode: "list".to_string(),
@@ -324,7 +365,7 @@ mod tests {
                 session_id: None,
                 task_id: None,
                 task_run_id: None,
-                entry_point: None,
+                entry_point: Some("load_knowledge_context".to_string()),
                 outcome: None,
                 skipped_reason: None,
                 limit: None,
@@ -333,131 +374,20 @@ mod tests {
             },
         )
         .await;
+        assert!(list_resp.error.is_none(), "{:?}", list_resp.error);
+        assert_eq!(list_resp.traces.len(), 1);
+        let trace_summary = &list_resp.traces[0];
+        assert_eq!(trace_summary.entry_point, "load_knowledge_context");
+        assert_eq!(trace_summary.candidate_count, 12);
+        assert_eq!(trace_summary.injected_count, 10);
+        assert_eq!(trace_summary.skipped_count, 2);
+        assert!(!trace_summary.candidate_cap_exceeded);
+        // List response must stay compact (no note bodies).
+        let summary_json = serde_json::to_string(&trace_summary).unwrap();
+        assert!(!summary_json.contains("short content"));
+        assert!(!summary_json.contains("low content body"));
 
-        assert!(response.error.is_none(), "{:?}", response.error);
-        assert!(response.trace.is_none());
-        assert_eq!(response.traces.len(), 1);
-        let summary = &response.traces[0];
-        assert_eq!(summary.trace_id, trace_id);
-        assert_eq!(summary.entry_point, "dispatch");
-        assert!(summary.trigger_summary.contains("test query"));
-        assert_eq!(summary.candidate_count, 2);
-        assert_eq!(summary.injected_count, 1);
-        assert_eq!(summary.skipped_count, 1);
-        assert!(!summary.candidate_cap_exceeded);
-        // No note bodies in list response.
-        assert!(!serde_json::to_string(&summary).unwrap().contains("word0"));
-    }
-
-    // Integration proof for proposal ykkj: seed a bounded scope-overlap
-    // universe with one below-threshold note and one above-threshold candidate
-    // outside the production limit, exercise the real
-    // `query_by_scope_overlap_trace_candidates` + classification/persistence
-    // path, then drill into the persisted trace through `memory_recall_trace`
-    // detail and list filters.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_recall_trace_detail_classifies_scope_overlap_candidates_with_min_confidence_and_not_top_k()
-     {
-        let setup = setup_server().await;
-        let task_paths = vec!["server/src/server/state/mod.rs".to_string()];
-        let scope = r#"["server/src/server/state/mod.rs"]"#;
-
-        // Seed three scoped notes. Production semantics: min_confidence=0.5,
-        // production_limit=1 (only the top candidate is injected).
-        let high = create_scoped_note(
-            &setup.server,
-            &setup.project_id,
-            "High confidence injected",
-            "high content body",
-            scope,
-        )
-        .await;
-        set_note_confidence_and_updated_at(&setup.server, &high.id, 0.95, "2026-01-03T00:00:00Z")
-            .await;
-
-        let mid = create_scoped_note(
-            &setup.server,
-            &setup.project_id,
-            "Over production limit",
-            &(0..1200).map(|i| format!("word{i} ")).collect::<String>(),
-            scope,
-        )
-        .await;
-        set_note_confidence_and_updated_at(&setup.server, &mid.id, 0.60, "2026-01-02T00:00:00Z")
-            .await;
-
-        let low = create_scoped_note(
-            &setup.server,
-            &setup.project_id,
-            "Below threshold",
-            "low content body",
-            scope,
-        )
-        .await;
-        set_note_confidence_and_updated_at(&setup.server, &low.id, 0.30, "2026-01-01T00:00:00Z")
-            .await;
-
-        // Real scope-overlap trace candidate query (no production threshold/limit).
-        let note_repo = NoteRepository::new(
-            setup.server.state.db().clone(),
-            setup.server.state.event_bus(),
-        );
-        let scope_candidates = note_repo
-            .query_by_scope_overlap_trace_candidates(
-                &setup.project_id,
-                &task_paths,
-                &["pattern"],
-                50,
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            scope_candidates.len(),
-            3,
-            "expected all three active scoped notes"
-        );
-
-        // Production classification: top-1 injected, rest skipped.
-        let production_limit = 1_usize;
-        let min_confidence = 0.5_f64;
-        let injected_ids: HashSet<String> = scope_candidates
-            .iter()
-            .take(production_limit)
-            .map(|c| c.id.clone())
-            .collect();
-
-        let trace_candidates: Vec<TraceCandidate> = scope_candidates
-            .iter()
-            .map(|c| classify_scope_candidate(c, &injected_ids, min_confidence))
-            .collect();
-        djinn_db::repositories::retrieval_trace::validate_candidates(&trace_candidates)
-            .expect("trace candidates must satisfy invariants");
-
-        // Persist through the real RetrievalTraceRepository (the same path
-        // used by dispatch instrumentation).
-        let trace_repo = RetrievalTraceRepository::new(setup.server.state.db().clone());
-        let candidates_json = serde_json::to_value(&trace_candidates).unwrap();
-        let row = trace_repo
-            .insert(CreateRetrievalTraceParams {
-                project_id: &setup.project_id,
-                session_id: Some("sess-classified-proof"),
-                task_run_id: Some("run-classified-proof"),
-                task_id: Some("task-classified-proof"),
-                entry_point: RetrievalTraceEntryPoint::Dispatch,
-                trigger: Some(&serde_json::json!({
-                    "task_paths": task_paths,
-                    "min_confidence": min_confidence,
-                    "production_limit": production_limit,
-                })),
-                candidates: &candidates_json,
-                candidate_cap: 50,
-                candidate_cap_exceeded: false,
-                sampling_metadata: None,
-                durations_ms: &serde_json::json!({"retrieval_ms": 7}),
-                estimated_injected_tokens: 64,
-            })
-            .await
-            .unwrap();
+        let trace_id = trace_summary.trace_id.clone();
 
         // Detail mode: hydrate title, permalink, content excerpt, rank/confidence,
         // outcome, skipped reasons, and metadata.
@@ -475,7 +405,7 @@ mod tests {
                 skipped_reason: None,
                 limit: None,
                 offset: None,
-                trace_id: Some(row.id.clone()),
+                trace_id: Some(trace_id.clone()),
             },
         )
         .await;
@@ -485,65 +415,63 @@ mod tests {
             detail_response.error
         );
         let detail = detail_response.trace.expect("detail expected");
-        assert_eq!(detail.trace_id, row.id);
-        assert_eq!(detail.candidates.len(), 3);
-        assert_eq!(detail.entry_point, "dispatch");
+        assert_eq!(detail.trace_id, trace_id);
+        assert_eq!(detail.candidates.len(), 12);
+        assert_eq!(detail.entry_point, "load_knowledge_context");
         assert_eq!(detail.candidate_cap, 50);
         assert!(!detail.candidate_cap_exceeded);
 
-        let by_id: std::collections::HashMap<
-            String,
-            &crate::tools::memory_tools::MemoryRecallTraceCandidate,
-        > = detail
-            .candidates
-            .iter()
-            .map(|c| (c.note_id.clone(), c))
-            .collect();
-        assert_eq!(by_id.len(), 3);
+        let by_id: HashMap<String, &crate::tools::memory_tools::MemoryRecallTraceCandidate> =
+            detail
+                .candidates
+                .iter()
+                .map(|c| (c.note_id.clone(), c))
+                .collect();
+        assert_eq!(by_id.len(), 12);
 
-        // High candidate is injected.
-        let high_detail = by_id.get(&high.id).expect("high candidate in detail");
-        assert_eq!(high_detail.title, "High confidence injected");
-        assert_eq!(high_detail.permalink, high.permalink);
-        assert_eq!(high_detail.outcome, "injected");
-        assert!(high_detail.skipped_reason.is_none());
-        assert!(high_detail.rank.is_some() && high_detail.rank.unwrap() == 1);
-        assert!((high_detail.confidence.unwrap() - 0.95).abs() < f64::EPSILON);
-        assert_eq!(
-            high_detail.content_excerpt.as_deref(),
-            Some("high content body")
-        );
+        // Over-limit candidate is above the minimum confidence but outside the
+        // top-10 production set.
+        let over_detail = by_id
+            .get(&over_limit.id)
+            .expect("over-limit candidate in detail");
+        assert_eq!(over_detail.title, "Over production limit");
+        assert_eq!(over_detail.permalink, over_limit.permalink);
+        assert_eq!(over_detail.outcome, "skipped");
+        assert_eq!(over_detail.skipped_reason.as_deref(), Some("not_top_k"));
+        assert!(over_detail.rank.unwrap() > 10);
+        assert!((over_detail.confidence.unwrap() - 0.80).abs() < f64::EPSILON);
+        let over_excerpt = over_detail.content_excerpt.as_ref().unwrap();
+        assert!(over_excerpt.chars().count() <= 1001);
+        assert!(over_excerpt.ends_with('…'));
+        assert!(over_excerpt.contains("word0"));
+        assert!(over_excerpt.contains("word100"));
+        assert!(!over_excerpt.contains("word1199"));
 
-        // Mid candidate is above threshold but outside the production limit.
-        let mid_detail = by_id.get(&mid.id).expect("mid candidate in detail");
-        assert_eq!(mid_detail.title, "Over production limit");
-        assert_eq!(mid_detail.permalink, mid.permalink);
-        assert_eq!(mid_detail.outcome, "skipped");
-        assert_eq!(mid_detail.skipped_reason.as_deref(), Some("not_top_k"));
-        assert!(mid_detail.rank.unwrap() > 1);
-        assert!((mid_detail.confidence.unwrap() - 0.60).abs() < f64::EPSILON);
-        let mid_excerpt = mid_detail.content_excerpt.as_ref().unwrap();
-        assert!(mid_excerpt.chars().count() <= 1001);
-        assert!(mid_excerpt.ends_with('…'));
-        assert!(mid_excerpt.contains("word0"));
-        assert!(mid_excerpt.contains("word100"));
-        assert!(!mid_excerpt.contains("word1199"));
-
-        // Low candidate is below the minimum confidence threshold.
-        let low_detail = by_id.get(&low.id).expect("low candidate in detail");
+        // Below-threshold candidate is dropped by the production minimum.
+        let low_detail = by_id
+            .get(&below_threshold.id)
+            .expect("below-threshold candidate in detail");
         assert_eq!(low_detail.title, "Below threshold");
-        assert_eq!(low_detail.permalink, low.permalink);
+        assert_eq!(low_detail.permalink, below_threshold.permalink);
         assert_eq!(low_detail.outcome, "skipped");
         assert_eq!(low_detail.skipped_reason.as_deref(), Some("min_confidence"));
-        assert!(low_detail.rank.unwrap() > 1);
-        assert!((low_detail.confidence.unwrap() - 0.30).abs() < f64::EPSILON);
+        assert!(low_detail.rank.unwrap() > 10);
+        assert!((low_detail.confidence.unwrap() - 0.10).abs() < f64::EPSILON);
         assert_eq!(
             low_detail.content_excerpt.as_deref(),
             Some("low content body")
         );
 
-        // List-mode filtering by skipped reason/outcome locates the same trace
-        // while returning compact summaries only.
+        // Injected candidates should be exactly the 10 high-confidence notes.
+        let injected_count = detail
+            .candidates
+            .iter()
+            .filter(|c| c.outcome == "injected")
+            .count();
+        assert_eq!(injected_count, 10);
+
+        // List-mode filtering by outcome and skipped reason locates the same
+        // trace while returning compact summaries only.
         let list_skipped = ops::memory_recall_trace(
             &setup.server,
             RecallTraceParams {
@@ -564,15 +492,7 @@ mod tests {
         .await;
         assert!(list_skipped.error.is_none(), "{:?}", list_skipped.error);
         assert_eq!(list_skipped.traces.len(), 1);
-        assert_eq!(list_skipped.traces[0].trace_id, row.id);
-        assert_eq!(list_skipped.traces[0].candidate_count, 3);
-        assert_eq!(list_skipped.traces[0].injected_count, 1);
-        assert_eq!(list_skipped.traces[0].skipped_count, 2);
-        assert!(list_skipped.trace.is_none());
-        let summary_json = serde_json::to_string(&list_skipped.traces[0]).unwrap();
-        assert!(!summary_json.contains("high content body"));
-        assert!(!summary_json.contains("mid content body"));
-        assert!(!summary_json.contains("low content body"));
+        assert_eq!(list_skipped.traces[0].trace_id, trace_id);
 
         let list_min_confidence = ops::memory_recall_trace(
             &setup.server,
@@ -598,7 +518,7 @@ mod tests {
             list_min_confidence.error
         );
         assert_eq!(list_min_confidence.traces.len(), 1);
-        assert_eq!(list_min_confidence.traces[0].trace_id, row.id);
+        assert_eq!(list_min_confidence.traces[0].trace_id, trace_id);
 
         let list_not_top_k = ops::memory_recall_trace(
             &setup.server,
@@ -620,7 +540,7 @@ mod tests {
         .await;
         assert!(list_not_top_k.error.is_none(), "{:?}", list_not_top_k.error);
         assert_eq!(list_not_top_k.traces.len(), 1);
-        assert_eq!(list_not_top_k.traces[0].trace_id, row.id);
+        assert_eq!(list_not_top_k.traces[0].trace_id, trace_id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

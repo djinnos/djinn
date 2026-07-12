@@ -110,8 +110,8 @@ pub fn init_tool_schema_registry() {
     });
 }
 
-#[cfg(test)]
-pub(crate) mod test_helpers;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers;
 
 #[cfg(test)]
 mod tests {
