@@ -744,6 +744,30 @@ impl CoordinatorActor {
             .and_then(|p| p.author_user_id)
     }
 
+    /// Resolve a user id to the display identity used for the legacy `owner`
+    /// column (their GitHub login). Returns `None` when the user can't be
+    /// resolved (missing row or lookup error) so callers fall back to the prior
+    /// "system" owner rather than failing task creation. `created_by_user_id`
+    /// remains the authoritative ownership field — this is display/filter only.
+    pub(super) async fn resolve_owner_identity(&self, user_id: &str) -> Option<String> {
+        match djinn_db::UserRepository::new(self.db.clone())
+            .get_by_id(user_id)
+            .await
+        {
+            Ok(Some(user)) => Some(user.github_login),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    user_id = %user_id,
+                    error = %e,
+                    "Failed to resolve owner identity for refinement task; \
+                     falling back to system owner"
+                );
+                None
+            }
+        }
+    }
+
     /// Force-close a finished refinement task. Best-effort.
     pub(super) async fn close_refinement_task(&self, task_id: &str, reason: &str) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
@@ -887,6 +911,21 @@ impl CoordinatorActor {
             }
         };
 
+        // Resolve the attributed user's display identity (their GitHub login)
+        // for the legacy `owner` column so the Kanban board and owner-based
+        // filters (`task_ready owner=…`) render refinement tasks under the real
+        // user instead of "system". `created_by_user_id` (set below) remains the
+        // authoritative ownership field; `tasks.owner` is legacy display/filter
+        // only. Falls back to "system" when the user row can't be resolved so
+        // task creation never fails on the lookup.
+        let owner = match attributed_user_id {
+            Some(uid) => self
+                .resolve_owner_identity(uid)
+                .await
+                .unwrap_or_else(|| "system".to_string()),
+            None => "system".to_string(),
+        };
+
         match task_repo
             .create_in_project(
                 &project_id,
@@ -896,7 +935,7 @@ impl CoordinatorActor {
                 "",
                 "refinement",
                 0,
-                "system",
+                &owner,
                 None,
                 None,
             )

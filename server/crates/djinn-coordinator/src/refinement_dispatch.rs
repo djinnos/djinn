@@ -31,9 +31,22 @@ use super::refinement::{RefinementPhase, StopReason};
 use super::actor::CoordinatorActor;
 use djinn_core::clock::{Clock, SystemClock};
 
-/// How long to wait for a refinement session to start producing output
-/// before treating it as stalled (conservative — sessions can take 5+ min).
+/// How long a refinement agent session may run (measured from **session
+/// start**, not dispatch) before treating it as stalled (conservative —
+/// sessions can take 5+ min). Time the task-run pod spends Pending in the k8s
+/// scheduler queue before any agent session starts does NOT count against this
+/// budget — see [`REFINEMENT_PENDING_START_TIMEOUT`].
 const REFINEMENT_SESSION_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// How long a dispatched refinement session may sit **without its agent
+/// session ever starting** (e.g. the task-run pod stuck Pending in the k8s
+/// scheduler queue under CPU pressure) before the dispatch is abandoned and
+/// retried. Distinct from [`REFINEMENT_SESSION_TIMEOUT`], which bounds actual
+/// agent execution once a session has started. Expiry is retryable (bounded by
+/// [`REFINEMENT_DISPATCH_RETRY_CAP`]), never terminal on its own — a slow
+/// scheduler must not permanently kill a tribunal that never got to run
+/// (incident 2026-07-12).
+const REFINEMENT_PENDING_START_TIMEOUT: Duration = Duration::from_secs(1200);
 
 /// How many consecutive times a refinement role session may fail to start
 /// before the loop terminates instead of re-dispatching.
@@ -46,8 +59,19 @@ pub(super) struct RefinementSession {
     pub task_id: String,
     /// Which phase this session is executing.
     pub phase: RefinementPhase,
-    /// When the session was dispatched.
+    /// When the session was dispatched (task-run pool dispatch time). Used to
+    /// bound the Pending-in-queue wait before the agent session starts, NOT the
+    /// execution budget — see `session_started_at`.
     pub dispatched_at: StdInstant,
+    /// First tick at which an agent session row was observed for `task_id`,
+    /// i.e. when the agent actually started running. `None` while the task-run
+    /// pod is still Pending / no session row exists yet. The execution timeout
+    /// (`REFINEMENT_SESSION_TIMEOUT`) is measured from this instant so pod
+    /// scheduler-queue time is never charged against the agent's budget. Cached
+    /// so start detection stops re-querying the DB once confirmed. In-memory
+    /// only; a coordinator restart drops in-flight sessions entirely (the loop
+    /// re-dispatches), so this needs no persistence.
+    pub session_started_at: Option<StdInstant>,
     /// The model used for this session.
     #[allow(dead_code)]
     pub model_id: String,
@@ -137,23 +161,86 @@ impl CoordinatorActor {
             let still_running = running_tasks.contains(&session.task_id);
 
             if still_running {
-                if session.dispatched_at.elapsed() > REFINEMENT_SESSION_TIMEOUT {
-                    tracing::warn!(
-                        proposal_id = %proposal_id,
-                        task_id = %session.task_id,
-                        phase = ?session.phase,
-                        "Refinement session timed out"
-                    );
-                    self.close_refinement_task(&session.task_id, "refinement session timed out")
-                        .await;
-                    self.terminate_refinement(
-                        proposal_id,
-                        StopReason::AgentFailure {
-                            role: format!("{:?}", session.phase),
-                            error: "session timeout".into(),
-                        },
-                    )
-                    .await;
+                // Resolve whether the agent session has actually started yet.
+                // The execution budget (`REFINEMENT_SESSION_TIMEOUT`) must be
+                // measured from session start, NOT from dispatch: time the
+                // task-run pod spends Pending in the k8s scheduler queue (before
+                // any session row exists) must not count against it. Otherwise
+                // scheduler back-pressure silently terminates tribunals that
+                // never got to run (incident 2026-07-12). Cache the first
+                // observed start so we stop re-querying the DB every tick.
+                let session_started_at = match session.session_started_at {
+                    Some(started) => Some(started),
+                    None => {
+                        if self.refinement_session_has_started(&session.task_id).await {
+                            let observed = SystemClock::new().now_instant();
+                            if let Some(s) = self.refinement_sessions.get_mut(proposal_id) {
+                                s.session_started_at = Some(observed);
+                            }
+                            Some(observed)
+                        } else {
+                            None
+                        }
+                    }
+                };
+
+                match session_started_at {
+                    Some(started_at) => {
+                        // The agent session has started — bound actual execution
+                        // from session start.
+                        if started_at.elapsed() > REFINEMENT_SESSION_TIMEOUT {
+                            tracing::warn!(
+                                proposal_id = %proposal_id,
+                                task_id = %session.task_id,
+                                phase = ?session.phase,
+                                "Refinement session timed out (execution budget from session start)"
+                            );
+                            self.close_refinement_task(
+                                &session.task_id,
+                                "refinement session timed out",
+                            )
+                            .await;
+                            self.terminate_refinement(
+                                proposal_id,
+                                StopReason::AgentFailure {
+                                    role: format!("{:?}", session.phase),
+                                    error: "session timeout".into(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                    None => {
+                        // Dispatched but the agent session has not started — the
+                        // task-run pod is (most likely) still Pending in the
+                        // scheduler queue. Do NOT burn the execution budget, but
+                        // bound the wait so a forever-Pending pod cannot hold the
+                        // tribunal open indefinitely. On expiry, abandon THIS
+                        // dispatch and retry the same phase (bounded by the retry
+                        // cap) rather than terminally kill the tribunal.
+                        if session.dispatched_at.elapsed() > REFINEMENT_PENDING_START_TIMEOUT {
+                            tracing::warn!(
+                                proposal_id = %proposal_id,
+                                task_id = %session.task_id,
+                                phase = ?session.phase,
+                                elapsed_secs = session.dispatched_at.elapsed().as_secs(),
+                                "Refinement session never started (task-run pod Pending past \
+                                 pending-start timeout); abandoning dispatch and retrying"
+                            );
+                            let over_cap_error = format!(
+                                "role session failed to start {REFINEMENT_DISPATCH_RETRY_CAP} times \
+                                 (task-run pod stuck Pending in scheduler queue)"
+                            );
+                            self.retry_or_terminate_unstarted_refinement(
+                                proposal_id,
+                                &session,
+                                "refinement role session never started (task-run pod stuck Pending)",
+                                over_cap_error,
+                                true,
+                            )
+                            .await;
+                        }
+                    }
                 }
                 return;
             }
@@ -167,65 +254,26 @@ impl CoordinatorActor {
             // Treating (b) as a completed-but-"dry" round silently burns rounds
             // on a dispatch outage and can hollow-converge the tribunal. Tell
             // them apart by whether any session row exists for the task.
-            let session_ran = {
-                let event_bus = crate::events::event_bus_for(&self.events_tx);
-                let session_repo = djinn_db::SessionRepository::new(self.db.clone(), event_bus);
-                match session_repo.list_for_task(&session.task_id).await {
-                    Ok(sessions) => !sessions.is_empty(),
-                    // On a DB read error, fail safe toward "it ran" so we don't
-                    // spin forever re-dispatching.
-                    Err(e) => {
-                        tracing::warn!(
-                            proposal_id = %proposal_id,
-                            task_id = %session.task_id,
-                            error = %e,
-                            "Failed to read sessions for refinement task; assuming it ran"
-                        );
-                        true
-                    }
-                }
-            };
+            let session_ran = self.refinement_session_has_started(&session.task_id).await;
 
             if !session_ran {
                 // Dispatch/setup failure: the role never executed. Re-dispatch
                 // the same phase on the next tick, bounded by a retry cap so a
-                // persistently broken runtime escalates instead of looping.
-                self.close_refinement_task(
-                    &session.task_id,
+                // persistently broken runtime escalates instead of looping. The
+                // slot already freed on its own here (the pool no longer reports
+                // the task running), so no pool teardown is needed.
+                let over_cap_error = format!(
+                    "role session failed to start {REFINEMENT_DISPATCH_RETRY_CAP} times \
+                     (runtime/devcontainer setup failure)"
+                );
+                self.retry_or_terminate_unstarted_refinement(
+                    proposal_id,
+                    &session,
                     "refinement role session never started (dispatch/setup failure)",
+                    over_cap_error,
+                    false,
                 )
                 .await;
-                self.refinement_sessions.remove(proposal_id);
-                let over_cap = if let Some(state) = self.active_refinements.get_mut(proposal_id) {
-                    state.dispatch_failures += 1;
-                    state.dispatch_failures >= REFINEMENT_DISPATCH_RETRY_CAP
-                } else {
-                    true
-                };
-                if over_cap {
-                    tracing::warn!(
-                        proposal_id = %proposal_id,
-                        phase = ?session.phase,
-                        "Refinement role session repeatedly failed to start — terminating"
-                    );
-                    self.terminate_refinement(
-                        proposal_id,
-                        StopReason::AgentFailure {
-                            role: format!("{:?}", session.phase),
-                            error: format!(
-                                "role session failed to start {REFINEMENT_DISPATCH_RETRY_CAP} times \
-                                 (runtime/devcontainer setup failure)"
-                            ),
-                        },
-                    )
-                    .await;
-                } else {
-                    tracing::warn!(
-                        proposal_id = %proposal_id,
-                        phase = ?session.phase,
-                        "Refinement role session never started; will re-dispatch (not counted as dry)"
-                    );
-                }
                 return;
             }
 
@@ -244,6 +292,96 @@ impl CoordinatorActor {
 
         // No in-flight session — dispatch the next phase.
         self.dispatch_next_refinement_phase(proposal_id).await;
+    }
+
+    /// Whether an agent session row exists yet for a dispatched refinement
+    /// task. A dispatched task with no session row means the agent has not
+    /// started (e.g. the task-run pod is still Pending in the scheduler queue).
+    /// On a DB read error, fail safe toward "started" so a transient DB blip
+    /// neither burns the pending-start budget nor strands the loop treating a
+    /// possibly-running session as never-started.
+    async fn refinement_session_has_started(&self, task_id: &str) -> bool {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let session_repo = djinn_db::SessionRepository::new(self.db.clone(), event_bus);
+        match session_repo.list_for_task(task_id).await {
+            Ok(sessions) => !sessions.is_empty(),
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "Failed to read sessions for refinement task; assuming it started"
+                );
+                true
+            }
+        }
+    }
+
+    /// Abandon a dispatched refinement role session that did not execute and
+    /// either re-dispatch the same phase (bounded by
+    /// [`REFINEMENT_DISPATCH_RETRY_CAP`]) or, once the cap is hit, terminate the
+    /// loop. Shared by the two "role never ran" paths: the slot freed with no
+    /// session row (runtime/devcontainer setup failure), and a dispatch that sat
+    /// Pending past [`REFINEMENT_PENDING_START_TIMEOUT`] without the agent
+    /// session ever starting.
+    ///
+    /// `tear_down_slot` kills the pool session and clears the in-flight
+    /// reservation for the still-Pending case, where the pool still holds the
+    /// slot; the slot-already-freed case leaves those to the paths that already
+    /// released them (the in-flight ledger is cleared by the session-start
+    /// reconciler, which never fired because no session started).
+    async fn retry_or_terminate_unstarted_refinement(
+        &mut self,
+        proposal_id: &str,
+        session: &RefinementSession,
+        close_reason: &str,
+        over_cap_error: String,
+        tear_down_slot: bool,
+    ) {
+        if tear_down_slot {
+            // The pool still holds the slot for the Pending task-run. Tear down
+            // the (still-queued) Job and clear the in-flight reservation so the
+            // retry does not leak a slot. Best-effort: a kill error must not
+            // block the retry.
+            if let Err(e) = self.pool.kill_session(&session.task_id).await {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    task_id = %session.task_id,
+                    error = %e,
+                    "Failed to tear down Pending refinement task-run; proceeding with retry"
+                );
+            }
+            self.clear_inflight_dispatch(&session.task_id).await;
+        }
+        self.close_refinement_task(&session.task_id, close_reason)
+            .await;
+        self.refinement_sessions.remove(proposal_id);
+        let over_cap = if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+            state.dispatch_failures += 1;
+            state.dispatch_failures >= REFINEMENT_DISPATCH_RETRY_CAP
+        } else {
+            true
+        };
+        if over_cap {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                phase = ?session.phase,
+                "Refinement role session repeatedly failed to start — terminating"
+            );
+            self.terminate_refinement(
+                proposal_id,
+                StopReason::AgentFailure {
+                    role: format!("{:?}", session.phase),
+                    error: over_cap_error,
+                },
+            )
+            .await;
+        } else {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                phase = ?session.phase,
+                "Refinement role session never started; will re-dispatch (not counted as dry)"
+            );
+        }
     }
 
     /// Dispatch the next refinement phase for a proposal.
@@ -634,6 +772,7 @@ impl CoordinatorActor {
                         task_id,
                         phase,
                         dispatched_at: SystemClock::new().now_instant(),
+                        session_started_at: None,
                         model_id,
                     },
                 );
