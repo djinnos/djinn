@@ -230,6 +230,11 @@ pub async fn run_cheap_doctor_checks(
         persist_findings(&finding_repo, run_id, &run.findings).await;
 
         for finding in &run.findings {
+            // This check is a dry-run: durable doctor evidence is allowed, but
+            // observing an orphan must not create task activity.
+            if finding.check_name == crate::doctor::CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME {
+                continue;
+            }
             // Every finding gets a board activity entry — Critical surfaces
             // in the dedicated lane; Warn/Info still surface in the
             // generic doctor-finding lane for observability.
