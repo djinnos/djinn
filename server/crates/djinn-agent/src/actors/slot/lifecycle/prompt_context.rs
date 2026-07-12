@@ -1153,10 +1153,11 @@ pub(crate) fn build_worker_resume_note(
     if let Some(summary) = &metadata.last_durable_progress_summary
         && !summary.trim().is_empty()
     {
-        let truncated = if summary.len() > 120 {
-            format!("{}…", &summary[..117])
-        } else {
-            summary.clone()
+        // Cut on a char boundary: a byte-index slice panics when the cut
+        // lands inside a multi-byte char in the free-text summary.
+        let truncated = match summary.char_indices().nth(117) {
+            Some((byte_idx, _)) => format!("{}…", &summary[..byte_idx]),
+            None => summary.clone(),
         };
         parts.push(format!("last progress: {truncated}"));
     }

@@ -64,7 +64,7 @@ async fn install_cached_graph(
         derive_graph_caches(&graph, Path::new("/var/tmp/djinn-crate-graph-test"));
     let mut cache = GRAPH_CACHE.write().await;
     *cache = Some(CachedGraph {
-        graph,
+        graph: Arc::new(graph),
         project_path: index_tree_path,
         git_head: "test-head".to_string(),
         pagerank,

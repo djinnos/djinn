@@ -203,6 +203,9 @@ where
 /// If an incoming object has a `criterion` field it is used as-is.  Otherwise
 /// the `criterion` text is copied from the existing array at the same index so
 /// that reviewer payloads like `[{"met": true}]` don't erase the text.
+/// Stored entries can be either `{criterion, met}` objects or bare strings
+/// (refinement revisions write bare strings), so both forms are valid
+/// fallback sources; incoming bare strings become the criterion text itself.
 pub(super) fn merge_acceptance_criteria(
     existing_json: &str,
     incoming: &[serde_json::Value],
@@ -213,13 +216,23 @@ pub(super) fn merge_acceptance_criteria(
         .iter()
         .enumerate()
         .map(|(i, inc)| {
-            let mut obj = inc.as_object().cloned().unwrap_or_default();
+            let mut obj = match inc {
+                serde_json::Value::String(s) => {
+                    let mut m = serde_json::Map::new();
+                    m.insert(
+                        "criterion".to_string(),
+                        serde_json::Value::String(s.clone()),
+                    );
+                    m
+                }
+                _ => inc.as_object().cloned().unwrap_or_default(),
+            };
             // If the incoming object is missing `criterion`, copy from existing.
             if !obj.contains_key("criterion")
-                && let Some(existing_criterion) = existing
-                    .get(i)
-                    .and_then(|e| e.get("criterion"))
-                    .and_then(|v| v.as_str())
+                && let Some(existing_criterion) = existing.get(i).and_then(|e| {
+                    e.as_str()
+                        .or_else(|| e.get("criterion").and_then(|v| v.as_str()))
+                })
             {
                 obj.insert(
                     "criterion".to_string(),
@@ -231,6 +244,42 @@ pub(super) fn merge_acceptance_criteria(
         .collect();
 
     serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
+}
+
+#[cfg(test)]
+mod merge_ac_tests {
+    use super::merge_acceptance_criteria;
+    use serde_json::json;
+
+    #[test]
+    fn met_only_payload_preserves_object_criterion() {
+        let merged = merge_acceptance_criteria(
+            r#"[{"criterion": "does the thing", "met": false}]"#,
+            &[json!({"met": true})],
+        );
+        assert_eq!(merged, r#"[{"met":true,"criterion":"does the thing"}]"#);
+    }
+
+    #[test]
+    fn met_only_payload_preserves_bare_string_criterion() {
+        let merged = merge_acceptance_criteria(r#"["does the thing"]"#, &[json!({"met": true})]);
+        assert_eq!(merged, r#"[{"met":true,"criterion":"does the thing"}]"#);
+    }
+
+    #[test]
+    fn incoming_bare_string_becomes_criterion_text() {
+        let merged = merge_acceptance_criteria(r#"["old text"]"#, &[json!("new text")]);
+        assert_eq!(merged, r#"[{"criterion":"new text"}]"#);
+    }
+
+    #[test]
+    fn incoming_criterion_wins_over_existing() {
+        let merged = merge_acceptance_criteria(
+            r#"["old text"]"#,
+            &[json!({"criterion": "new text", "met": true})],
+        );
+        assert_eq!(merged, r#"[{"criterion":"new text","met":true}]"#);
+    }
 }
 
 pub(super) fn task_to_value(t: &Task) -> serde_json::Value {
