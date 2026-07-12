@@ -6,6 +6,8 @@ mod compaction;
 mod defaults;
 #[path = "tests/handler.rs"]
 mod handler;
+#[path = "tests/interruption.rs"]
+mod interruption;
 #[path = "tests/mcp_dispatch.rs"]
 mod mcp_dispatch;
 #[path = "tests/prompt.rs"]

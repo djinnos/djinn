@@ -1,3 +1,6 @@
+{{- if and .Values.imagePipeline.zot.retention.enabled (not .Values.imagePipeline.zot.retention.dryRun) (or (not .Values.imagePipeline.enabled) (not .Values.imagePipeline.zot.enabled)) -}}
+{{- fail "imagePipeline.zot.retention cannot be destructive unless imagePipeline.enabled and imagePipeline.zot.enabled are true; no Zot policy or matching runtime preflight endpoint would be rendered" -}}
+{{- end -}}
 {{- if and .Values.imagePipeline.enabled .Values.imagePipeline.zot.enabled -}}
 # Zot registry configuration. Single rendered config.json mounted into the
 # StatefulSet at /etc/zot/config.json. Live GC (gcInterval, gcDelay) keeps
