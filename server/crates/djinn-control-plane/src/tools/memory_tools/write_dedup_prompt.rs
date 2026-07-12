@@ -6,11 +6,13 @@ use super::write_dedup_types::{MemoryWriteDedupDecision, MemoryWriteDedupDecisio
 /// write-dedup prompt. The repository still carries the complete body.
 pub(super) const MEMORY_WRITE_DEDUP_CANDIDATE_CONTENT_CHAR_CAP: usize = 4_000;
 
-pub(super) const MEMORY_WRITE_DEDUP_SYSTEM: &str = "You are deciding whether a new knowledge-base note should create a new note, reuse an existing candidate, or merge into an existing candidate. Respond with JSON only.\n\
-Schema: {\"action\":\"create_new|reuse_existing|merge_into_existing\",\"candidate_id\":\"optional candidate id\",\"merged_title\":\"required for merge_into_existing\",\"merged_content\":\"required for merge_into_existing\"}.\n\
-Choose create_new when the draft is materially distinct.\n\
-Choose reuse_existing when the draft is effectively the same note.\n\
-Choose merge_into_existing when the draft should update an existing note with combined content.";
+pub(super) const MEMORY_WRITE_DEDUP_SYSTEM: &str = "You are deciding whether a new knowledge-base note should create a new note, reuse an existing candidate, merge into an existing candidate, or supersede an existing candidate. Respond with JSON only.\n\
+Schema: {\"action\":\"create_new|reuse_existing|merge_into_existing|supersede_existing\",\"candidate_id\":\"required for reuse_existing, merge_into_existing, and supersede_existing\",\"merged_title\":\"required for merge_into_existing\",\"merged_content\":\"required for merge_into_existing\",\"reason\":\"required for supersede_existing\"}.\n\
+Choose create_new when the draft is materially distinct from every candidate.\n\
+Choose reuse_existing when the existing candidate already covers the draft; the candidate should be returned unchanged.\n\
+Choose merge_into_existing only when you have read the candidate's full rendered body and both the draft and that body contribute non-trivially to a combined note.\n\
+Choose supersede_existing only when you have read the candidate's full rendered body and the draft is a strict improvement or replacement for that specific candidate.\n\
+Do not choose merge or supersede unless the candidate's full body is present in the prompt; prefer create_new if you are uncertain.";
 
 #[derive(Debug, serde::Deserialize)]
 struct MemoryWriteDedupDecisionPayload {
@@ -18,6 +20,7 @@ struct MemoryWriteDedupDecisionPayload {
     candidate_id: Option<String>,
     merged_title: Option<String>,
     merged_content: Option<String>,
+    reason: Option<String>,
 }
 
 pub(super) fn render_memory_write_dedup_prompt(
@@ -34,7 +37,7 @@ pub(super) fn render_memory_write_dedup_prompt(
     }
 
     prompt.push_str(
-        "Decide whether to create a new note, reuse an existing candidate, or merge into an existing candidate. Respond with JSON only.",
+        "Decide whether to create a new note, reuse an existing candidate, merge into an existing candidate, or supersede an existing candidate. Respond with JSON only.",
     );
 
     prompt
@@ -97,6 +100,16 @@ pub(crate) fn parse_memory_write_dedup_decision(
                 .merged_content
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| "merge_into_existing requires merged_content".to_string())?,
+        }),
+        "supersede_existing" => Ok(MemoryWriteDedupDecision::SupersedeExisting {
+            candidate_id: payload
+                .candidate_id
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "supersede_existing requires candidate_id".to_string())?,
+            reason: payload
+                .reason
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "supersede_existing requires reason".to_string())?,
         }),
         other => Err(format!("unknown dedup action: {other}")),
     }
