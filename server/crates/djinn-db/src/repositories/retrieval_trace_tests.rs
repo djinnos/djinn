@@ -658,7 +658,7 @@ async fn list_by_project_pagination_is_deterministic_and_excludes_other_projects
     let other_project = "019f4900-0000-7000-8000-000000000028";
     seed_project(&db, project_id).await;
     seed_project(&db, other_project).await;
-    let repo = RetrievalTraceRepository::new(db);
+    let repo = RetrievalTraceRepository::new(db.clone());
     let candidates = serde_json::to_value(vec![injected_candidate("n1", 1, 0.9)]).unwrap();
 
     let mut ids = Vec::new();
@@ -681,11 +681,16 @@ async fn list_by_project_pagination_is_deterministic_and_excludes_other_projects
             .await
             .unwrap();
         ids.push(row.id);
-        // Ensure monotonic ordering by sleeping 10ms between inserts. SQLite
-        // in-memory timestamps have millisecond precision; this makes the
-        // DESC order stable across the test.
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+    // Force all project rows to share the same `created_at` timestamp so the
+    // test exercises the secondary ORDER BY id DESC tie-breaker with real ties.
+    let common_ts = "2026-07-12T00:00:00.000Z";
+    sqlx::query("UPDATE retrieval_traces SET created_at = $1 WHERE project_id = $2")
+        .bind(common_ts)
+        .bind(project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
 
     // Insert into another project.
     repo.insert(CreateRetrievalTraceParams {

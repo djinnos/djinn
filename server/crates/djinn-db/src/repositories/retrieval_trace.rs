@@ -550,7 +550,7 @@ impl RetrievalTraceRepository {
                 durations_ms, estimated_injected_tokens, created_at
             FROM retrieval_traces
             WHERE project_id = $1{condition_clause}
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             OFFSET ${offset_bind}
             LIMIT ${limit_bind}"#
         );
