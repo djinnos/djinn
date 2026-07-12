@@ -73,6 +73,7 @@ impl DjinnMcpServer {
         .await
         {
             WriteDedupOutcome::Respond(response) => {
+                let response = *response;
                 if let Some(note_id) = response.id.as_deref()
                     && response.error.is_none()
                 {

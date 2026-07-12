@@ -58,7 +58,7 @@ impl MemoryWriteDedupDecider for LlmMemoryWriteDedupDecider {
 /// and SupersedeExisting flow through `write_services::create_note`.
 pub(crate) enum WriteDedupOutcome {
     CreateNew,
-    Respond(MemoryNoteResponse),
+    Respond(Box<MemoryNoteResponse>),
     SupersedeExisting {
         candidate_id: String,
         reason: String,
@@ -72,7 +72,7 @@ pub(crate) async fn maybe_apply_write_dedup(
 ) -> WriteDedupOutcome {
     match apply_write_dedup(repo, decider, pending).await {
         Ok(outcome) => outcome,
-        Err(error) => WriteDedupOutcome::Respond(MemoryNoteResponse::error(error)),
+        Err(error) => WriteDedupOutcome::Respond(Box::new(MemoryNoteResponse::error(error))),
     }
 }
 
@@ -83,9 +83,9 @@ async fn apply_write_dedup(
 ) -> Result<WriteDedupOutcome, String> {
     if let Some(note) = find_exact_hash_match(repo, pending).await? {
         emit_decision_kind("reuse_existing");
-        return Ok(WriteDedupOutcome::Respond(
+        return Ok(WriteDedupOutcome::Respond(Box::new(
             MemoryNoteResponse::deduplicated_from_note(&note),
-        ));
+        )));
     }
 
     if !mergeable_note_type(pending.note_type) {
@@ -161,9 +161,9 @@ pub(crate) async fn apply_dedup_decision(
                 .await
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("dedup candidate not found: {candidate_id}"))?;
-            Ok(WriteDedupOutcome::Respond(
+            Ok(WriteDedupOutcome::Respond(Box::new(
                 MemoryNoteResponse::deduplicated_from_note(&note),
-            ))
+            )))
         }
         MemoryWriteDedupDecision::MergeIntoExisting {
             candidate_id,
@@ -179,9 +179,9 @@ pub(crate) async fn apply_dedup_decision(
                 )
                 .await
                 .map_err(|error| error.to_string())?;
-            Ok(WriteDedupOutcome::Respond(
+            Ok(WriteDedupOutcome::Respond(Box::new(
                 MemoryNoteResponse::deduplicated_from_note(&note),
-            ))
+            )))
         }
         MemoryWriteDedupDecision::SupersedeExisting {
             candidate_id,
