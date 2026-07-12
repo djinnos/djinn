@@ -543,8 +543,14 @@ imagePipeline:
       existingClaim: ""
     auth:
       # When non-empty, the chart mounts this pre-existing Secret instead of
-      # rendering one from the inline values. Secret must carry both
-      # `htpasswd` (bcrypt'd user:pass) and `config.json` (docker auth config).
+      # rendering one from the inline values. The caller-owned Secret must
+      # carry `htpasswd` (bcrypt'd user:pass) and `config.json` (docker auth
+      # config) for Zot/buildkitd, plus plaintext `username` and `password`
+      # keys for the server's Zot retention-preflight HTTP Basic auth. The
+      # `username`/`password` key names are the chart contract and are wired
+      # only with SecretKeyRefs (never into a ConfigMap). Set `auth.username`
+      # to the same username stored in the caller-owned Secret so Zot's access
+      # policy permits the preflight request.
       existingSecret: ""
       # Default credentials used by buildkitd + image-controller to push/pull.
       # Overridden via --set or a secrets-only values file at install time.
