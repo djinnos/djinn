@@ -4,8 +4,10 @@ import { callMcpTool } from "@/api/mcpClient";
 import { getServerBaseUrl } from "@/api/serverUrl";
 import {
   checkServerHealth,
+  addProjectFromGithub,
   fetchProviderCatalog,
   getGithubInstallUrl,
+  githubRepoToProjectArgs,
   invalidateProviderCatalogCache,
   listGithubRepos,
   searchTasksAcrossProjects,
@@ -269,6 +271,30 @@ describe("server API helpers", () => {
   });
 
   describe("GitHub project helpers", () => {
+    it("preserves a repository's non-main default branch when adding it", async () => {
+      callMcpToolMock.mockResolvedValueOnce({
+        status: "ok",
+        project: { id: "project-1", github_owner: "acme", github_repo: "legacy" },
+      } as never);
+      const args = githubRepoToProjectArgs({
+        owner: "acme",
+        repo: "legacy",
+        default_branch: "master",
+        private: true,
+        installation_id: 42,
+        account_login: "acme",
+      });
+
+      await addProjectFromGithub(args);
+
+      expect(callMcpToolMock).toHaveBeenCalledWith("project_add_from_github", {
+        owner: "acme",
+        repo: "legacy",
+        ref: "master",
+        installation_id: 42,
+      });
+    });
+
     it("throws the normalized error message from github_list_repos", async () => {
       callMcpToolMock.mockResolvedValueOnce({ status: "error: sign in required" } as never);
 
