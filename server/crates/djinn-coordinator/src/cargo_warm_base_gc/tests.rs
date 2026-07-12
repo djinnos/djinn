@@ -1311,6 +1311,37 @@ async fn pressure_fractional_byte_boundary_reaches_high_watermark() {
 }
 
 #[tokio::test]
+async fn pressure_large_capacity_preserves_high_watermark_byte_ceiling() {
+    // Regression: converting this capacity to f64 rounds it down by one. The
+    // planner must retain that final byte when computing ceil(total * 0.25).
+    let config = pressure_config(0.15, 0.25);
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 9_007_199_254_740_993,
+        available_bytes: 0,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![pressure_entry(
+            "018f8b9a-0d70-7f0a-8000-000000000001",
+            2_251_799_813_685_248,
+        )],
+        ignored: 0,
+    };
+    let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
+    let warm = Warm(Ok(false));
+    let locks = Lock(LockOutcome::Available);
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory, &activity, &warm, &locks, &capacity, &config, &clock,
+    )
+    .await;
+
+    assert_eq!(plan.candidates.len(), 1);
+    assert_eq!(plan.projected_bytes, 2_251_799_813_685_248);
+    assert_eq!(plan.target_bytes, 2_251_799_813_685_249);
+}
+
+#[tokio::test]
 async fn pressure_lock_busy_and_error_retained() {
     let config = pressure_config(0.15, 0.25);
     let capacity = Capacity(Ok(CapacitySnapshot {

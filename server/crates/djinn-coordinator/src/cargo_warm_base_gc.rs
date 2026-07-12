@@ -424,13 +424,50 @@ pub async fn plan_pressure_eviction(
 }
 
 fn target_reclaim_bytes(capacity: &CapacitySnapshot, high_free_ratio: f64) -> u64 {
-    // Ceiling calculation: we need *at least* total_bytes * high_free_ratio
-    // bytes to be free, so we round up to the next whole byte. This prevents
-    // truncating the target before subtraction and stopping below the high
-    // watermark on fractional-byte boundaries.
-    let high_bytes =
-        ((capacity.total_bytes as f64 * high_free_ratio).ceil() as u64).min(capacity.total_bytes);
+    // We need *at least* `total_bytes * high_free_ratio` bytes to be free, so
+    // round up to a whole byte. Do this with the ratio's IEEE-754 components,
+    // rather than converting total_bytes to f64: u64 capacities above 2^53
+    // would otherwise be rounded before the ceiling is applied.
+    let high_bytes = ceiling_ratio_bytes(capacity.total_bytes, high_free_ratio);
     high_bytes.saturating_sub(capacity.available_bytes)
+}
+
+/// Return `ceil(total * ratio)` without lossy conversion of `total` to f64.
+///
+/// Watermark configuration is constrained to finite ratios in `[0, 1)`, but
+/// this helper defensively bounds invalid values to keep planning fail-safe and
+/// bounded when called with an unchecked test fixture.
+fn ceiling_ratio_bytes(total: u64, ratio: f64) -> u64 {
+    if total == 0 || ratio <= 0.0 {
+        return 0;
+    }
+    if !ratio.is_finite() || ratio >= 1.0 {
+        return total;
+    }
+
+    let bits = ratio.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    let (significand, binary_exponent) = if exponent == 0 {
+        // Subnormal: fraction * 2^-1074.
+        (fraction, -1074)
+    } else {
+        // Normal: (2^52 + fraction) * 2^(exponent - 1023 - 52).
+        (fraction | (1_u64 << 52), exponent - 1023 - 52)
+    };
+
+    // A valid positive ratio below one has a negative binary exponent. For a
+    // denominator wider than u128, even the largest u64 capacity times the
+    // significand is below one byte, so its ceiling is exactly one byte.
+    let shift = (-binary_exponent) as u32;
+    if shift >= 128 {
+        return 1;
+    }
+    let numerator = (total as u128).saturating_mul(significand as u128);
+    let denominator = 1_u128 << shift;
+    let whole_bytes = numerator / denominator;
+    let has_fraction = numerator % denominator != 0;
+    (whole_bytes + u128::from(has_fraction)).min(total as u128) as u64
 }
 
 fn pressure_skip_reason_from_retain(reason: RetainReason) -> PressureSkipReason {
