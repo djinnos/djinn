@@ -97,7 +97,7 @@ pub use repositories::{
         NoteAssociationProvenanceUpsert, NoteAssociationSource, NoteConsolidationRepository,
         NoteDedupCandidate, NoteEmbeddingMatch, NoteEmbeddingProvider, NoteEmbeddingRecord,
         NoteQualityAssessment, NoteRepairEmbeddingRow, NoteRepository, NoteSearchParams,
-        NoteVectorStore, PromptBudgetReport, ProposedBackfillAnchor, QdrantConfig,
+        NoteStatus, NoteVectorStore, PromptBudgetReport, ProposedBackfillAnchor, QdrantConfig,
         QdrantNoteVectorStore, QueryReplayReport, RankingReport, ReplayCriteria, ReplayFixture,
         ReplayNote, ReplayQuery, ReplayReport, STALE_CITATION, STALE_DECAY_SIGNAL,
         UpsertNoteEmbedding, anchor_embedding_replay_fixture, assess_note_quality,

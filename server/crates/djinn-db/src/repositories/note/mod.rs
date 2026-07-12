@@ -90,6 +90,7 @@ pub use housekeeping::{
     AnchorProposerKind, BackfillRetrievalAnchorOptions, BackfillRetrievalAnchorReport,
     LlmAnchorProposer, ProposedBackfillAnchor, propose_anchor_deterministic,
 };
+pub use lifecycle::NoteStatus;
 
 /// Compact scope-overlap candidate row returned by
 /// [`NoteRepository::query_by_scope_overlap_trace_candidates`].
