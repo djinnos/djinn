@@ -1008,9 +1008,7 @@ pub struct BoardHealthClosedParentOpenChildren {
     pub findings: Vec<BoardHealthClosedParentOpenChildrenFinding>,
 }
 
-/// One closed-parent orphan finding: a non-closed task whose parent scopes are
-/// terminal and that has no other open parent. The finding carries the full
-/// evidence a later repair snapshot needs.
+/// One closed-parent orphan finding with evidence for a later repair snapshot.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthClosedParentOpenChildrenFinding {
     pub id: String,
