@@ -4,11 +4,16 @@
 //! harness' `StubRuntime::persist_model_health_state` is a no-op, so
 //! `model_health` mutation-shaped tests still return the documented error
 //! envelopes when required fields are missing.
+//!
+//! Recommended-model override policy coverage exercises the effective
+//! `recommended` flag on `provider_models_connected` outputs.
 
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::events::EventBus;
+use djinn_db::OrgAiPolicyRepository;
 use djinn_provider::repos::CredentialRepository;
 use serde_json::json;
+use std::collections::HashMap;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_catalog_returns_expected_shape() {
@@ -115,8 +120,6 @@ async fn provider_model_lookup_returns_found_and_not_found_shapes() {
         .expect("provider_model_lookup should dispatch");
     assert!(!not_found["found"].as_bool().unwrap_or(true));
     assert!(not_found["model"].is_null());
-    // G3: a 404-style miss must carry the structured tool-error envelope so the
-    // agent can branch on status instead of re-guessing the same bad id.
     let env = &not_found["error"];
     assert!(
         env.is_object(),
@@ -133,8 +136,6 @@ async fn provider_model_lookup_returns_found_and_not_found_shapes() {
             .contains("provider_models_connected"),
         "hint should point at the recovery tool: {env}"
     );
-
-    // Backward compatibility: the success path must NOT carry an error envelope.
     assert!(found.get("error").is_none() || found["error"].is_null());
 }
 
@@ -206,20 +207,16 @@ async fn provider_oauth_start_returns_error_shape_when_not_configured_or_invalid
     assert!(result.get("oauth_supported").is_some());
 }
 
-// ── Org AI policy: subscription allow/block enforcement (slice 5 of p8py) ──────
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn org_policy_blocks_subscription_from_connected_and_validation() {
     let harness = McpTestHarness::new().await;
     let db = harness.db().clone();
 
-    // Connect a subscription provider so it would otherwise appear connected.
     CredentialRepository::new(db, EventBus::noop())
         .set("minimax-coding-plan", "MINIMAX_API_KEY", "sk-sub")
         .await
         .unwrap();
 
-    // Baseline: the subscription is connected and a model on it validates.
     let connected_before = harness
         .call_tool("provider_connected", json!({}))
         .await
@@ -239,8 +236,6 @@ async fn org_policy_blocks_subscription_from_connected_and_validation() {
         .await
         .expect("model on connected subscription validates before block");
 
-    // Admin blocks the subscription. (No user context in the harness → the
-    // admin gate is open, matching the credential-repo trusted-path convention.)
     let set = harness
         .call_tool(
             "org_policy_set",
@@ -258,7 +253,6 @@ async fn org_policy_blocks_subscription_from_connected_and_validation() {
         "blocked set persisted"
     );
 
-    // Enforcement 1: hidden from provider_connected.
     let connected_after = harness
         .call_tool("provider_connected", json!({}))
         .await
@@ -272,7 +266,6 @@ async fn org_policy_blocks_subscription_from_connected_and_validation() {
         "blocked subscription must be hidden from provider_connected"
     );
 
-    // Enforcement 2: hidden from provider_catalog.
     let catalog_after = harness
         .call_tool("provider_catalog", json!({}))
         .await
@@ -286,7 +279,6 @@ async fn org_policy_blocks_subscription_from_connected_and_validation() {
         "blocked subscription must be hidden from provider_catalog"
     );
 
-    // Enforcement 3: hidden from provider_models_connected.
     let models_after = harness
         .call_tool("provider_models_connected", json!({}))
         .await
@@ -300,7 +292,6 @@ async fn org_policy_blocks_subscription_from_connected_and_validation() {
         "blocked subscription's models must be hidden from provider_models_connected"
     );
 
-    // Enforcement 4: validation rejects selecting a model on the blocked sub.
     let err = harness
         .state()
         .validate_models_for_user(&["minimax-coding-plan/MiniMax-M3".to_string()], None)
@@ -311,8 +302,6 @@ async fn org_policy_blocks_subscription_from_connected_and_validation() {
         "rejection should mention org policy, got: {err}"
     );
 
-    // Admin API keys are never governed: a non-subscription id passed to the
-    // blocklist is dropped, and openai stays connectable.
     let set_apikey = harness
         .call_tool(
             "org_policy_set",
@@ -348,7 +337,6 @@ async fn org_policy_get_reports_jurisdiction_and_lock_default() {
         json!([]),
         "fresh org policy should expose an empty demoted-recommended override list"
     );
-    // The subscription table carries a jurisdiction per row.
     if let Some(first) = result["subscriptions"].as_array().and_then(|a| a.first()) {
         let j = first["jurisdiction"].as_str().unwrap_or("");
         assert!(
@@ -449,19 +437,14 @@ async fn org_policy_subscription_enumeration_includes_codex_chinese_and_dedupes_
 
     let by_id = |id: &str| subs.iter().find(|s| s["id"] == id);
 
-    // ChatGPT/Codex is a governable subscription, classified US — even though it
-    // is a merged child the catalog otherwise hides under `openai`.
     let codex = by_id("chatgpt_codex").expect("chatgpt_codex must be enumerated");
     assert_eq!(codex["jurisdiction"], "us", "codex is US-hosted");
 
-    // Connected Chinese subs are classified CN.
     for cn_id in ["minimax-coding-plan", "kimi-for-coding", "zai-coding-plan"] {
         let item = by_id(cn_id).unwrap_or_else(|| panic!("{cn_id} must be enumerated"));
         assert_eq!(item["jurisdiction"], "cn", "{cn_id} should be China-hosted");
     }
 
-    // The two GitHub Copilot ids (`github-copilot` + `githubcopilot`) collapse to
-    // exactly one row.
     let copilot_count = subs
         .iter()
         .filter(|s| {
@@ -483,7 +466,6 @@ async fn org_policy_subscription_enumeration_includes_codex_chinese_and_dedupes_
         "GitHub Copilot must be de-duplicated to one row"
     );
 
-    // Non-subscription API providers are never listed.
     assert!(
         by_id("openai").is_none(),
         "plain openai api key is not governed"
@@ -497,21 +479,17 @@ async fn org_policy_blocks_codex_subscription_via_openai_namespaced_models() {
     let harness = McpTestHarness::new().await;
     let db = harness.db().clone();
 
-    // Connect the openai provider so the connectivity check passes; the test
-    // then isolates the org-policy gate (codex block) from connectivity.
     CredentialRepository::new(db, EventBus::noop())
         .set("openai", "OPENAI_API_KEY", "sk-test")
         .await
         .unwrap();
 
-    // Baseline: a codex model (surfaced under the openai namespace) validates.
     harness
         .state()
         .validate_models_for_user(&["openai/gpt-5.3-codex".to_string()], None)
         .await
         .expect("codex model validates before block");
 
-    // Admin blocks the ChatGPT/Codex subscription by its own identity.
     let set = harness
         .call_tool(
             "org_policy_set",
@@ -528,8 +506,6 @@ async fn org_policy_blocks_codex_subscription_via_openai_namespaced_models() {
         "codex sub must be storable in the blocklist (it is a subscription)"
     );
 
-    // Enforcement: a codex model namespaced `openai/...` is now rejected, because
-    // it resolves to the blocked chatgpt_codex subscription identity.
     let err = harness
         .state()
         .validate_models_for_user(&["openai/gpt-5.3-codex".to_string()], None)
@@ -540,12 +516,219 @@ async fn org_policy_blocks_codex_subscription_via_openai_namespaced_models() {
         "rejection should mention org policy, got: {err}"
     );
 
-    // A plain openai API-key model is NOT governed by the codex block.
     harness
         .state()
         .validate_models_for_user(&["openai/gpt-5.5".to_string()], None)
         .await
         .expect("plain openai api-key model stays ungoverned");
+}
+
+// ── Org AI policy: recommended-model override policy on connected outputs ─────
+
+async fn connected_models_recommended_map(harness: &McpTestHarness) -> HashMap<String, bool> {
+    let result = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch");
+    result["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .map(|m| {
+            (
+                m["id"].as_str().expect("model id").to_string(),
+                m["recommended"].as_bool().unwrap_or(false),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_models_connected_demotes_baseline_recommended_model() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    CredentialRepository::new(db, EventBus::noop())
+        .set("openai", "OPENAI_API_KEY", "sk-test")
+        .await
+        .unwrap();
+
+    let before = connected_models_recommended_map(&harness).await;
+    let gpt_5_3_codex = "openai/gpt-5.3-codex";
+    assert!(
+        before.contains_key(gpt_5_3_codex),
+        "{gpt_5_3_codex} should be present in connected output, got ids: {:?}",
+        before.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        *before.get(gpt_5_3_codex).unwrap(),
+        "{gpt_5_3_codex} should be baseline recommended before demotion"
+    );
+
+    let set = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"demoted_recommended_model_ids": [gpt_5_3_codex]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(set["ok"].as_bool().unwrap_or(false), "org_policy_set ok");
+
+    let after = connected_models_recommended_map(&harness).await;
+    assert!(
+        !after.get(gpt_5_3_codex).copied().unwrap_or(true),
+        "demoted baseline recommended model should surface recommended=false"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_models_connected_promotes_non_baseline_model() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    CredentialRepository::new(db, EventBus::noop())
+        .set("openai", "OPENAI_API_KEY", "sk-test")
+        .await
+        .unwrap();
+
+    let before = connected_models_recommended_map(&harness).await;
+    let gpt_5_2 = "openai/gpt-5.2";
+    assert!(
+        before.contains_key(gpt_5_2),
+        "gpt-5.2 should be present in connected output, got ids: {:?}",
+        before.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !before.get(gpt_5_2).copied().unwrap_or(false),
+        "gpt-5.2 should not be baseline recommended before promotion"
+    );
+
+    let set = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"additional_recommended_model_ids": [gpt_5_2]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(set["ok"].as_bool().unwrap_or(false), "org_policy_set ok");
+
+    let after = connected_models_recommended_map(&harness).await;
+    assert!(
+        *after
+            .get(gpt_5_2)
+            .expect("gpt-5.2 must still be present in catalog output"),
+        "additional override should promote gpt-5.2 to recommended=true"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_models_connected_ignores_override_ids_missing_from_catalog() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    CredentialRepository::new(db, EventBus::noop())
+        .set("openai", "OPENAI_API_KEY", "sk-test")
+        .await
+        .unwrap();
+
+    let set = harness
+        .call_tool(
+            "org_policy_set",
+            json!({
+                "additional_recommended_model_ids": ["openai/nonexistent-model"],
+                "demoted_recommended_model_ids": ["openai/also-nonexistent"],
+            }),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(set["ok"].as_bool().unwrap_or(false), "org_policy_set ok");
+
+    let result = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch");
+    let models = result["models"].as_array().expect("models array");
+    assert!(
+        !models.iter().any(|m| m["id"] == "openai/nonexistent-model"),
+        "additional override missing from catalog must not synthesize a model"
+    );
+    assert!(
+        !models.iter().any(|m| m["id"] == "openai/also-nonexistent"),
+        "demoted override missing from catalog must not synthesize a model"
+    );
+    assert!(result.get("error").is_none() || result["error"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_models_connected_overlap_demotion_wins_for_legacy_corrupt_policy() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    CredentialRepository::new(db.clone(), EventBus::noop())
+        .set("openai", "OPENAI_API_KEY", "sk-test")
+        .await
+        .unwrap();
+
+    let repo = OrgAiPolicyRepository::new(db);
+    let mut policy = repo.get().await.expect("load policy");
+    policy.additional_recommended_model_ids = vec!["openai/gpt-5.3-codex".to_string()];
+    policy.demoted_recommended_model_ids = vec!["openai/gpt-5.3-codex".to_string()];
+    repo.set(&policy).await.expect("persist corrupt overlap");
+
+    let result = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch");
+    let gpt_5_3_codex = result["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|m| m["id"] == "openai/gpt-5.3-codex")
+        .expect("openai/gpt-5.3-codex must remain in output")
+        .clone();
+    assert!(
+        !gpt_5_3_codex["recommended"].as_bool().unwrap_or(true),
+        "demotion wins over addition for overlapping ids in corrupt policy"
+    );
+    assert!(result.get("error").is_none() || result["error"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_models_connected_merged_child_preserves_full_path_and_uses_surfaced_id() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    CredentialRepository::new(db, EventBus::noop())
+        .set("chatgpt_codex", "CHATGPT_CODEX_TOKEN", "token")
+        .await
+        .unwrap();
+
+    let before = connected_models_recommended_map(&harness).await;
+    let codex_model = "openai/gpt-5.3-codex";
+    assert!(
+        before.contains_key(codex_model),
+        "{codex_model} should be present in connected output, got ids: {:?}",
+        before.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        *before.get(codex_model).unwrap(),
+        "codex model should be baseline recommended before demotion"
+    );
+
+    let set = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"demoted_recommended_model_ids": [codex_model]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(set["ok"].as_bool().unwrap_or(false), "org_policy_set ok");
+
+    let after = connected_models_recommended_map(&harness).await;
+    assert!(
+        !after.get(codex_model).copied().unwrap_or(true),
+        "demotion must apply to the merged-child surfaced id {codex_model}"
+    );
 }
 
 // ── Org AI policy: recommended-model override-list validation regressions ──────
@@ -649,9 +832,6 @@ async fn org_policy_set_rejects_unknown_provider_recommended_model_override_ids(
 async fn org_policy_set_accepts_known_but_disconnected_provider_recommended_model_overrides() {
     let harness = McpTestHarness::new().await;
 
-    // google is a built-in provider; no credential is seeded in the harness so
-    // it is known/configured but not currently connected. Pre-staging policy
-    // must still accept it.
     let result = harness
         .call_tool(
             "org_policy_set",
