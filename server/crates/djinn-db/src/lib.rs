@@ -34,6 +34,12 @@ pub use repositories::tool_call_export::{
     ExportDimensions, NormalizedToolCallRow, PersistedTranscript, ToolCallExportRepository,
     normalize_persisted_transcript,
 };
+pub use repositories::tool_call_metrics::{
+    AdoptionCounts, AdoptionShare, ConfidenceInterval, FailureRates, RateMetric,
+    ToolSurfaceMetrics, adoption_counts, apply_patch_adoption_share, compute_metrics,
+    edit_minus_apply_patch_failure_interval, failure_rates, read_truncation_loop_rate,
+    retry_after_edit_failure, wilson_difference_interval, wilson_interval,
+};
 pub use repositories::{
     agent::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,
