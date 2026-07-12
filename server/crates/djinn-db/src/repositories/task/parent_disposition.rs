@@ -625,19 +625,22 @@ pub async fn apply_parent_disposition_tx(
     scope: &DispositionScope,
 ) -> Result<DispositionPlan> {
     let echo = DispositionScopeEcho::from(scope);
-    let child_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM tasks WHERE epic_id = ANY($1) ORDER BY created_at",
-    )
-    .bind(&scope.epic_ids)
-    .fetch_all(&mut *conn)
-    .await?;
+    let child_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM tasks WHERE epic_id = ANY($1) ORDER BY created_at")
+            .bind(&scope.epic_ids)
+            .fetch_all(&mut *conn)
+            .await?;
     let mut findings = Vec::with_capacity(child_ids.len());
     let entry_point = match scope.entry_point {
         DispositionEntryPoint::EpicClose => "epic_close",
         DispositionEntryPoint::ProposalAbort => "proposal_abort",
         DispositionEntryPoint::ProposalObsoleteEpicReconcile => "proposal_obsolete_epic_reconcile",
     };
-    let parent_kind = if scope.proposal_id.is_some() { "proposal" } else { "epic" };
+    let parent_kind = if scope.proposal_id.is_some() {
+        "proposal"
+    } else {
+        "epic"
+    };
     let parent_id = scope
         .proposal_id
         .as_deref()
@@ -658,19 +661,14 @@ pub async fn apply_parent_disposition_tx(
         // terminal callers, this keeps the evidence coherent with the locked
         // child row and avoids a read-after-commit race.
         let guard_reason = match disposition {
-            ChildDisposition::RetainedOtherParent => {
-                Some(GuardReason::OtherOpenProposalParent {
-                    open_proposals: find_other_open_proposal_parents_tx(
-                        conn,
-                        &child.task_id,
-                        scope,
-                    )
+            ChildDisposition::RetainedOtherParent => Some(GuardReason::OtherOpenProposalParent {
+                open_proposals: find_other_open_proposal_parents_tx(conn, &child.task_id, scope)
                     .await?,
-                })
-            }
+            }),
             ChildDisposition::RetainedExternalDependent => {
                 Some(GuardReason::ExternalOpenDependent {
-                    dependents: find_external_open_dependents_tx(conn, &child.task_id, scope).await?,
+                    dependents: find_external_open_dependents_tx(conn, &child.task_id, scope)
+                        .await?,
                 })
             }
             _ => guard_reason_for_disposition(&disposition),
@@ -683,7 +681,18 @@ pub async fn apply_parent_disposition_tx(
                     close_reason = 'parent_closed',
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#)
                     .bind(&child.task_id).execute(&mut *conn).await?;
-                insert_disposition_activities(conn, &child.task_id, &child.status, "closed", "parent_closed", "parent_child_disposed", parent_kind, parent_id, entry_point).await?;
+                insert_disposition_activities(
+                    conn,
+                    &child.task_id,
+                    &child.status,
+                    "closed",
+                    "parent_closed",
+                    "parent_child_disposed",
+                    parent_kind,
+                    parent_id,
+                    entry_point,
+                )
+                .await?;
             }
             ChildDisposition::Park => {
                 let reason = park_reason_for_status(&child.status);
@@ -693,32 +702,63 @@ pub async fn apply_parent_disposition_tx(
                     close_reason = NULL,
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#)
                     .bind(&child.task_id).execute(&mut *conn).await?;
-                insert_disposition_activities(conn, &child.task_id, &child.status, "needs_lead_intervention", reason, "parent_child_parked", parent_kind, parent_id, entry_point).await?;
+                insert_disposition_activities(
+                    conn,
+                    &child.task_id,
+                    &child.status,
+                    "needs_lead_intervention",
+                    reason,
+                    "parent_child_parked",
+                    parent_kind,
+                    parent_id,
+                    entry_point,
+                )
+                .await?;
             }
             _ => {}
         }
         findings.push(DispositionFinding {
-            task_id: child.task_id, short_id: child.short_id, title: child.title,
-            status: child.status, guard_reason, disposition, scope: echo.clone(),
+            task_id: child.task_id,
+            short_id: child.short_id,
+            title: child.title,
+            status: child.status,
+            guard_reason,
+            disposition,
+            scope: echo.clone(),
         });
     }
     let counts = tally(&findings);
-    Ok(DispositionPlan { scope: echo, findings, counts })
+    Ok(DispositionPlan {
+        scope: echo,
+        findings,
+        counts,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn insert_disposition_activities(
-    conn: &mut sqlx::PgConnection, task_id: &str, from_status: &str, to_status: &str,
-    reason: &str, event_type: &str, parent_kind: &str, parent_id: &str, entry_point: &str,
+    conn: &mut sqlx::PgConnection,
+    task_id: &str,
+    from_status: &str,
+    to_status: &str,
+    reason: &str,
+    event_type: &str,
+    parent_kind: &str,
+    parent_id: &str,
+    entry_point: &str,
 ) -> Result<()> {
-    let status_payload = serde_json::json!({"from_status": from_status, "to_status": to_status, "reason": reason});
+    let status_payload =
+        serde_json::json!({"from_status": from_status, "to_status": to_status, "reason": reason});
     let mut disposition_payload = serde_json::json!({"parent_kind": parent_kind, "parent_id": parent_id, "entry_point": entry_point, "from_status": from_status, "to_status": to_status, "reason": reason});
     // `park_reason` is the established parent-child activity contract. Keep
     // the generic reason too: status_changed continues to use that key.
     if event_type == "parent_child_parked" {
         disposition_payload["park_reason"] = serde_json::Value::String(reason.to_owned());
     }
-    for (event_type, payload) in [("status_changed", status_payload), (event_type, disposition_payload)] {
+    for (event_type, payload) in [
+        ("status_changed", status_payload),
+        (event_type, disposition_payload),
+    ] {
         sqlx::query("INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) VALUES ($1, $2, 'system', 'system', $3, $4)")
             .bind(uuid::Uuid::now_v7().to_string()).bind(task_id).bind(event_type).bind(payload)
             .execute(&mut *conn).await?;
@@ -727,7 +767,10 @@ async fn insert_disposition_activities(
 }
 
 fn park_reason_for_status(status: &str) -> &'static str {
-    match status { "approved" | "pr_draft" | "pr_review" => "parent_closed_pr_active", _ => "parent_closed_in_flight" }
+    match status {
+        "approved" | "pr_draft" | "pr_review" => "parent_closed_pr_active",
+        _ => "parent_closed_in_flight",
+    }
 }
 
 // ── Internal row + helpers ───────────────────────────────────────────────────
@@ -1218,7 +1261,13 @@ mod tests {
         assert_eq!(finding.disposition, ChildDisposition::RetainedOtherParent);
         match &finding.guard_reason {
             Some(GuardReason::OtherOpenProposalParent { open_proposals }) => {
-                assert_eq!(open_proposals, &vec![OpenProposalRef { proposal_id: other, status: "building".to_owned() }]);
+                assert_eq!(
+                    open_proposals,
+                    &vec![OpenProposalRef {
+                        proposal_id: other,
+                        status: "building".to_owned()
+                    }]
+                );
             }
             other => panic!("expected other-open-parent evidence, got {other:?}"),
         }
@@ -1246,8 +1295,14 @@ mod tests {
         tx.commit().await.unwrap();
 
         assert_eq!(plan.counts.close, 2);
-        assert_eq!(finding_for(&plan, &child).disposition, ChildDisposition::Close);
-        assert_eq!(finding_for(&plan, &dependent).disposition, ChildDisposition::Close);
+        assert_eq!(
+            finding_for(&plan, &child).disposition,
+            ChildDisposition::Close
+        );
+        assert_eq!(
+            finding_for(&plan, &dependent).disposition,
+            ChildDisposition::Close
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1262,13 +1317,17 @@ mod tests {
         let dependent = make_task(&db, &external_epic, "open", "t2").await;
         add_blocker(&db, &dependent, &child).await;
 
-        let scope = DispositionScope::for_proposal_obsolete_epic_reconcile(&proposal, &obsolete_epic);
+        let scope =
+            DispositionScope::for_proposal_obsolete_epic_reconcile(&proposal, &obsolete_epic);
         let mut tx = db.pool().begin().await.unwrap();
         let plan = apply_parent_disposition_tx(&mut tx, &scope).await.unwrap();
         tx.commit().await.unwrap();
 
         let finding = finding_for(&plan, &child);
-        assert_eq!(finding.disposition, ChildDisposition::RetainedExternalDependent);
+        assert_eq!(
+            finding.disposition,
+            ChildDisposition::RetainedExternalDependent
+        );
         match &finding.guard_reason {
             Some(GuardReason::ExternalOpenDependent { dependents }) => {
                 assert_eq!(dependents.len(), 1);
