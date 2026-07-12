@@ -33,7 +33,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use djinn_agent::context::{AgentContext, ReconciliationSweepConfig};
 use djinn_agent::file_time::FileTime;
@@ -46,11 +46,11 @@ use djinn_agent::supervisor::{
 use djinn_core::events::EventBus;
 use djinn_core::models::TaskRunTrigger;
 use djinn_db::{
-    Database, EpicCreateInput, EpicRepository, ProjectRepository, SessionRepository,
-    TaskRepository, TaskRunRepository,
+    Database, EpicCreateInput, EpicRepository, ProjectRepository, SessionMessageRepository,
+    SessionRepository, TaskRepository, TaskRunRepository,
 };
 use djinn_provider::catalog::{CatalogService, HealthTracker};
-use djinn_provider::message::{ContentBlock, Conversation};
+use djinn_provider::message::{ContentBlock, Conversation, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
 use djinn_workspace::MirrorManager;
 use futures::stream;
@@ -58,6 +58,10 @@ use tempfile::TempDir;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{Layer, registry::LookupSpan};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Test fixtures (inlined because `djinn_agent::test_helpers` is `#[cfg(test)]`
@@ -96,6 +100,58 @@ fn test_agent_context(db: Database) -> AgentContext {
         default_project_id: None,
         reconciliation_sweep: ReconciliationSweepConfig::default(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct CapturedEvent {
+    fields: HashMap<String, String>,
+}
+
+#[derive(Default, Clone)]
+struct EventCaptureLayer {
+    events: Arc<StdMutex<Vec<CapturedEvent>>>,
+}
+
+impl EventCaptureLayer {
+    fn events(&self) -> Vec<CapturedEvent> {
+        self.events.lock().expect("event capture mutex").clone()
+    }
+}
+
+#[derive(Default)]
+struct FieldVisitor {
+    fields: HashMap<String, String>,
+}
+
+impl Visit for FieldVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields.insert(
+            field.name().to_owned(),
+            format!("{value:?}").trim_matches('"').to_owned(),
+        );
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields
+            .insert(field.name().to_owned(), value.to_owned());
+    }
+}
+
+impl<S> Layer<S> for EventCaptureLayer
+where
+    S: tracing::Subscriber,
+    S: for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let mut visitor = FieldVisitor::default();
+        event.record(&mut visitor);
+        self.events
+            .lock()
+            .expect("event capture mutex")
+            .push(CapturedEvent {
+                fields: visitor.fields,
+            });
     }
 }
 
@@ -333,13 +389,22 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
 /// which the reply loop recognises as a finalize.
 struct ScriptedProvider {
     turns: Arc<StdMutex<VecDeque<Vec<StreamEvent>>>>,
+    system_prompts: Arc<StdMutex<Vec<String>>>,
 }
 
 impl ScriptedProvider {
     fn new(turns: Vec<Vec<StreamEvent>>) -> Self {
         Self {
             turns: Arc::new(StdMutex::new(turns.into_iter().collect())),
+            system_prompts: Arc::new(StdMutex::new(Vec::new())),
         }
+    }
+
+    fn system_prompts(&self) -> Vec<String> {
+        self.system_prompts
+            .lock()
+            .expect("recorded system prompts mutex")
+            .clone()
     }
 }
 
@@ -350,7 +415,7 @@ impl LlmProvider for ScriptedProvider {
 
     fn stream<'a>(
         &'a self,
-        _conversation: &'a Conversation,
+        conversation: &'a Conversation,
         _tools: &'a [serde_json::Value],
         _tool_choice: Option<ToolChoice>,
     ) -> Pin<
@@ -364,7 +429,18 @@ impl LlmProvider for ScriptedProvider {
         >,
     > {
         let turns = Arc::clone(&self.turns);
+        let system_prompts = Arc::clone(&self.system_prompts);
+        let system_prompt = conversation
+            .messages
+            .iter()
+            .find(|message| message.role == Role::System)
+            .map(|message| message.text_content())
+            .expect("provider receives a rendered system prompt");
         Box::pin(async move {
+            system_prompts
+                .lock()
+                .expect("recorded system prompts mutex")
+                .push(system_prompt);
             let events = turns
                 .lock()
                 .unwrap()
@@ -523,10 +599,23 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
     //    finalizes via `submit_work` and the Spike flow maps that to
     //    TaskRunOutcome::Closed (see `mod.rs::run_sequence`'s Spike/Planning
     //    tail branch).
+    // The session-start event is structured tracing telemetry. Serialize this
+    // collector because tracing's default dispatcher is thread-local and this
+    // integration test may run alongside other telemetry tests.
+    static TRACE_CAPTURE_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+    let _trace_capture_guard = TRACE_CAPTURE_LOCK
+        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+        .lock_owned()
+        .await;
+    let telemetry = EventCaptureLayer::default();
+    let subscriber = tracing_subscriber::registry().with(telemetry.clone());
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
     let report = match supervisor.run(spec).await {
         Ok(r) => r,
         Err(e) => panic!("supervisor run failed: {e:?}"),
     };
+    let captured_events = telemetry.events();
 
     // ── Outcome assertions ────────────────────────────────────────────────────
     assert!(
@@ -566,6 +655,65 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
         Some(project.id.as_str())
     );
     assert_eq!(architect_session.task_id.as_deref(), Some(task.id.as_str()));
+
+    // The event must identify this exact persisted session/task/role and hash
+    // the exact prompt handed to the provider, rather than an earlier render.
+    let session_start = captured_events
+        .iter()
+        .find(|event| event.fields.get("event").map(String::as_str) == Some("session_start"))
+        .expect("structured session_start telemetry");
+    let prompt = stub
+        .system_prompts()
+        .into_iter()
+        .next()
+        .expect("fake provider received one system prompt");
+    let expected_prompt_hash = djinn_roles::prompts::rendered_system_prompt_hash(&prompt);
+    let prompt_hash = session_start
+        .fields
+        .get("prompt_hash")
+        .expect("session_start prompt hash");
+    assert_eq!(prompt_hash, &expected_prompt_hash);
+    assert!(
+        prompt_hash.starts_with("sha256:")
+            && prompt_hash.len() == "sha256:".len() + 16
+            && prompt_hash["sha256:".len()..]
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase()),
+        "prompt hash must use the sha256:<16 lowercase hex> format: {prompt_hash}"
+    );
+    assert_eq!(
+        session_start.fields.get("session_id").map(String::as_str),
+        Some(architect_session.id.as_str())
+    );
+    assert_eq!(
+        session_start.fields.get("task_id").map(String::as_str),
+        Some(task.short_id.as_str())
+    );
+    assert_eq!(
+        session_start.fields.get("agent_type").map(String::as_str),
+        Some("architect")
+    );
+    assert_eq!(
+        session_start
+            .fields
+            .get("prompt_hash_input")
+            .map(String::as_str),
+        Some("rendered_system_prompt_v1")
+    );
+
+    // The real reply loop persists its downstream assistant behavior under the
+    // same session id emitted in session-start telemetry.
+    let message_repo = SessionMessageRepository::new(db.clone(), events.clone());
+    let persisted_behavior = message_repo
+        .load_for_sessions(std::slice::from_ref(&architect_session.id))
+        .await
+        .expect("load persisted session behavior");
+    assert!(
+        persisted_behavior.iter().any(|(session_id, role, _, _)| {
+            session_id == &architect_session.id && role == "assistant"
+        }),
+        "the assistant behavior record must carry the session-start session id"
+    );
 
     // ── (c) no worktrees anywhere under the test-controlled roots ────────────
     assert_no_worktrees(source_dir.path());
