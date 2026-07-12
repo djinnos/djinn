@@ -1342,6 +1342,32 @@ async fn pressure_large_capacity_preserves_high_watermark_byte_ceiling() {
 }
 
 #[tokio::test]
+async fn pressure_large_capacity_compares_low_watermark_exactly() {
+    let config = pressure_config(0.5, 0.5);
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 9_007_199_254_740_993,
+        available_bytes: 4_503_599_627_370_496,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 1)],
+        ignored: 0,
+    };
+    let plan = plan_pressure_eviction(
+        inventory,
+        &Activity(Ok(snapshot_at(Some(old_activity(12))))),
+        &Warm(Ok(false)),
+        &Lock(LockOutcome::Available),
+        &capacity,
+        &config,
+        &TestClock::new(future(15), std::time::Instant::now()),
+    )
+    .await;
+    assert_eq!(plan.target_bytes, 1);
+    assert_eq!(plan.candidates.len(), 1);
+    assert_eq!(plan.projected_bytes, 1);
+}
+
+#[tokio::test]
 async fn pressure_lock_busy_and_error_retained() {
     let config = pressure_config(0.15, 0.25);
     let capacity = Capacity(Ok(CapacitySnapshot {

@@ -345,12 +345,11 @@ pub async fn plan_pressure_eviction(
     };
     plan.target_bytes = target_reclaim_bytes(&capacity_snapshot, config.warm_base_high_free_ratio);
 
-    let free_ratio = if capacity_snapshot.total_bytes == 0 {
-        0.0
-    } else {
-        capacity_snapshot.available_bytes as f64 / capacity_snapshot.total_bytes as f64
-    };
-    if free_ratio >= config.warm_base_low_free_ratio {
+    if !available_below_ratio(
+        capacity_snapshot.available_bytes,
+        capacity_snapshot.total_bytes,
+        config.warm_base_low_free_ratio,
+    ) {
         for entry in inventory.entries {
             plan.retained
                 .push((entry.project_id, PressureSkipReason::AboveLowWatermark));
@@ -432,6 +431,36 @@ fn target_reclaim_bytes(capacity: &CapacitySnapshot, high_free_ratio: f64) -> u6
     high_bytes.saturating_sub(capacity.available_bytes)
 }
 
+/// Compare `available / total < ratio` exactly, without converting bytes to f64.
+/// Invalid ratios and zero capacity fail closed (pressure is not started).
+fn available_below_ratio(available: u64, total: u64, ratio: f64) -> bool {
+    if total == 0 || ratio <= 0.0 || !ratio.is_finite() || ratio >= 1.0 {
+        return false;
+    }
+    let (significand, binary_exponent) = finite_positive_ratio_parts(ratio);
+    let numerator = (total as u128) * (significand as u128);
+    let shift = (-binary_exponent) as u32;
+    if shift >= 128 {
+        return available == 0 && numerator != 0;
+    }
+    let available = available as u128;
+    if available > (u128::MAX >> shift) {
+        return false;
+    }
+    (available << shift) < numerator
+}
+
+fn finite_positive_ratio_parts(ratio: f64) -> (u64, i32) {
+    let bits = ratio.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    if exponent == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1_u64 << 52), exponent - 1023 - 52)
+    }
+}
+
 /// Return `ceil(total * ratio)` without lossy conversion of `total` to f64.
 ///
 /// Watermark configuration is constrained to finite ratios in `[0, 1)`, but
@@ -445,16 +474,7 @@ fn ceiling_ratio_bytes(total: u64, ratio: f64) -> u64 {
         return total;
     }
 
-    let bits = ratio.to_bits();
-    let exponent = ((bits >> 52) & 0x7ff) as i32;
-    let fraction = bits & ((1_u64 << 52) - 1);
-    let (significand, binary_exponent) = if exponent == 0 {
-        // Subnormal: fraction * 2^-1074.
-        (fraction, -1074)
-    } else {
-        // Normal: (2^52 + fraction) * 2^(exponent - 1023 - 52).
-        (fraction | (1_u64 << 52), exponent - 1023 - 52)
-    };
+    let (significand, binary_exponent) = finite_positive_ratio_parts(ratio);
 
     // A valid positive ratio below one has a negative binary exponent. For a
     // denominator wider than u128, even the largest u64 capacity times the
