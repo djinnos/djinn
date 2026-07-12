@@ -525,13 +525,15 @@ fn proposal_reconcile_obsolete_epic_schema_documents_scope_and_blocking() {
         .expect("proposal_reconcile_obsolete_epic has a description");
     for required in [
         "Scoped teardown",
-        "Blocks if any task has merged work",
-        "only the selected epic's children",
+        "Blocks if any target task has merged work",
+        "shared parent-disposition matrix",
+        "only the selected linked epic's children",
         "disposed (closed)",
-        "parked",
+        "parked for lead intervention",
         "retained for another open proposal parent",
         "retained for an external dependent",
-        "unlinks it from the proposal",
+        "closes and unlinks only the selected epic",
+        "leaving unrelated graduated epics linked",
         "instead of whole-build proposal_stop_build",
     ] {
         assert!(
