@@ -128,7 +128,7 @@ PY
 echo "=== Test 1: retention disabled ==="
 render_manifests "$TMPDIR_RENDER/disabled.yaml" \
     --set imagePipeline.zot.retention.enabled=false
-assert_manifests "$TMPDIR_RENDER/disabled.yaml" false true 5 test-release-zot-auth
+assert_manifests "$TMPDIR_RENDER/disabled.yaml" false true 5 test-release-djinn-zot-auth
 
 echo ""
 echo "=== Test 2: retention enabled with dryRun=true ==="
@@ -137,7 +137,7 @@ render_manifests "$TMPDIR_RENDER/dry-run.yaml" \
     --set imagePipeline.zot.retention.dryRun=true \
     --set imagePipeline.zot.retention.newestTags=3 \
     --set imagePipeline.zot.retention.deleteUntagged=true
-assert_manifests "$TMPDIR_RENDER/dry-run.yaml" true true 3 test-release-zot-auth
+assert_manifests "$TMPDIR_RENDER/dry-run.yaml" true true 3 test-release-djinn-zot-auth
 
 echo ""
 echo "=== Test 3: destructive retention ==="
@@ -146,7 +146,7 @@ render_manifests "$TMPDIR_RENDER/destructive.yaml" \
     --set imagePipeline.zot.retention.dryRun=false \
     --set imagePipeline.zot.retention.newestTags=10 \
     --set imagePipeline.zot.retention.deleteUntagged=true
-assert_manifests "$TMPDIR_RENDER/destructive.yaml" true false 10 test-release-zot-auth
+assert_manifests "$TMPDIR_RENDER/destructive.yaml" true false 10 test-release-djinn-zot-auth
 
 echo ""
 echo "=== Test 4: caller-owned existingSecret auth ==="
