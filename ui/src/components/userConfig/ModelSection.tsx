@@ -70,7 +70,13 @@ const LANE_META: Record<ModelLaneKey, { title: string; roles: string }> = {
  * `Sessions` cap. Caps are per-model and shared across lanes. One Save persists
  * all three lanes + the union of caps.
  */
-export function ModelSection({ targetId }: { targetId: string }) {
+export function ModelSection({
+  targetId,
+  onboarding = false,
+}: {
+  targetId: string;
+  onboarding?: boolean;
+}) {
   const queryClient = useQueryClient();
 
   const connectedModels = useQuery({
@@ -274,21 +280,25 @@ export function ModelSection({ targetId }: { targetId: string }) {
         </div>
       ) : (
         <div className="flex flex-col gap-5">
-          <ThoroughReviewToggle
-            checked={effectiveDiverseReview}
-            enabled={diverseReviewEnabled}
-            soleModel={soleReviewModel}
-            saving={saveMutation.isPending}
-            onToggle={toggleDiverseReview}
-          />
+          {!onboarding && (
+            <>
+              <ThoroughReviewToggle
+                checked={effectiveDiverseReview}
+                enabled={diverseReviewEnabled}
+                soleModel={soleReviewModel}
+                saving={saveMutation.isPending}
+                onToggle={toggleDiverseReview}
+              />
 
-          <DiverseRefinementToggle
-            checked={effectiveDiverseRefinement}
-            enabled={diverseRefinementEnabled}
-            soleModel={soleRefinementModel}
-            saving={saveMutation.isPending}
-            onToggle={toggleDiverseRefinement}
-          />
+              <DiverseRefinementToggle
+                checked={effectiveDiverseRefinement}
+                enabled={diverseRefinementEnabled}
+                soleModel={soleRefinementModel}
+                saving={saveMutation.isPending}
+                onToggle={toggleDiverseRefinement}
+              />
+            </>
+          )}
 
           {MODEL_LANE_KEYS.map((lane) => (
             <LaneEditor

@@ -2,9 +2,9 @@
  * First-run onboarding sheet.
  *
  * The sheet is a focused, sequential first-run flow shown when a user has no
- * connected providers — so they don't land on the full settings page cold. It
- * consolidates: connect a subscription → done. Per-role model lanes are
- * configured later, manually, in Settings → Model Roles.
+ * connected providers and/or model-role assignments — so they don't land on
+ * the full settings page cold. It consolidates provider connection and the
+ * production Model Roles editor into one guided flow.
  *
  * Dismissal is deliberately CLIENT-SIDE (localStorage keyed by user id) rather
  * than a new DB column: we want to avoid adding a migration in this slice. The

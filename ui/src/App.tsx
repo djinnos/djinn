@@ -31,6 +31,7 @@ import { FirstRunOnboarding } from "@/components/onboarding/FirstRunOnboarding";
 import { isFirstRunDismissed } from "@/components/onboarding/firstRun";
 import { useProjectGateStore } from "@/stores/projectGateStore";
 import { RepositoryOnboarding } from "@/components/RepositoryOnboarding";
+import { ProjectImageOnboarding } from "@/components/onboarding/ProjectImageOnboarding";
 import { useDispatchPauseHydration } from "@/hooks/useDispatchPauseHydration";
 
 export function MainLayout() {
@@ -120,7 +121,12 @@ function AuthenticatedApp() {
   const userId = useAuthUser()?.id ?? null;
   const { hasProvider, refresh: refreshGate } = useProviderGateStore();
   const { hasModels, refresh: refreshModelGate } = useModelGateStore();
-  const { hasProject, refresh: refreshProjectGate } = useProjectGateStore();
+  const {
+    hasProject,
+    projectNeedingImage,
+    clearPendingProject,
+    refresh: refreshProjectGate,
+  } = useProjectGateStore();
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
 
   useProjectsBootstrap(status);
@@ -149,12 +155,10 @@ function AuthenticatedApp() {
     return <MainLayout />;
   }
 
-  // First-run model-setup sheet: a single sequential flow (connect a
-  // subscription → done) shown when this user has no connected provider and/or
-  // no model lanes. Replaces the old separate provider + model onboarding
-  // gates; per-role model lanes are configured later in Settings → Model Roles.
-  // A client-side dismissal (localStorage, keyed by user id) suppresses it for
-  // someone who skipped without finishing.
+  // First-run model-setup sheet: connect a subscription, then configure the
+  // same Plan / Implement / Review editor exposed in Settings. A client-side
+  // dismissal (localStorage, keyed by user id) suppresses it for someone who
+  // deliberately skipped without finishing.
   const needsModelSetup = hasProvider === false || hasModels === false;
   if (needsModelSetup && !isFirstRunDismissed(userId)) {
     return (
@@ -170,6 +174,18 @@ function AuthenticatedApp() {
 
   if (hasProject === false) {
     return <RepositoryOnboarding />;
+  }
+
+  if (projectNeedingImage) {
+    return (
+      <ProjectImageOnboarding
+        project={projectNeedingImage}
+        onFinished={async () => {
+          clearPendingProject(projectNeedingImage.id);
+          await refreshProjectGate();
+        }}
+      />
+    );
   }
 
   return <MainLayout />;

@@ -88,6 +88,8 @@ export interface UserModelSelection {
    * task model. Falls back to same-model when alternatives are unavailable.
    */
   diverseRefinement: boolean;
+  /** True when org AI policy owns the lanes and user edits are forbidden. */
+  laneLocked?: boolean;
 }
 
 function parseMaxSessions(raw: unknown): Record<string, number> {
@@ -107,6 +109,7 @@ export async function fetchUserModelSelection(
     maxSessions: parseMaxSessions(response.max_sessions),
     diverseReview: response.diverse_review !== false,
     diverseRefinement: response.diverse_refinement !== false,
+    laneLocked: response.lane_locked === true,
   };
 }
 
@@ -138,6 +141,8 @@ export async function saveUserModelSelection(
     maxSessions: parseMaxSessions(response.max_sessions),
     diverseReview: response.diverse_review !== false,
     diverseRefinement: response.diverse_refinement !== false,
+    // A successful user save is only possible when org policy is unlocked.
+    laneLocked: false,
   };
 }
 

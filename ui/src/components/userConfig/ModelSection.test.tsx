@@ -832,4 +832,19 @@ describe("ModelSection", () => {
       screen.getAllByRole("button", { name: "Add model" }).length,
     ).toBeGreaterThanOrEqual(3);
   });
+
+  it("hides advanced diversity toggles in onboarding mode", async () => {
+    render(<ModelSection targetId="target-user" onboarding />);
+
+    expect(await screen.findByText("GPT-5")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: "Thorough review" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: "Diverse refinement" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Plan" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Implement" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Review" })).toBeInTheDocument();
+  });
 });

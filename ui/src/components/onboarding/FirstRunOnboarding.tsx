@@ -14,29 +14,38 @@ import {
   ApiKeyConnectForm,
   CodexConnectCard,
 } from "@/components/userConfig/ProviderSection";
+import { ModelSection } from "@/components/userConfig/ModelSection";
 import { userConfigKeys } from "@/components/userConfig/userConfigKeys";
 import {
   SELF_TARGET,
   fetchUserCatalog,
   fetchUserConnectedProviders,
+  fetchUserModelSelection,
 } from "@/api/userConfig";
+import {
+  MODEL_LANE_KEYS,
+  type ModelLanes,
+} from "@/api/userSettings";
 
 import { dismissFirstRun } from "./firstRun";
 
-type StepKey = "connect" | "done";
+type StepKey = "connect" | "models" | "done";
 
 const STEPS: { key: StepKey; label: string }[] = [
   { key: "connect", label: "Connect" },
+  { key: "models", label: "Models" },
   { key: "done", label: "Done" },
 ];
 
 /**
  * First-run onboarding sheet. A focused, sequential flow for a brand-new user
- * with no connected providers:
+ * with no connected providers and/or no model-role assignments:
  *
  *   1. Connect a subscription (Codex OAuth) or paste an API key. Skippable.
- *   2. Done — finish. Per-role model lanes are configured later, manually, in
- *      Settings → Model Roles.
+ *   2. Assign at least one connected model to Plan, Implement, and Review.
+ *      The production Model Roles editor is embedded here so onboarding and
+ *      Settings cannot drift.
+ *   3. Done — finish.
  *
  * Rendered by `AuthenticatedApp` in place of the legacy provider/model gates.
  * On finish/skip it calls `onFinished` (which refreshes the server gates and
@@ -60,6 +69,10 @@ export function FirstRunOnboarding({
     queryKey: userConfigKeys.catalog(SELF_TARGET),
     queryFn: () => fetchUserCatalog(SELF_TARGET),
   });
+  const modelSelection = useQuery({
+    queryKey: userConfigKeys.modelSelection(SELF_TARGET),
+    queryFn: () => fetchUserModelSelection(SELF_TARGET),
+  });
 
   const connectedCount = connectedProviders.data?.length ?? 0;
   const hasProvider = connectedCount > 0;
@@ -70,6 +83,9 @@ export function FirstRunOnboarding({
     () => new Set((connectedProviders.data ?? []).map((p) => p.id)),
     [connectedProviders.data],
   );
+  const modelRolesConfigured =
+    modelSelection.data?.laneLocked === true ||
+    hasEveryModelRole(modelSelection.data?.lanes);
 
   const refreshProviders = () => {
     void queryClient.invalidateQueries({
@@ -87,7 +103,12 @@ export function FirstRunOnboarding({
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-background px-6 py-12 text-foreground">
-      <div className="flex w-full max-w-xl flex-col items-center gap-8">
+      <div
+        className={cn(
+          "flex w-full flex-col items-center gap-8",
+          step === "models" ? "max-w-6xl" : "max-w-xl",
+        )}
+      >
         <div className="relative">
           <div
             className="pointer-events-none absolute left-1/2 top-1/2 h-16 w-16 -translate-x-1/2 -translate-y-1/2 rounded-full bg-purple-400/40"
@@ -121,14 +142,109 @@ export function FirstRunOnboarding({
               connectedIds={connectedIds}
               onConnected={refreshProviders}
               onSkip={finish}
+              onContinue={() => setStep("models")}
+            />
+          )}
+
+          {step === "models" && (
+            <ModelsStep
+              lanes={modelSelection.data?.lanes}
+              laneLocked={modelSelection.data?.laneLocked === true}
+              loading={modelSelection.isLoading}
+              error={modelSelection.error}
+              onRetry={() => void modelSelection.refetch()}
+              onBack={() => setStep("connect")}
+              onSkip={() => setStep("done")}
               onContinue={() => setStep("done")}
             />
           )}
 
-          {step === "done" && <DoneStep onFinish={finish} />}
+          {step === "done" && (
+            <DoneStep
+              modelRolesConfigured={modelRolesConfigured}
+              onFinish={finish}
+            />
+          )}
         </div>
       </div>
     </main>
+  );
+}
+
+function ModelsStep({
+  lanes,
+  laneLocked,
+  loading,
+  error,
+  onRetry,
+  onBack,
+  onSkip,
+  onContinue,
+}: {
+  lanes: ModelLanes | undefined;
+  laneLocked: boolean;
+  loading: boolean;
+  error: unknown;
+  onRetry: () => void;
+  onBack: () => void;
+  onSkip: () => void;
+  onContinue: () => void;
+}) {
+  const hasEveryRole = laneLocked || hasEveryModelRole(lanes);
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="text-center">
+        <h2 className="text-xl font-semibold">Assign models to roles</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Choose at least one model for Plan, Implement, and Review, then save.
+          The first model in each lane runs first; the rest are fallbacks.
+        </p>
+      </div>
+
+      {error ? (
+        <InlineError
+          message={error instanceof Error ? error.message : "Failed to load model roles"}
+          onRetry={onRetry}
+        />
+      ) : laneLocked ? (
+        <div className="rounded-xl border bg-card/30 p-6 text-center">
+          <h3 className="text-sm font-semibold">Managed by your organization</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Your organization&apos;s AI policy supplies the model roles. You can
+            continue with those inherited settings.
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-xl border bg-card/30 p-5">
+          <ModelSection targetId={SELF_TARGET} onboarding />
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <Button variant="ghost" size="sm" onClick={onBack}>
+          Back
+        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={onSkip}>
+            Skip for now
+          </Button>
+          <Button
+            size="sm"
+            disabled={loading || !hasEveryRole}
+            onClick={onContinue}
+            title={
+              hasEveryRole
+                ? undefined
+                : "Save at least one model in Plan, Implement, and Review"
+            }
+          >
+            Continue
+            <HugeiconsIcon icon={ArrowRight01Icon} size={15} />
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -249,7 +365,17 @@ function ConnectStep({
   );
 }
 
-function DoneStep({ onFinish }: { onFinish: () => void }) {
+function hasEveryModelRole(lanes: ModelLanes | undefined): boolean {
+  return MODEL_LANE_KEYS.every((lane) => (lanes?.[lane].length ?? 0) > 0);
+}
+
+function DoneStep({
+  modelRolesConfigured,
+  onFinish,
+}: {
+  modelRolesConfigured: boolean;
+  onFinish: () => void;
+}) {
   return (
     <div className="flex flex-col items-center gap-5 text-center">
       <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/15">
@@ -258,7 +384,9 @@ function DoneStep({ onFinish }: { onFinish: () => void }) {
       <div>
         <h2 className="text-xl font-semibold">You&apos;re all set</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          You can pick models per role any time in Settings → Model Roles.
+          {modelRolesConfigured
+            ? "Your provider and model roles are ready. You can change them any time in Settings → Model Roles."
+            : "Your provider is connected. Add role-specific models later in Settings → Model Roles."}
         </p>
       </div>
 
