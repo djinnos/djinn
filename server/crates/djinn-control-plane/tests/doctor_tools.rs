@@ -799,3 +799,156 @@ async fn doctor_run_persists_jk7v_aligned_classifier_evidence() {
     assert_eq!(snapshot["outputs"]["verdict"], "dead");
     assert_eq!(snapshot["outputs"]["outcome"], "dead_reclaimed");
 }
+
+// ---------------------------------------------------------------------------
+// closed_parent_open_children: persisted dry-run contract
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closed_parent_open_children_db_dry_run_is_read_only() {
+    use djinn_agent::doctor::{
+        CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, ClosedParentOpenChildrenSource,
+        TaskRepositoryClosedParentOpenChildrenSource, register_closed_parent_open_children_check,
+    };
+    use djinn_core::events::DjinnEventEnvelope;
+    use djinn_db::{EpicRepository, ProposalCreateInput, ProposalRepository, TaskRepository};
+    let harness = doctor_test_harness().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epics = EpicRepository::new(harness.db().clone(), common::test_events());
+    let tasks = TaskRepository::new(harness.db().clone(), common::test_events());
+    let mut ids = Vec::new();
+    for status in ["open", "in_progress", "pr_review", "open"] {
+        let epic = common::create_test_epic(harness.db(), &project.id).await;
+        let task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
+        tasks.set_status(&task.id, status).await.unwrap();
+        if status == "pr_review" {
+            tasks
+                .set_pr_url(&task.id, "https://github.com/djinnos/djinn/pull/999999")
+                .await
+                .unwrap();
+        }
+        epics.set_status_raw(&epic.id, "closed").await.unwrap();
+        ids.push(task.id);
+    }
+    let proposals = ProposalRepository::new(harness.db().clone(), common::test_events());
+    let proposal = proposals
+        .create(ProposalCreateInput {
+            title: "live parent",
+            body: "",
+            acceptance_criteria: None,
+            status: Some("building"),
+            body_format: None,
+        })
+        .await
+        .unwrap();
+    let guarded_task = tasks.get(&ids[3]).await.unwrap().unwrap();
+    proposals
+        .link_epic(
+            &proposal.id,
+            guarded_task.epic_id.as_deref().unwrap(),
+            &project.id,
+        )
+        .await
+        .unwrap();
+    // Establish that the real production query sees every fixture before the
+    // named check is registered. This prevents stale registry/source state
+    // from turning the MCP assertion into an in-memory-only regression.
+    let health = tasks.board_health(30).await.unwrap();
+    let health_findings = health["closed_parent_open_children"]["findings"]
+        .as_array()
+        .unwrap();
+    assert_eq!(health_findings.len(), 4, "board health: {health}");
+    let mut expected = std::collections::BTreeMap::new();
+    expected.insert(ids[0].as_str(), ("close", "parent_closed"));
+    expected.insert(
+        ids[1].as_str(),
+        ("park", "historical_parent_closed_in_flight"),
+    );
+    expected.insert(
+        ids[2].as_str(),
+        ("park", "historical_parent_closed_pr_active"),
+    );
+    expected.insert(ids[3].as_str(), ("retain", "other_open_parent"));
+    for finding in health_findings {
+        let task_id = finding["id"].as_str().unwrap();
+        let (action, guard) = expected
+            .get(task_id)
+            .unwrap_or_else(|| panic!("unexpected board-health task {task_id}"));
+        assert_eq!(finding["recommended_disposition"]["action"], *action);
+        assert_eq!(finding["recommended_disposition"]["guard"], *guard);
+    }
+    let mut tasks_before = Vec::new();
+    let mut activity_before = Vec::new();
+    for id in &ids {
+        tasks_before.push(serde_json::to_value(tasks.get(id).await.unwrap().unwrap()).unwrap());
+        activity_before.push(serde_json::to_value(tasks.list_activity(id).await.unwrap()).unwrap());
+    }
+    let (tx, _) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let source = Arc::new(TaskRepositoryClosedParentOpenChildrenSource::new(
+        harness.db().clone(),
+        tx,
+    ));
+    source.refresh().await;
+    assert_eq!(source.snapshot()["findings"], json!(health_findings));
+    register_closed_parent_open_children_check(registry(), source);
+    let response = harness
+        .call_tool(
+            "doctor_run",
+            json!({"check_names":[CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response["ok"], true);
+    let findings = response["results"][0]["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 4);
+    let repo = DoctorFindingRepository::new(harness.db().clone());
+    let mut actual = std::collections::BTreeMap::new();
+    for result in findings {
+        let finding = repo
+            .get(result["finding_id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let owner = finding.entity_ids["task_id"].as_str().unwrap();
+        assert_eq!(finding.entity_ids["task_id"], owner);
+        assert_eq!(finding.evidence["board_health_finding"]["id"], owner);
+        assert_eq!(
+            finding.resolver_snapshot.as_ref().unwrap()["inputs"]["board_health_finding"]["id"],
+            owner
+        );
+        assert_eq!(
+            finding.evidence["board_health_finding"],
+            *health_findings
+                .iter()
+                .find(|health| health["id"].as_str() == Some(owner))
+                .unwrap(),
+            "persisted evidence must preserve the complete board-health child snapshot"
+        );
+        actual.insert(
+            owner.to_owned(),
+            (
+                finding.evidence["selected_disposition"]["action"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                finding.evidence["selected_disposition"]["guard"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            ),
+        );
+    }
+    let expected: std::collections::BTreeMap<_, _> = expected
+        .into_iter()
+        .map(|(id, (action, guard))| (id.to_owned(), (action.to_owned(), guard.to_owned())))
+        .collect();
+    assert_eq!(actual, expected);
+    let mut tasks_after = Vec::new();
+    let mut activity_after = Vec::new();
+    for id in &ids {
+        tasks_after.push(serde_json::to_value(tasks.get(id).await.unwrap().unwrap()).unwrap());
+        activity_after.push(serde_json::to_value(tasks.list_activity(id).await.unwrap()).unwrap());
+    }
+    assert_eq!(tasks_before, tasks_after);
+    assert_eq!(activity_before, activity_after);
+}
