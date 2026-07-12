@@ -206,6 +206,7 @@ fn novelty_candidate(existing_id: &str) -> NoteDedupCandidate {
         title: "Existing Semantic Note".to_string(),
         folder: "cases".to_string(),
         note_type: "case".to_string(),
+        content: "Full existing note body for novelty testing.".to_string(),
         abstract_: Some(
             "Fix flaky semantic duplicate tests by injecting dedup candidates.".to_string(),
         ),
@@ -229,6 +230,7 @@ fn novelty_failure_candidate_lookup(
         title: "Candidate For Invalid JSON".to_string(),
         folder: "cases".to_string(),
         note_type: "case".to_string(),
+        content: "Full existing candidate body.".to_string(),
         abstract_: Some("Existing candidate summary".to_string()),
         overview: Some("Existing candidate overview".to_string()),
         score: 1.0,
@@ -1675,6 +1677,7 @@ async fn admission_gate_preserves_novelty_dedup() {
                 title: "Existing Anchor Target".to_string(),
                 folder: "cases".to_string(),
                 note_type: "case".to_string(),
+                content: "Full existing anchor target body.".to_string(),
                 abstract_: Some("Existing case for the gate-passing dedup test.".to_string()),
                 overview: Some(
                     "An existing case is the dedup target for a passing candidate.".to_string(),
