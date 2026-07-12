@@ -229,16 +229,19 @@ fn extract_operation_candidates(
             break;
         };
         let candidate = &after_start[..end];
-        let operation_context = description[..consumed + start]
+        let span_start = consumed + start;
+        let span_end = consumed + start + 1 + end;
+        let before = description[..span_start]
             .chars()
             .rev()
             .take(48)
             .collect::<String>()
             .chars()
             .rev()
-            .collect::<String>()
-            .to_ascii_lowercase()
-            .contains("operation");
+            .collect::<String>();
+        let after = description[span_end..].chars().take(48).collect::<String>();
+        let operation_context = before.to_ascii_lowercase().contains("operation")
+            || after.to_ascii_lowercase().contains("operation");
         if is_operation_token(candidate) && (operation_context || enum_values.contains(candidate)) {
             candidates.insert(candidate.to_string());
         }
@@ -548,15 +551,15 @@ mod tests {
         let p2 = project_tool_schema(second);
         by_name.insert(name.clone(), p1);
         // force the second to conflict by checking against the inserted content
-        if let Some(existing) = by_name.get(&name) {
-            if *existing != p2 {
-                return Err(ToolSurfaceConflict {
-                    name: name.clone(),
-                    message: format!(
-                        "same name advertised with different schemas; first={existing}, second={p2}"
-                    ),
-                });
-            }
+        if let Some(existing) = by_name.get(&name)
+            && *existing != p2
+        {
+            return Err(ToolSurfaceConflict {
+                name: name.clone(),
+                message: format!(
+                    "same name advertised with different schemas; first={existing}, second={p2}"
+                ),
+            });
         }
         Ok(())
     }
@@ -671,6 +674,24 @@ mod tests {
                 && diagnostic.nearest_enum_values.len() == 3
         }));
         assert!(diagnostics[2].to_string().contains("route_map"));
+    }
+
+    #[test]
+    fn operation_guard_recognizes_trailing_operation_context() {
+        let tool = operation_tool(
+            "Choose `Run` as the operation.",
+            json!({"type": "object", "properties": {
+                "operation": {"type": "string", "enum": ["run", "stop"]}
+            }}),
+        );
+        let diagnostics = validate_operation_description_enums(&[tool]);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].missing_mentioned_value, "Run");
+        assert_eq!(
+            diagnostics[0].field_path,
+            "inputSchema.properties.operation"
+        );
+        assert_eq!(diagnostics[0].nearest_enum_values, ["run", "stop"]);
     }
 
     #[test]
