@@ -64,38 +64,7 @@ fn is_declared_failure(row: &NormalizedToolCallRow, classes: &[&str]) -> bool {
 
 // ─── Simple rate metric ────────────────────────────────────────────────────
 
-/// A rate metric with auditable numerator/denominator and the resulting rate.
-///
-/// Rates are stored as `f64` in `[0, 1]`.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct RateMetric {
-    pub numerator: usize,
-    pub denominator: usize,
-    pub rate: f64,
-}
-
-impl RateMetric {
-    /// Compute a plain rate: `numerator / denominator` (0.0 when denominator is 0).
-    pub fn new(numerator: usize, denominator: usize) -> Self {
-        let rate = if denominator == 0 {
-            0.0
-        } else {
-            numerator as f64 / denominator as f64
-        };
-        Self {
-            numerator,
-            denominator,
-            rate,
-        }
-    }
-
-    /// Compute a rate with one pseudo-count added to both numerator and
-    /// denominator, per proposal a5ht's zero-rate handling.
-    pub fn with_pseudo_count(numerator: usize, denominator: usize) -> Self {
-        Self::new(numerator + 1, denominator + 1)
-    }
-}
-
+pub use primitives::RateMetric;
 /// Compute `edit_failure_rate` and `apply_patch_failure_rate` from normalized
 /// rows. Task-stop cancellation is excluded; all declared error classes are
 /// included.
