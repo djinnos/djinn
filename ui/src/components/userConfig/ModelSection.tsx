@@ -232,17 +232,30 @@ export function ModelSection({ targetId }: { targetId: string }) {
             top runs first. Each lane maps to the agents below it.
           </p>
         </div>
-        {dirty && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="shrink-0"
-            disabled={saveMutation.isPending}
-            onClick={() => saveMutation.mutate()}
-          >
-            {saveMutation.isPending ? "Saving…" : "Save"}
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {!loadError && !isLoading && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              disabled={connectedModels.isFetching || saveMutation.isPending}
+              onClick={() => void connectedModels.refetch()}
+            >
+              {connectedModels.isFetching ? "Refreshing…" : "Refresh models"}
+            </Button>
+          )}
+          {dirty && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              disabled={saveMutation.isPending}
+              onClick={() => saveMutation.mutate()}
+            >
+              {saveMutation.isPending ? "Saving…" : "Save"}
+            </Button>
+          )}
+        </div>
       </div>
 
       {loadError ? (

@@ -34,6 +34,7 @@ expression: section
 - `memory_extracted_audit()`
 - `memory_broken_links(folder?)`
 - `memory_orphans(folder?)`
+- `memory_recall_trace()`
 - `agent_metrics(role)`
 - `agent_create(base_role, name, description?, model_preference?, system_prompt_extensions?)`
 - `memory_write(content, title, type, status?, tags?)`
