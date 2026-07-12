@@ -48,7 +48,7 @@ fn excerpt(v: &str) -> String {
     }
     x
 }
-async fn recall(s: &DjinnMcpServer, p: RecallTraceParams) -> MemoryRecallTraceResponse {
+pub(super) async fn recall(s: &DjinnMcpServer, p: RecallTraceParams) -> MemoryRecallTraceResponse {
     let Some(project) = p.project_id.as_deref().or(p.project.as_deref()) else {
         return err("project or project_id parameter required");
     };
