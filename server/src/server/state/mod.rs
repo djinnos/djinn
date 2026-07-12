@@ -24,8 +24,9 @@ use djinn_db::{
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{
-    ImageBuildWatcher, ImageController, ImageControllerConfig, RetentionPreflightConfig,
-    ZotHttpAuth, ZotHttpConfig, ZotHttpStateSource, adapt_selected_images, run_preflight,
+    ImageBuildWatcher, ImageController, ImageControllerConfig, PreflightOutcome,
+    RetentionPreflightConfig, ZotHttpAuth, ZotHttpConfig, ZotHttpStateSource, ZotStateSource,
+    adapt_selected_images, run_preflight,
 };
 use djinn_k8s::{K8sGraphWarmer, KubernetesConfig, TokenReviewer, WarmCompletionSink};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
@@ -547,18 +548,16 @@ impl AppState {
         };
         let source = ZotHttpStateSource::new(ZotHttpConfig::new(&retention.endpoint, auth))
             .map_err(|error| anyhow::anyhow!("construct Zot retention state source: {error}"))?;
-        let outcome = run_preflight(
+        run_retention_preflight_orchestration(
             &source,
-            &adapt_selected_images(&selected_rows),
+            &selected_rows,
             &RetentionPreflightConfig {
                 destructive_enabled: !retention.dry_run,
                 newest_tags: retention.newest_tags,
             },
         )
         .await
-        .map_err(|error| anyhow::anyhow!("Zot retention preflight failed: {error}"))?;
-        tracing::info!(destructive = !retention.dry_run, newest_tags = retention.newest_tags, report = %outcome.report, "Zot catalog retention preflight report");
-        Ok(())
+        .map(|_| ())
     }
 
     /// Abort + await the image-build watcher task if it was spawned.
@@ -2265,6 +2264,36 @@ impl CanonicalGraphRefreshProbe for AppStateCanonicalGraphRefreshProbe {
 ///   are treated as not-fresh; everything else (the cache contains an entry
 ///   whose pinned commit is either known-current or
 ///   commit-check-failed) is treated as fresh so `await_fresh` does not spin.
+///
+/// Orchestrate the Zot retention preflight over injected state sources.
+///
+/// This is the real orchestration seam: it adapts DB-selected image rows into
+/// the pure planner shape, runs [`run_preflight`] against a [`ZotStateSource`],
+/// logs the deterministic report, and returns the outcome. The production
+/// caller ([`AppState::run_zot_retention_preflight`]) wires the live
+/// `ZotHttpStateSource` and DB rows; tests inject mock implementations to
+/// exercise mode/error semantics without a live registry or Kubernetes.
+///
+/// Returns `Err` for Zot fetch failures, Zot state errors, and unsafe
+/// destructive selected images — fail-closed at the startup/enablement
+/// boundary.
+pub(crate) async fn run_retention_preflight_orchestration(
+    zot_source: &dyn ZotStateSource,
+    selected_rows: &[djinn_db::SelectedCatalogImage],
+    cfg: &RetentionPreflightConfig,
+) -> anyhow::Result<PreflightOutcome> {
+    let outcome = run_preflight(zot_source, &adapt_selected_images(selected_rows), cfg)
+        .await
+        .map_err(|error| anyhow::anyhow!("Zot retention preflight failed: {error}"))?;
+    tracing::info!(
+        destructive = cfg.destructive_enabled,
+        newest_tags = cfg.newest_tags,
+        report = %outcome.report,
+        "Zot catalog retention preflight report"
+    );
+    Ok(outcome)
+}
+
 fn build_in_process_graph_warmer(state: AppState) -> djinn_agent::warmer::InProcessGraphWarmer {
     use djinn_agent::warmer::{InProcessGraphWarmer, InProcessWarmerDeps};
     use djinn_db::ProjectRepository;
@@ -2407,4 +2436,534 @@ fn build_in_process_graph_warmer(state: AppState) -> djinn_agent::warmer::InProc
         project_root,
         is_fresh,
     })
+}
+
+#[cfg(test)]
+mod retention_preflight_tests {
+    //! Injected scenario tests for the Zot retention startup preflight
+    //! orchestration seam ([`super::run_retention_preflight_orchestration`]).
+    //!
+    //! These tests exercise the *real* production orchestration path (DB-row
+    //! adaptation → pure planner → preflight mode/error semantics → report)
+    //! without a live Zot registry or Kubernetes cluster. State is injected via
+    //! mock [`ZotStateSource`] implementations and canned
+    //! [`djinn_db::SelectedCatalogImage`] rows.
+
+    use super::*;
+    use djinn_image_controller::{ZotRepository, ZotStateError, ZotTag};
+
+    /// Join an error's full cause chain into a single lowercase string for
+    /// substring assertions.
+    fn error_chain(err: &anyhow::Error) -> String {
+        err.chain()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join(" → ")
+            .to_lowercase()
+    }
+
+    // ── Mock Zot state sources ────────────────────────────────────────────
+
+    /// A mock Zot state source that returns canned repository state.
+    struct MockZot {
+        repos: Vec<ZotRepository>,
+    }
+
+    #[async_trait::async_trait]
+    impl ZotStateSource for MockZot {
+        async fn fetch_repositories(&self) -> Result<Vec<ZotRepository>, ZotStateError> {
+            Ok(self.repos.clone())
+        }
+    }
+
+    /// A mock Zot state source that always fails — proves fail-closed on Zot
+    /// fetch/state errors.
+    struct FailingZot;
+
+    #[async_trait::async_trait]
+    impl ZotStateSource for FailingZot {
+        async fn fetch_repositories(&self) -> Result<Vec<ZotRepository>, ZotStateError> {
+            Err(ZotStateError::Fetch("injected: connection refused".into()))
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+
+    fn ztag(name: &str, digest: &str, size: u64, pushed: &str) -> ZotTag {
+        ZotTag {
+            tag: name.into(),
+            digest: digest.into(),
+            size_bytes: size,
+            pushed_at: pushed.into(),
+        }
+    }
+
+    fn zrepo(name: &str, tags: Vec<ZotTag>) -> ZotRepository {
+        ZotRepository {
+            name: name.into(),
+            tags,
+        }
+    }
+
+    /// Build a DB selected-catalog-image row in the same shape the
+    /// production `ImageRepository::list_selected_catalog_images` returns.
+    /// `tag` is a full registry ref like `reg/djinn-image-i1:hash`, matching
+    /// how `adapt_selected_images` extracts the bare tag suffix.
+    fn db_selected(
+        image_id: &str,
+        name: &str,
+        tag: Option<&str>,
+        digest: Option<&str>,
+        status: &str,
+    ) -> djinn_db::SelectedCatalogImage {
+        djinn_db::SelectedCatalogImage {
+            image_id: image_id.into(),
+            name: name.into(),
+            tag: tag.map(String::from),
+            registry_digest: digest.map(String::from),
+            status: status.into(),
+            last_error: None,
+            selected_project_ids: vec!["p1".into()],
+        }
+    }
+
+    /// A two-tag repo fixture: a "keep" tag (newer, larger) and a "drop" tag
+    /// (older, smaller). With newest_tags=1, "keep" is retained and "drop" is
+    /// deleted.
+    fn two_tag_repo(image_id: &str) -> ZotRepository {
+        zrepo(
+            &format!("djinn-image-{image_id}"),
+            vec![
+                ztag("keep", "sha256:keep", 500, "2024-01-02T00:00:00Z"),
+                ztag("drop", "sha256:drop", 300, "2024-01-01T00:00:00Z"),
+            ],
+        )
+    }
+
+    const fn dry_run_cfg(newest: usize) -> RetentionPreflightConfig {
+        RetentionPreflightConfig {
+            destructive_enabled: false,
+            newest_tags: newest,
+        }
+    }
+
+    const fn destructive_cfg(newest: usize) -> RetentionPreflightConfig {
+        RetentionPreflightConfig {
+            destructive_enabled: true,
+            newest_tags: newest,
+        }
+    }
+
+    // ── Advisory dry-run report ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dry_run_report_contains_all_sections_and_deterministic_byte_counts() {
+        let zot = MockZot {
+            repos: vec![two_tag_repo("i1")],
+        };
+        let selected = vec![db_selected(
+            "i1",
+            "Rust",
+            Some("reg/djinn-image-i1:keep"),
+            Some("sha256:keep"),
+            "ready",
+        )];
+        let outcome = run_retention_preflight_orchestration(&zot, &selected, &dry_run_cfg(1))
+            .await
+            .expect("dry-run must succeed");
+
+        // Mode: never blocks.
+        assert!(!outcome.blocks_rollout, "dry-run must never block rollout");
+        assert!(outcome.plan.is_safe, "selected tag 'keep' is retained");
+
+        // Deterministic report content.
+        assert!(outcome.report.contains("Retained tags"));
+        assert!(outcome.report.contains("Deleted tags"));
+        assert!(outcome.report.contains("Selected-image pins"));
+        // "drop" (300B) is reclaimed; "keep" (500B) is retained.
+        assert!(
+            outcome.report.contains("Projected reclaimed bytes: 300"),
+            "report must show projected reclaimed bytes: {report}",
+            report = outcome.report
+        );
+        assert!(
+            outcome.report.contains("Projected retained bytes: 500"),
+            "report must show projected retained bytes: {report}",
+            report = outcome.report
+        );
+        assert!(outcome.report.contains("Safe: yes"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_emits_advisory_report_even_when_unsafe() {
+        // Selected image uses the "drop" tag which will be deleted.
+        let zot = MockZot {
+            repos: vec![two_tag_repo("i1")],
+        };
+        let selected = vec![db_selected(
+            "i1",
+            "Rust",
+            Some("reg/djinn-image-i1:drop"),
+            Some("sha256:drop"),
+            "ready",
+        )];
+        let outcome = run_retention_preflight_orchestration(&zot, &selected, &dry_run_cfg(1))
+            .await
+            .expect("dry-run must not fail even if images are unsafe");
+
+        assert!(!outcome.blocks_rollout, "dry-run must never block");
+        assert!(
+            !outcome.plan.is_safe,
+            "plan should flag the unsafe image in the report"
+        );
+        assert!(outcome.report.contains("UNSAFE"), "report must flag unsafe");
+        assert!(outcome.report.contains("Safe: NO"));
+    }
+
+    // ── Safe destructive progression ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn safe_destructive_progresses_when_all_images_pullable() {
+        let zot = MockZot {
+            repos: vec![two_tag_repo("i1")],
+        };
+        let selected = vec![db_selected(
+            "i1",
+            "Rust",
+            Some("reg/djinn-image-i1:keep"),
+            Some("sha256:keep"),
+            "ready",
+        )];
+        let outcome = run_retention_preflight_orchestration(&zot, &selected, &destructive_cfg(1))
+            .await
+            .expect("destructive must succeed when all images are safe");
+
+        assert!(!outcome.blocks_rollout);
+        assert!(outcome.plan.is_safe);
+        assert_eq!(outcome.plan.unsafe_images.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn destructive_allows_digest_alias_when_tag_deleted() {
+        // The selected "v1" tag will be deleted (newest=1 keeps "v2"), but
+        // both tags share the same digest — an alias — so the image remains
+        // pullable by the retained "v2" tag.
+        let zot = MockZot {
+            repos: vec![zrepo(
+                "djinn-image-i1",
+                vec![
+                    ztag("v1", "sha256:shared", 100, "2024-01-01T00:00:00Z"),
+                    ztag("v2", "sha256:shared", 200, "2024-01-02T00:00:00Z"),
+                ],
+            )],
+        };
+        let selected = vec![db_selected(
+            "i1",
+            "Rust",
+            Some("reg/djinn-image-i1:v1"),
+            Some("sha256:shared"),
+            "ready",
+        )];
+        let outcome = run_retention_preflight_orchestration(&zot, &selected, &destructive_cfg(1))
+            .await
+            .expect("alias via shared digest must be safe");
+        assert!(outcome.plan.is_safe);
+        assert!(!outcome.blocks_rollout);
+    }
+
+    // ── Unsafe selected-image blocking ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn destructive_blocks_when_selected_image_tag_is_deleted() {
+        let zot = MockZot {
+            repos: vec![two_tag_repo("i1")],
+        };
+        let selected = vec![db_selected(
+            "i1",
+            "Rust",
+            Some("reg/djinn-image-i1:drop"),
+            Some("sha256:drop"),
+            "ready",
+        )];
+        let err = run_retention_preflight_orchestration(&zot, &selected, &destructive_cfg(1))
+            .await
+            .expect_err("destructive must fail-closed when an image is unsafe");
+
+        let chain = error_chain(&err);
+        assert!(
+            chain.contains("blocked") || chain.contains("destructive"),
+            "error should mention destructive block: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn destructive_blocks_when_any_of_multiple_images_is_unsafe() {
+        let zot = MockZot {
+            repos: vec![two_tag_repo("safe"), two_tag_repo("risky")],
+        };
+        let selected = vec![
+            db_selected(
+                "safe",
+                "Rust",
+                Some("reg/djinn-image-safe:keep"),
+                Some("sha256:keep"),
+                "ready",
+            ),
+            // "risky" image uses the "drop" tag → unsafe.
+            db_selected(
+                "risky",
+                "Node",
+                Some("reg/djinn-image-risky:drop"),
+                Some("sha256:drop"),
+                "ready",
+            ),
+        ];
+        let err = run_retention_preflight_orchestration(&zot, &selected, &destructive_cfg(1))
+            .await
+            .expect_err("one unsafe image out of two must still block");
+        let chain = error_chain(&err);
+        assert!(
+            chain.contains("1 selected image"),
+            "error should report 1 blocked image: {chain}"
+        );
+    }
+
+    // ── Selected-image DB-error fail-closed semantic ───────────────────────
+    //
+    // The DB-error fail-closed path lives at the AppState layer: if
+    // list_selected_catalog_images fails, the error propagates to the startup
+    // boundary. At this seam (which receives already-loaded rows), an empty
+    // selected list means no images to protect, so retention is safe.
+    // The fail-closed semantic that matters at this seam is: even with zero
+    // selected images, a Zot fetch error must still fail (see zot_error tests).
+
+    #[tokio::test]
+    async fn empty_selected_list_is_trivially_safe_in_destructive() {
+        let zot = MockZot {
+            repos: vec![two_tag_repo("orphan")],
+        };
+        let outcome = run_retention_preflight_orchestration(&zot, &[], &destructive_cfg(1))
+            .await
+            .expect("no selected images = nothing to protect = safe");
+        assert!(outcome.plan.is_safe);
+        assert!(outcome.plan.unsafe_images.is_empty());
+        assert!(!outcome.blocks_rollout);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_state_blocks_when_selected_image_db_query_fails() {
+        // The DB-error fail-closed path lives at the AppState layer: if
+        // list_selected_catalog_images fails, the error propagates to the
+        // startup/enablement boundary (become_leader exits). Here we construct
+        // a real AppState with a test DB, drop the `images` table so the
+        // query fails, and assert run_zot_retention_preflight returns Err —
+        // proving fail-closed on DB failure without a live Zot or Kubernetes.
+        //
+        // Guard: if no test Postgres is reachable (e.g. DJINN_TEST_DATABASE_URL
+        // is empty and the default fallback port isn't listening), skip the
+        // test rather than fail-spuriously. The fail-closed semantic is
+        // structurally a `?` propagation; the other tests cover the Zot and
+        // unsafe-image error paths at the seam level.
+        let db = crate::test_helpers::create_test_db();
+        match db.ensure_initialized().await {
+            Ok(()) => {}
+            Err(error) => {
+                tracing::warn!(%error, "skipping DB-error test — test database unavailable");
+                return;
+            }
+        }
+        // Drop the images table (CASCADE to satisfy FK from image_builds) so
+        // list_selected_catalog_images SQL fails.
+        sqlx::query("DROP TABLE IF EXISTS images CASCADE")
+            .execute(db.pool())
+            .await
+            .expect("drop images table for test");
+
+        let state = AppState::new(db, tokio_util::sync::CancellationToken::new());
+        // Enabled retention config — forces the DB query to execute.
+        let mut config = ImageControllerConfig::for_testing();
+        config.zot_retention.enabled = true;
+
+        let err = state
+            .run_zot_retention_preflight(&config)
+            .await
+            .expect_err("DB query failure must fail-closed at the startup boundary");
+        let chain = error_chain(&err);
+        assert!(
+            chain.contains("load selected catalog images"),
+            "error should mention the DB load failure: {chain}"
+        );
+    }
+
+    // ── Zot error blocking ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn zot_state_error_fails_destructive_preflight() {
+        let zot = FailingZot;
+        let selected: Vec<djinn_db::SelectedCatalogImage> = vec![];
+        let err = run_retention_preflight_orchestration(&zot, &selected, &destructive_cfg(1))
+            .await
+            .expect_err("Zot fetch failure must fail-closed in destructive mode");
+        let chain = error_chain(&err);
+        assert!(
+            chain.contains("zot"),
+            "error should mention Zot failure: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn zot_state_error_fails_even_in_dry_run() {
+        let zot = FailingZot;
+        let selected: Vec<djinn_db::SelectedCatalogImage> = vec![];
+        let err = run_retention_preflight_orchestration(&zot, &selected, &dry_run_cfg(1))
+            .await
+            .expect_err("Zot fetch failure must surface even in dry-run");
+        let chain = error_chain(&err);
+        assert!(
+            chain.contains("zot"),
+            "fetch error must propagate in dry-run: {chain}"
+        );
+    }
+
+    // ── Deterministic end-to-end report assertions ─────────────────────────
+    //
+    // One comprehensive fixture that asserts retained/deleted tags, selected
+    // pins/aliases, projected reclaimed bytes, and projected post-GC retained
+    // bytes in a single end-to-end orchestration run.
+
+    #[tokio::test]
+    async fn end_to_end_report_has_deterministic_tags_pins_and_bytes() {
+        let zot = MockZot {
+            repos: vec![
+                zrepo(
+                    "djinn-image-a1",
+                    vec![
+                        ztag("v3", "sha256:a-v3", 900, "2024-03-01T00:00:00Z"),
+                        ztag("v2", "sha256:a-v2", 800, "2024-02-01T00:00:00Z"),
+                        ztag("v1", "sha256:a-v1", 700, "2024-01-01T00:00:00Z"),
+                    ],
+                ),
+                zrepo(
+                    "djinn-image-b2",
+                    vec![
+                        ztag("latest", "sha256:b-lat", 400, "2024-03-01T00:00:00Z"),
+                        ztag("old", "sha256:b-old", 200, "2024-01-01T00:00:00Z"),
+                    ],
+                ),
+            ],
+        };
+        // Two selected images, both pointing at retained tags.
+        let selected = vec![
+            db_selected(
+                "a1",
+                "Rust",
+                Some("reg/djinn-image-a1:v2"),
+                Some("sha256:a-v2"),
+                "ready",
+            ),
+            db_selected(
+                "b2",
+                "Node",
+                Some("reg/djinn-image-b2:latest"),
+                Some("sha256:b-lat"),
+                "ready",
+            ),
+        ];
+        // newest=2: retains top-2 by pushed_at per repo.
+        //   a1: retains v3(900) + v2(800), deletes v1(700) → reclaim 700.
+        //   b2: retains latest(400) + old(200) → no deletion.
+        // Both selected tags are retained → safe.
+        let outcome = run_retention_preflight_orchestration(&zot, &selected, &dry_run_cfg(2))
+            .await
+            .expect("dry-run with all-safe images must succeed");
+
+        // Retained/deleted tag assertions.
+        assert_eq!(outcome.plan.repos.len(), 2);
+        let a1_plan = &outcome.plan.repos[0];
+        assert_eq!(a1_plan.repo, "djinn-image-a1");
+        assert_eq!(
+            a1_plan
+                .retained
+                .iter()
+                .map(|t| t.tag.as_str())
+                .collect::<Vec<_>>(),
+            vec!["v2", "v3"],
+            "retained tags sorted alphabetically"
+        );
+        assert_eq!(
+            a1_plan
+                .deleted
+                .iter()
+                .map(|t| t.tag.as_str())
+                .collect::<Vec<_>>(),
+            vec!["v1"]
+        );
+        let b2_plan = &outcome.plan.repos[1];
+        assert_eq!(b2_plan.repo, "djinn-image-b2");
+        assert_eq!(b2_plan.deleted.len(), 0);
+
+        // Selected pins/aliases.
+        assert_eq!(
+            outcome.plan.safe_pins.len(),
+            2,
+            "both selected images should be safe"
+        );
+        // safe_pins sorted by image_id.
+        assert_eq!(outcome.plan.safe_pins[0].image_id, "a1");
+        assert_eq!(outcome.plan.safe_pins[1].image_id, "b2");
+
+        // Projected bytes.
+        // Reclaimed: only a1's v1 (700). b2 deletes nothing.
+        assert_eq!(outcome.plan.projected_reclaimed_bytes, 700);
+        // Retained: a1 (900+800) + b2 (400+200) = 2300.
+        assert_eq!(outcome.plan.projected_retained_bytes, 2300);
+
+        // Report string contains the same byte projections.
+        assert!(outcome.report.contains("Projected reclaimed bytes: 700"));
+        assert!(outcome.report.contains("Projected retained bytes: 2300"));
+
+        // The plan-level fields must match the report sections.
+        assert!(outcome.report.contains("Retained tags (2)"));
+        assert!(outcome.report.contains("Deleted tags (1)"));
+        assert!(outcome.report.contains("Selected-image pins (2)"));
+    }
+
+    #[tokio::test]
+    async fn end_to_end_report_shows_alias_pin_when_tag_deleted() {
+        // a1's selected tag "v1" is deleted (newest=1 keeps "v3"), but "v3"
+        // shares the same digest as "v1" — an alias. The report should show
+        // an AliasRetained pin, not an unsafe image.
+        let zot = MockZot {
+            repos: vec![zrepo(
+                "djinn-image-a1",
+                vec![
+                    ztag("v3", "sha256:shared", 900, "2024-03-01T00:00:00Z"),
+                    ztag("v1", "sha256:shared", 700, "2024-01-01T00:00:00Z"),
+                ],
+            )],
+        };
+        let selected = vec![db_selected(
+            "a1",
+            "Rust",
+            Some("reg/djinn-image-a1:v1"),
+            Some("sha256:shared"),
+            "ready",
+        )];
+        let outcome = run_retention_preflight_orchestration(&zot, &selected, &dry_run_cfg(1))
+            .await
+            .unwrap();
+
+        assert!(outcome.plan.is_safe);
+        assert_eq!(outcome.plan.safe_pins.len(), 1);
+        // The pin reason should be an alias (the retained tag differs from
+        // the selected tag but shares the digest).
+        assert!(
+            outcome.report.contains("aliased by retained tag"),
+            "report should describe alias pin: {report}",
+            report = outcome.report
+        );
+        // Retained: v3 (900). Deleted: v1 (700).
+        assert_eq!(outcome.plan.projected_retained_bytes, 900);
+        assert_eq!(outcome.plan.projected_reclaimed_bytes, 700);
+    }
 }
