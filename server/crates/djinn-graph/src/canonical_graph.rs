@@ -105,7 +105,13 @@ pub struct CachedSccs {
 }
 
 pub struct CachedGraph {
-    pub graph: crate::repo_graph::RepoDependencyGraph,
+    /// The resident canonical graph, shared behind an `Arc` so read-path
+    /// serves (`load_canonical_graph`) and warm installs hand out cheap
+    /// pointer clones instead of deep-copying the whole graph (~570 MiB for a
+    /// large repo). Deep-copying out of the slot on every `code_graph` /
+    /// `impact_check` query was the transient that OOM-killed the 2Gi server
+    /// pod; the `Arc` makes those serves allocation-free.
+    pub graph: Arc<crate::repo_graph::RepoDependencyGraph>,
     pub project_path: PathBuf,
     pub git_head: String,
     pub pagerank: Arc<crate::repo_graph::RepoGraphRanking>,
@@ -225,15 +231,57 @@ async fn mark_cache_validated() {
 /// [`CACHE_REVALIDATION_TTL`] backstop covers the case where this hook is never
 /// invoked (e.g. non-K8s runtime, or a missed terminal observation).
 ///
-/// The slot is single-tenant (one project at a time), so clearing it may cost
-/// an unrelated project one reload from the persisted blob — cheap and correct.
+/// The slot is single-tenant (one project at a time).
+///
+/// ## Debounced, lazy invalidation (memory-safety hardening)
+///
+/// This used to *empty* the slot on every warm success, forcing the next query
+/// to reload the full ~570 MiB blob from Postgres — during a merge storm (a
+/// warm every 1–2 min) that meant constant reload churn, and two such reloads
+/// landing concurrently OOM-killed the 2Gi pod. Two changes remove that churn
+/// without weakening convergence:
+///
+/// 1. **Lazy, commit-aware:** instead of dropping the resident graph we only
+///    reset the revalidation stamp. The next read then does the *cheap*
+///    commit-only probe already built into [`load_canonical_graph`]: if the
+///    warm produced the **same** head SHA (a redundant re-warm — the common
+///    storm case) the slot is confirmed current and kept, costing zero blob
+///    reloads; only a genuinely newer commit triggers the single-flight
+///    reload. This is the "only invalidate when actually stale" behaviour the
+///    warm-success hook (which carries no SHA of its own) cannot express
+///    directly, routed through the read path's SHA comparison.
+/// 2. **Debounced:** invalidations arriving within [`MIN_INVALIDATION_INTERVAL`]
+///    of the previous honored one are coalesced. The [`CACHE_REVALIDATION_TTL`]
+///    read-path backstop (much shorter) still bounds staleness, so a coalesced
+///    invalidation never hides a newer graph — it only drops duplicate probes.
+///
+/// The event-driven convergence contract (K8s warm Job rewrites
+/// `repo_graph_cache` out-of-band; this hook nudges the in-process slot toward
+/// it) is preserved: a genuinely newer graph always lands, at worst within the
+/// revalidation TTL.
 pub async fn invalidate_canonical_graph_cache() {
+    let now = SystemClock::new().now_instant();
     {
-        let mut cache = GRAPH_CACHE.write().await;
-        *cache = None;
+        let last = CACHE_LAST_INVALIDATED.read().await;
+        if let Some(stamped) = *last
+            && now.saturating_duration_since(stamped) < MIN_INVALIDATION_INTERVAL
+        {
+            cache_telemetry::incr(&cache_telemetry::INVALIDATIONS_DEBOUNCED);
+            return;
+        }
     }
-    let mut validated = CACHE_LAST_VALIDATED.write().await;
-    *validated = None;
+    {
+        let mut last = CACHE_LAST_INVALIDATED.write().await;
+        *last = Some(now);
+    }
+    // Lazy: keep the resident graph, but mark it revalidation-due so the next
+    // read re-confirms its pinned commit against the DB (cheap) and reloads the
+    // blob only if the commit actually advanced.
+    {
+        let mut validated = CACHE_LAST_VALIDATED.write().await;
+        *validated = None;
+    }
+    cache_telemetry::incr(&cache_telemetry::INVALIDATIONS_FORCED);
 }
 
 /// Test-only: force the next read to treat the slot as revalidation-due
@@ -243,6 +291,79 @@ pub async fn invalidate_canonical_graph_cache() {
 pub(crate) async fn force_revalidation_due_for_test() {
     let mut guard = CACHE_LAST_VALIDATED.write().await;
     *guard = None;
+}
+
+/// Test-only: clear the invalidation-debounce stamp so the next
+/// [`invalidate_canonical_graph_cache`] is honored regardless of what a prior
+/// (process-global) test left behind. Tests that assert debounce behaviour call
+/// this first to start from a deterministic state.
+#[cfg(test)]
+pub(crate) async fn reset_invalidation_debounce_for_test() {
+    let mut guard = CACHE_LAST_INVALIDATED.write().await;
+    *guard = None;
+}
+
+/// Serializes the DB-blob reload of the canonical-graph slot so that N
+/// concurrent `load_canonical_graph` callers hitting an empty/stale slot
+/// perform **exactly one** Postgres `graph_blob` read + bincode deserialize
+/// between them, instead of each independently loading (and momentarily
+/// holding) a full copy of the ~570 MiB graph. The measured OOM-kill was two
+/// concurrent blob loads one second apart pushing the pod past its 2Gi memcg
+/// limit — this mutex makes that double-load structurally impossible. The
+/// winner installs the fresh slot; the losers observe it on a double-check and
+/// serve the shared `Arc` without touching the DB.
+static GRAPH_LOAD_MUTEX: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Instant of the last honored canonical-graph invalidation. Used to debounce
+/// the warm-success invalidation storm: during a merge storm the K8s warmer
+/// fires `on_warm_succeeded` every 1–2 minutes, and eagerly emptying the slot
+/// on each would force a full blob reload every time. See
+/// [`invalidate_canonical_graph_cache`].
+static CACHE_LAST_INVALIDATED: std::sync::LazyLock<RwLock<Option<std::time::Instant>>> =
+    std::sync::LazyLock::new(|| RwLock::new(None));
+
+/// Minimum interval between honored canonical-graph invalidations. A warm
+/// success arriving within this window of the previous one is coalesced: the
+/// [`CACHE_REVALIDATION_TTL`] read-path backstop (an order of magnitude
+/// smaller) still converges any genuinely newer graph within its own window,
+/// so dropping the redundant explicit invalidation only removes duplicate
+/// commit probes / reloads — never correctness.
+const MIN_INVALIDATION_INTERVAL: Duration = Duration::from_secs(60);
+
+/// In-crate cache telemetry. `djinn-graph` has no `metrics` dependency and is
+/// tracing-first (see the `tracing::info!` install log in
+/// [`install_as_canonical`]); these process-global atomics are the counterpart
+/// counters, surfaced on install and exposed to tests. Ordering is `Relaxed` —
+/// these are monotonic observability counters, not synchronization state.
+pub(crate) mod cache_telemetry {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// `code_graph`/`impact_check` query served the resident slot directly
+    /// (zero DB round-trips, shared `Arc` clone).
+    pub(crate) static FAST_PATH_HITS: AtomicU64 = AtomicU64::new(0);
+    /// A caller performed the single-flight Postgres blob read + deserialize
+    /// (the expensive path). One increment == one resident-graph rebuild.
+    pub(crate) static RELOADS: AtomicU64 = AtomicU64::new(0);
+    /// A caller blocked on the single-flight mutex, then found the slot already
+    /// (re)installed by the winner and served it without its own blob load.
+    pub(crate) static CONCURRENT_LOAD_WAITS: AtomicU64 = AtomicU64::new(0);
+    /// A fresh resident graph was installed into the slot (warm or reload).
+    pub(crate) static INSTALLS: AtomicU64 = AtomicU64::new(0);
+    /// A warm-success invalidation was honored (forced a commit revalidation).
+    pub(crate) static INVALIDATIONS_FORCED: AtomicU64 = AtomicU64::new(0);
+    /// A warm-success invalidation was coalesced under
+    /// [`super::MIN_INVALIDATION_INTERVAL`].
+    pub(crate) static INVALIDATIONS_DEBOUNCED: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn incr(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot(counter: &AtomicU64) -> u64 {
+        counter.load(Ordering::Relaxed)
+    }
 }
 
 pub fn derive_graph_caches(
@@ -539,7 +660,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 ) -> Result<
     (
         crate::index_tree::IndexTreeHandle,
-        crate::repo_graph::RepoDependencyGraph,
+        Arc<crate::repo_graph::RepoDependencyGraph>,
     ),
     String,
 > {
@@ -572,13 +693,15 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             && cached.project_path == handle.path()
             && cached.git_head == commit_sha
         {
-            spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &cached.graph);
-            spawn_cluster_docs_best_effort(ctx, project_id, &cached.graph);
-            return Ok((handle, cached.graph.clone()));
+            let graph = cached.graph.clone();
+            spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), graph.clone());
+            spawn_cluster_docs_best_effort(ctx, project_id, graph.clone());
+            return Ok((handle, graph));
         }
     }
 
     if let Ok(Some(row)) = cache_repo.get(project_id, &commit_sha).await {
+        let blob_len = row.graph_blob.len();
         match load_cached_artifact(row.graph_blob, handle.path().to_path_buf()).await {
             Ok((graph, pagerank, sccs, layout_positions, crate_map)) => {
                 install_as_canonical(
@@ -589,10 +712,11 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                     sccs,
                     layout_positions,
                     crate_map,
+                    Some(blob_len),
                 )
                 .await;
-                spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
-                spawn_cluster_docs_best_effort(ctx, project_id, &graph);
+                spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), graph.clone());
+                spawn_cluster_docs_best_effort(ctx, project_id, graph.clone());
                 return Ok((handle, graph));
             }
             Err(e) => {
@@ -615,12 +739,14 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             && cached.project_path == handle.path()
             && cached.git_head == commit_sha
         {
-            spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &cached.graph);
-            spawn_cluster_docs_best_effort(ctx, project_id, &cached.graph);
-            return Ok((handle, cached.graph.clone()));
+            let graph = cached.graph.clone();
+            spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), graph.clone());
+            spawn_cluster_docs_best_effort(ctx, project_id, graph.clone());
+            return Ok((handle, graph));
         }
     }
     if let Ok(Some(row)) = cache_repo.get(project_id, &commit_sha).await {
+        let blob_len = row.graph_blob.len();
         match load_cached_artifact(row.graph_blob, handle.path().to_path_buf()).await {
             Ok((graph, pagerank, sccs, layout_positions, crate_map)) => {
                 install_as_canonical(
@@ -631,10 +757,11 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                     sccs,
                     layout_positions,
                     crate_map,
+                    Some(blob_len),
                 )
                 .await;
-                spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
-                spawn_cluster_docs_best_effort(ctx, project_id, &graph);
+                spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), graph.clone());
+                spawn_cluster_docs_best_effort(ctx, project_id, graph.clone());
                 return Ok((handle, graph));
             }
             Err(e) => {
@@ -912,6 +1039,10 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         node_count,
         edge_count,
     ) = blocking?;
+    // Wrap the freshly built graph in an `Arc` once, here, so the canonical
+    // slot install, the best-effort chunk/cluster spawns, and the returned
+    // handle all share the same allocation instead of each deep-copying it.
+    let graph = Arc::new(graph);
 
     tracing::info!(
         project_id = %project_id,
@@ -1064,6 +1195,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         sccs,
         layout_positions,
         crate_map,
+        Some(serialized_blob.len()),
     )
     .await;
 
@@ -1071,8 +1203,8 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     // does not observe a stale in-progress marker.
     crate::warm_sentinel::clear(sentinel_cache_root.cache_root());
 
-    spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
-    spawn_cluster_docs_best_effort(ctx, project_id, &graph);
+    spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), graph.clone());
+    spawn_cluster_docs_best_effort(ctx, project_id, graph.clone());
     Ok((handle, graph))
 }
 
@@ -1151,7 +1283,7 @@ fn spawn_chunk_and_embed_best_effort<C: WarmContext>(
     ctx: &C,
     project_id: &str,
     project_root: &Path,
-    graph: &crate::repo_graph::RepoDependencyGraph,
+    graph: Arc<crate::repo_graph::RepoDependencyGraph>,
 ) {
     let (Some(embeddings), Some(vector_store)) =
         (ctx.code_chunk_embeddings(), ctx.code_chunk_vector_store())
@@ -1162,7 +1294,7 @@ fn spawn_chunk_and_embed_best_effort<C: WarmContext>(
         ctx.db().clone(),
         embeddings,
         vector_store,
-        Arc::new(graph.clone()),
+        graph,
         project_id.to_string(),
         project_root.to_path_buf(),
     );
@@ -1176,13 +1308,13 @@ fn spawn_chunk_and_embed_best_effort<C: WarmContext>(
 fn spawn_cluster_docs_best_effort<C: WarmContext>(
     ctx: &C,
     project_id: &str,
-    graph: &crate::repo_graph::RepoDependencyGraph,
+    graph: Arc<crate::repo_graph::RepoDependencyGraph>,
 ) {
     crate::cluster_doc::spawn_generate_for_all(
         ctx.db().clone(),
         ctx.event_bus(),
         project_id.to_string(),
-        Arc::new(graph.clone()),
+        graph,
     );
 }
 
@@ -1402,15 +1534,27 @@ pub async fn canonical_graph_count_commits_since(
     count_commits_since(project_root, pinned_commit).await
 }
 
+// The derived caches (pagerank/sccs/layout/crate_map) are each their own
+// `Arc` and are installed alongside the graph + commit identity; threading them
+// as one bundle struct would only move the argument list elsewhere, so keep the
+// explicit signature.
+#[allow(clippy::too_many_arguments)]
 async fn install_as_canonical(
     project_path: PathBuf,
     git_head: String,
-    graph: crate::repo_graph::RepoDependencyGraph,
+    graph: Arc<crate::repo_graph::RepoDependencyGraph>,
     pagerank: Arc<crate::repo_graph::RepoGraphRanking>,
     sccs: Arc<CachedSccs>,
     layout_positions: Arc<std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>>,
     crate_map: Arc<std::collections::BTreeMap<PathBuf, String>>,
+    // Approximate serialized (bincode) byte size of the graph, when the caller
+    // already has it cheaply to hand (the reload blob length, or the freshly
+    // serialized blob on the warm path). Logged as a coarse resident-size
+    // proxy on install; `None` when no cheap estimate is available.
+    approx_serialized_bytes: Option<usize>,
 ) {
+    let node_count = graph.node_count();
+    let edge_count = graph.edge_count();
     {
         let mut cache = GRAPH_CACHE.write().await;
         *cache = Some(CachedGraph {
@@ -1423,6 +1567,14 @@ async fn install_as_canonical(
             crate_map,
         });
     }
+    cache_telemetry::incr(&cache_telemetry::INSTALLS);
+    tracing::info!(
+        node_count,
+        edge_count,
+        approx_serialized_bytes,
+        installs_total = cache_telemetry::INSTALLS.load(std::sync::atomic::Ordering::Relaxed),
+        "canonical_graph: installed resident graph slot"
+    );
     // Whenever we (re)install the slot it reflects the freshest graph this
     // process knows — from the in-process warm path or a DB reload — so open a
     // fresh revalidation window. This keeps the in-process warm path's
@@ -1436,7 +1588,7 @@ async fn load_cached_artifact(
     project_root: PathBuf,
 ) -> Result<
     (
-        crate::repo_graph::RepoDependencyGraph,
+        Arc<crate::repo_graph::RepoDependencyGraph>,
         Arc<crate::repo_graph::RepoGraphRanking>,
         Arc<CachedSccs>,
         Arc<std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>>,
@@ -1449,7 +1601,9 @@ async fn load_cached_artifact(
         let graph = crate::repo_graph::RepoDependencyGraph::from_artifact(&artifact);
         let (pagerank, sccs, layout_positions, crate_map) =
             derive_graph_caches(&graph, &project_root);
-        Ok((graph, pagerank, sccs, layout_positions, crate_map))
+        // Share the deserialized graph behind an `Arc` from the moment it is
+        // built so the reload path never deep-copies it out again.
+        Ok((Arc::new(graph), pagerank, sccs, layout_positions, crate_map))
     })
     .await
     .map_err(|e| format!("spawn_blocking join: {e}"))?
@@ -1471,7 +1625,7 @@ pub async fn load_canonical_graph<C: WarmContext>(
     project_path: &str,
 ) -> Result<
     (
-        crate::repo_graph::RepoDependencyGraph,
+        Arc<crate::repo_graph::RepoDependencyGraph>,
         Arc<crate::repo_graph::RepoGraphRanking>,
         Arc<CachedSccs>,
     ),
@@ -1531,6 +1685,7 @@ pub async fn load_canonical_graph<C: WarmContext>(
         if serve_from_ram {
             let cache = GRAPH_CACHE.read().await;
             if let Some(cached) = cache.as_ref().filter(|c| c.project_path == index_tree_path) {
+                cache_telemetry::incr(&cache_telemetry::FAST_PATH_HITS);
                 return Ok((
                     cached.graph.clone(),
                     cached.pagerank.clone(),
@@ -1542,18 +1697,70 @@ pub async fn load_canonical_graph<C: WarmContext>(
         }
     }
 
+    // Slot is empty, stale, or holds a different project: take the
+    // single-flight reload path so concurrent callers collapse onto one DB
+    // blob read + deserialize instead of each loading a full copy.
+    load_and_install_from_db(ctx, project_id, &index_tree_path).await
+}
+
+/// Single-flight reload of the canonical-graph slot from `repo_graph_cache`.
+///
+/// The [`GRAPH_LOAD_MUTEX`] guarantees that when many `load_canonical_graph`
+/// callers race on an empty/stale slot, exactly one of them performs the
+/// Postgres `graph_blob` read + bincode deserialize (each ~570 MiB resident for
+/// a large repo). The others block on the mutex, then find the slot already
+/// (re)installed by the winner — confirmed by the double-check below — and
+/// serve the shared `Arc` with no DB round-trip and no second large allocation.
+/// This is what makes the measured "two concurrent blob loads → OOM at 2Gi"
+/// failure mode structurally impossible.
+async fn load_and_install_from_db<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+    index_tree_path: &Path,
+) -> Result<
+    (
+        Arc<crate::repo_graph::RepoDependencyGraph>,
+        Arc<crate::repo_graph::RepoGraphRanking>,
+        Arc<CachedSccs>,
+    ),
+    String,
+> {
+    use djinn_db::RepoGraphCacheRepository;
+
+    let _flight = GRAPH_LOAD_MUTEX.lock().await;
+
+    // Double-check under the flight lock: a concurrent winner may have just
+    // installed a fresh slot (which stamps the revalidation window). If so it is
+    // current and matches this project — serve it without a second blob load.
+    {
+        let cache = GRAPH_CACHE.read().await;
+        if let Some(cached) = cache.as_ref().filter(|c| c.project_path == *index_tree_path)
+            && !revalidation_due().await
+        {
+            cache_telemetry::incr(&cache_telemetry::CONCURRENT_LOAD_WAITS);
+            return Ok((
+                cached.graph.clone(),
+                cached.pagerank.clone(),
+                cached.sccs.clone(),
+            ));
+        }
+    }
+
+    // We are the single flight: perform the one DB read + deserialize + install.
+    let cache_repo = RepoGraphCacheRepository::new(ctx.db().clone());
     let row = cache_repo
         .latest_for_project(project_id)
         .await
         .map_err(|e| format!("read repo_graph_cache for '{project_id}': {e}"))?
         .ok_or_else(|| GRAPH_NOT_WARMED_ERR.to_string())?;
 
+    let blob_len = row.graph_blob.len();
     // Treat unreadable blobs (artifact-version drift, schema migration,
     // partial writes) the same as "not warmed yet". The architect warm pass
     // will rewrite the row; surfacing the raw bincode error to the user is
     // never useful.
     let (graph, pagerank, sccs, layout_positions, crate_map) =
-        load_cached_artifact(row.graph_blob, index_tree_path.clone())
+        load_cached_artifact(row.graph_blob, index_tree_path.to_path_buf())
             .await
             .map_err(|e| {
                 tracing::warn!(
@@ -1563,14 +1770,16 @@ pub async fn load_canonical_graph<C: WarmContext>(
                 );
                 GRAPH_NOT_WARMED_ERR.to_string()
             })?;
+    cache_telemetry::incr(&cache_telemetry::RELOADS);
     install_as_canonical(
-        index_tree_path,
+        index_tree_path.to_path_buf(),
         row.commit_sha,
         graph.clone(),
         pagerank.clone(),
         sccs.clone(),
         layout_positions.clone(),
         crate_map.clone(),
+        Some(blob_len),
     )
     .await;
     // `install_as_canonical` stamps the revalidation window, so subsequent
@@ -1583,7 +1792,7 @@ pub async fn load_canonical_graph_only<C: WarmContext>(
     ctx: &C,
     project_id: &str,
     project_path: &str,
-) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
+) -> Result<Arc<crate::repo_graph::RepoDependencyGraph>, String> {
     let (graph, _pagerank, _sccs) = load_canonical_graph(ctx, project_id, project_path).await?;
     Ok(graph)
 }
@@ -2007,7 +2216,7 @@ edition = "2024"
         let layout_positions = std::sync::Arc::new(std::collections::BTreeMap::new());
         let crate_map = std::sync::Arc::new(std::collections::BTreeMap::new());
         CachedGraph {
-            graph,
+            graph: std::sync::Arc::new(graph),
             project_path: std::path::PathBuf::from("/tmp/fake-project"),
             git_head: git_head.to_string(),
             pagerank,
@@ -2652,7 +2861,7 @@ edition = "2024"
                 derive_graph_caches(&graph, &project_root);
             let mut cache = GRAPH_CACHE.write().await;
             *cache = Some(CachedGraph {
-                graph,
+                graph: std::sync::Arc::new(graph),
                 project_path: index_tree_path.clone(),
                 git_head: stale_sha,
                 pagerank,
@@ -2732,11 +2941,12 @@ edition = "2024"
         install_as_canonical(
             index_tree_path.clone(),
             "stale-sha".to_string(),
-            stale_graph,
+            std::sync::Arc::new(stale_graph),
             pagerank,
             sccs,
             layout_positions,
             crate_map,
+            None,
         )
         .await;
 
@@ -2789,11 +2999,12 @@ edition = "2024"
         install_as_canonical(
             index_tree_path.clone(),
             "slot-sha".to_string(),
-            ram_graph,
+            std::sync::Arc::new(ram_graph),
             pagerank,
             sccs,
             layout_positions,
             crate_map,
+            None,
         )
         .await;
 
@@ -2835,6 +3046,262 @@ edition = "2024"
             after.node_count(),
             db_count,
             "after the TTL window the newer persisted blob must be reloaded"
+        );
+        clear_test_caches().await;
+    }
+
+    /// Arc-sharing fast path: two reads inside the TTL window return the *same*
+    /// allocation (pointer-equal `Arc`), proving the resident graph is shared
+    /// rather than deep-copied per query, and that no rebuild/reload happened.
+    // `lock_pipeline_env` returns a std `MutexGuard` held across the test's
+    // awaits to serialize the process-global slot; mirrors the sibling
+    // pipeline tests that carry the same allow.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn load_canonical_graph_fast_path_serves_shared_arc_without_reload() {
+        let _env_lock = lock_pipeline_env();
+        let tmp = workspace_tempdir("canonical-graph-arc-share-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("arc-share", "test", "arc-share")
+            .await
+            .expect("create project");
+        let project_root_str = project_root.to_string_lossy().into_owned();
+        let (_pr, index_tree_path) = normalize_graph_query_paths(&project_root_str);
+
+        // Persisted row + resident slot pinned at the same commit; install
+        // stamps the revalidation window so both reads land inside the TTL.
+        let graph = build_test_graph_fixture();
+        let blob = bincode::serialize(&graph.to_artifact()).expect("serialize");
+        RepoGraphCacheRepository::new(db.clone())
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "same-sha",
+                graph_blob: &blob,
+            })
+            .await
+            .expect("seed row");
+        let (pagerank, sccs, layout_positions, crate_map) =
+            derive_graph_caches(&graph, &project_root);
+        install_as_canonical(
+            index_tree_path.clone(),
+            "same-sha".to_string(),
+            std::sync::Arc::new(graph),
+            pagerank,
+            sccs,
+            layout_positions,
+            crate_map,
+            None,
+        )
+        .await;
+
+        let reloads_before = cache_telemetry::snapshot(&cache_telemetry::RELOADS);
+        let hits_before = cache_telemetry::snapshot(&cache_telemetry::FAST_PATH_HITS);
+
+        let (g1, _p1, _s1) = load_canonical_graph(&ctx, &project.id, &project_root_str)
+            .await
+            .expect("first load");
+        let (g2, _p2, _s2) = load_canonical_graph(&ctx, &project.id, &project_root_str)
+            .await
+            .expect("second load");
+
+        assert!(
+            std::sync::Arc::ptr_eq(&g1, &g2),
+            "fast-path serves must hand out the same shared Arc, not deep copies"
+        );
+        assert_eq!(
+            cache_telemetry::snapshot(&cache_telemetry::RELOADS),
+            reloads_before,
+            "serving the resident slot must not trigger any DB reload"
+        );
+        assert_eq!(
+            cache_telemetry::snapshot(&cache_telemetry::FAST_PATH_HITS),
+            hits_before + 2,
+            "both reads must be counted as fast-path hits"
+        );
+        clear_test_caches().await;
+    }
+
+    /// Single-flight: N concurrent reads of an empty slot perform *exactly one*
+    /// underlying DB blob load; the rest await the winner and serve the shared
+    /// Arc. This is the structural guard against the measured double-load OOM.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn load_canonical_graph_single_flights_concurrent_empty_slot_loads() {
+        let _env_lock = lock_pipeline_env();
+        let tmp = workspace_tempdir("canonical-graph-single-flight-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("single-flight", "test", "single-flight")
+            .await
+            .expect("create project");
+        let project_root_str = project_root.to_string_lossy().into_owned();
+
+        let graph = build_test_graph_fixture();
+        let blob = bincode::serialize(&graph.to_artifact()).expect("serialize");
+        RepoGraphCacheRepository::new(db.clone())
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "flight-sha",
+                graph_blob: &blob,
+            })
+            .await
+            .expect("seed row");
+
+        // Start from a genuinely empty slot so every caller misses the fast path.
+        clear_test_caches().await;
+        force_revalidation_due_for_test().await;
+
+        let reloads_before = cache_telemetry::snapshot(&cache_telemetry::RELOADS);
+        let waits_before = cache_telemetry::snapshot(&cache_telemetry::CONCURRENT_LOAD_WAITS);
+
+        const CONCURRENCY: usize = 8;
+        let futures: Vec<_> = (0..CONCURRENCY)
+            .map(|_| load_canonical_graph(&ctx, &project.id, &project_root_str))
+            .collect();
+        let results = futures::future::join_all(futures).await;
+
+        let graphs: Vec<_> = results
+            .into_iter()
+            .map(|r| r.expect("concurrent load must succeed").0)
+            .collect();
+
+        assert_eq!(
+            cache_telemetry::snapshot(&cache_telemetry::RELOADS) - reloads_before,
+            1,
+            "exactly one concurrent caller may perform the DB blob load"
+        );
+        assert_eq!(
+            cache_telemetry::snapshot(&cache_telemetry::CONCURRENT_LOAD_WAITS) - waits_before,
+            (CONCURRENCY - 1) as u64,
+            "every non-winner must serve via the single-flight double-check, not its own load"
+        );
+        for g in &graphs[1..] {
+            assert!(
+                std::sync::Arc::ptr_eq(&graphs[0], g),
+                "all concurrent callers must receive the same shared Arc"
+            );
+        }
+        clear_test_caches().await;
+    }
+
+    /// Debounced, lazy invalidation: a burst of warm-success invalidations is
+    /// coalesced under `MIN_INVALIDATION_INTERVAL`, and a honored invalidation
+    /// only reloads the blob when the head SHA actually advanced — a same-SHA
+    /// re-warm is confirmed against the DB commit and served from RAM with no
+    /// reload, while a new-SHA warm reloads exactly once.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn invalidation_is_debounced_and_reloads_only_on_new_sha() {
+        let _env_lock = lock_pipeline_env();
+        let tmp = workspace_tempdir("canonical-graph-invalidation-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("invalidation", "test", "invalidation")
+            .await
+            .expect("create project");
+        let project_root_str = project_root.to_string_lossy().into_owned();
+        let (_pr, index_tree_path) = normalize_graph_query_paths(&project_root_str);
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+
+        // Resident slot + persisted row both at SHA-1 (fixture A).
+        let graph_a = build_test_graph_fixture();
+        let count_a = graph_a.node_count();
+        let blob_a = bincode::serialize(&graph_a.to_artifact()).expect("serialize a");
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "sha-1",
+                graph_blob: &blob_a,
+            })
+            .await
+            .expect("seed sha-1");
+        let (pagerank, sccs, layout_positions, crate_map) =
+            derive_graph_caches(&graph_a, &project_root);
+        install_as_canonical(
+            index_tree_path.clone(),
+            "sha-1".to_string(),
+            std::sync::Arc::new(graph_a),
+            pagerank,
+            sccs,
+            layout_positions,
+            crate_map,
+            None,
+        )
+        .await;
+
+        reset_invalidation_debounce_for_test().await;
+        let forced_before = cache_telemetry::snapshot(&cache_telemetry::INVALIDATIONS_FORCED);
+        let debounced_before = cache_telemetry::snapshot(&cache_telemetry::INVALIDATIONS_DEBOUNCED);
+
+        // First invalidation is honored; an immediate second one is debounced.
+        invalidate_canonical_graph_cache().await;
+        invalidate_canonical_graph_cache().await;
+        assert_eq!(
+            cache_telemetry::snapshot(&cache_telemetry::INVALIDATIONS_FORCED) - forced_before,
+            1,
+            "only the first invalidation in the burst is honored"
+        );
+        assert_eq!(
+            cache_telemetry::snapshot(&cache_telemetry::INVALIDATIONS_DEBOUNCED) - debounced_before,
+            1,
+            "the second, sub-interval invalidation must be coalesced"
+        );
+
+        // Same-SHA: the honored invalidation forced a revalidation, but the DB
+        // still pins SHA-1, so the read confirms the slot and serves from RAM.
+        let reloads_before = cache_telemetry::snapshot(&cache_telemetry::RELOADS);
+        let (same, _p, _s) = load_canonical_graph(&ctx, &project.id, &project_root_str)
+            .await
+            .expect("same-sha load");
+        assert_eq!(
+            same.node_count(),
+            count_a,
+            "a same-SHA re-warm must keep serving the resident graph"
+        );
+        assert_eq!(
+            cache_telemetry::snapshot(&cache_telemetry::RELOADS),
+            reloads_before,
+            "a same-SHA invalidation must NOT trigger a blob reload"
+        );
+
+        // New-SHA: persist a different graph at SHA-2, honor a fresh
+        // invalidation, and confirm the read reloads exactly once.
+        let graph_b = crate::repo_graph::RepoDependencyGraph::build(&[]);
+        let count_b = graph_b.node_count();
+        assert_ne!(count_a, count_b, "fixtures must differ to detect a reload");
+        let blob_b = bincode::serialize(&graph_b.to_artifact()).expect("serialize b");
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "sha-2",
+                graph_blob: &blob_b,
+            })
+            .await
+            .expect("seed sha-2");
+
+        reset_invalidation_debounce_for_test().await;
+        invalidate_canonical_graph_cache().await;
+
+        let reloads_before_new = cache_telemetry::snapshot(&cache_telemetry::RELOADS);
+        let (fresh, _p, _s) = load_canonical_graph(&ctx, &project.id, &project_root_str)
+            .await
+            .expect("new-sha load");
+        assert_eq!(
+            fresh.node_count(),
+            count_b,
+            "a new-SHA warm must land the fresh graph"
+        );
+        assert_eq!(
+            cache_telemetry::snapshot(&cache_telemetry::RELOADS) - reloads_before_new,
+            1,
+            "a new-SHA invalidation must reload exactly once"
         );
         clear_test_caches().await;
     }
