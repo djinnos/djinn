@@ -114,6 +114,10 @@ const INFRA_EXEMPT_TOTAL: &str = "djinn_infra_exempt_total";
 const FALLBACK_RESCUE_TOTAL: &str = "djinn_fallback_rescue_total";
 const REASONING_KILL_TOTAL: &str = "djinn_reasoning_kill_total";
 
+// ─── Reply-loop turn budget observability ────────────────────────────────
+const REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL: &str =
+    "djinn_reply_loop_inline_char_budget_trips_total";
+
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
 /// Install the process-global Prometheus recorder.
@@ -782,6 +786,12 @@ fn register_metrics() {
             }
         }
     }
+    // ─── Reply-loop turn budget observability ─────────────────────────
+    metrics::describe_counter!(
+        REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL,
+        "Reply-loop turns where the merged inline character budget was exceeded and a tool result was externalized. Per-turn details remain in structured tracing events."
+    );
+    metrics::counter!(REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL).absolute(0);
     // ─── Arbiter rollout hardening metrics ────────────────────────────
     metrics::describe_counter!(
         ARBITER_DECISION_TOTAL,
@@ -1244,6 +1254,31 @@ pub mod fallback_rescue {
     /// earlier candidates failed.
     pub fn increment_rescue() {
         metrics::counter!(super::FALLBACK_RESCUE_TOTAL).increment(1);
+    }
+}
+
+pub mod reply_loop {
+    //! Reply-loop turn-budget observability.
+    //!
+    //! Tracks production-level counts for reply-loop policy outcomes while
+    //! keeping rich per-turn metadata in structured tracing events.
+    //!
+    //! Bounded labels: none.
+    //!
+    //! High-cardinality dimensions (`task_id`, tool names, tool-use ids,
+    //! result sizes, budget values) MUST NOT appear as Prometheus labels.
+
+    /// Increment the reply-loop inline-character-budget-trip counter.
+    ///
+    /// Call once on the over-budget branch of the turn budget post-pass,
+    /// after the pass has externalized at least one tool result because the
+    /// merged inline character count exceeded the configured budget. This
+    /// counter is intentionally label-free; per-turn details such as
+    /// `inline_chars_pre`, `inline_chars_post`, `tool_count`,
+    /// `externalized_count`, `largest_result_chars`, and `tool_name_missing`
+    /// remain in the structured tracing event emitted by the reply loop.
+    pub fn increment_inline_char_budget_trip() {
+        metrics::counter!(super::REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL).increment(1);
     }
 }
 
@@ -2746,6 +2781,67 @@ mod tests {
             unlabelled_sample_value(&rendered, FALLBACK_RESCUE_TOTAL) >= 1.0,
             "fallback rescue should increment by 1"
         );
+    }
+
+    #[test]
+    fn reply_loop_inline_char_budget_trip_counter_renders_and_increments() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let before = render().unwrap();
+        let before_val =
+            unlabelled_sample_value(&before, REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL);
+        assert!(
+            before.contains(&format!(
+                "# HELP {REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL}"
+            )),
+            "missing HELP line for reply-loop budget-trip counter:\n{before}"
+        );
+        assert!(
+            before.contains(REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL),
+            "counter must be visible (zero-seeded) before the first trip:\n{before}"
+        );
+
+        reply_loop::increment_inline_char_budget_trip();
+
+        let after = render().unwrap();
+        let after_val = unlabelled_sample_value(&after, REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL);
+        assert_eq!(
+            after_val,
+            before_val + 1.0,
+            "budget-trip counter should increment exactly once"
+        );
+    }
+
+    #[test]
+    fn reply_loop_inline_char_budget_trip_counter_has_no_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        reply_loop::increment_inline_char_budget_trip();
+
+        let rendered = render().unwrap();
+        for forbidden in [
+            "task_id=",
+            "tool=",
+            "tool_name=",
+            "tool_use_id=",
+            "result_size=",
+            "inline_chars=",
+            "budget=",
+            "preview_floor=",
+            "externalized_count=",
+        ] {
+            for line in rendered.lines() {
+                if !line.starts_with(REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL) {
+                    continue;
+                }
+                assert!(
+                    !line.contains(forbidden),
+                    "reply-loop budget-trip counter must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
+        }
     }
 
     #[test]
