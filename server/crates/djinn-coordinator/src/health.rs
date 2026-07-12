@@ -3108,4 +3108,61 @@ async fn sweep_cargo_warm_base_guard(
         projected_bytes = result.projected_bytes,
         "warm-base idle GC completed"
     );
+
+    let pressure_inventory = match gc::inventory_under(Path::new(gc::CARGO_WARM_BASE_ROOT)) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            tracing::warn!(component = metrics::COMPONENT_CARGO_WARM_BASE, mode = config.mode.as_metric_label(), error = %error, "warm-base pressure GC inventory failed; retaining bases");
+            metrics::increment_cleanup_total(
+                metrics::COMPONENT_CARGO_WARM_BASE,
+                metrics::OUTCOME_ERROR,
+                config.mode.as_metric_label(),
+            );
+            return;
+        }
+    };
+    let activity = gc::DbActivityGuard::new(db.clone());
+    let planning_locks = gc::BaseLockPlanningAdapter::new(gc::FlockBaseLock);
+    let capacity = gc::StatvfsFilesystemCapacity;
+    let plan = gc::plan_pressure_eviction(
+        pressure_inventory,
+        &activity,
+        guard.as_ref(),
+        &planning_locks,
+        &capacity,
+        config,
+        &clock,
+    )
+    .await;
+    if !plan.candidates.is_empty() {
+        metrics::increment_candidates(
+            metrics::COMPONENT_CARGO_WARM_BASE,
+            config.mode.as_metric_label(),
+            plan.candidates.len() as u64,
+        );
+    }
+    let pressure = gc::execute_pressure_eviction(
+        plan,
+        &activity,
+        guard.as_ref(),
+        &locks,
+        &capacity,
+        config,
+        &clock,
+        config.mode,
+        Path::new(gc::CARGO_WARM_BASE_ROOT),
+    )
+    .await;
+    tracing::info!(
+        component = metrics::COMPONENT_CARGO_WARM_BASE,
+        mode = config.mode.as_metric_label(),
+        deleted = pressure.deleted.len(),
+        dry_run = pressure.dry_run.len(),
+        retained = pressure.retained.len(),
+        reclaimed_bytes = pressure.reclaimed_bytes,
+        projected_bytes = pressure.projected_bytes,
+        reached_high_watermark = pressure.reached_high_watermark,
+        remeasurement_failed = pressure.remeasurement_failed,
+        "warm-base pressure GC completed"
+    );
 }

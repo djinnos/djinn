@@ -27,6 +27,226 @@ pub enum BaseClassification {
     Orphaned,
 }
 
+/// Execute a deterministic pressure plan.
+///
+/// Dry-run does not acquire a lock or recheck candidates, because creating a
+/// lock file mutates fallback mtime state. It reports precisely the planner's
+/// ordered prefix. Delete mode holds an owned non-blocking lock across a full
+/// post-lock safety recheck, actual-size measurement, and removal. Capacity is
+/// remeasured after every successful deletion and terminates the sweep on a
+/// measurement failure or as soon as the high watermark is reached.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_pressure_eviction(
+    plan: PressureEvictionPlan,
+    activity: &dyn ActivityGuard,
+    warm_jobs: &dyn WarmJobGuard,
+    locks: &dyn BaseLock,
+    capacity: &dyn FilesystemCapacity,
+    config: &crate::context::CacheCleanupConfig,
+    clock: &dyn Clock,
+    mode: crate::context::CacheCleanupMode,
+    root: &Path,
+) -> PressureEvictionResult {
+    use crate::context::CacheCleanupMode;
+    use djinn_telemetry::cache_cleanup as metrics;
+
+    let mut result = PressureEvictionResult {
+        projected_bytes: plan.projected_bytes,
+        ..Default::default()
+    };
+    if mode == CacheCleanupMode::DryRun {
+        result.dry_run = plan
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.entry)
+            .collect();
+        for _ in &result.dry_run {
+            metrics::increment_cleanup_total(
+                metrics::COMPONENT_CARGO_WARM_BASE,
+                metrics::OUTCOME_DRY_RUN,
+                mode.as_metric_label(),
+            );
+        }
+        return result;
+    }
+
+    for candidate in plan.candidates {
+        let entry = candidate.entry;
+        let cached_last_activity =
+            match latest_activity_time(candidate.latest_activity.as_deref(), &entry.path) {
+                Ok(last) => last,
+                Err(_) => {
+                    retain_pressure(
+                        &mut result,
+                        &entry.project_id,
+                        PressureSkipReason::ActivityError,
+                        mode,
+                    );
+                    continue;
+                }
+            };
+        let guard = match locks.try_lock(&entry.path) {
+            Ok(Some(guard)) => guard,
+            Ok(None) => {
+                retain_pressure(
+                    &mut result,
+                    &entry.project_id,
+                    PressureSkipReason::LockBusy,
+                    mode,
+                );
+                continue;
+            }
+            Err(_) => {
+                retain_pressure(
+                    &mut result,
+                    &entry.project_id,
+                    PressureSkipReason::LockError,
+                    mode,
+                );
+                continue;
+            }
+        };
+        let safe = match recheck_pressure_after_lock(
+            &entry.project_id,
+            activity,
+            warm_jobs,
+            clock.now(),
+            config.warm_base_grace_period,
+            cached_last_activity,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(reason) => {
+                retain_pressure(&mut result, &entry.project_id, reason, mode);
+                drop(guard);
+                continue;
+            }
+        };
+        if !safe {
+            retain_pressure(
+                &mut result,
+                &entry.project_id,
+                PressureSkipReason::Young,
+                mode,
+            );
+            drop(guard);
+            continue;
+        }
+
+        let actual_bytes = directory_size(&entry.path);
+        if safe_remove_directory(&entry.path, root).is_err() {
+            retain_pressure(
+                &mut result,
+                &entry.project_id,
+                PressureSkipReason::DeleteError,
+                mode,
+            );
+            drop(guard);
+            continue;
+        }
+        result.reclaimed_bytes = result.reclaimed_bytes.saturating_add(actual_bytes);
+        result.deleted.push(entry);
+        metrics::increment_cleanup_total(
+            metrics::COMPONENT_CARGO_WARM_BASE,
+            metrics::OUTCOME_DELETED,
+            mode.as_metric_label(),
+        );
+        if actual_bytes > 0 {
+            metrics::record_reclaimed_bytes(
+                metrics::COMPONENT_CARGO_WARM_BASE,
+                mode.as_metric_label(),
+                actual_bytes,
+            );
+        }
+        drop(guard);
+
+        let measured = match capacity.capacity(root) {
+            Ok(measured) => measured,
+            Err(_) => {
+                result.remeasurement_failed = true;
+                metrics::increment_cleanup_total(
+                    metrics::COMPONENT_CARGO_WARM_BASE,
+                    metrics::OUTCOME_ERROR,
+                    mode.as_metric_label(),
+                );
+                break;
+            }
+        };
+        if !available_below_ratio(
+            measured.available_bytes,
+            measured.total_bytes,
+            config.warm_base_high_free_ratio,
+        ) {
+            result.reached_high_watermark = true;
+            break;
+        }
+    }
+    result
+}
+
+fn retain_pressure(
+    result: &mut PressureEvictionResult,
+    project_id: &str,
+    reason: PressureSkipReason,
+    mode: crate::context::CacheCleanupMode,
+) {
+    use djinn_telemetry::cache_cleanup as metrics;
+
+    result.retained.push((project_id.to_owned(), reason));
+    let outcome = match reason {
+        PressureSkipReason::Young => metrics::OUTCOME_RETAINED_YOUNG,
+        PressureSkipReason::ActiveTaskRun => metrics::OUTCOME_RETAINED_ACTIVE,
+        PressureSkipReason::LockBusy => metrics::OUTCOME_RETAINED_LOCK_BUSY,
+        PressureSkipReason::WarmJobInFlight | PressureSkipReason::NotSelected => {
+            metrics::OUTCOME_RETAINED
+        }
+        PressureSkipReason::AboveLowWatermark
+        | PressureSkipReason::ActivityError
+        | PressureSkipReason::WarmJobError
+        | PressureSkipReason::LockError
+        | PressureSkipReason::MeasurementError
+        | PressureSkipReason::DeleteError => metrics::OUTCOME_ERROR,
+    };
+    metrics::increment_cleanup_total(
+        metrics::COMPONENT_CARGO_WARM_BASE,
+        outcome,
+        mode.as_metric_label(),
+    );
+}
+
+async fn recheck_pressure_after_lock(
+    project_id: &str,
+    activity: &dyn ActivityGuard,
+    warm_jobs: &dyn WarmJobGuard,
+    now: SystemTime,
+    grace: Duration,
+    cached_last_activity: SystemTime,
+) -> Result<bool, PressureSkipReason> {
+    let snapshot = activity
+        .activity(project_id)
+        .await
+        .map_err(|_| PressureSkipReason::ActivityError)?;
+    if snapshot.has_active_task_run {
+        return Err(PressureSkipReason::ActiveTaskRun);
+    }
+    match warm_jobs.has_in_flight_warm(project_id).await {
+        Ok(true) => return Err(PressureSkipReason::WarmJobInFlight),
+        Err(_) => return Err(PressureSkipReason::WarmJobError),
+        Ok(false) => {}
+    }
+    let last = match snapshot.latest_activity.as_deref() {
+        Some(ts) => system_time_from_offset(
+            parse_iso8601(ts).map_err(|_| PressureSkipReason::ActivityError)?,
+        ),
+        None => cached_last_activity,
+    };
+    let cutoff = last
+        .checked_add(grace)
+        .ok_or(PressureSkipReason::ActivityError)?;
+    Ok(now >= cutoff)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarmBaseEntry {
     pub project_id: String,
@@ -205,6 +425,7 @@ pub enum PressureSkipReason {
     LockError,
     Young,
     MeasurementError,
+    DeleteError,
     NotSelected,
 }
 
@@ -214,6 +435,20 @@ pub struct PressureEvictionPlan {
     pub retained: Vec<(String, PressureSkipReason)>,
     pub projected_bytes: u64,
     pub target_bytes: u64,
+}
+
+/// Result of executing a previously computed pressure plan. `dry_run` is the
+/// exact ordered planner prefix; delete mode measures each base immediately
+/// before removal rather than reporting the planner's estimate as reclaimed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PressureEvictionResult {
+    pub deleted: Vec<WarmBaseEntry>,
+    pub dry_run: Vec<WarmBaseEntry>,
+    pub retained: Vec<(String, PressureSkipReason)>,
+    pub reclaimed_bytes: u64,
+    pub projected_bytes: u64,
+    pub reached_high_watermark: bool,
+    pub remeasurement_failed: bool,
 }
 
 /// Evaluate all destructive-operation guards.  Any guard error becomes a

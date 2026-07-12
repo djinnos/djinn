@@ -1408,3 +1408,46 @@ async fn pressure_lock_busy_and_error_retained() {
     assert_eq!(plan.retained[0].1, PressureSkipReason::LockBusy);
     assert_eq!(plan.retained[1].1, PressureSkipReason::LockError);
 }
+
+#[tokio::test]
+async fn pressure_execute_dry_run_reports_planner_prefix_without_locking() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000001");
+    let planned = WarmBaseEntry {
+        project_id: "018f8b9a-0d70-7f0a-8000-000000000001".into(),
+        path: base.clone(),
+        size_bytes: 99,
+    };
+    let locks = RecordingBaseLock {
+        attempts: std::sync::Mutex::new(Vec::new()),
+        succeed: true,
+    };
+    let result = execute_pressure_eviction(
+        PressureEvictionPlan {
+            candidates: vec![WarmBaseCandidate {
+                entry: planned.clone(),
+                classification: BaseClassification::Registered,
+                latest_activity: None,
+                free_space_bytes: 0,
+            }],
+            retained: Vec::new(),
+            projected_bytes: 99,
+            target_bytes: 99,
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &locks,
+        &Capacity(Err("must not measure dry run".into())),
+        &default_config(),
+        &epoch_clock(),
+        crate::context::CacheCleanupMode::DryRun,
+        temp.path(),
+    )
+    .await;
+
+    assert_eq!(result.dry_run, vec![planned]);
+    assert_eq!(result.projected_bytes, 99);
+    assert!(result.deleted.is_empty());
+    assert!(base.exists());
+    assert!(locks.attempts.lock().unwrap().is_empty());
+}
