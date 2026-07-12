@@ -9,8 +9,10 @@
 //! `recommended` flag on `provider_models_connected` outputs.
 
 use djinn_control_plane::test_support::McpTestHarness;
+use djinn_core::auth_context::SESSION_USER_ID;
 use djinn_core::events::EventBus;
 use djinn_db::OrgAiPolicyRepository;
+use djinn_db::repositories::user::UserRepository;
 use djinn_provider::repos::CredentialRepository;
 use serde_json::json;
 use std::collections::HashMap;
@@ -852,4 +854,179 @@ async fn org_policy_set_accepts_known_but_disconnected_provider_recommended_mode
         json!(["google/gemini-1"]),
         "known disconnected provider override should be persisted"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_recommended_connected_model_persists_and_validates_including_org_overrides() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    CredentialRepository::new(db.clone(), EventBus::noop())
+        .set("openai", "OPENAI_API_KEY", "sk-test")
+        .await
+        .unwrap();
+
+    let before = connected_models_recommended_map(&harness).await;
+    let dotted_non_recommended = "openai/gpt-5.2";
+    assert!(
+        before.contains_key(dotted_non_recommended),
+        "{dotted_non_recommended} should be in connected output, got ids: {:?}",
+        before.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !before.get(dotted_non_recommended).copied().unwrap_or(false),
+        "{dotted_non_recommended} should be non-recommended before overrides"
+    );
+    let baseline_recommended = "openai/gpt-5.3-codex";
+    assert!(
+        before.contains_key(baseline_recommended),
+        "{baseline_recommended} should be in connected output, got ids: {:?}",
+        before.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        *before
+            .get(baseline_recommended)
+            .expect("codex model present"),
+        "{baseline_recommended} should be baseline recommended before overrides"
+    );
+
+    let user_repo = UserRepository::new(db.clone());
+    let user = user_repo
+        .upsert_from_github(999_003, "provider-tools-test-user", None, None)
+        .await
+        .expect("create test user");
+    let user_id = user.id;
+
+    let set = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness
+                .call_tool(
+                    "user_settings_set",
+                    json!({
+                        "lanes": {
+                            "implement": [dotted_non_recommended]
+                        }
+                    }),
+                )
+                .await
+        })
+        .await
+        .expect("user_settings_set dispatch");
+    assert!(
+        set["ok"].as_bool().unwrap_or(false),
+        "user_settings_set should accept the non-recommended connected model: {set}"
+    );
+    let set_lanes = set["lanes"].as_object().expect("set response lanes");
+    assert_eq!(
+        set_lanes["implement"],
+        json!([dotted_non_recommended]),
+        "user_settings_set should echo the exact dotted id"
+    );
+
+    let get = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness.call_tool("user_settings_get", json!({})).await
+        })
+        .await
+        .expect("user_settings_get dispatch");
+    assert!(
+        get["ok"].as_bool().unwrap_or(false),
+        "user_settings_get should succeed: {get}"
+    );
+    let get_lanes = get["lanes"].as_object().expect("get response lanes");
+    assert_eq!(
+        get_lanes["implement"],
+        json!([dotted_non_recommended]),
+        "user_settings_get should read back the exact dotted id unchanged"
+    );
+
+    harness
+        .state()
+        .validate_models_for_user(&[dotted_non_recommended.to_string()], Some(&user_id))
+        .await
+        .expect("catalog-present non-recommended id should be dispatch-valid");
+
+    let absent = "nope/unknown-model";
+    let err = harness
+        .state()
+        .validate_models_for_user(&[absent.to_string()], Some(&user_id))
+        .await
+        .expect_err("catalog-absent id should be rejected by dispatch validation");
+    assert!(
+        err.contains("providers you haven't connected"),
+        "expected connectivity rejection for absent id, got: {err}"
+    );
+
+    let policy_set = harness
+        .call_tool(
+            "org_policy_set",
+            json!({
+                "additional_recommended_model_ids": [dotted_non_recommended],
+                "demoted_recommended_model_ids": [baseline_recommended]
+            }),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(
+        policy_set["ok"].as_bool().unwrap_or(false),
+        "org_policy_set overrides should succeed: {policy_set}"
+    );
+
+    let after = connected_models_recommended_map(&harness).await;
+    assert!(
+        *after
+            .get(dotted_non_recommended)
+            .expect("dotted id still present in catalog after promotion"),
+        "additional override should promote {dotted_non_recommended} to recommended"
+    );
+    assert!(
+        !after.get(baseline_recommended).copied().unwrap_or(true),
+        "demotion should mark {baseline_recommended} as not recommended"
+    );
+
+    let set_after = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness
+                .call_tool(
+                    "user_settings_set",
+                    json!({
+                        "lanes": {
+                            "plan": [baseline_recommended],
+                            "implement": [dotted_non_recommended]
+                        }
+                    }),
+                )
+                .await
+        })
+        .await
+        .expect("user_settings_set after overrides dispatch");
+    assert!(
+        set_after["ok"].as_bool().unwrap_or(false),
+        "catalog-present models should remain persistable after overrides: {set_after}"
+    );
+    let lanes_after = set_after["lanes"]
+        .as_object()
+        .expect("lanes after overrides");
+    assert_eq!(
+        lanes_after["plan"],
+        json!([baseline_recommended]),
+        "demoted model should still persist by exact id"
+    );
+    assert_eq!(
+        lanes_after["implement"],
+        json!([dotted_non_recommended]),
+        "promoted model should still persist by exact id"
+    );
+
+    harness
+        .state()
+        .validate_models_for_user(
+            &[
+                dotted_non_recommended.to_string(),
+                baseline_recommended.to_string(),
+            ],
+            Some(&user_id),
+        )
+        .await
+        .expect("catalog-present models should remain dispatch-valid after overrides");
 }
