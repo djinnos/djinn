@@ -38,6 +38,7 @@ pub mod task_attempt;
 pub mod task_attempt_tests;
 pub mod task_run;
 pub mod test_support;
+pub mod tool_call_export;
 pub mod usage_analytics;
 pub mod user;
 pub mod user_settings;
