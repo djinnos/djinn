@@ -479,8 +479,43 @@ pub(super) async fn closed_parent_open_children_section(pool: &sqlx::PgPool) -> 
     // Runtime query: the section is additive and must not add entries to the
     // offline sqlx cache. We aggregate evidence as JSONB so the row shape is
     // stable regardless of how many proposals/dependents a task has.
+    //
+    // The external-dependent filter matches the landed parent-disposition
+    // semantics: a terminal proposal owns all of the epics it linked, so any
+    // open dependent in those epics is internal to the closing scope, not an
+    // external blocker. For a closed epic without an associated terminal
+    // proposal, the scope is the child's own epic only. We derive the
+    // per-terminal-proposal linked epic IDs from `task_scope` in the CTE below.
     let rows = sqlx::query(
-        r#"SELECT
+        r#"WITH terminal_proposals AS (
+              SELECT p.id AS proposal_id
+                FROM proposals p
+               WHERE p.status IN ('archived', 'superseded', 'rejected', 'done')
+            ),
+            task_scope AS (
+              SELECT t.id AS task_id,
+                     t.epic_id,
+                     e.status AS epic_status,
+                     COALESCE(
+                       (SELECT jsonb_agg(DISTINCT pe2.epic_id ORDER BY pe2.epic_id)
+                          FROM proposal_epics pe1
+                          JOIN terminal_proposals tp ON tp.proposal_id = pe1.proposal_id
+                          JOIN proposal_epics pe2 ON pe2.proposal_id = pe1.proposal_id
+                         WHERE pe1.epic_id = t.epic_id),
+                       '[]'::jsonb
+                     ) AS proposal_scope_epic_ids,
+                     COALESCE(
+                       (SELECT jsonb_agg(pe.proposal_id ORDER BY pe.proposal_id)
+                          FROM proposal_epics pe
+                          JOIN terminal_proposals tp ON tp.proposal_id = pe.proposal_id
+                         WHERE pe.epic_id = t.epic_id),
+                       '[]'::jsonb
+                     ) AS terminal_proposal_ids
+                FROM tasks t
+                JOIN epics e ON t.epic_id = e.id
+               WHERE t.status <> 'closed'
+            )
+            SELECT
               t.id AS task_id,
               t.short_id,
               t.title,
@@ -489,14 +524,7 @@ pub(super) async fn closed_parent_open_children_section(pool: &sqlx::PgPool) -> 
               t.epic_id,
               e.short_id AS epic_short_id,
               e.status AS epic_status,
-              COALESCE(
-                (SELECT jsonb_agg(p.id ORDER BY p.id)
-                 FROM proposal_epics pe
-                 JOIN proposals p ON p.id = pe.proposal_id
-                 WHERE pe.epic_id = e.id
-                   AND p.status IN ('archived', 'superseded', 'rejected', 'done')),
-                '[]'::jsonb
-              ) AS terminal_proposal_ids,
+              ts.terminal_proposal_ids,
               COALESCE(
                 (SELECT jsonb_agg(p.id ORDER BY p.id)
                  FROM proposal_epics pe
@@ -516,13 +544,19 @@ pub(super) async fn closed_parent_open_children_section(pool: &sqlx::PgPool) -> 
                  )
                  FROM blockers b
                  JOIN tasks dep ON dep.id = b.task_id
+                 JOIN task_scope ts2 ON ts2.task_id = t.id
                  WHERE b.blocking_task_id = t.id
                    AND dep.status <> 'closed'
-                   AND (dep.epic_id IS NULL OR dep.epic_id <> t.epic_id)),
+                   AND (
+                     dep.epic_id IS NULL
+                     OR ts2.epic_status <> 'closed' AND NOT (ts2.proposal_scope_epic_ids @> jsonb_build_array(dep.epic_id))
+                     OR ts2.epic_status = 'closed' AND NOT (ts2.proposal_scope_epic_ids @> jsonb_build_array(dep.epic_id)) AND dep.epic_id <> t.epic_id
+                   )),
                 '[]'::jsonb
               ) AS external_open_dependents
            FROM tasks t
            JOIN epics e ON t.epic_id = e.id
+           JOIN task_scope ts ON ts.task_id = t.id
            WHERE t.status <> 'closed'
            ORDER BY t.created_at"#,
     )
@@ -929,5 +963,44 @@ mod tests {
 
         let section = closed_parent_open_children_section(db.pool()).await;
         assert_eq!(section.get("total").unwrap().as_i64(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn terminal_proposal_multi_epic_internal_dependent_recommends_close() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let first_epic = epic(&db, &project, "open").await;
+        let second_epic = epic(&db, &project, "open").await;
+        let terminal = proposal(&db, "rejected").await;
+        link_epic(&db, &terminal, &first_epic, &project).await;
+        link_epic(&db, &terminal, &second_epic, &project).await;
+        let child = task(&db, &first_epic, "open").await;
+        let dependent = task(&db, &second_epic, "open").await;
+        blocker(&db, &dependent, &child).await;
+
+        let section = closed_parent_open_children_section(db.pool()).await;
+        let findings = section.get("findings").unwrap().as_array().unwrap();
+        assert_eq!(findings.len(), 2);
+        let child_finding = findings
+            .iter()
+            .find(|f| f.get("id").unwrap().as_str() == Some(child.as_str()))
+            .unwrap();
+        assert_eq!(
+            child_finding.get("recommended_action").unwrap().as_str(),
+            Some("close")
+        );
+        assert_eq!(
+            child_finding.get("recommended_reason").unwrap().as_str(),
+            Some("parent_closed")
+        );
+        let dependents = child_finding
+            .get("external_open_dependents")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(
+            dependents.is_empty(),
+            "dependent in same terminal-proposal scope is internal, not external"
+        );
     }
 }
