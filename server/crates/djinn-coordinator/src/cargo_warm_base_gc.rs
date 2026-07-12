@@ -486,7 +486,7 @@ fn ceiling_ratio_bytes(total: u64, ratio: f64) -> u64 {
     let numerator = (total as u128).saturating_mul(significand as u128);
     let denominator = 1_u128 << shift;
     let whole_bytes = numerator / denominator;
-    let has_fraction = numerator % denominator != 0;
+    let has_fraction = !numerator.is_multiple_of(denominator);
     (whole_bytes + u128::from(has_fraction)).min(total as u128) as u64
 }
 
