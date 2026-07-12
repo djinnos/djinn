@@ -45,6 +45,8 @@ function um(id: string, opts: Partial<UserModel> = {}): UserModel {
  * task design:
  * - `acme` provider with recommended `Zeta` whose name sorts AFTER the
  *   non-recommended `Alpha` alphabetically — catches alphabetical-only sort.
+ *   Also includes `acme/legacy.v2.5`, a dotted non-recommended id, to guard
+ *   id round-tripping without splitting on `.`.
  * - `beta` provider with no recommendations → all models visible by fallback.
  * - `fireworks` provider with a multi-segment id + full metadata.
  */
@@ -52,6 +54,7 @@ function pickerFixtures(): UserModel[] {
   return [
     // acme: recommended Zeta (name "Zeta") sorts AFTER non-recommended Alpha.
     um("acme/alpha", { provider_id: "acme", name: "Alpha", recommended: false }),
+    um("acme/legacy.v2.5", { provider_id: "acme", name: "Legacy v2.5", recommended: false }),
     um("acme/zeta", { provider_id: "acme", name: "Zeta", recommended: true }),
     // beta: no recommendations → all models visible by fallback.
     um("beta/b1", { provider_id: "beta", name: "Beta One", recommended: false }),
@@ -640,6 +643,71 @@ describe("ModelSection picker (browse/search)", () => {
     expect(allIds).toContain(fullId);
     // maxSessions keys by the full id.
     expect(call[2]).toHaveProperty(fullId);
+  });
+
+  it("selecting a dotted non-recommended id adds the exact full id without splitting", async () => {
+    vi.mocked(saveUserModelSelection).mockClear();
+    render(<ModelSection targetId="target-user" />);
+
+    const addButtons = await screen.findAllByRole("button", { name: "Add model" });
+    const user = userEvent.setup();
+    // Use the Implement lane so it does not share the existing plan lane shape.
+    await user.click(addButtons[1]!);
+
+    const search = await screen.findByPlaceholderText("Search models…");
+    await user.type(search, "legacy.v2.5");
+
+    const legacyRow = await screen.findByText("Legacy v2.5");
+    const item = legacyRow.closest("[data-slot='command-item']")!;
+    await user.click(item);
+
+    const dottedId = "acme/legacy.v2.5";
+    await waitFor(() => {
+      expect(screen.getByText("Legacy v2.5")).toBeInTheDocument();
+    });
+
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(saveUserModelSelection).toHaveBeenCalledTimes(1);
+    });
+    const call = vi.mocked(saveUserModelSelection).mock.calls[0]!;
+    const lanes = call[1];
+    const allIds = [...lanes.plan, ...lanes.implement, ...lanes.review];
+    expect(allIds).toContain(dottedId);
+    expect(call[2]).toHaveProperty(dottedId);
+  });
+
+  it("a demoted connected non-recommended model is still reachable through browse and search", async () => {
+    render(<ModelSection targetId="target-user" />);
+
+    const addButtons = await screen.findAllByRole("button", { name: "Add model" });
+    const user = userEvent.setup();
+    await user.click(addButtons[0]!);
+
+    await screen.findByText("Add a model");
+
+    // Default view hides non-recommended Legacy v2.5 (acme has a recommended Zeta).
+    expect(screen.queryByText("Legacy v2.5")).not.toBeInTheDocument();
+
+    // Browse all reveals it.
+    const browseAll = await screen.findByRole("button", { name: /browse all acme models/i });
+    await user.click(browseAll);
+    expect(await screen.findByText("Legacy v2.5")).toBeInTheDocument();
+
+    // Close the picker, reopen it, then search by the dotted suffix to prove it
+    // remains findable.
+    await user.click(await screen.findByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(screen.queryByText("Add a model")).not.toBeInTheDocument();
+    });
+
+    await user.click(addButtons[0]!);
+    await screen.findByText("Add a model");
+    const search = await screen.findByPlaceholderText("Search models…");
+    await user.type(search, "legacy.v2.5");
+    expect(await screen.findByText("Legacy v2.5")).toBeInTheDocument();
   });
 });
 
