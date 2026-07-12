@@ -16,7 +16,7 @@
 use crate::retention::{
     self, CATALOG_REPO_PREFIX, RetentionPlan, SelectedImage, ZotRepository, ZotTag,
 };
-use reqwest::header;
+use djinn_provider::http_util::{HttpClient, HttpError, HttpRequestBuilder, HttpResponse};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -38,15 +38,9 @@ pub enum ZotStateError {
     #[error("zot state parse error: {0}")]
     Parse(String),
     #[error("zot transport failure during {operation}: {message}")]
-    Transport {
-        operation: &'static str,
-        message: String,
-    },
+    Transport { operation: String, message: String },
     #[error("zot returned HTTP {status} during {operation}")]
-    Status {
-        operation: &'static str,
-        status: u16,
-    },
+    Status { operation: String, status: u16 },
     #[error("zot returned incomplete state for {repo}:{tag}: missing {field}")]
     Incomplete {
         repo: String,
@@ -81,52 +75,29 @@ impl ZotHttpConfig {
 #[derive(Clone)]
 pub struct ZotHttpStateSource {
     config: ZotHttpConfig,
-    client: reqwest::Client,
+    client: HttpClient,
 }
 impl ZotHttpStateSource {
     pub fn new(config: ZotHttpConfig) -> Result<Self, ZotStateError> {
-        let client = reqwest::Client::builder()
-            .timeout(config.request_timeout)
-            .build()
-            .map_err(|e| ZotStateError::Transport {
-                operation: "client construction",
-                message: e.to_string(),
-            })?;
+        let client = HttpClient::new(config.request_timeout)?;
         Ok(Self { config, client })
     }
-    fn request(&self, url: &str) -> reqwest::RequestBuilder {
+    fn request(&self, url: &str) -> HttpRequestBuilder {
         let request = self
             .client
             .get(url)
-            .header(header::ACCEPT, "application/vnd.oci.image.manifest.v1+json");
+            .header("Accept", "application/vnd.oci.image.manifest.v1+json");
         match &self.config.auth {
             ZotHttpAuth::None => request,
-            ZotHttpAuth::Basic { username, password } => {
-                request.basic_auth(username, Some(password))
-            }
+            ZotHttpAuth::Basic { username, password } => request.basic_auth(username, password),
             ZotHttpAuth::Bearer(token) => request.bearer_auth(token),
         }
     }
-    async fn response(
-        &self,
-        url: &str,
-        op: &'static str,
-    ) -> Result<reqwest::Response, ZotStateError> {
-        let response = self
-            .request(url)
-            .send()
+    async fn response(&self, url: &str, op: &'static str) -> Result<HttpResponse, ZotStateError> {
+        self.request(url)
+            .send(op)
             .await
-            .map_err(|e| ZotStateError::Transport {
-                operation: op,
-                message: e.to_string(),
-            })?;
-        if !response.status().is_success() {
-            return Err(ZotStateError::Status {
-                operation: op,
-                status: response.status().as_u16(),
-            });
-        }
-        Ok(response)
+            .map_err(ZotStateError::from)
     }
     async fn names(
         &self,
@@ -138,15 +109,11 @@ impl ZotHttpStateSource {
         while let Some(url) = next.take() {
             let response = self.response(&url, op).await?;
             let link = response
-                .headers()
-                .get(header::LINK)
-                .and_then(|v| v.to_str().ok())
+                .header("Link")
+                .as_deref()
                 .and_then(next_link)
                 .map(str::to_owned);
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|e| ZotStateError::Parse(e.to_string()))?;
+            let body: serde_json::Value = response.json().await?;
             let entries = body
                 .get(key)
                 .and_then(serde_json::Value::as_array)
@@ -179,23 +146,14 @@ impl ZotHttpStateSource {
             )
             .await?;
         let digest = response
-            .headers()
-            .get("Docker-Content-Digest")
-            .and_then(|v| v.to_str().ok())
+            .header("Docker-Content-Digest")
             .filter(|v| !v.is_empty())
-            .map(str::to_owned)
             .ok_or_else(|| ZotStateError::Incomplete {
                 repo: repo.into(),
                 tag: tag.into(),
                 field: "Docker-Content-Digest",
             })?;
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| ZotStateError::Transport {
-                operation: "manifest body",
-                message: e.to_string(),
-            })?;
+        let bytes = response.bytes("manifest").await?;
         let manifest: Manifest =
             serde_json::from_slice(&bytes).map_err(|e| ZotStateError::Parse(e.to_string()))?;
         let config = manifest.config.ok_or_else(|| ZotStateError::Incomplete {
@@ -215,8 +173,7 @@ impl ZotHttpStateSource {
             )
             .await?
             .json()
-            .await
-            .map_err(|e| ZotStateError::Parse(e.to_string()))?;
+            .await?;
         let pushed_at = image_config
             .created
             .filter(|v| !v.is_empty())
@@ -280,6 +237,25 @@ impl ZotStateSource for ZotHttpStateSource {
         Ok(result)
     }
 }
+impl From<HttpError> for ZotStateError {
+    fn from(e: HttpError) -> Self {
+        match e {
+            HttpError::Build { message } => ZotStateError::Transport {
+                operation: "client construction".to_string(),
+                message,
+            },
+            HttpError::Transport { operation, message } => {
+                ZotStateError::Transport { operation, message }
+            }
+            HttpError::Status { operation, status } => ZotStateError::Status { operation, status },
+            HttpError::Body { operation, message } => {
+                ZotStateError::Transport { operation, message }
+            }
+            HttpError::Parse { message } => ZotStateError::Parse(message),
+        }
+    }
+}
+
 fn next_link(value: &str) -> Option<&str> {
     let part = value
         .split(',')
@@ -648,9 +624,9 @@ mod tests {
         assert!(matches!(
             source.fetch_repositories().await,
             Err(ZotStateError::Status {
-                operation: "catalog",
+                operation,
                 status: 503
-            })
+            }) if operation == "catalog"
         ));
         server.await.unwrap();
 
@@ -662,9 +638,9 @@ mod tests {
         assert!(matches!(
             source.fetch_repositories().await,
             Err(ZotStateError::Transport {
-                operation: "catalog",
+                operation,
                 ..
-            })
+            }) if operation == "catalog"
         ));
     }
 
