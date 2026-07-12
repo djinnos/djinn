@@ -424,7 +424,12 @@ pub async fn plan_pressure_eviction(
 }
 
 fn target_reclaim_bytes(capacity: &CapacitySnapshot, high_free_ratio: f64) -> u64 {
-    let high_bytes = (capacity.total_bytes as f64 * high_free_ratio) as u64;
+    // Ceiling calculation: we need *at least* total_bytes * high_free_ratio
+    // bytes to be free, so we round up to the next whole byte. This prevents
+    // truncating the target before subtraction and stopping below the high
+    // watermark on fractional-byte boundaries.
+    let high_bytes =
+        ((capacity.total_bytes as f64 * high_free_ratio).ceil() as u64).min(capacity.total_bytes);
     high_bytes.saturating_sub(capacity.available_bytes)
 }
 

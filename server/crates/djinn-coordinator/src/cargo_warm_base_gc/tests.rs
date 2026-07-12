@@ -1280,6 +1280,37 @@ async fn pressure_young_base_is_excluded() {
 }
 
 #[tokio::test]
+async fn pressure_fractional_byte_boundary_reaches_high_watermark() {
+    // Regression: total_bytes is so small that total_bytes * high_free_ratio
+    // is not an integer. A ceiling calculation must be used so that the
+    // required high-watermark byte count is met, not truncated below it.
+    let config = pressure_config(0.15, 0.25);
+    let capacity = Capacity(Ok(CapacitySnapshot {
+        total_bytes: 10,
+        available_bytes: 1,
+    }));
+    let inventory = WarmBaseInventory {
+        entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 1)],
+        ignored: 0,
+    };
+    let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
+    let warm = Warm(Ok(false));
+    let locks = Lock(LockOutcome::Available);
+    let clock = TestClock::new(future(15), std::time::Instant::now());
+
+    let plan = plan_pressure_eviction(
+        inventory, &activity, &warm, &locks, &capacity, &config, &clock,
+    )
+    .await;
+
+    // Need 3 free bytes to reach ceil(10 * 0.25) = 3. Available is 1, so target
+    // is 2 bytes. With only a 1-byte base, the whole safe prefix is selected.
+    assert_eq!(plan.candidates.len(), 1);
+    assert_eq!(plan.target_bytes, 2);
+    assert_eq!(plan.projected_bytes, 1);
+}
+
+#[tokio::test]
 async fn pressure_lock_busy_and_error_retained() {
     let config = pressure_config(0.15, 0.25);
     let capacity = Capacity(Ok(CapacitySnapshot {
