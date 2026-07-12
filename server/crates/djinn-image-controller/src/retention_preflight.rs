@@ -282,9 +282,11 @@ struct ImageConfig {
 /// Preflight configuration for retention gating.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RetentionPreflightConfig {
+    pub enabled: bool,
     /// Whether destructive deletion is enabled in the Helm/operator config.
-    /// When `false`, preflight is advisory (dry-run report only, never blocks).
-    /// When `true`, preflight runs the full fail-closed safety check.
+    /// Only meaningful when `enabled` is `true`. When `false`, preflight is
+    /// advisory (dry-run report only, never blocks). When `true`, preflight
+    /// runs the full fail-closed safety check.
     pub destructive_enabled: bool,
     /// Number of newest tags to retain per catalog repo.
     pub newest_tags: usize,
@@ -293,8 +295,75 @@ pub struct RetentionPreflightConfig {
 impl Default for RetentionPreflightConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             destructive_enabled: false,
             newest_tags: 5,
+        }
+    }
+}
+
+impl RetentionPreflightConfig {
+    /// Derive the bounded preflight mode from this configuration.
+    pub fn mode(&self) -> PreflightMode {
+        if !self.enabled {
+            PreflightMode::Disabled
+        } else if self.destructive_enabled {
+            PreflightMode::Destructive
+        } else {
+            PreflightMode::DryRun
+        }
+    }
+}
+
+/// Bounded retention preflight mode — one value per operational state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreflightMode {
+    /// Retention is disabled — preflight is a no-op.
+    Disabled,
+    /// Advisory dry-run — report only, never blocks.
+    DryRun,
+    /// Destructive — fail-closed safety gate is active.
+    Destructive,
+}
+
+impl PreflightMode {
+    /// Stable lowercase label for logs/reports/metrics.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::DryRun => "dry_run",
+            Self::Destructive => "destructive",
+        }
+    }
+}
+
+/// Bounded retention preflight outcome — one value per deterministic result
+/// state. Covers all five states required by the cross-path observability
+/// matrix: disabled, advisory dry-run, safe destructive, blocked destructive,
+/// and fetch/state error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreflightOutcomeKind {
+    /// Retention is disabled — no plan computed, no Zot contact.
+    Disabled,
+    /// Dry-run advisory report produced (plan may be safe or unsafe).
+    Advisory,
+    /// Destructive mode and all selected images are proven pullable.
+    DestructiveSafe,
+    /// Destructive mode but one or more selected images are unsafe — blocked.
+    DestructiveBlocked,
+    /// Zot state fetch or DB enumeration failed — fail-closed.
+    FetchError,
+}
+
+impl PreflightOutcomeKind {
+    /// Stable lowercase label for logs/reports/metrics.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Advisory => "advisory",
+            Self::DestructiveSafe => "destructive_safe",
+            Self::DestructiveBlocked => "destructive_blocked",
+            Self::FetchError => "fetch_error",
         }
     }
 }
@@ -304,6 +373,10 @@ impl Default for RetentionPreflightConfig {
 pub struct PreflightOutcome {
     /// The computed retention plan (always available, even in dry-run).
     pub plan: RetentionPlan,
+    /// Bounded preflight mode (disabled/dry-run/destructive).
+    pub mode: PreflightMode,
+    /// Bounded deterministic outcome kind.
+    pub outcome_kind: PreflightOutcomeKind,
     /// Whether this preflight would block rollout (true only when destructive
     /// AND unsafe images exist).
     pub blocks_rollout: bool,
@@ -328,6 +401,9 @@ pub enum PreflightError {
         count: usize,
         /// The retention plan with the full analysis.
         plan: RetentionPlan,
+        /// The deterministic dry-run report (so callers can surface it even
+        /// when preflight returns `Err`).
+        report: String,
     },
 }
 
@@ -339,15 +415,33 @@ type PreflightResult = std::result::Result<PreflightOutcome, PreflightError>;
 /// catalog images from the DB, runs the planner, and enforces fail-closed
 /// behavior.
 ///
-/// - When `cfg.destructive_enabled` is `false`, the outcome is advisory: a
-///   dry-run report is produced but nothing blocks.
+/// - When `cfg.enabled` is `false`, returns a [`PreflightMode::Disabled`] /
+///   [`PreflightOutcomeKind::Disabled`] outcome with an empty plan and no Zot
+///   contact.
+/// - When `cfg.destructive_enabled` is `false` (dry-run), the outcome is
+///   advisory: a dry-run report is produced but nothing blocks.
 /// - When `cfg.destructive_enabled` is `true` and any selected image is unsafe,
-///   returns [`PreflightError::UnsafeSelectedImages`].
+///   returns [`PreflightError::UnsafeSelectedImages`] (fail-closed).
 pub async fn run_preflight(
     zot: &dyn ZotStateSource,
     selected: &[SelectedImage],
     cfg: &RetentionPreflightConfig,
 ) -> PreflightResult {
+    let mode = cfg.mode();
+
+    // Disabled: no Zot contact, no DB enumeration. Produce a bounded disabled
+    // outcome so the observability matrix has a deterministic representation.
+    if mode == PreflightMode::Disabled {
+        let plan = retention::plan_retention(&[], &[], &retention::RetentionPolicy::default());
+        return Ok(PreflightOutcome {
+            plan,
+            mode,
+            outcome_kind: PreflightOutcomeKind::Disabled,
+            blocks_rollout: false,
+            report: render_disabled_report(),
+        });
+    }
+
     // Fetch Zot state — errors propagate (fail-closed on fetch failure).
     let repos = zot.fetch_repositories().await?;
 
@@ -355,22 +449,92 @@ pub async fn run_preflight(
         newest_tags: cfg.newest_tags,
     };
     let plan = retention::plan_retention(&repos, selected, &policy);
-    let report = retention::render_report(&plan);
+    let report = render_mode_report(&plan, mode);
 
-    if cfg.destructive_enabled && !plan.is_safe {
+    if mode == PreflightMode::Destructive && !plan.is_safe {
         return Err(PreflightError::UnsafeSelectedImages {
             count: plan.unsafe_images.len(),
             plan,
+            report,
         });
     }
 
-    let blocks_rollout = cfg.destructive_enabled && !plan.is_safe;
+    let blocks_rollout = mode == PreflightMode::Destructive && !plan.is_safe;
+
+    let outcome_kind = if mode == PreflightMode::Destructive {
+        PreflightOutcomeKind::DestructiveSafe
+    } else {
+        PreflightOutcomeKind::Advisory
+    };
 
     Ok(PreflightOutcome {
         plan,
+        mode,
+        outcome_kind,
         blocks_rollout,
         report,
     })
+}
+
+/// Render the disabled-mode report — a bounded, deterministic representation
+/// that does not require a live registry.
+fn render_disabled_report() -> String {
+    let mut out = String::new();
+    out.push_str("=== Zot Catalog Retention Preflight Report ===\n\n");
+    out.push_str("Mode: disabled\n");
+    out.push_str("Outcome: disabled\n");
+    out.push_str("Retention is not enabled; no Zot contact or plan computed.\n");
+    out
+}
+
+/// Wrap the pure planner report with a bounded mode/outcome header so the
+/// operator-facing surface always identifies the preflight mode and
+/// deterministic result kind alongside the candidate/byte/safety detail.
+fn render_mode_report(plan: &RetentionPlan, mode: PreflightMode) -> String {
+    let outcome_kind = if mode == PreflightMode::Destructive {
+        if plan.is_safe {
+            PreflightOutcomeKind::DestructiveSafe
+        } else {
+            PreflightOutcomeKind::DestructiveBlocked
+        }
+    } else {
+        PreflightOutcomeKind::Advisory
+    };
+
+    let mut out = String::new();
+    out.push_str("=== Zot Catalog Retention Preflight Report ===\n\n");
+    out.push_str(&format!("Mode: {}\n", mode.label()));
+    out.push_str(&format!("Outcome: {}\n", outcome_kind.label()));
+
+    // Aggregate candidate tag counts across all repos.
+    let retained_count: usize = plan.repos.iter().map(|r| r.retained.len()).sum();
+    let deleted_count: usize = plan.repos.iter().map(|r| r.deleted.len()).sum();
+    let candidate_count = retained_count + deleted_count;
+    out.push_str(&format!("Candidate tags: {candidate_count}\n"));
+    out.push_str(&format!("Retained tags: {retained_count}\n"));
+    out.push_str(&format!("Deleted tags: {deleted_count}\n"));
+    out.push_str(&format!(
+        "Projected reclaimed bytes: {}\n",
+        plan.projected_reclaimed_bytes
+    ));
+    out.push_str(&format!(
+        "Projected retained bytes: {}\n",
+        plan.projected_retained_bytes
+    ));
+    out.push_str(&format!(
+        "Safe: {}\n",
+        if plan.is_safe { "yes" } else { "NO" }
+    ));
+    out.push_str(&format!("Selected images safe: {}\n", plan.safe_pins.len()));
+    out.push_str(&format!(
+        "Selected images unsafe: {}\n\n",
+        plan.unsafe_images.len()
+    ));
+
+    // Append the detailed per-repo / pin / unsafe sections from the pure
+    // planner report (without re-emitting its header/summary lines).
+    out.push_str(&retention::render_report(plan));
+    out
 }
 
 /// Convert DB-level [`djinn_db::SelectedCatalogImage`] records into the pure
@@ -395,10 +559,12 @@ pub fn adapt_selected_images(db_rows: &[djinn_db::SelectedCatalogImage]) -> Vec<
 /// Build a [`RetentionPreflightConfig`] from the Helm-rendered retention
 /// settings. This is how the controller reads `mrgt`'s Helm values at runtime.
 pub fn preflight_config_from_helm(
+    enabled: bool,
     destructive_enabled: bool,
     newest_tags: usize,
 ) -> RetentionPreflightConfig {
     RetentionPreflightConfig {
+        enabled,
         destructive_enabled,
         newest_tags,
     }
@@ -726,6 +892,7 @@ mod tests {
         };
         let selected = vec![sel("i1", Some("keep"), Some("sha256:keep"), "ready")];
         let cfg = RetentionPreflightConfig {
+            enabled: true,
             destructive_enabled: true,
             newest_tags: 1,
         };
@@ -750,6 +917,7 @@ mod tests {
         // Selected image's tag "old" will be deleted and its digest is unique.
         let selected = vec![sel("i1", Some("old"), Some("sha256:old"), "ready")];
         let cfg = RetentionPreflightConfig {
+            enabled: true,
             destructive_enabled: true,
             newest_tags: 1,
         };
@@ -774,6 +942,7 @@ mod tests {
         };
         let selected = vec![sel("i1", Some("old"), Some("sha256:old"), "ready")];
         let cfg = RetentionPreflightConfig {
+            enabled: true,
             destructive_enabled: false, // dry-run
             newest_tags: 1,
         };
@@ -801,6 +970,7 @@ mod tests {
         };
         let selected = vec![sel("i1", Some("keep"), Some("sha256:keep"), "ready")];
         let cfg = RetentionPreflightConfig {
+            enabled: true,
             destructive_enabled: false,
             newest_tags: 1,
         };
@@ -819,6 +989,7 @@ mod tests {
         let zot = FailingZot;
         let selected: Vec<SelectedImage> = vec![];
         let cfg = RetentionPreflightConfig {
+            enabled: true,
             destructive_enabled: true,
             newest_tags: 1,
         };
@@ -836,6 +1007,7 @@ mod tests {
         let zot = FailingZot;
         let selected: Vec<SelectedImage> = vec![];
         let cfg = RetentionPreflightConfig {
+            enabled: true,
             destructive_enabled: false,
             newest_tags: 1,
         };
@@ -899,6 +1071,7 @@ mod tests {
             sel("risky", Some("drop"), Some("sha256:r2"), "ready"),
         ];
         let cfg = RetentionPreflightConfig {
+            enabled: true,
             destructive_enabled: true,
             newest_tags: 1,
         };
@@ -924,11 +1097,216 @@ mod tests {
         };
         let selected = vec![sel("i1", Some("v1"), Some("sha256:shared"), "ready")];
         let cfg = RetentionPreflightConfig {
+            enabled: true,
             destructive_enabled: true,
             newest_tags: 1,
         };
         let outcome = run_preflight(&zot, &selected, &cfg).await.unwrap();
         assert!(outcome.plan.is_safe, "alias via shared digest must be safe");
         assert!(!outcome.blocks_rollout);
+    }
+
+    // ── Bounded mode/outcome contract ────────────────────────────────────
+
+    #[tokio::test]
+    async fn disabled_mode_produces_disabled_outcome_without_zot_contact() {
+        let zot = FailingZot; // Should never be called.
+        let cfg = RetentionPreflightConfig {
+            enabled: false,
+            destructive_enabled: false,
+            newest_tags: 5,
+        };
+        let outcome = run_preflight(&zot, &[], &cfg).await.unwrap();
+        assert_eq!(outcome.mode, PreflightMode::Disabled);
+        assert_eq!(outcome.outcome_kind, PreflightOutcomeKind::Disabled);
+        assert!(!outcome.blocks_rollout);
+        assert!(outcome.report.contains("Mode: disabled"));
+        assert!(outcome.report.contains("Outcome: disabled"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_mode_produces_advisory_outcome() {
+        let zot = MockZot {
+            repos: vec![two_tag_fixture()],
+        };
+        let selected = vec![sel("i1", Some("keep"), Some("sha256:keep"), "ready")];
+        let cfg = RetentionPreflightConfig {
+            enabled: true,
+            destructive_enabled: false,
+            newest_tags: 1,
+        };
+        let outcome = run_preflight(&zot, &selected, &cfg).await.unwrap();
+        assert_eq!(outcome.mode, PreflightMode::DryRun);
+        assert_eq!(outcome.outcome_kind, PreflightOutcomeKind::Advisory);
+        assert!(!outcome.blocks_rollout);
+        assert!(outcome.report.contains("Mode: dry_run"));
+        assert!(outcome.report.contains("Outcome: advisory"));
+    }
+
+    #[tokio::test]
+    async fn destructive_safe_produces_destructive_safe_outcome() {
+        let zot = MockZot {
+            repos: vec![two_tag_fixture()],
+        };
+        let selected = vec![sel("i1", Some("keep"), Some("sha256:keep"), "ready")];
+        let cfg = RetentionPreflightConfig {
+            enabled: true,
+            destructive_enabled: true,
+            newest_tags: 1,
+        };
+        let outcome = run_preflight(&zot, &selected, &cfg).await.unwrap();
+        assert_eq!(outcome.mode, PreflightMode::Destructive);
+        assert_eq!(outcome.outcome_kind, PreflightOutcomeKind::DestructiveSafe);
+        assert!(!outcome.blocks_rollout);
+        assert!(outcome.report.contains("Mode: destructive"));
+        assert!(outcome.report.contains("Outcome: destructive_safe"));
+    }
+
+    #[tokio::test]
+    async fn destructive_blocked_produces_error_with_report() {
+        let zot = MockZot {
+            repos: vec![two_tag_fixture()],
+        };
+        let selected = vec![sel("i1", Some("drop"), Some("sha256:drop"), "ready")];
+        let cfg = RetentionPreflightConfig {
+            enabled: true,
+            destructive_enabled: true,
+            newest_tags: 1,
+        };
+        let err = run_preflight(&zot, &selected, &cfg).await.unwrap_err();
+        match err {
+            PreflightError::UnsafeSelectedImages { count, report, .. } => {
+                assert_eq!(count, 1);
+                assert!(
+                    report.contains("Mode: destructive"),
+                    "blocked report must contain mode: {report}"
+                );
+                assert!(
+                    report.contains("Outcome: destructive_blocked"),
+                    "blocked report must contain outcome: {report}"
+                );
+                assert!(report.contains("UNSAFE"));
+            }
+            other => panic!("expected UnsafeSelectedImages, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_error_produces_fail_closed_in_both_modes() {
+        let zot = FailingZot;
+        // Destructive mode: must fail.
+        let cfg_destructive = RetentionPreflightConfig {
+            enabled: true,
+            destructive_enabled: true,
+            newest_tags: 1,
+        };
+        assert!(run_preflight(&zot, &[], &cfg_destructive).await.is_err());
+
+        // Dry-run mode: must also fail (fail-closed on fetch error).
+        let cfg_dry_run = RetentionPreflightConfig {
+            enabled: true,
+            destructive_enabled: false,
+            newest_tags: 1,
+        };
+        assert!(run_preflight(&zot, &[], &cfg_dry_run).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn report_contains_candidate_tag_counts_and_bytes() {
+        let zot = MockZot {
+            repos: vec![two_tag_fixture()],
+        };
+        let selected = vec![sel("i1", Some("keep"), Some("sha256:keep"), "ready")];
+        let cfg = RetentionPreflightConfig {
+            enabled: true,
+            destructive_enabled: false,
+            newest_tags: 1,
+        };
+        let outcome = run_preflight(&zot, &selected, &cfg).await.unwrap();
+        // Aggregate counts.
+        assert!(outcome.report.contains("Candidate tags: 2"));
+        assert!(outcome.report.contains("Retained tags: 1"));
+        assert!(outcome.report.contains("Deleted tags: 1"));
+        // Projected bytes.
+        assert!(outcome.report.contains("Projected reclaimed bytes: 300"));
+        assert!(outcome.report.contains("Projected retained bytes: 500"));
+        // Selected-image safety.
+        assert!(outcome.report.contains("Selected images safe: 1"));
+        assert!(outcome.report.contains("Selected images unsafe: 0"));
+    }
+
+    #[tokio::test]
+    async fn report_contains_gc_observation_guidance() {
+        let zot = MockZot {
+            repos: vec![two_tag_fixture()],
+        };
+        let selected = vec![sel("i1", Some("keep"), Some("sha256:keep"), "ready")];
+        let cfg = RetentionPreflightConfig {
+            enabled: true,
+            destructive_enabled: false,
+            newest_tags: 1,
+        };
+        let outcome = run_preflight(&zot, &selected, &cfg).await.unwrap();
+        assert!(
+            outcome
+                .report
+                .contains("Post-enable Zot GC observation guidance"),
+            "report must contain GC observation guidance"
+        );
+        assert!(
+            outcome.report.contains("operator-owned"),
+            "report must state production execution is operator-owned"
+        );
+    }
+
+    #[test]
+    fn preflight_config_mode_derivation() {
+        assert_eq!(
+            RetentionPreflightConfig {
+                enabled: false,
+                destructive_enabled: false,
+                newest_tags: 5
+            }
+            .mode(),
+            PreflightMode::Disabled
+        );
+        assert_eq!(
+            RetentionPreflightConfig {
+                enabled: false,
+                destructive_enabled: true,
+                newest_tags: 5
+            }
+            .mode(),
+            PreflightMode::Disabled,
+            "disabled overrides destructive_enabled"
+        );
+        assert_eq!(
+            RetentionPreflightConfig {
+                enabled: true,
+                destructive_enabled: false,
+                newest_tags: 5
+            }
+            .mode(),
+            PreflightMode::DryRun
+        );
+        assert_eq!(
+            RetentionPreflightConfig {
+                enabled: true,
+                destructive_enabled: true,
+                newest_tags: 5
+            }
+            .mode(),
+            PreflightMode::Destructive
+        );
+    }
+
+    fn two_tag_fixture() -> ZotRepository {
+        zrepo(
+            "djinn-image-i1",
+            vec![
+                ztag("keep", "sha256:keep", 500, "2024-01-02"),
+                ztag("drop", "sha256:drop", 300, "2024-01-01"),
+            ],
+        )
     }
 }

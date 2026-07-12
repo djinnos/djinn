@@ -1,0 +1,9 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+ordinary = { path = "../ordinary" }
+pm = { path = "../pm" }
