@@ -278,6 +278,7 @@ pub fn coordinator_context_from_db(
         task_ops_project_path_override: None,
         working_root: None,
         graph_warmer: None,
+        warm_job_guard: None,
         repo_graph_ops: None,
         runtime_ops: None,
         cargo_target_runs_root: None,

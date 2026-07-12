@@ -17,6 +17,10 @@ pub struct WarmBaseActivity {
     /// `true` when the project has at least one task run in a live
     /// (`starting` or `running`) non-terminal state.
     pub has_active_task_run: bool,
+    /// `true` when the project was deleted through `ProjectRepository`.
+    /// Tombstones remain after the project row is cascaded away so warm-base
+    /// cleanup can distinguish deleted projects from arbitrary UUID paths.
+    pub deleted_project: bool,
 }
 
 pub struct WarmBaseActivityRepository {
@@ -30,9 +34,10 @@ impl WarmBaseActivityRepository {
 
     /// Return the warm-base activity snapshot for a single project.
     ///
-    /// Returns `Ok(None)` when the project id is unknown.  Returns
+    /// Returns `Ok(None)` when the project id is unknown. Returns
     /// `Ok(Some(activity))` with `activity.latest_activity = None` when the
-    /// project exists but has no recorded task runs or warm activity.
+    /// project exists but has no recorded task runs or warm activity. A
+    /// deletion tombstone also returns `Some`, with `deleted_project = true`.
     pub async fn get(&self, project_id: &str) -> Result<Option<WarmBaseActivity>> {
         self.db.ensure_initialized().await?;
 
@@ -66,16 +71,25 @@ impl WarmBaseActivityRepository {
         .fetch_optional(self.db.pool())
         .await?;
 
-        let Some(r) = row else {
-            return Ok(None);
-        };
+        if let Some(r) = row {
+            let latest_activity: Option<String> = r.get("latest_activity");
+            let has_active_task_run: bool = r.get("has_active_task_run");
+            return Ok(Some(WarmBaseActivity {
+                latest_activity,
+                has_active_task_run,
+                deleted_project: false,
+            }));
+        }
 
-        let latest_activity: Option<String> = r.get("latest_activity");
-        let has_active_task_run: bool = r.get("has_active_task_run");
-
-        Ok(Some(WarmBaseActivity {
-            latest_activity,
-            has_active_task_run,
+        let deleted: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM deleted_projects WHERE project_id = $1")
+                .bind(project_id)
+                .fetch_optional(self.db.pool())
+                .await?;
+        Ok(deleted.map(|_| WarmBaseActivity {
+            latest_activity: None,
+            has_active_task_run: false,
+            deleted_project: true,
         }))
     }
 }
@@ -153,6 +167,26 @@ mod tests {
         repo.db.ensure_initialized().await.unwrap();
         let activity = repo.get("does-not-exist").await.expect("query");
         assert!(activity.is_none());
+    }
+
+    #[tokio::test]
+    async fn deleted_project_returns_tombstone_activity() {
+        let repo = fresh().await;
+        repo.db.ensure_initialized().await.unwrap();
+        sqlx::query("INSERT INTO deleted_projects (project_id) VALUES ($1)")
+            .bind("deleted-project")
+            .execute(repo.db.pool())
+            .await
+            .expect("seed deletion tombstone");
+
+        let activity = repo
+            .get("deleted-project")
+            .await
+            .expect("query")
+            .expect("tombstone exists");
+        assert!(activity.deleted_project);
+        assert!(!activity.has_active_task_run);
+        assert!(activity.latest_activity.is_none());
     }
 
     #[tokio::test]
