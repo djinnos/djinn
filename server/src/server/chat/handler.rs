@@ -98,8 +98,9 @@ use djinn_compaction::COMPACTION_SUMMARY_END_MARKER;
 use djinn_control_plane::server::DjinnMcpServer;
 use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
 use djinn_db::{
-    ChatInterruptionNoticeRepository, CreateChatInterruptionNotice, ProposalRepository,
-    SessionCompactionBoundaryRepository, SessionMessageRepository, SessionRepository,
+    ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
+    ProposalRepository, SessionCompactionBoundaryRepository, SessionMessageRepository,
+    SessionRepository,
 };
 use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_provider};
@@ -109,6 +110,46 @@ const MAX_TOOL_ITERATIONS: usize = 20;
 /// Metadata marker kind emitted by `SessionMessageRepository::summary_message`
 /// when `load_conversation` projects a completed compaction boundary.
 const PROJECTED_COMPACTION_MARKER_KIND: &str = "compaction_summary";
+
+/// The durable ids and model-only message for notices included in one chat turn.
+/// IDs, rather than rendered text or message positions, are the deduplication key.
+struct InterruptionReminder {
+    notice_ids: Vec<String>,
+    message: Message,
+}
+
+/// Collapse all pending interruptions into one model-only reminder. Notice timestamps
+/// are normalized UTC strings in the durable contract, so lexical maximum is latest.
+fn collapse_interruption_notices(
+    notices: &[ChatInterruptionNotice],
+) -> Option<InterruptionReminder> {
+    if notices.is_empty() {
+        return None;
+    }
+
+    let discarded_tool_calls_count = notices
+        .iter()
+        .map(|notice| notice.discarded_tool_calls_count)
+        .sum::<i32>();
+    let latest_interruption = notices
+        .iter()
+        .map(|notice| notice.interrupted_at.as_str())
+        .max()
+        .expect("non-empty notices have an interruption timestamp");
+    let message = Message::system(format!(
+        "A previous assistant turn was interrupted at {latest_interruption}. \
+         Its saved output may be partial. {discarded_tool_calls_count} pending tool call(s) \
+         were discarded and did not run. Treat that turn as incomplete."
+    ));
+
+    Some(InterruptionReminder {
+        notice_ids: notices
+            .iter()
+            .map(|notice| notice.interruption_notice_id.clone())
+            .collect(),
+        message,
+    })
+}
 
 /// Whether `msg` is a projected compaction summary produced by
 /// `load_conversation` when a completed durable boundary exists.
@@ -734,6 +775,20 @@ pub(super) async fn completions_handler_impl(
                 format!("failed to load persisted chat history: {e}"),
             )
         })?;
+    // Read notices before constructing the next prompt, but do not consume
+    // them yet: any prompt/history/provider-start failure must leave the same
+    // stable ids available for a retry.
+    let interruption_reminder = ChatInterruptionNoticeRepository::new(state.db().clone())
+        .list_unconsumed(&session_id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(session_id=%session_id, error=%e, "failed to load chat interruption notices");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load chat interruption notices: {e}"),
+            )
+        })
+        .map(|notices| collapse_interruption_notices(&notices))?;
     let latest_user_already_persisted =
         last_user_content_for_persist
             .as_ref()
@@ -756,6 +811,14 @@ pub(super) async fn completions_handler_impl(
     );
     let (system_message, _chat_config) = apply_chat_skills(system_message).await;
     conversation.push(system_message);
+    let interruption_notice_ids = if let Some(reminder) = interruption_reminder {
+        // This must remain between the normal preamble and every persisted
+        // message, including a projected compaction summary.
+        conversation.push(reminder.message);
+        reminder.notice_ids
+    } else {
+        Vec::new()
+    };
 
     if persisted_history.messages.is_empty() {
         conversation.messages.extend(
@@ -883,6 +946,7 @@ pub(super) async fn completions_handler_impl(
                         model_id: model_for_title,
                         context_window,
                         extra_allowed_mcp,
+                        interruption_notice_ids,
                     }),
                 ),
             )
@@ -910,6 +974,8 @@ struct ChatLoopContext {
     /// Extra MCP tools allowed for this loop on top of the global chat allowlist
     /// (the proposal-editing subset for a proposal-scoped chat; empty otherwise).
     extra_allowed_mcp: Vec<String>,
+    /// Stable notice ids included in the assembled first provider prompt.
+    interruption_notice_ids: Vec<String>,
 }
 
 /// Dispatch a single tool call and return its `ToolResult` content block.
@@ -1190,6 +1256,7 @@ async fn run_chat_loop(ctx: ChatLoopContext) {
         model_id,
         context_window,
         extra_allowed_mcp,
+        mut interruption_notice_ids,
     } = ctx;
     let agent_ctx = state.agent_context();
     let mut loop_count = 0usize;
@@ -1264,6 +1331,21 @@ async fn run_chat_loop(ctx: ChatLoopContext) {
             Err(StreamInitOutcome::CompactedAndContinue) => continue,
             Err(StreamInitOutcome::UnrecoverableBreak) => break,
         };
+
+        // Provider stream creation is the model-call start boundary. Only now
+        // consume exactly the durable ids which were included in the reminder.
+        // A failed initialization above leaves this vector and the rows intact.
+        if !interruption_notice_ids.is_empty() {
+            let notice_repo = ChatInterruptionNoticeRepository::new(state.db().clone());
+            match notice_repo.mark_consumed(&interruption_notice_ids).await {
+                Ok(()) => interruption_notice_ids.clear(),
+                Err(error) => tracing::warn!(
+                    session_id=%session_id,
+                    error=%error,
+                    "failed to consume started chat interruption notices"
+                ),
+            }
+        }
 
         tokio::pin!(stream);
         let turn = drain_provider_turn(&mut stream, &tx, &state, &session_id).await;
@@ -1630,6 +1712,69 @@ mod tests {
             provider_data: Some(marker),
         };
         Message::system_with_metadata(text, metadata)
+    }
+
+    fn interruption_notice(
+        id: &str,
+        discarded_tool_calls_count: i32,
+        interrupted_at: &str,
+    ) -> ChatInterruptionNotice {
+        ChatInterruptionNotice {
+            interruption_notice_id: id.to_owned(),
+            session_id: "session".to_owned(),
+            session_message_id: None,
+            interrupted_turn: true,
+            discarded_tool_calls_count,
+            interrupted_at: interrupted_at.to_owned(),
+            consumed_at: None,
+        }
+    }
+
+    #[test]
+    fn interruption_reminder_aggregates_and_precedes_projected_transcript() {
+        let notices = vec![
+            interruption_notice("notice-1", 2, "2026-07-12T01:00:00.000Z"),
+            interruption_notice("notice-2", 3, "2026-07-12T02:00:00.000Z"),
+        ];
+        let reminder = collapse_interruption_notices(&notices).expect("notices produce reminder");
+
+        assert_eq!(reminder.notice_ids, vec!["notice-1", "notice-2"]);
+        assert!(
+            reminder
+                .message
+                .text_content()
+                .contains("5 pending tool call(s)")
+        );
+        assert!(
+            reminder
+                .message
+                .text_content()
+                .contains("2026-07-12T02:00:00.000Z")
+        );
+
+        let mut conversation = Conversation::new();
+        conversation.push(Message::system("normal system and developer preamble"));
+        conversation.push(reminder.message);
+        conversation.push(projected_summary_message("persisted compaction summary"));
+        conversation.push(Message::user("persisted user turn"));
+
+        assert_eq!(
+            conversation.messages[0].text_content(),
+            "normal system and developer preamble"
+        );
+        assert!(
+            conversation.messages[1]
+                .text_content()
+                .contains("interrupted")
+        );
+        assert_eq!(
+            conversation.messages[2].text_content(),
+            "persisted compaction summary"
+        );
+        assert_eq!(
+            conversation.messages[3].text_content(),
+            "persisted user turn"
+        );
     }
 
     #[test]
