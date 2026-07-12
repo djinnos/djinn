@@ -733,6 +733,209 @@ async fn provider_models_connected_merged_child_preserves_full_path_and_uses_sur
     );
 }
 
+// ── Browse-all subscription filtering and merged-child id regressions ───────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_models_connected_rejects_blocked_and_unsupported_subscription_models() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    CredentialRepository::new(db, EventBus::noop())
+        .set("openai", "OPENAI_API_KEY", "sk-test")
+        .await
+        .unwrap();
+
+    let model_id = "minimax-coding-plan/MiniMax-M2.5";
+
+    let connected = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch");
+    assert!(
+        !connected["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .any(|m| m["id"] == model_id),
+        "unsupported (disconnected) subscription model must be absent from provider_models_connected"
+    );
+
+    let err = harness
+        .state()
+        .validate_models_for_user(&[model_id.to_string()], None)
+        .await
+        .expect_err("unsupported subscription model must fail dispatch validation");
+    assert!(
+        err.contains("haven't connected"),
+        "expected disconnected-provider rejection, got: {err}"
+    );
+
+    let set = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"blocked_subscriptions": ["minimax-coding-plan"]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(set["ok"].as_bool().unwrap_or(false), "org_policy_set ok");
+    assert!(
+        set["blocked_subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "minimax-coding-plan"),
+        "blocked subscription must be persisted"
+    );
+
+    let connected_after = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch after block");
+    assert!(
+        !connected_after["models"]
+            .as_array()
+            .expect("models array after block")
+            .iter()
+            .any(|m| m["id"] == model_id),
+        "blocked subscription model must remain absent from provider_models_connected"
+    );
+
+    let err_blocked = harness
+        .state()
+        .validate_models_for_user(&[model_id.to_string()], None)
+        .await
+        .expect_err("blocked subscription model must fail dispatch validation");
+    assert!(
+        err_blocked.contains("blocked by org policy"),
+        "expected blocked-subscription rejection, got: {err_blocked}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_models_connected_merged_child_persists_and_validates_full_id() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    CredentialRepository::new(db.clone(), EventBus::noop())
+        .set("chatgpt_codex", "CHATGPT_CODEX_TOKEN", "token")
+        .await
+        .unwrap();
+
+    let connected = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch");
+    let codex_model = connected["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|m| m["id"] == "openai/gpt-5.3-codex")
+        .expect("merged-child codex model must appear in connected output")
+        .clone();
+    assert_eq!(
+        codex_model["id"], "openai/gpt-5.3-codex",
+        "connected output must use the surfaced namespaced id"
+    );
+    assert_eq!(
+        codex_model["provider_id"], "openai",
+        "connected output must surface the parent provider id"
+    );
+
+    let user_repo = UserRepository::new(db.clone());
+    let user = user_repo
+        .upsert_from_github(999_004, "merged-child-test-user", None, None)
+        .await
+        .expect("create test user");
+    let user_id = user.id;
+
+    let set = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness
+                .call_tool(
+                    "user_settings_set",
+                    json!({
+                        "lanes": {
+                            "implement": ["openai/gpt-5.3-codex"]
+                        }
+                    }),
+                )
+                .await
+        })
+        .await
+        .expect("user_settings_set dispatch");
+    assert!(set["ok"].as_bool().unwrap_or(false), "user_settings_set ok");
+    let set_lanes = set["lanes"].as_object().expect("set response lanes");
+    assert_eq!(
+        set_lanes["implement"],
+        json!(["openai/gpt-5.3-codex"]),
+        "user_settings_set must echo the exact surfaced id"
+    );
+
+    let get = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness.call_tool("user_settings_get", json!({})).await
+        })
+        .await
+        .expect("user_settings_get dispatch");
+    assert!(get["ok"].as_bool().unwrap_or(false), "user_settings_get ok");
+    let get_lanes = get["lanes"].as_object().expect("get response lanes");
+    assert_eq!(
+        get_lanes["implement"],
+        json!(["openai/gpt-5.3-codex"]),
+        "user_settings_get must read back the exact surfaced id unchanged"
+    );
+
+    harness
+        .state()
+        .validate_models_for_user(&["openai/gpt-5.3-codex".to_string()], Some(&user_id))
+        .await
+        .expect("merged-child surfaced id must be dispatch-valid");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_models_connected_overrides_do_not_resurrect_filtered_subscription_models() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    CredentialRepository::new(db, EventBus::noop())
+        .set("openai", "OPENAI_API_KEY", "sk-test")
+        .await
+        .unwrap();
+
+    let set = harness
+        .call_tool(
+            "org_policy_set",
+            json!({
+                "blocked_subscriptions": ["chatgpt_codex", "minimax-coding-plan"],
+                "additional_recommended_model_ids": [
+                    "minimax-coding-plan/MiniMax-M2.5",
+                    "openai/gpt-5.2"
+                ],
+                "demoted_recommended_model_ids": ["openai/gpt-5.3-codex"]
+            }),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(set["ok"].as_bool().unwrap_or(false), "org_policy_set ok");
+
+    let map = connected_models_recommended_map(&harness).await;
+    assert!(
+        !map.contains_key("minimax-coding-plan/MiniMax-M2.5"),
+        "promotion must not reveal a blocked/disconnected subscription model"
+    );
+    assert!(
+        !*map
+            .get("openai/gpt-5.3-codex")
+            .expect("openai/gpt-5.3-codex should remain present in connected catalog"),
+        "demotion must not hide a connected catalog model"
+    );
+    assert!(
+        *map.get("openai/gpt-5.2")
+            .expect("openai/gpt-5.2 should be present in connected catalog"),
+        "promotion should still apply to a connected catalog model"
+    );
+}
+
 // ── Org AI policy: recommended-model override-list validation regressions ──────
 
 fn assert_org_policy_set_error(result: &serde_json::Value, expected_substring: &str) {
