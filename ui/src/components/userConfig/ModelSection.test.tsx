@@ -605,6 +605,84 @@ describe("ModelSection picker (browse/search)", () => {
     expect(within(item as HTMLElement).getByText("Recommended")).toBeInTheDocument();
   });
 
+  it("a refreshed connected-model response while mounted makes a new non-recommended multi-segment model addable", async () => {
+    const refreshedId = "fireworks/accounts/fireworks/models/new-refreshed-v1";
+    const refreshedName = "New Refreshed v1";
+
+    const initialModels = [
+      um("acme/alpha", { provider_id: "acme", name: "Alpha", recommended: false }),
+      um("acme/zeta", { provider_id: "acme", name: "Zeta", recommended: true }),
+    ];
+
+    const refreshedModels = [
+      ...initialModels,
+      um(refreshedId, {
+        provider_id: "fireworks",
+        name: refreshedName,
+        recommended: false,
+      }),
+    ];
+
+    let callCount = 0;
+    vi.mocked(fetchUserConnectedModels).mockImplementation(async () => {
+      callCount += 1;
+      return callCount === 1 ? initialModels : refreshedModels;
+    });
+    vi.mocked(saveUserModelSelection).mockClear();
+
+    render(<ModelSection targetId="target-user" />);
+
+    const user = userEvent.setup();
+    const refreshButton = await screen.findByRole("button", { name: "Refresh models" });
+
+    // Before refresh the new model is not reachable via search.
+    const addButtonsBefore = await screen.findAllByRole("button", { name: "Add model" });
+    await user.click(addButtonsBefore[0]!);
+    await screen.findByText("Add a model");
+    const searchBefore = await screen.findByPlaceholderText("Search models…");
+    await user.type(searchBefore, "new-refreshed");
+    expect(screen.queryByText(refreshedName)).not.toBeInTheDocument();
+
+    // Close the picker and trigger the settings-surface refetch path.
+    await user.click(await screen.findByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(screen.queryByText("Add a model")).not.toBeInTheDocument();
+    });
+    await user.click(refreshButton);
+
+    // Wait for the refetch to complete by observing the local call count.
+    await waitFor(() => {
+      expect(callCount).toBe(2);
+    });
+
+    // After refresh the same mounted component can browse/search the new model.
+    const addButtonsAfter = await screen.findAllByRole("button", { name: "Add model" });
+    await user.click(addButtonsAfter[0]!);
+    await screen.findByText("Add a model");
+    const searchAfter = await screen.findByPlaceholderText("Search models…");
+    await user.type(searchAfter, "new-refreshed");
+    const refreshedRow = await screen.findByText(refreshedName);
+    const item = refreshedRow.closest("[data-slot='command-item']")!;
+    await user.click(item);
+
+    await waitFor(() => {
+      expect(screen.getByText(refreshedName)).toBeInTheDocument();
+    });
+
+    // Save and assert the exact full multi-segment id reaches the mutation.
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(saveUserModelSelection).toHaveBeenCalledTimes(1);
+    });
+    const call = vi.mocked(saveUserModelSelection).mock.calls[0]!;
+    const lanes = call[1];
+    const allIds = [...lanes.plan, ...lanes.implement, ...lanes.review];
+    expect(allIds).toContain(refreshedId);
+    expect(call[2]).toHaveProperty(refreshedId);
+  });
+
   it("selecting a multi-segment model id adds the exact full id without truncation", async () => {
     vi.mocked(saveUserModelSelection).mockClear();
     render(<ModelSection targetId="target-user" />);
