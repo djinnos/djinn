@@ -2,6 +2,7 @@
 use super::*;
 use crate::AgentType;
 use djinn_core::models::Task;
+use serde_json::json;
 
 /// Render a prompt for the given agent type using empty tool schemas.
 ///
@@ -219,6 +220,284 @@ fn worker_prompt_includes_setup_commands_when_present() {
     assert!(prompt.contains("Do not run them yourself"));
     assert!(prompt.contains("npm install"));
     assert!(!prompt.contains("{{setup_commands_section}}"));
+}
+
+/// Return a small tool schema whose signature is visible in the rendered tools
+/// section. Descriptions are intentionally omitted from production rendering,
+/// so this fixture keeps mutations in signature-changing fields.
+fn make_test_tool_schema() -> serde_json::Value {
+    json!({
+        "name": "test_tool",
+        "description": "A tool for testing; not visible in production tool section.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "alpha": { "type": "string" },
+                "beta": { "type": "string" }
+            },
+            "required": ["alpha"]
+        }
+    })
+}
+
+/// Render a prompt for the given agent type using a deterministic fixture tool
+/// schema. Used by prompt-hash tests so mutations of the schema alter the
+/// rendered signature.
+fn render_prompt_with_test_tool(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> String {
+    let config = agent_type.role_config();
+    render_prompt_for_role(config, tool_schema_fixture, task, ctx)
+}
+
+fn tool_schema_fixture() -> Vec<serde_json::Value> {
+    vec![make_test_tool_schema()]
+}
+
+// ── Rendered-system-prompt hash tests (h0cl) ─────────────────────────────────
+
+#[test]
+fn rendered_system_prompt_hash_matches_exact_format() {
+    // Known SHA-256("hello") truncated to the first 16 hex chars.
+    let hash = rendered_system_prompt_hash("hello");
+    assert_eq!(hash, "sha256:2cf24dba5fb0a30e");
+    assert!(hash.starts_with("sha256:"));
+    assert_eq!(hash.len(), "sha256:".len() + 16);
+}
+
+#[test]
+fn rendered_system_prompt_hash_is_utf8_byte_exact() {
+    // Hash must reflect bytes, not Unicode code points. The literal "é" (U+00E9)
+    // and the escape \u{00e9} produce identical UTF-8 bytes.
+    let literal_hash = rendered_system_prompt_hash("é");
+    let escape_hash = rendered_system_prompt_hash("\u{00e9}");
+    assert_eq!(
+        literal_hash, escape_hash,
+        "hash should be over identical UTF-8 bytes"
+    );
+
+    // NFD (e + combining acute) vs NFC (composed é) produce different bytes, so
+    // the hashes must differ.
+    let nfd = "\u{0065}\u{0301}";
+    let nfc = "\u{00e9}";
+    assert_ne!(nfd.as_bytes(), nfc.as_bytes(), "precondition: bytes differ");
+    assert_ne!(
+        rendered_system_prompt_hash(nfd),
+        rendered_system_prompt_hash(nfc),
+        "different UTF-8 byte sequences should yield different hashes"
+    );
+}
+
+#[test]
+fn identical_rendered_prompts_produce_identical_hashes() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt_a = render_prompt_with_test_tool(AgentType::Worker, &task, &ctx);
+    let prompt_b = render_prompt_with_test_tool(AgentType::Worker, &task, &ctx);
+
+    assert_eq!(prompt_a, prompt_b);
+    assert_eq!(
+        rendered_system_prompt_hash(&prompt_a),
+        rendered_system_prompt_hash(&prompt_b),
+        "identical rendered strings must hash to the same identifier"
+    );
+}
+
+#[test]
+fn different_task_title_changes_rendered_hash() {
+    let ctx = make_ctx();
+    let base_task = make_task();
+    let base_prompt = render_prompt_with_test_tool(AgentType::Worker, &base_task, &ctx);
+    let base_hash = rendered_system_prompt_hash(&base_prompt);
+
+    let mut mutated_task = make_task();
+    mutated_task.title = "Add a totally different widget".into();
+    let mutated_prompt = render_prompt_with_test_tool(AgentType::Worker, &mutated_task, &ctx);
+    let mutated_hash = rendered_system_prompt_hash(&mutated_prompt);
+
+    assert_ne!(
+        base_hash, mutated_hash,
+        "a prompt-visible task mutation should change the hash"
+    );
+}
+
+fn tool_schema_for_renamed_tool() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "renamed_tool",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "alpha": { "type": "string" },
+                "beta": { "type": "string" }
+            },
+            "required": ["alpha"]
+        }
+    })]
+}
+
+fn tool_schema_for_property_mutated() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "test_tool",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "alpha": { "type": "string" },
+                "gamma": { "type": "string" }
+            },
+            "required": ["alpha"]
+        }
+    })]
+}
+
+#[test]
+fn tool_schema_signature_mutation_changes_rendered_hash() {
+    let task = make_task();
+    let ctx = make_ctx();
+
+    let base_prompt = render_prompt_for_role(
+        AgentType::Worker.role_config(),
+        tool_schema_for_once,
+        &task,
+        &ctx,
+    );
+    let base_hash = rendered_system_prompt_hash(&base_prompt);
+
+    // Mutate the tool name: this changes the rendered `- `test_tool(...)` line.
+    let mutated_prompt = render_prompt_for_role(
+        AgentType::Worker.role_config(),
+        tool_schema_for_renamed_tool,
+        &task,
+        &ctx,
+    );
+    let mutated_hash = rendered_system_prompt_hash(&mutated_prompt);
+    assert_ne!(
+        base_hash, mutated_hash,
+        "a tool name mutation visible in the rendered signature should change the hash"
+    );
+
+    // Mutate a property name in the schema: this changes the rendered signature.
+    let property_prompt = render_prompt_for_role(
+        AgentType::Worker.role_config(),
+        tool_schema_for_property_mutated,
+        &task,
+        &ctx,
+    );
+    let property_hash = rendered_system_prompt_hash(&property_prompt);
+    assert_ne!(
+        base_hash, property_hash,
+        "a visible property-name mutation should change the hash"
+    );
+}
+
+fn tool_schema_for_once() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "test_tool",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "alpha": { "type": "string" },
+                "beta": { "type": "string" }
+            },
+            "required": ["alpha"]
+        }
+    })]
+}
+
+fn tool_schema_for_description_test() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "test_tool",
+        "description": "first description",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "alpha": { "type": "string" }
+            },
+            "required": ["alpha"]
+        }
+    })]
+}
+
+#[test]
+fn tool_description_mutation_does_not_affect_hash_when_descriptions_omitted() {
+    // `format_tools_section` omits description bodies, so mutating only the
+    // description should not change the rendered tools section. This is a
+    // negative regression guard: if descriptions are ever included, the helper
+    // must also pick them up and this test will need to be updated.
+    let task = make_task();
+    let ctx = make_ctx();
+
+    let base_prompt = render_prompt_for_role(
+        AgentType::Worker.role_config(),
+        tool_schema_for_description_test,
+        &task,
+        &ctx,
+    );
+    let mutated_prompt = render_prompt_for_role(
+        AgentType::Worker.role_config(),
+        tool_schema_for_description_mutated,
+        &task,
+        &ctx,
+    );
+
+    assert_eq!(
+        base_prompt, mutated_prompt,
+        "description-only mutation must not alter rendered prompt"
+    );
+    assert_eq!(
+        rendered_system_prompt_hash(&base_prompt),
+        rendered_system_prompt_hash(&mutated_prompt),
+        "hash should stay stable when rendered prompt is unchanged"
+    );
+}
+
+fn tool_schema_for_description_mutated() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "test_tool",
+        "description": "second completely different description",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "alpha": { "type": "string" }
+            },
+            "required": ["alpha"]
+        }
+    })]
+}
+
+#[test]
+fn hash_boundary_is_after_truncation() {
+    let task = make_task();
+    // Inject a huge activity log that forces `MAX_SYSTEM_PROMPT_CHARS` truncation.
+    let huge_activity = "x".repeat(40_000);
+    let ctx = TaskContext {
+        activity: Some(huge_activity.clone()),
+        ..make_ctx()
+    };
+    let truncated_prompt = render_prompt(AgentType::Worker, &task, &ctx);
+    assert!(
+        truncated_prompt.len() <= MAX_SYSTEM_PROMPT_CHARS + 200,
+        "prompt should be truncated within the expected budget"
+    );
+    assert!(truncated_prompt.contains("omitted") || truncated_prompt.contains("truncated"));
+
+    let hash = rendered_system_prompt_hash(&truncated_prompt);
+    assert!(
+        hash.starts_with("sha256:"),
+        "hash must use the required prefix"
+    );
+    assert_eq!(
+        hash.len(),
+        "sha256:".len() + 16,
+        "hash must be 16 hex chars"
+    );
+
+    // The hash of the truncated output must differ from the hash of an
+    // unbounded version of the same inputs, proving the boundary is applied to
+    // the final returned string.
+    let longer = format!("{truncated_prompt}\n{huge_activity}");
+    assert_ne!(
+        rendered_system_prompt_hash(&longer),
+        hash,
+        "hash must reflect the final truncated string, not a longer unbounded version"
+    );
 }
 
 #[test]

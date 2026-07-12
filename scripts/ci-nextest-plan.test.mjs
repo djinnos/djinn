@@ -3,6 +3,10 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { readFile, writeFile, mkdtemp, rm, access } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   canonicalId,
   parseDiscovery,
@@ -10,8 +14,12 @@ import {
   estimateDuration,
   planTests,
   validateExactOnce,
+  buildFilterExpression,
+  parseArgs,
   TIMING_VERSION,
+  PROOF_VERSION,
   FALLBACK_DURATION_SECONDS,
+  DEFAULT_MAX_AGE_DAYS,
   PR_DEFAULT_SHARDS,
   PR_MAX_SHARDS,
   WIDE_DEFAULT_SHARDS,
@@ -19,6 +27,11 @@ import {
   PR_WIDEN_TEST_THRESHOLD,
   PR_WIDEN_DURATION_THRESHOLD_SECONDS,
 } from './ci-nextest-plan.mjs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const SCRIPT = join(__dirname, 'ci-nextest-plan.mjs');
+const NEXTEST_TOML = join(__dirname, '..', 'server', '.config', 'nextest.toml');
 
 function makeSummary(overrides = {}) {
   return {
@@ -66,6 +79,69 @@ function timingMap(tests, duration = 10) {
   const map = new Map();
   for (const t of tests) map.set(t.id, duration);
   return map;
+}
+
+async function makeTempDir() {
+  return mkdtemp('/var/tmp/ci-nextest-plan-');
+}
+
+async function pathExists(path) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function runCli(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [SCRIPT, ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+async function runPlan(args) {
+  const result = await runCli(args);
+  if (result.code !== 0) {
+    throw new Error(`CLI exited ${result.code}: ${result.stderr}`);
+  }
+  return JSON.parse(result.stdout);
+}
+
+function parseToml(text) {
+  const sections = {};
+  let current = null;
+  for (let line of text.split('\n')) {
+    const comment = line.indexOf('#');
+    if (comment >= 0) line = line.slice(0, comment);
+    line = line.trim();
+    if (!line) continue;
+    const sectionMatch = line.match(/^\[([^\]]+)\]$/);
+    if (sectionMatch) {
+      current = sectionMatch[1];
+      sections[current] = {};
+      continue;
+    }
+    if (current) {
+      const eq = line.indexOf('=');
+      if (eq >= 0) {
+        const key = line.slice(0, eq).trim();
+        const value = line.slice(eq + 1).trim();
+        sections[current][key] = value;
+      }
+    }
+  }
+  return sections;
 }
 
 const SUMMARY_ONE = makeSummary({
@@ -268,6 +344,88 @@ describe('estimateDuration', () => {
   });
 });
 
+describe('buildFilterExpression', () => {
+  it('produces an empty match for a shard with no tests', () => {
+    const expr = buildFilterExpression({ tests: [] });
+    assert.equal(expr, 'not (binary_id(/./))');
+  });
+
+  it('matches a single test exactly', () => {
+    const expr = buildFilterExpression({
+      tests: [{ binaryId: 'pkg::bin', testName: 'test_one' }],
+    });
+    assert.equal(expr, 'binary_id(=pkg::bin) & test(=test_one)');
+  });
+
+  it('groups multiple tests by binary ID', () => {
+    const expr = buildFilterExpression({
+      tests: [
+        { binaryId: 'pkg::bin', testName: 'test_one' },
+        { binaryId: 'pkg::bin', testName: 'test_two' },
+      ],
+    });
+    assert.equal(expr, 'binary_id(=pkg::bin) & (test(=test_one) | test(=test_two))');
+  });
+
+  it('joins multiple binaries with union', () => {
+    const expr = buildFilterExpression({
+      tests: [
+        { binaryId: 'pkg::bin', testName: 'a' },
+        { binaryId: 'other::it', testName: 'b' },
+      ],
+    });
+    assert.equal(expr, '(binary_id(=pkg::bin) & test(=a)) | (binary_id(=other::it) & test(=b))');
+  });
+});
+
+describe('parseArgs', () => {
+  it('uses defaults for an empty argument list', () => {
+    const opts = parseArgs(['node', 'script']);
+    assert.equal(opts.profile, 'pull-request');
+    assert.equal(opts.event, null);
+    assert.equal(opts.maxAgeDays, DEFAULT_MAX_AGE_DAYS);
+    assert.equal(typeof opts.now, 'number');
+    assert.equal(opts.fullValidation, false);
+    assert.equal(opts.help, undefined);
+  });
+
+  it('accepts discovery, timing, matrix, proof, and event paths', () => {
+    const opts = parseArgs([
+      'node', 'script',
+      '--discovery', 'd.json',
+      '--timing', 't.json',
+      '--matrix', 'm.json',
+      '--proof', 'p.json',
+      '--event', 'pull_request',
+    ]);
+    assert.equal(opts.discoveryPath, 'd.json');
+    assert.equal(opts.timingPath, 't.json');
+    assert.equal(opts.matrixPath, 'm.json');
+    assert.equal(opts.proofPath, 'p.json');
+    assert.equal(opts.event, 'pull_request');
+  });
+
+  it('overrides profile with --full-validation', () => {
+    const opts = parseArgs(['node', 'script', '--profile', 'pull-request', '--full-validation']);
+    assert.equal(opts.profile, 'full-validation');
+  });
+
+  it('accepts a numeric or ISO --now', () => {
+    const numeric = parseArgs(['node', 'script', '--now', '1700000000000']);
+    assert.equal(numeric.now, 1700000000000);
+    const iso = parseArgs(['node', 'script', '--now', '2026-01-01T00:00:00.000Z']);
+    assert.equal(iso.now, Date.parse('2026-01-01T00:00:00.000Z'));
+  });
+
+  it('rejects unknown arguments', () => {
+    assert.throws(() => parseArgs(['node', 'script', '--bogus']), /Unknown argument: --bogus/);
+  });
+
+  it('rejects missing option values', () => {
+    assert.throws(() => parseArgs(['node', 'script', '--discovery']), /Missing argument for --discovery/);
+  });
+});
+
 describe('planTests', () => {
   it('assigns every discovered test exactly once', () => {
     const tests = parseDiscovery(JSON.stringify(SUMMARY_MANY));
@@ -275,6 +433,15 @@ describe('planTests', () => {
     validateExactOnce(plan);
     assert.equal(plan.proof.exactOnce, true);
     assert.equal(plan.shardCount, COLD_START_SHARDS);
+  });
+
+  it('enumerates discovered and assigned IDs in the proof', () => {
+    const tests = parseDiscovery(JSON.stringify(SUMMARY_MANY));
+    const plan = planTests({ tests, timings: new Map() });
+    const expectedIds = tests.map((t) => t.id).sort();
+    assert.deepEqual(plan.proof.discoveredIds, expectedIds);
+    assert.deepEqual(plan.proof.assignedIds, expectedIds);
+    assert.equal(plan.proof.version, PROOF_VERSION);
   });
 
   it('plans compact PR with two shards when timing is fresh', () => {
@@ -412,5 +579,180 @@ describe('planTests', () => {
       assert.equal(plan.coldStart, true);
       assert.equal(plan.shardCount, COLD_START_SHARDS);
     }
+  });
+});
+
+describe('CLI end-to-end', () => {
+  it('writes matrix and proof artifacts', async () => {
+    const dir = await makeTempDir();
+    try {
+      const discovery = join(dir, 'discovery.json');
+      const timing = join(dir, 'timing.json');
+      const matrixPath = join(dir, 'matrix.json');
+      const proofPath = join(dir, 'proof.json');
+      await writeFile(discovery, JSON.stringify(SUMMARY_MANY));
+      await writeFile(timing, JSON.stringify(makeTiming({
+        generated_at: Date.now(),
+        tests: { 'pkg|bin|fast': 10, 'pkg|bin|slow': 100, 'other|it|alpha': 20, 'other|it|beta': 20 },
+      })));
+
+      const plan = await runPlan([
+        '--discovery', discovery,
+        '--timing', timing,
+        '--profile', 'pull-request',
+        '--event', 'pull_request',
+        '--matrix', matrixPath,
+        '--proof', proofPath,
+        '--now', Date.now().toString(),
+      ]);
+      assert.equal(plan.profile, 'pull-request');
+      assert.equal(plan.event, 'pull_request');
+
+      const matrix = JSON.parse(await readFile(matrixPath, 'utf8'));
+      assert.equal(matrix.version, PROOF_VERSION);
+      assert.equal(matrix.profile, 'pull-request');
+      assert.equal(matrix.event, 'pull_request');
+      assert.equal(matrix.shardCount, plan.shardCount);
+      assert.equal(Array.isArray(matrix.shards), true);
+      assert.equal(matrix.shards.length, plan.shardCount);
+
+      const proof = JSON.parse(await readFile(proofPath, 'utf8'));
+      assert.equal(proof.version, PROOF_VERSION);
+      assert.equal(proof.profile, 'pull-request');
+      assert.equal(proof.event, 'pull_request');
+      assert.equal(proof.exactOnce, true);
+      assert.deepEqual(proof.discoveredIds, plan.proof.discoveredIds);
+      assert.deepEqual(proof.assignedIds, plan.proof.assignedIds);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits nonzero on malformed discovery without writing artifacts', async () => {
+    const dir = await makeTempDir();
+    try {
+      const discovery = join(dir, 'discovery.json');
+      const matrixPath = join(dir, 'matrix.json');
+      const proofPath = join(dir, 'proof.json');
+      await writeFile(discovery, 'not valid json');
+
+      const result = await runCli([
+        '--discovery', discovery,
+        '--matrix', matrixPath,
+        '--proof', proofPath,
+      ]);
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /Invalid discovery JSON/);
+      assert.equal(await pathExists(matrixPath), false);
+      assert.equal(await pathExists(proofPath), false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not drop tests when timing is stale, incompatible, or missing', async () => {
+    const dir = await makeTempDir();
+    try {
+      const discovery = join(dir, 'discovery.json');
+      await writeFile(discovery, JSON.stringify(SUMMARY_MANY));
+      const now = Date.now();
+
+      const stale = makeTiming({
+        generated_at: now - 30 * 24 * 60 * 60 * 1000,
+        tests: { 'pkg|bin|fast': 10 },
+      });
+      const incompatible = makeTiming({ version: 'legacy/v0', tests: { 'pkg|bin|fast': 10 } });
+      const cases = [
+        { name: 'missing', timing: null },
+        { name: 'stale', timing: stale },
+        { name: 'incompatible', timing: incompatible },
+      ];
+
+      for (const c of cases) {
+        const args = ['--discovery', discovery, '--profile', 'pull-request', '--now', now.toString()];
+        if (c.timing) {
+          const timingPath = join(dir, `${c.name}-timing.json`);
+          await writeFile(timingPath, JSON.stringify(c.timing));
+          args.push('--timing', timingPath);
+        }
+        const plan = await runPlan(args);
+        assert.equal(plan.proof.discoveredCount, 4, `${c.name}: discoveredCount`);
+        assert.equal(plan.proof.assignedCount, 4, `${c.name}: assignedCount`);
+        assert.equal(plan.proof.exactOnce, true, `${c.name}: exactOnce`);
+        assert.equal(plan.coldStart, true, `${c.name}: coldStart`);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('sets full-validation profile via flag', async () => {
+    const dir = await makeTempDir();
+    try {
+      const discovery = join(dir, 'discovery.json');
+      await writeFile(discovery, JSON.stringify(SUMMARY_ONE));
+      const plan = await runPlan(['--discovery', discovery, '--full-validation']);
+      assert.equal(plan.profile, 'full-validation');
+      assert.equal(plan.shardCount, WIDE_DEFAULT_SHARDS);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('matrix filters partition discovered tests exactly once', async () => {
+    const dir = await makeTempDir();
+    try {
+      const discovery = join(dir, 'discovery.json');
+      await writeFile(discovery, JSON.stringify(SUMMARY_MANY));
+      const matrixPath = join(dir, 'matrix.json');
+      await runPlan([
+        '--discovery', discovery,
+        '--matrix', matrixPath,
+        '--profile', 'pull-request',
+      ]);
+      const matrix = JSON.parse(await readFile(matrixPath, 'utf8'));
+      const seen = new Set();
+      const discovered = new Set(parseDiscovery(JSON.stringify(SUMMARY_MANY)).map((t) => t.id));
+      for (const row of matrix.shards) {
+        assert.equal(row.shard, `shard-${row.shardIndex + 1}`);
+        assert.equal(typeof row.filter, 'string');
+        assert.equal(row.count, row.testIds.length);
+        for (const id of row.testIds) {
+          assert.equal(seen.has(id), false, `duplicate assignment: ${id}`);
+          assert.equal(discovered.has(id), true, `unknown id: ${id}`);
+          seen.add(id);
+        }
+      }
+      assert.equal(seen.size, discovered.size);
+      assert.deepEqual([...seen].sort(), [...discovered].sort());
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('nextest.toml compatibility', () => {
+  it('contains planner-emit profiles that inherit from ci and preserve default/ci', async () => {
+    const toml = await readFile(NEXTEST_TOML, 'utf8');
+    const sections = parseToml(toml);
+
+    assert.equal('profile.default' in sections, true);
+    assert.equal('profile.ci' in sections, true);
+    assert.equal('profile.pull-request' in sections, true);
+    assert.equal('profile.merge-group' in sections, true);
+    assert.equal('profile.full-validation' in sections, true);
+
+    assert.equal(sections['profile.pull-request'].inherits, '"ci"');
+    assert.equal(sections['profile.pull-request']['fail-fast'], 'true');
+    assert.equal(sections['profile.pull-request']['final-status-level'], '"fail"');
+
+    assert.equal(sections['profile.merge-group'].inherits, '"ci"');
+    assert.equal(sections['profile.full-validation'].inherits, '"ci"');
+
+    // Existing CI profile is unchanged.
+    assert.equal(sections['profile.ci']['fail-fast'], 'false');
+    assert.equal(sections['profile.ci']['final-status-level'], '"flaky"');
+    assert.equal(sections['profile.default']['fail-fast'], 'true');
+    assert.equal(sections['profile.default'].retries, '0');
   });
 });
