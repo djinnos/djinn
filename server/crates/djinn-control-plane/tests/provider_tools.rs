@@ -11,8 +11,10 @@
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::auth_context::SESSION_USER_ID;
 use djinn_core::events::EventBus;
+use djinn_core::models::{Model, Pricing, Provider};
 use djinn_db::OrgAiPolicyRepository;
 use djinn_db::repositories::user::UserRepository;
+use djinn_provider::catalog::builtin;
 use djinn_provider::repos::CredentialRepository;
 use serde_json::json;
 use std::collections::HashMap;
@@ -1252,4 +1254,174 @@ async fn non_recommended_connected_model_persists_and_validates_including_org_ov
         )
         .await
         .expect("catalog-present models should remain dispatch-valid after overrides");
+}
+
+// ── Degraded-mode loaded-catalog freshness: seeded non-recommended model ─────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seeded_loaded_catalog_non_recommended_model_round_trips_and_validates() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    let provider_id = "seed-catalog-freshness";
+    let bare_model_id = "accounts/fireworks/models/seeded-fresh-5.0";
+    let full_model_id = format!("{provider_id}/{bare_model_id}");
+
+    // Seed the in-memory catalog with a custom, OpenAI-compatible provider that
+    // carries a multi-segment model id. This model is intentionally absent from
+    // the baseline RECOMMENDED_MODELS table.
+    let provider = Provider {
+        id: provider_id.to_string(),
+        name: "Seeded Freshness Provider".to_string(),
+        npm: "@ai-sdk/openai".to_string(),
+        env_vars: vec!["SEED_API_KEY".to_string()],
+        base_url: "https://api.seed.example/v1".to_string(),
+        docs_url: "https://seed.example/docs".to_string(),
+        is_openai_compatible: true,
+    };
+    let model = Model {
+        id: full_model_id.clone(),
+        provider_id: provider_id.to_string(),
+        name: "Seeded Fresh 5.0".to_string(),
+        tool_call: true,
+        reasoning: false,
+        attachment: false,
+        context_window: 128_000,
+        output_limit: 16_384,
+        pricing: Pricing {
+            input_per_million: 1.0,
+            output_per_million: 3.0,
+            cache_read_per_million: 0.0,
+            cache_write_per_million: 0.0,
+        },
+    };
+    harness
+        .state()
+        .catalog()
+        .add_custom_provider(provider, vec![model]);
+
+    assert!(
+        !builtin::is_recommended_model(provider_id, bare_model_id),
+        "seeded fixture must not be in the baseline RECOMMENDED_MODELS"
+    );
+
+    CredentialRepository::new(db.clone(), EventBus::noop())
+        .set(provider_id, "SEED_API_KEY", "sk-seed")
+        .await
+        .unwrap();
+
+    let connected = harness
+        .call_tool("provider_connected", json!({}))
+        .await
+        .expect("provider_connected dispatch");
+    assert!(
+        connected["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == provider_id),
+        "seeded provider must be reported as connected"
+    );
+
+    let result = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch");
+    let models = result["models"].as_array().expect("models array");
+    let seeded = models
+        .iter()
+        .find(|m| m["id"] == full_model_id)
+        .expect("seeded model must appear in connected catalog output");
+    assert_eq!(seeded["provider_id"], provider_id);
+    assert!(
+        !seeded["recommended"].as_bool().unwrap_or(true),
+        "seeded model must surface recommended=false"
+    );
+
+    let user_repo = UserRepository::new(db.clone());
+    let user = user_repo
+        .upsert_from_github(999_005, "seeded-catalog-user", None, None)
+        .await
+        .expect("create test user");
+    let user_id = user.id;
+
+    let set = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness
+                .call_tool(
+                    "user_settings_set",
+                    json!({
+                        "lanes": {
+                            "implement": [full_model_id]
+                        }
+                    }),
+                )
+                .await
+        })
+        .await
+        .expect("user_settings_set dispatch");
+    assert!(
+        set["ok"].as_bool().unwrap_or(false),
+        "user_settings_set should accept the seeded non-recommended model: {set}"
+    );
+    let set_lanes = set["lanes"].as_object().expect("set response lanes");
+    assert_eq!(
+        set_lanes["implement"],
+        json!([full_model_id]),
+        "user_settings_set must echo the exact seeded id"
+    );
+
+    let get = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness.call_tool("user_settings_get", json!({})).await
+        })
+        .await
+        .expect("user_settings_get dispatch");
+    assert!(
+        get["ok"].as_bool().unwrap_or(false),
+        "user_settings_get should succeed: {get}"
+    );
+    let get_lanes = get["lanes"].as_object().expect("get response lanes");
+    assert_eq!(
+        get_lanes["implement"],
+        json!([full_model_id]),
+        "user_settings_get must read back the exact seeded id unchanged"
+    );
+
+    harness
+        .state()
+        .validate_models_for_user(std::slice::from_ref(&full_model_id), Some(&user_id))
+        .await
+        .expect("seeded catalog-present id should be dispatch-valid");
+
+    let absent = format!("{provider_id}/accounts/fireworks/models/not-seeded");
+    let err = harness
+        .state()
+        .validate_models_for_user(std::slice::from_ref(&absent), Some(&user_id))
+        .await
+        .expect_err("catalog-absent id under the connected provider should be rejected");
+    assert!(
+        err.contains("not available in the connected provider catalog"),
+        "expected catalog membership rejection for absent id, got: {err}"
+    );
+
+    let rejected_set = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness
+                .call_tool("user_settings_set", json!({"lanes": {"plan": [absent]}}))
+                .await
+        })
+        .await
+        .expect("user_settings_set rejection dispatch");
+    assert!(
+        !rejected_set["ok"].as_bool().unwrap_or(true),
+        "user_settings_set must reject a catalog-absent id: {rejected_set}"
+    );
+    assert!(
+        rejected_set["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not available in the connected provider catalog"),
+        "user_settings_set should report catalog membership rejection: {rejected_set}"
+    );
 }
