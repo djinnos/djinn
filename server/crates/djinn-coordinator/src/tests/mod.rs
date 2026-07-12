@@ -47,6 +47,10 @@ impl RecordingGraphWarmer {
 
 #[async_trait::async_trait]
 impl djinn_runtime::GraphWarmerService for RecordingGraphWarmer {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn trigger(&self, project_id: &str) {
         self.triggered
             .lock()
