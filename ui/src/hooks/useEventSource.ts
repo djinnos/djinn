@@ -1,4 +1,4 @@
-/* eslint-disable react-refresh/only-export-components -- reconnect delay helpers are exported for focused unit tests. */
+ 
 /**
  * useEventSource hook - Manages EventSource connection with auto-reconnect
  *

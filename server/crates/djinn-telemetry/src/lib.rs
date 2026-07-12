@@ -87,8 +87,8 @@ const PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS: &str =
 const CACHE_CLEANUP_TOTAL: &str = "djinn_cache_cleanup_total";
 const CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL: &str = "djinn_cache_cleanup_reclaimed_bytes_total";
 const CACHE_CLEANUP_CANDIDATES_TOTAL: &str = "djinn_cache_cleanup_candidates_total";
-const CACHE_CLEANUP_COMPONENTS: [&str; 2] = ["sccache", "cargo_target_runs"];
-const CACHE_CLEANUP_OUTCOMES: [&str; 10] = [
+const CACHE_CLEANUP_COMPONENTS: [&str; 3] = ["sccache", "cargo_target_runs", "cargo_warm_base"];
+const CACHE_CLEANUP_OUTCOMES: [&str; 13] = [
     "deleted",
     "skipped",
     "retained",
@@ -99,6 +99,9 @@ const CACHE_CLEANUP_OUTCOMES: [&str; 10] = [
     "loose_file_deleted",
     "retained_fresh_malformed",
     "retained_non_utf8",
+    "retained_young",
+    "retained_active",
+    "retained_lock_busy",
 ];
 const CACHE_CLEANUP_MODES: [&str; 2] = ["dry_run", "delete"];
 
@@ -113,6 +116,10 @@ const ARBITER_TIME_IN_ARBITRATION_SECONDS: &str = "djinn_arbiter_time_in_arbitra
 const INFRA_EXEMPT_TOTAL: &str = "djinn_infra_exempt_total";
 const FALLBACK_RESCUE_TOTAL: &str = "djinn_fallback_rescue_total";
 const REASONING_KILL_TOTAL: &str = "djinn_reasoning_kill_total";
+
+// ─── Reply-loop turn budget observability ────────────────────────────────
+const REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL: &str =
+    "djinn_reply_loop_inline_char_budget_trips_total";
 
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
@@ -782,6 +789,12 @@ fn register_metrics() {
             }
         }
     }
+    // ─── Reply-loop turn budget observability ─────────────────────────
+    metrics::describe_counter!(
+        REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL,
+        "Reply-loop turns where the merged inline character budget was exceeded and a tool result was externalized. Per-turn details remain in structured tracing events."
+    );
+    metrics::counter!(REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL).absolute(0);
     // ─── Arbiter rollout hardening metrics ────────────────────────────
     metrics::describe_counter!(
         ARBITER_DECISION_TOTAL,
@@ -1247,6 +1260,31 @@ pub mod fallback_rescue {
     }
 }
 
+pub mod reply_loop {
+    //! Reply-loop turn-budget observability.
+    //!
+    //! Tracks production-level counts for reply-loop policy outcomes while
+    //! keeping rich per-turn metadata in structured tracing events.
+    //!
+    //! Bounded labels: none.
+    //!
+    //! High-cardinality dimensions (`task_id`, tool names, tool-use ids,
+    //! result sizes, budget values) MUST NOT appear as Prometheus labels.
+
+    /// Increment the reply-loop inline-character-budget-trip counter.
+    ///
+    /// Call once on the over-budget branch of the turn budget post-pass,
+    /// after the pass has externalized at least one tool result because the
+    /// merged inline character count exceeded the configured budget. This
+    /// counter is intentionally label-free; per-turn details such as
+    /// `inline_chars_pre`, `inline_chars_post`, `tool_count`,
+    /// `externalized_count`, `largest_result_chars`, and `tool_name_missing`
+    /// remain in the structured tracing event emitted by the reply loop.
+    pub fn increment_inline_char_budget_trip() {
+        metrics::counter!(super::REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL).increment(1);
+    }
+}
+
 pub mod reasoning_kill {
     //! Reasoning-model false-positive kill observability.
     //!
@@ -1476,6 +1514,7 @@ pub mod cache_cleanup {
     /// Stable component labels.
     pub const COMPONENT_SCCACHE: &str = "sccache";
     pub const COMPONENT_CARGO_TARGET_RUNS: &str = "cargo_target_runs";
+    pub const COMPONENT_CARGO_WARM_BASE: &str = "cargo_warm_base";
 
     /// Stable outcome labels for `djinn_cache_cleanup_total`.
     pub const OUTCOME_DELETED: &str = "deleted";
@@ -1493,17 +1532,28 @@ pub mod cache_cleanup {
     pub const OUTCOME_RETAINED_FRESH_MALFORMED: &str = "retained_fresh_malformed";
     pub const OUTCOME_RETAINED_NON_UTF8: &str = "retained_non_utf8";
 
+    /// Warm-base idle eviction specific outcome labels. These are bounded and
+    /// distinguish the most common retention reasons without leaking
+    /// high-cardinality project or path labels into metrics.
+    pub const OUTCOME_RETAINED_YOUNG: &str = "retained_young";
+    pub const OUTCOME_RETAINED_ACTIVE: &str = "retained_active";
+    pub const OUTCOME_RETAINED_LOCK_BUSY: &str = "retained_lock_busy";
+
     /// Stable mode labels.
     pub const MODE_DRY_RUN: &str = "dry_run";
     pub const MODE_DELETE: &str = "delete";
 
     /// All bounded component labels — used for registration seeding.
     #[cfg(test)]
-    pub(crate) const ALL_COMPONENTS: [&str; 2] = [COMPONENT_SCCACHE, COMPONENT_CARGO_TARGET_RUNS];
+    pub(crate) const ALL_COMPONENTS: [&str; 3] = [
+        COMPONENT_SCCACHE,
+        COMPONENT_CARGO_TARGET_RUNS,
+        COMPONENT_CARGO_WARM_BASE,
+    ];
 
     /// All bounded outcome labels — used for registration seeding.
     #[cfg(test)]
-    pub(crate) const ALL_OUTCOMES: [&str; 10] = [
+    pub(crate) const ALL_OUTCOMES: [&str; 13] = [
         OUTCOME_DELETED,
         OUTCOME_SKIPPED,
         OUTCOME_RETAINED,
@@ -1514,6 +1564,9 @@ pub mod cache_cleanup {
         OUTCOME_LOOSE_FILE_DELETED,
         OUTCOME_RETAINED_FRESH_MALFORMED,
         OUTCOME_RETAINED_NON_UTF8,
+        OUTCOME_RETAINED_YOUNG,
+        OUTCOME_RETAINED_ACTIVE,
+        OUTCOME_RETAINED_LOCK_BUSY,
     ];
 
     /// All bounded mode labels — used for registration seeding.
@@ -1522,7 +1575,7 @@ pub mod cache_cleanup {
 
     /// Increment the cache cleanup counter for a `(component, outcome, mode)` bucket.
     ///
-    /// `component` MUST be one of `COMPONENT_SCCACHE` or `COMPONENT_CARGO_TARGET_RUNS`.
+    /// `component` MUST be one of the `COMPONENT_*` constants.
     /// `outcome` MUST be one of the `OUTCOME_*` constants.
     /// `mode` MUST be one of `MODE_DRY_RUN` or `MODE_DELETE`.
     ///
@@ -2746,6 +2799,67 @@ mod tests {
             unlabelled_sample_value(&rendered, FALLBACK_RESCUE_TOTAL) >= 1.0,
             "fallback rescue should increment by 1"
         );
+    }
+
+    #[test]
+    fn reply_loop_inline_char_budget_trip_counter_renders_and_increments() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let before = render().unwrap();
+        let before_val =
+            unlabelled_sample_value(&before, REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL);
+        assert!(
+            before.contains(&format!(
+                "# HELP {REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL}"
+            )),
+            "missing HELP line for reply-loop budget-trip counter:\n{before}"
+        );
+        assert!(
+            before.contains(REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL),
+            "counter must be visible (zero-seeded) before the first trip:\n{before}"
+        );
+
+        reply_loop::increment_inline_char_budget_trip();
+
+        let after = render().unwrap();
+        let after_val = unlabelled_sample_value(&after, REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL);
+        assert_eq!(
+            after_val,
+            before_val + 1.0,
+            "budget-trip counter should increment exactly once"
+        );
+    }
+
+    #[test]
+    fn reply_loop_inline_char_budget_trip_counter_has_no_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        reply_loop::increment_inline_char_budget_trip();
+
+        let rendered = render().unwrap();
+        for forbidden in [
+            "task_id=",
+            "tool=",
+            "tool_name=",
+            "tool_use_id=",
+            "result_size=",
+            "inline_chars=",
+            "budget=",
+            "preview_floor=",
+            "externalized_count=",
+        ] {
+            for line in rendered.lines() {
+                if !line.starts_with(REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL) {
+                    continue;
+                }
+                assert!(
+                    !line.contains(forbidden),
+                    "reply-loop budget-trip counter must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
+        }
     }
 
     #[test]

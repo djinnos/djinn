@@ -53,6 +53,7 @@ workspace-hack.workspace = true
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
+filetime = "0.2"
 insta = { version = "1", features = ["json"] }
 tracing-test = "0.2"
 djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
