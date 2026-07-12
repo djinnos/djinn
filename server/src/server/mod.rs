@@ -5,7 +5,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
 use serde::Serialize;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+use time::format_description::well_known::Rfc3339;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
@@ -235,6 +236,16 @@ pub(crate) struct MemoryMountHealth {
     last_error: Option<String>,
 }
 
+/// Format a `SystemTime` as RFC3339, degrading to `None` on out-of-range or
+/// formatting errors so the health endpoint cannot panic.
+fn format_system_time_rfc3339(ts: SystemTime) -> Option<String> {
+    let offset = time::OffsetDateTime::from_unix_timestamp(
+        i64::try_from(ts.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs()).ok()?,
+    )
+    .ok()?;
+    offset.format(&Rfc3339).ok()
+}
+
 async fn health(State(state): State<AppState>) -> axum::Json<HealthResponse> {
     let interval_secs = state.provider_catalog_refresh_interval_secs();
     let max_age = Duration::from_secs(interval_secs.saturating_mul(2));
@@ -243,9 +254,9 @@ async fn health(State(state): State<AppState>) -> axum::Json<HealthResponse> {
     let source_tier: ProviderCatalogSourceTier = catalog.source_tier(max_age).into();
     let last_refresh_status: ProviderCatalogRefreshStatus = catalog.last_refresh_status().into();
     let last_refresh_error = catalog.last_refresh_error();
-    // `CatalogService` only tracks monotonic `Instant` age; no wall-clock timestamp
-    // is exposed, so `fetched_at` is intentionally `None` rather than invented.
-    let fetched_at = None::<String>;
+    let fetched_at = catalog
+        .last_successful_fetch_time()
+        .and_then(format_system_time_rfc3339);
 
     axum::Json(HealthResponse {
         status: "ok",
