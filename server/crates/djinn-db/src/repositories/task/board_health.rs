@@ -628,6 +628,11 @@ pub(super) async fn closed_parent_open_children_section(pool: &sqlx::PgPool) -> 
             "recommended_action": recommended_action,
             "recommended_status": recommended_status,
             "recommended_reason": recommended_reason,
+            "recommended_disposition": {
+                "action": recommended_action,
+                "status": recommended_status,
+                "guard": recommended_reason,
+            },
         }));
     }
 
@@ -959,10 +964,32 @@ mod tests {
         let open = proposal(&db, "building").await;
         link_epic(&db, &terminal, &epic, &project).await;
         link_epic(&db, &open, &epic, &project).await;
-        task(&db, &epic, "open").await;
+        let child = task(&db, &epic, "open").await;
 
         let section = closed_parent_open_children_section(db.pool()).await;
-        assert_eq!(section.get("total").unwrap().as_i64(), Some(0));
+        let findings = section.get("findings").unwrap().as_array().unwrap();
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(finding.get("id").unwrap().as_str(), Some(child.as_str()));
+        assert_eq!(finding["recommended_disposition"]["action"], "retain");
+        assert_eq!(
+            finding["recommended_disposition"]["guard"],
+            "other_open_parent"
+        );
+        assert!(
+            finding["other_open_parent_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id.as_str() == Some(open.as_str()))
+        );
+        assert!(
+            finding["terminal_proposal_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id.as_str() == Some(terminal.as_str()))
+        );
     }
 
     #[tokio::test]
