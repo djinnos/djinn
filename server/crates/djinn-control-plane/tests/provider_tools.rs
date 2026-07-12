@@ -1,3 +1,4 @@
+// djinn:allow-oversize — provider tool integration contracts share one harness fixture.
 //! Contract tests for `provider_*` + `model_health` MCP tools.
 //!
 //! Migrated from `server/src/mcp_contract_tests/provider_tools.rs`.  The
@@ -1423,5 +1424,278 @@ async fn seeded_loaded_catalog_non_recommended_model_round_trips_and_validates()
             .unwrap_or_default()
             .contains("not available in the connected provider catalog"),
         "user_settings_set should report catalog membership rejection: {rejected_set}"
+    );
+}
+
+// ── Periodic refresh: new non-recommended model becomes dispatchable without restart ─
+
+/// Serializes the refresh tests that mutate the process-wide upstream catalog URL
+/// env var. Using an async-aware mutex avoids holding a sync `MutexGuard` across
+/// the test's await points.
+static CATALOG_URL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Guard that restores the default catalog URL env var when the test finishes.
+struct RestoreCatalogUrl;
+
+impl Drop for RestoreCatalogUrl {
+    fn drop(&mut self) {
+        // SAFETY: the test holds CATALOG_URL_LOCK, so no other test is mutating
+        // process environment concurrently. Removing this override restores the
+        // production default catalog URL.
+        unsafe { std::env::remove_var("DJINN_PROVIDER_CATALOG_URL") };
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn periodic_refresh_makes_new_non_recommended_model_dispatchable_without_restart() {
+    let _guard = CATALOG_URL_LOCK.lock().await;
+
+    // Start a local mock models.dev server and point the catalog fetch at it.
+    let server = wiremock::MockServer::start().await;
+    // SAFETY: the test holds CATALOG_URL_LOCK, so no other test is mutating
+    // process environment concurrently. This override lets the live catalog
+    // refresh path fetch from the mock server instead of the real internet.
+    unsafe { std::env::set_var("DJINN_PROVIDER_CATALOG_URL", server.uri()) };
+    let _env = RestoreCatalogUrl;
+
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    CredentialRepository::new(db.clone(), EventBus::noop())
+        .set("openai", "OPENAI_API_KEY", "sk-test")
+        .await
+        .unwrap();
+
+    let model = |id: &str, name: &str| {
+        json!({
+            "id": id,
+            "name": name,
+            "tool_call": true,
+            "reasoning": false,
+            "attachment": false,
+            "cost": {"input": 1.0, "output": 2.0, "cache_read": 0.5, "cache_write": 0.5},
+            "limit": {"context": 128000, "output": 16384}
+        })
+    };
+    let openai_payload = |models: serde_json::Value| {
+        json!({
+            "openai": {
+                "id": "openai",
+                "npm": "@ai-sdk/openai",
+                "env": ["OPENAI_API_KEY"],
+                "api": "https://api.openai.com/v1",
+                "doc": "https://platform.openai.com/docs",
+                "models": models
+            }
+        })
+    };
+
+    // Use a proof-only id which cannot already exist in the embedded snapshot,
+    // so observing it also proves the owner's boot request completed.
+    let initial = openai_payload(json!({
+        "gpt-5.3-codex": model("gpt-5.3-codex", "GPT-5.3 Codex"),
+        "refresh-proof.initial": model("refresh-proof.initial", "Refresh Proof Initial")
+    }));
+    server
+        .register(
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(&initial)),
+        )
+        .await;
+
+    // ── Drive the her4 refresh owner ────────────────────────────────────────
+    //
+    // We spawn the *actual* `run_provider_catalog_refresh_loop` — the single
+    // owner that production starts in `AppState::startup`. A short deterministic
+    // interval lets the periodic tick fire quickly. The `CatalogService` is
+    // `Arc<RwLock<_>>`-backed and `Clone`, so the spawned loop and the harness
+    // share one catalog instance: a refresh inside the loop is visible to the
+    // test through `harness.state().catalog()`.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let refresh_catalog = harness.state().catalog().clone();
+    let refresh_interval = std::time::Duration::from_secs(3_600);
+    let (tick_tx, tick_rx) = tokio::sync::mpsc::channel(1);
+    let refresh_handle = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            djinn_provider::catalog::run_provider_catalog_refresh_loop(
+                refresh_catalog,
+                refresh_interval,
+                cancel,
+                djinn_provider::catalog::ProviderCatalogRefreshTicks::Manual(tick_rx),
+            )
+            .await;
+        })
+    };
+
+    // Releasing a manual tick also proves the boot phase completed, because the
+    // owner cannot receive periodic ticks until after its initial refresh.
+    let (boot_barrier_tx, boot_barrier_rx) = tokio::sync::oneshot::channel();
+    tick_tx
+        .send(boot_barrier_tx)
+        .await
+        .expect("release boot-completion barrier tick");
+    boot_barrier_rx
+        .await
+        .expect("owner should complete the barrier tick after boot");
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("boot request")
+            .len(),
+        2,
+        "boot and its completion-barrier tick should each make one initial request"
+    );
+    assert_eq!(
+        harness.state().catalog().last_refresh_status(),
+        djinn_provider::catalog::RefreshStatus::Success,
+        "boot refresh via the owner loop should succeed"
+    );
+
+    let connected = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch");
+    let ids: Vec<String> = connected["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .map(|m| m["id"].as_str().expect("model id").to_string())
+        .collect();
+    assert!(
+        ids.contains(&"openai/refresh-proof.initial".to_string()),
+        "initial catalog should include the proof-only model, got ids: {:?}",
+        ids
+    );
+    assert!(
+        !ids.contains(&"openai/gpt-5.2.nano".to_string()),
+        "dotted model should not appear before the periodic tick picks it up"
+    );
+
+    // ── Change the mocked upstream response ────────────────────────────────
+    //
+    // Reset the mock server and register the updated payload containing the new
+    // dotted model. The same running application/catalog state — no restart,
+    // no reconstruction — now sees a different upstream on the next periodic
+    // tick of the existing refresh owner.
+    server.reset().await;
+    let refreshed = openai_payload(json!({
+        "gpt-5.3-codex": model("gpt-5.3-codex", "GPT-5.3 Codex"),
+        "gpt-5.2": model("gpt-5.2", "GPT-5.2"),
+        "gpt-5.2.nano": model("gpt-5.2.nano", "GPT-5.2 Nano")
+    }));
+    server
+        .register(
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(&refreshed)),
+        )
+        .await;
+
+    // ── Release exactly one periodic tick to fetch the changed response ────────────
+    //
+    // The test never calls `catalog().refresh()` directly. The new model only
+    // appears because the refresh owner's periodic branch (manual tick →
+    // `catalog.refresh()`) re-fetches the mock and swaps in the updated catalog.
+    // The acknowledgement is sent only after that branch finishes refresh.
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    tick_tx
+        .send(completion_tx)
+        .await
+        .expect("release exactly one changed-response tick");
+    completion_rx
+        .await
+        .expect("canonical owner should complete the released periodic tick");
+    assert!(
+        harness
+            .state()
+            .catalog()
+            .find_model("openai/gpt-5.2.nano")
+            .is_some(),
+        "exactly one changed-response tick should apply the new model"
+    );
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("periodic request")
+            .len(),
+        1
+    );
+
+    // Stop the owner loop; subsequent assertions use the now-refreshed catalog.
+    cancel.cancel();
+    let _ = refresh_handle.await;
+
+    let connected_after = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch after refresh");
+    let new_model = connected_after["models"]
+        .as_array()
+        .expect("models array after refresh")
+        .iter()
+        .find(|m| m["id"] == "openai/gpt-5.2.nano")
+        .expect("refreshed dotted model should appear in provider_models_connected");
+    assert!(
+        !new_model["recommended"].as_bool().unwrap_or(true),
+        "newly refreshed dotted model should be non-recommended"
+    );
+
+    // Round-trip through user settings and dispatch-time validation.
+    let user_repo = UserRepository::new(db.clone());
+    let user = user_repo
+        .upsert_from_github(999_010, "refresh-test-user", None, None)
+        .await
+        .expect("create test user");
+    let user_id = user.id;
+
+    let set = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness
+                .call_tool(
+                    "user_settings_set",
+                    json!({
+                        "lanes": {
+                            "implement": ["openai/gpt-5.2.nano"]
+                        }
+                    }),
+                )
+                .await
+        })
+        .await
+        .expect("user_settings_set dispatch");
+    assert!(set["ok"].as_bool().unwrap_or(false), "user_settings_set ok");
+    assert_eq!(
+        set["lanes"]["implement"],
+        json!(["openai/gpt-5.2.nano"]),
+        "user_settings_set should echo the exact refreshed dotted id"
+    );
+
+    let get = SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            harness.call_tool("user_settings_get", json!({})).await
+        })
+        .await
+        .expect("user_settings_get dispatch");
+    assert!(get["ok"].as_bool().unwrap_or(false), "user_settings_get ok");
+    assert_eq!(
+        get["lanes"]["implement"],
+        json!(["openai/gpt-5.2.nano"]),
+        "user_settings_get should round-trip the exact refreshed dotted id"
+    );
+
+    harness
+        .state()
+        .validate_models_for_user(&["openai/gpt-5.2.nano".to_string()], Some(&user_id))
+        .await
+        .expect("refreshed dotted model should be dispatch-valid");
+
+    // Confirm the refreshed catalog survives state without restart/reconstruction.
+    let reloaded_state = harness.state().catalog().last_refresh_status();
+    assert_eq!(
+        reloaded_state,
+        djinn_provider::catalog::RefreshStatus::Success,
+        "refresh status should remain success on the same running state"
     );
 }

@@ -101,6 +101,26 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
     }
 }
 
+/// Invoke the real production `load_knowledge_context` path for integration tests.
+///
+/// This is the same orchestration used by dispatch: it runs the production
+/// scope-overlap query, the capped trace-candidate query, deterministic
+/// classification, prompt packing, and fail-open trace persistence.  Exposed
+/// under `test-support` so the MCP tool tests in `djinn-control-plane` can
+/// prove the tracedrop outcomes without reimplementing the classifier.
+pub async fn run_load_knowledge_context_for_test(
+    task: &Task,
+    epic_context: Option<&str>,
+    app_state: &AgentContext,
+) -> Option<String> {
+    crate::actors::slot::lifecycle::prompt_context::load_knowledge_context(
+        task,
+        epic_context,
+        app_state,
+    )
+    .await
+}
+
 /// Cheap `SupervisorServices` stub for tests that exercise `call_tool`
 /// against the non-host-bound tool subset (lsp, memory, code_graph, …).
 /// Panics if the test ends up invoking any trait method; the three
