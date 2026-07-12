@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
+use crate::cargo_warm_base_gc::WarmJobGuard;
 use crate::roles::RoleRegistry;
 use djinn_control_plane::bridge;
 use djinn_core::clock::{Clock, SystemClock};
@@ -317,6 +318,7 @@ pub struct CoordinatorContext {
     pub task_ops_project_path_override: Option<PathBuf>,
     pub working_root: Option<PathBuf>,
     pub graph_warmer: Option<Arc<dyn GraphWarmerService>>,
+    pub warm_job_guard: Option<Arc<dyn WarmJobGuard>>,
     pub repo_graph_ops: Option<Arc<dyn bridge::RepoGraphOps>>,
     pub runtime_ops: Option<Arc<dyn bridge::RuntimeOps>>,
     pub cargo_target_runs_root: Option<PathBuf>,

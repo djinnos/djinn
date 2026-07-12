@@ -1238,6 +1238,7 @@ dependencies = [
  "djinn-core",
  "djinn-db",
  "djinn-git",
+ "djinn-k8s",
  "djinn-lsp",
  "djinn-memory",
  "djinn-orchestration-types",
