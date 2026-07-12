@@ -24,3 +24,22 @@ retries = { backoff = "exponential", count = 2, delay = "1s", jitter = true }
 slow-timeout = { period = "30s", terminate-after = 3 }
 fail-fast = false
 final-status-level = "flaky"
+
+[profile.pull-request]
+# Compact PR gate: fast feedback, stop early on the first failure. Inherits the
+# CI retry/slow-timeout behavior so flaky regressions are still caught, but the
+# planner contract emits this profile name so consumers can pass it directly to
+# `cargo nextest run --profile pull-request`.
+inherits = "ci"
+fail-fast = true
+final-status-level = "fail"
+
+[profile.merge-group]
+# Wide merge-queue gate: run the full suite, retry flakes, report all failures.
+# Emitted by the planner so consumers can run `--profile merge-group`.
+inherits = "ci"
+
+[profile.full-validation]
+# Wide manual full-validation gate: same resilience as merge-group.
+# Emitted by the planner for workflow_dispatch full-validation runs.
+inherits = "ci"
