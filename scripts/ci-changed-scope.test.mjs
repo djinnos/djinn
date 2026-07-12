@@ -81,8 +81,11 @@ test('docs-only merge_group selects every protected server policy job, not UI', 
   assert.equal(result.jobs.aarch64, false);
 });
 
-test('unknown executable and configuration roots fail closed', () => {
-  for (const path of ['scripts/new-check.sh', '.github/actions/check/action.yml', 'package.json']) {
+test('unknown executable and configuration paths fail closed', () => {
+  for (const path of [
+    'scripts/new-check.sh', '.github/actions/check/action.yml', 'package.json',
+    '.cargo/config.toml', 'config/quality-gate.yml', 'tools/verify-ci.sh',
+  ]) {
     const result = plan([path]);
     assert.equal(result.lanes.unknown, true, path);
     assertOnlyJobs(result, Object.keys(result.jobs));

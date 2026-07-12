@@ -53,12 +53,11 @@ function isMigration(path) {
   return /^server\/crates\/[^/]+\/migrations_postgres\//.test(path);
 }
 
-function isUnsafeRoot(path) {
-  // Scripts, CI/configuration, and unclassified top-level executable/config files
-  // can alter a protected check without changing Rust source. Route them fully.
-  if ((matches(path, '.github') && !matches(path, '.github/workflows')) || matches(path, 'scripts') || matches(path, 'deploy') || matches(path, 'infra')) return true;
-  if (!path.includes('/')) return !isDocumentation(path);
-  return false;
+function isUnclassifiedNonDocumentation(path) {
+  // Documentation is deliberately the sole narrow lane. Every other path must
+  // belong to a known product or workflow lane, including nested executable and
+  // configuration paths, or it receives fail-closed full validation.
+  return !isDocumentation(path) && !matches(path, 'ui') && !matches(path, 'server') && !matches(path, '.github/workflows');
 }
 
 /**
@@ -94,11 +93,11 @@ export function classifyChangedScope(files) {
     ) lanes.sandboxAarch64 = true;
     if (isMemoryRanking(path)) lanes.memoryRanking = true;
     if (matches(path, '.github/workflows')) lanes.workflowCi = true;
-    if (isUnsafeRoot(path)) lanes.unknown = true;
+    if (isUnclassifiedNonDocumentation(path)) lanes.unknown = true;
   }
   // A source/configuration path that isn't a recognized UI or server lane is
   // unsafe to route narrowly. Documentation is the sole intentionally narrow lane.
-  if (normalizedFiles.length === 0 || normalizedFiles.some((path) => !isDocumentation(path) && !matches(path, 'ui') && !matches(path, 'server') && !matches(path, '.github/workflows') && isUnsafeRoot(path))) lanes.unknown = true;
+  if (normalizedFiles.length === 0 || normalizedFiles.some(isUnclassifiedNonDocumentation)) lanes.unknown = true;
   return { files: normalizedFiles, lanes };
 }
 
