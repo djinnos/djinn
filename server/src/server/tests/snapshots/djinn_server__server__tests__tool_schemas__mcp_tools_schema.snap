@@ -22514,21 +22514,21 @@ expression: signatures
           "properties": {
             "implement": {
               "description": "Concurrent worker sessions.",
-              "format": "uint32",
+              "format": "int64",
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
             },
             "plan": {
               "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
-              "format": "uint32",
+              "format": "int64",
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
             },
             "review": {
               "description": "Concurrent reviewer sessions.",
-              "format": "uint32",
+              "format": "int64",
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
@@ -22656,21 +22656,21 @@ expression: signatures
           "properties": {
             "implement": {
               "description": "Concurrent worker sessions.",
-              "format": "uint32",
+              "format": "int64",
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
             },
             "plan": {
               "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
-              "format": "uint32",
+              "format": "int64",
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
             },
             "review": {
               "description": "Concurrent reviewer sessions.",
-              "format": "uint32",
+              "format": "int64",
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
@@ -22788,21 +22788,21 @@ expression: signatures
           "properties": {
             "implement": {
               "description": "Concurrent worker sessions.",
-              "format": "uint32",
+              "format": "int64",
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
             },
             "plan": {
               "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
-              "format": "uint32",
+              "format": "int64",
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
             },
             "review": {
               "description": "Concurrent reviewer sessions.",
-              "format": "uint32",
+              "format": "int64",
               "maximum": 10,
               "minimum": 1,
               "type": "integer"

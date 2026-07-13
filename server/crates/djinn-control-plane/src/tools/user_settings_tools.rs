@@ -66,13 +66,13 @@ impl From<ModelLanesPayload> for ModelLanes {
 pub struct LaneMaxSessionsPayload {
     /// Concurrent autonomous planning and refinement sessions. Interactive
     /// chat is not subject to this ceiling.
-    #[schemars(range(min = 1, max = 10))]
+    #[schemars(with = "i64", range(min = 1, max = 10))]
     pub plan: u32,
     /// Concurrent worker sessions.
-    #[schemars(range(min = 1, max = 10))]
+    #[schemars(with = "i64", range(min = 1, max = 10))]
     pub implement: u32,
     /// Concurrent reviewer sessions.
-    #[schemars(range(min = 1, max = 10))]
+    #[schemars(with = "i64", range(min = 1, max = 10))]
     pub review: u32,
 }
 
