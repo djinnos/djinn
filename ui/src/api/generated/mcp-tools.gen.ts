@@ -1322,6 +1322,34 @@ export namespace EpicCloseOutputSchema {
    */
   originating_adr_id?: string
   owner?: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id?: string
   status?: string
   title?: string
@@ -1445,6 +1473,34 @@ export namespace EpicCreateOutputSchema {
    */
   originating_adr_id?: string
   owner?: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id?: string
   status?: string
   title?: string
@@ -1534,6 +1590,34 @@ export namespace EpicListOutputSchema {
    */
   originating_adr_id?: string
   owner: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id: string
   status: string
   title: string
@@ -1642,6 +1726,34 @@ export namespace EpicReopenOutputSchema {
    */
   originating_adr_id?: string
   owner?: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id?: string
   status?: string
   title?: string
@@ -1694,6 +1806,34 @@ export namespace EpicShowOutputSchema {
    */
   originating_adr_id?: string
   owner?: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id?: string
   status?: string
   task_count?: number
@@ -1837,6 +1977,34 @@ export namespace EpicUpdateOutputSchema {
    */
   originating_adr_id?: string
   owner?: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id?: string
   status?: string
   title?: string

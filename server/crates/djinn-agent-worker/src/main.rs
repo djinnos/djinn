@@ -1544,7 +1544,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    round-trips over RPC.
     let supervisor = TaskRunSupervisor::new(mirror, worker_services.clone());
     let report_result = supervisor
-        .run(spec.clone())
+        .run_for_orderly_shutdown(spec.clone())
         .await
         .context("task-run supervisor drive");
 
@@ -3671,5 +3671,60 @@ warning: something
             "cancelled seed sum delta must equal elapsed"
         );
         assert_no_seed_identity_labels(&after);
+    }
+
+    // ── Workspace cleanup telemetry tests (proposal zp5t) ──────────────────
+
+    /// Serialize telemetry-scrape tests so each can use a precise delta.
+    static CLEANUP_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn cleanup_telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
+        CLEANUP_TELEMETRY_MUTEX
+            .lock()
+            .expect("cleanup telemetry test mutex poisoned")
+    }
+
+    /// Count `workspace_cleanup_seconds_count` samples for a given
+    /// trigger/outcome pair.
+    fn cleanup_count(rendered: &str, trigger: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_cleanup_seconds_count")
+                    && line.contains(&format!("trigger=\"{trigger}\""))
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
+    /// Read the `_sum` value for `workspace_cleanup_seconds` for a given
+    /// trigger/outcome pair.
+    #[test]
+    fn attached_workspace_teardown_owned_is_noop_no_sample() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().to_path_buf();
+        let ws = Workspace::attach_existing(&path, "main").expect("attach");
+        assert!(!ws.is_owned(), "attached workspace must not be owned");
+
+        let before = djinn_telemetry::render().expect("render before");
+        let shutdown_ok_before = cleanup_count(&before, "shutdown", "ok");
+
+        // teardown_owned is a no-op for Attached — no delete, no observation.
+        ws.teardown_owned().expect("attached teardown must be Ok");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert!(
+            path.exists(),
+            "attached directory must NOT be deleted by teardown_owned"
+        );
+        assert_eq!(
+            cleanup_count(&after, "shutdown", "ok"),
+            shutdown_ok_before,
+            "attached teardown must NOT emit any sample"
+        );
     }
 }
