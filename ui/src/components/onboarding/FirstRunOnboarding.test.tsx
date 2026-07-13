@@ -19,43 +19,21 @@ vi.mock("@/components/userConfig/ProviderSection", () => ({
   ApiKeyConnectForm: () => <div>API key connection</div>,
 }));
 
-vi.mock("@/components/userConfig/ModelSection", async () => {
-  const { useQueryClient } = await import("@tanstack/react-query");
+vi.mock("./OnboardingModelSetup", () => {
   return {
-    ModelSection: ({
-      targetId,
-      onboarding,
+    OnboardingModelSetup: ({
+      onSaved,
     }: {
-      targetId: string;
-      onboarding?: boolean;
+      onSaved: (selection: unknown) => void;
     }) => {
-      const queryClient = useQueryClient();
       return (
         <div>
-          <span>{onboarding ? "Onboarding model editor" : "Settings model editor"}</span>
+          <span>Onboarding model setup</span>
           <button
             type="button"
-            onClick={() =>
-              queryClient.setQueryData(
-                ["user-config", targetId, "model-selection"],
-                {
-                  lanes: {
-                    plan: ["openai/gpt-5.5"],
-                    implement: ["openai/gpt-5.3-codex"],
-                    review: ["openai/gpt-5.5"],
-                  },
-                  maxSessions: {
-                    "openai/gpt-5.5": 1,
-                    "openai/gpt-5.3-codex": 1,
-                  },
-                  diverseReview: true,
-                  diverseRefinement: true,
-                  laneLocked: false,
-                },
-              )
-            }
+            onClick={() => onSaved({})}
           >
-            Save all roles
+            Save models and continue
           </button>
         </div>
       );
@@ -86,29 +64,60 @@ describe("FirstRunOnboarding", () => {
     });
   });
 
-  it("keeps Continue disabled when persisted lanes are only partially configured", async () => {
-    mocks.fetchUserModelSelection.mockResolvedValue({
-      lanes: {
-        plan: ["openai/gpt-5.5"],
-        implement: ["openai/gpt-5.3-codex"],
-        review: [],
-      },
-      maxSessions: {},
-      diverseReview: true,
-      diverseRefinement: true,
-      laneLocked: false,
+  it("requires a provider and offers no onboarding bypass", async () => {
+    mocks.fetchUserConnectedProviders.mockResolvedValue([]);
+
+    render(<FirstRunOnboarding onFinished={vi.fn()} />);
+
+    const heading = await screen.findByRole("heading", {
+      name: "Connect a model provider",
+      level: 1,
     });
-
-    const user = userEvent.setup();
-    render(<FirstRunOnboarding userId="user-1" onFinished={vi.fn()} />);
-
-    await user.click(await screen.findByRole("button", { name: /continue/i }));
-
-    expect(screen.getByText("Onboarding model editor")).toBeInTheDocument();
+    expect(heading).toBeInTheDocument();
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(screen.queryByRole("button", { name: "Skip for now" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /continue/i })).toBeDisabled();
   });
 
-  it("enables Continue when all persisted model roles are configured", async () => {
+  it("surfaces catalog failures and retries both provider setup queries", async () => {
+    mocks.fetchUserConnectedProviders.mockResolvedValue([]);
+    mocks.fetchUserCatalog.mockRejectedValue(new Error("Catalog unavailable"));
+    const user = userEvent.setup();
+
+    render(<FirstRunOnboarding onFinished={vi.fn()} />);
+
+    expect(await screen.findByText("Catalog unavailable")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => {
+      expect(mocks.fetchUserConnectedProviders).toHaveBeenCalledTimes(2);
+      expect(mocks.fetchUserCatalog).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("resumes at focused role setup and finishes immediately after it saves", async () => {
+    const user = userEvent.setup();
+    const onFinished = vi.fn();
+    render(<FirstRunOnboarding onFinished={onFinished} />);
+
+    expect(await screen.findByText("Onboarding model setup")).toBeInTheDocument();
+    const heading = screen.getByRole("heading", {
+      name: "Assign models to roles",
+      level: 1,
+    });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Step 2 of 3: Models",
+    );
+    expect(screen.queryByRole("button", { name: "Skip for now" })).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Save models and continue" }),
+    );
+
+    await waitFor(() => expect(onFinished).toHaveBeenCalledOnce());
+  });
+
+  it("treats complete org-locked roles as read-only success", async () => {
     mocks.fetchUserModelSelection.mockResolvedValue({
       lanes: {
         plan: ["openai/gpt-5.5"],
@@ -118,42 +127,17 @@ describe("FirstRunOnboarding", () => {
       maxSessions: {},
       diverseReview: true,
       diverseRefinement: true,
-      laneLocked: false,
+      laneLocked: true,
     });
 
-    const user = userEvent.setup();
-    render(<FirstRunOnboarding userId="user-1" onFinished={vi.fn()} />);
+    render(<FirstRunOnboarding onFinished={vi.fn()} />);
 
-    await user.click(await screen.findByRole("button", { name: /continue/i }));
-
+    expect(await screen.findByText("Managed by your organization")).toBeInTheDocument();
+    expect(screen.queryByText("Onboarding model setup")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /continue/i })).toBeEnabled();
   });
 
-  it("requires persisted selections for Plan, Implement, and Review", async () => {
-    const user = userEvent.setup();
-    const onFinished = vi.fn();
-    render(<FirstRunOnboarding userId="user-1" onFinished={onFinished} />);
-
-    const connectContinue = await screen.findByRole("button", { name: /continue/i });
-    await waitFor(() => expect(connectContinue).toBeEnabled());
-    await user.click(connectContinue);
-
-    expect(
-      screen.getByRole("heading", { name: "Assign models to roles" }),
-    ).toBeInTheDocument();
-    const modelsContinue = screen.getByRole("button", { name: /continue/i });
-    expect(modelsContinue).toBeDisabled();
-
-    await user.click(screen.getByRole("button", { name: "Save all roles" }));
-    await waitFor(() => expect(modelsContinue).toBeEnabled());
-    await user.click(modelsContinue);
-
-    expect(screen.getByRole("heading", { name: "You're all set" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Get started" }));
-    expect(onFinished).toHaveBeenCalledOnce();
-  });
-
-  it("treats org-locked roles as complete and does not render the editable model section", async () => {
+  it("blocks org-locked users when the policy has no role assignments", async () => {
     mocks.fetchUserModelSelection.mockResolvedValue({
       lanes: { plan: [], implement: [], review: [] },
       maxSessions: {},
@@ -162,23 +146,10 @@ describe("FirstRunOnboarding", () => {
       laneLocked: true,
     });
 
-    const user = userEvent.setup();
-    render(<FirstRunOnboarding userId="user-1" onFinished={vi.fn()} />);
+    render(<FirstRunOnboarding onFinished={vi.fn()} />);
 
-    await user.click(await screen.findByRole("button", { name: /continue/i }));
-
-    expect(screen.getByText("Managed by your organization")).toBeInTheDocument();
-    expect(screen.queryByText("Onboarding model editor")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /continue/i })).toBeEnabled();
-  });
-
-  it("keeps the role step skippable for users relying on deployment fallback", async () => {
-    const user = userEvent.setup();
-    render(<FirstRunOnboarding userId="user-1" onFinished={vi.fn()} />);
-
-    await user.click(await screen.findByRole("button", { name: /continue/i }));
-    await user.click(screen.getByRole("button", { name: "Skip for now" }));
-
-    expect(screen.getByRole("heading", { name: "You're all set" })).toBeInTheDocument();
+    expect(await screen.findByText("Model roles need an administrator")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /continue/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Skip for now" })).not.toBeInTheDocument();
   });
 });

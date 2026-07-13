@@ -2,38 +2,15 @@ import { create } from 'zustand';
 import { fetchProjects, type Project } from '@/api/server';
 import { fetchDevcontainerStatus } from '@/api/devcontainer';
 
-const PENDING_PROJECT_STORAGE_KEY = 'djinn:onboarding:pending-project-image:v1';
-
 let refreshGeneration = 0;
-
-function readPendingProjectId(): string | null {
-  try {
-    return window.localStorage.getItem(PENDING_PROJECT_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function writePendingProjectId(projectId: string | null): void {
-  try {
-    if (projectId) {
-      window.localStorage.setItem(PENDING_PROJECT_STORAGE_KEY, projectId);
-    } else {
-      window.localStorage.removeItem(PENDING_PROJECT_STORAGE_KEY);
-    }
-  } catch {
-    // Storage can be unavailable in hardened/private browser contexts. The
-    // in-memory gate still completes the current session correctly.
-  }
-}
 
 interface ProjectGateState {
   /** null = not yet checked */
   hasProject: boolean | null;
-  /** Project added by this browser that still needs its first image. */
+  /** First project whose durable server status still requires image setup. */
   projectNeedingImage: Project | null;
-  /** Persisted id used to resume the just-added project's setup after reload. */
-  pendingProjectId: string | null;
+  /** Retryable project-list/status failure while resolving required setup. */
+  error: string | null;
   isChecking: boolean;
   markPendingProject: (project: Project) => void;
   clearPendingProject: (projectId?: string) => void;
@@ -43,112 +20,104 @@ interface ProjectGateState {
 export const useProjectGateStore = create<ProjectGateState>((set, get) => ({
   hasProject: null,
   projectNeedingImage: null,
-  pendingProjectId: readPendingProjectId(),
+  error: null,
   isChecking: false,
 
   markPendingProject: (project) => {
-    // Invalidate any older refresh before exposing the newly-added project.
+    // Expose the newly-added project immediately while its first durable
+    // status check catches up. Invalidate any older refresh so it cannot hide
+    // this required step with stale server data.
     refreshGeneration += 1;
-    writePendingProjectId(project.id);
     set({
       hasProject: true,
       projectNeedingImage: project,
-      pendingProjectId: project.id,
+      error: null,
       isChecking: false,
     });
   },
 
   clearPendingProject: (projectId) => {
-    const pendingProjectId = get().pendingProjectId;
+    const pendingProjectId = get().projectNeedingImage?.id;
     // A stale completion must not clear a newer repository's onboarding.
     if (projectId && pendingProjectId && projectId !== pendingProjectId) return;
 
     refreshGeneration += 1;
-    writePendingProjectId(null);
     set({
       projectNeedingImage: null,
-      pendingProjectId: null,
+      error: null,
       isChecking: false,
     });
   },
 
   refresh: async () => {
     const generation = ++refreshGeneration;
-    set({ isChecking: true });
+    set({ isChecking: true, error: null });
     try {
       const projects = await fetchProjects();
       if (generation !== refreshGeneration) return;
 
       if (projects.length === 0) {
-        writePendingProjectId(null);
         set({
           hasProject: false,
           projectNeedingImage: null,
-          pendingProjectId: null,
+          error: null,
           isChecking: false,
         });
         return;
       }
 
-      const pendingProjectId = get().pendingProjectId;
-      if (!pendingProjectId) {
-        // Existing/legacy image-less projects keep using the in-app status badge.
-        // Full-screen onboarding is reserved for the repository this browser
-        // just added, so an upgrade never turns into a global forced migration.
-        set({ hasProject: true, projectNeedingImage: null, isChecking: false });
-        return;
-      }
+      // Browser storage cannot be the source of truth for required setup: it
+      // disappears in a new browser/profile and can drift from the database.
+      // Resolve every project from its durable server status, then route the
+      // first project that needs an image or whose status is unresolved.
+      const checks = await Promise.all(
+        projects.map(async (project) => {
+          try {
+            return { project, status: await fetchDevcontainerStatus(project.id), error: null };
+          } catch (error) {
+            return { project, status: null, error };
+          }
+        }),
+      );
+      if (generation !== refreshGeneration) return;
 
-      const pendingProject = projects.find((project) => project.id === pendingProjectId);
-      if (!pendingProject) {
-        writePendingProjectId(null);
+      const incomplete = checks.find(
+        ({ status, error }) => error || status?.error || status?.needs_image !== false,
+      );
+
+      if (incomplete) {
+        const error = incomplete.error
+          ? incomplete.error instanceof Error
+            ? incomplete.error.message
+            : "Could not check image setup"
+          : incomplete.status?.error ??
+            (incomplete.status?.needs_image === true
+              ? null
+              : "Image setup status was incomplete");
         set({
           hasProject: true,
-          projectNeedingImage: null,
-          pendingProjectId: null,
+          projectNeedingImage: incomplete.project,
+          error,
           isChecking: false,
         });
         return;
       }
 
-      try {
-        const status = await fetchDevcontainerStatus(pendingProject.id);
-        if (generation !== refreshGeneration) return;
-
-        if (status.error) {
-          // The status tool can resolve an error payload with default false-y
-          // fields. Keep reload recovery instead of mistaking that payload for
-          // proof that image assignment completed.
-          set({ hasProject: true, projectNeedingImage: null, isChecking: false });
-          return;
-        }
-
-        if (status.needs_image) {
-          set({
-            hasProject: true,
-            projectNeedingImage: pendingProject,
-            isChecking: false,
-          });
-        } else {
-          writePendingProjectId(null);
-          set({
-            hasProject: true,
-            projectNeedingImage: null,
-            pendingProjectId: null,
-            isChecking: false,
-          });
-        }
-      } catch {
-        if (generation !== refreshGeneration) return;
-        // Do not trap the user on a transient status failure, but retain the
-        // persisted id so a reload/reconnect can resume the pending setup.
-        set({ hasProject: true, projectNeedingImage: null, isChecking: false });
-      }
-    } catch {
+      set({
+        hasProject: true,
+        projectNeedingImage: null,
+        error: null,
+        isChecking: false,
+      });
+    } catch (error) {
       if (generation !== refreshGeneration) return;
-      // Preserve a directly-marked pending project when the post-add list
-      // refresh fails. Otherwise leave the gate open and let the app retry.
-      set({ hasProject: true, isChecking: false });
+      // Do not guess that a repository exists when the required readiness call
+      // failed. App renders a retry state for this unresolved gate.
+      set({
+        hasProject: get().projectNeedingImage ? true : null,
+        error: error instanceof Error ? error.message : "Could not load repositories",
+        isChecking: false,
+      });
     }
   },
 }));

@@ -88,8 +88,23 @@ describe("ProjectImageOnboarding", () => {
     const onFinished = vi.fn();
     render(<ProjectImageOnboarding project={project} onFinished={onFinished} />);
 
-    const create = await screen.findByRole("button", {
-      name: "Create detected image",
+    const pageTitle = await screen.findByRole("heading", {
+      level: 1,
+      name: "Prepare the runtime environment",
+    });
+    await waitFor(() => expect(pageTitle).toHaveFocus());
+    expect(
+      await screen.findByRole("heading", {
+        name: "Recommended for this repository",
+      }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Node 22 + npm")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Existing catalog image" }),
+    ).not.toBeInTheDocument();
+
+    const create = screen.getByRole("button", {
+      name: "Use recommended environment",
     });
     await user.click(create);
 
@@ -113,7 +128,13 @@ describe("ProjectImageOnboarding", () => {
     );
     expect(mocks.setProjectImage).toHaveBeenCalledWith("project-1", "image-1");
     expect(
-      await screen.findByRole("heading", { name: "Environment build started" }),
+      await screen.findByRole("heading", {
+        level: 1,
+        name: "Environment assigned",
+      }),
+    ).toHaveFocus();
+    expect(
+      screen.getByText(/finish any required build in the background/i),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /enter djinn/i }));
@@ -130,11 +151,13 @@ describe("ProjectImageOnboarding", () => {
 
     render(<ProjectImageOnboarding project={project} onFinished={vi.fn()} />);
     await user.click(
-      await screen.findByRole("button", { name: "Create detected image" }),
+      await screen.findByRole("button", {
+        name: "Use recommended environment",
+      }),
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Environment build started" }),
+      await screen.findByRole("heading", { name: "Environment assigned" }),
     ).toBeInTheDocument();
     expect(screen.queryByText(/controller unavailable/i)).not.toBeInTheDocument();
   });
@@ -152,18 +175,20 @@ describe("ProjectImageOnboarding", () => {
 
     render(<ProjectImageOnboarding project={project} onFinished={vi.fn()} />);
     await user.click(
-      await screen.findByRole("button", { name: "Create detected image" }),
+      await screen.findByRole("button", {
+        name: "Use recommended environment",
+      }),
     );
 
     expect(
       await screen.findByText(/controller unavailable/i),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: "Environment build started" }),
+      screen.queryByRole("heading", { name: "Environment assigned" }),
     ).not.toBeInTheDocument();
   });
 
-  it("assigns an existing catalog image without waiting for stack detection", async () => {
+  it("does not allow Advanced image assignment before stack detection", async () => {
     const user = userEvent.setup();
     mocks.fetchProjectStack.mockResolvedValue({ stack: null });
     mocks.listImages.mockResolvedValue([
@@ -177,15 +202,15 @@ describe("ProjectImageOnboarding", () => {
     ]);
 
     render(<ProjectImageOnboarding project={project} onFinished={vi.fn()} />);
-    await user.click(await screen.findByRole("combobox"));
-    await user.click(
-      await screen.findByRole("option", { name: "Node 22 + npm" }),
-    );
-    await user.click(screen.getByRole("button", { name: "Use image" }));
-
-    await waitFor(() =>
-      expect(mocks.setProjectImage).toHaveBeenCalledWith("project-1", "shared-node"),
-    );
+    await user.click(await screen.findByRole("button", { name: /advanced/i }));
+    expect(
+      await screen.findByRole("combobox", { name: "Existing catalog image" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Use image" })).toBeDisabled();
+    expect(
+      screen.getByText(/repository detection must finish before an image can be assigned/i),
+    ).toBeInTheDocument();
+    expect(mocks.setProjectImage).not.toHaveBeenCalled();
     expect(mocks.resetEnvironmentConfig).not.toHaveBeenCalled();
     expect(mocks.createImage).not.toHaveBeenCalled();
   });
@@ -203,9 +228,12 @@ describe("ProjectImageOnboarding", () => {
     ]);
 
     render(<ProjectImageOnboarding project={project} onFinished={vi.fn()} />);
-    await user.click(await screen.findByRole("combobox"));
+    await user.click(await screen.findByRole("button", { name: /advanced/i }));
     await user.click(
-      await screen.findByRole("option", { name: "Node 22 + npm" }),
+      await screen.findByRole("combobox", { name: "Existing catalog image" }),
+    );
+    await user.click(
+      await screen.findByRole("option", { name: /Node 22 \+ npm/i }),
     );
     await user.click(screen.getByRole("button", { name: "Use image" }));
 
@@ -240,7 +268,9 @@ describe("ProjectImageOnboarding", () => {
 
     render(<ProjectImageOnboarding project={project} onFinished={vi.fn()} />);
     await user.click(
-      await screen.findByRole("button", { name: "Create detected image" }),
+      await screen.findByRole("button", {
+        name: "Use recommended environment",
+      }),
     );
 
     await waitFor(() => expect(mocks.createImage).toHaveBeenCalledOnce());
@@ -274,8 +304,64 @@ describe("ProjectImageOnboarding", () => {
     render(<ProjectImageOnboarding project={project} onFinished={vi.fn()} />);
 
     expect(
-      await screen.findByRole("button", { name: "Create detected image" }),
+      await screen.findByRole("button", {
+        name: "Use recommended environment",
+      }),
     ).toBeDisabled();
     expect(mocks.createImage).not.toHaveBeenCalled();
+  });
+
+  it("shows image build status in Advanced and prevents failed-image assignment", async () => {
+    const user = userEvent.setup();
+    mocks.listImages.mockResolvedValue([
+      {
+        id: "ready-image",
+        name: "Ready image",
+        status: "ready",
+        config: detectedConfig,
+        servicePresets: [],
+      },
+      {
+        id: "building-image",
+        name: "Building image",
+        status: "building",
+        config: detectedConfig,
+        servicePresets: [],
+      },
+      {
+        id: "failed-image",
+        name: "Failed image",
+        status: "failed",
+        config: detectedConfig,
+        servicePresets: [],
+      },
+    ]);
+
+    render(<ProjectImageOnboarding project={project} onFinished={vi.fn()} />);
+
+    expect(
+      screen.queryByRole("combobox", { name: "Existing catalog image" }),
+    ).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: /advanced/i }));
+    await user.click(
+      await screen.findByRole("combobox", { name: "Existing catalog image" }),
+    );
+
+    const readyStatus = await screen.findByText("Ready");
+    const buildingStatus = screen.getByText("Building");
+    const failedStatus = screen.getByText("Failed");
+
+    expect(readyStatus.closest('[role="option"]')).not.toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(buildingStatus.closest('[role="option"]')).not.toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(failedStatus.closest('[role="option"]')).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
   });
 });

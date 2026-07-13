@@ -23,14 +23,20 @@ const project = {
   github_repo: "example",
 } as Project;
 
+const secondProject = {
+  id: "project-2",
+  name: "Second",
+  github_owner: "djinnos",
+  github_repo: "second",
+} as Project;
+
 describe("projectGateStore", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    window.localStorage.clear();
     useProjectGateStore.setState({
       hasProject: null,
       projectNeedingImage: null,
-      pendingProjectId: null,
+      error: null,
       isChecking: false,
     });
   });
@@ -47,22 +53,20 @@ describe("projectGateStore", () => {
     });
   });
 
-  it("does not turn legacy image-less projects into a global onboarding gate", async () => {
-    mocks.fetchProjects.mockResolvedValue([project]);
+  it("keeps project readiness unresolved when the repository list fails", async () => {
+    mocks.fetchProjects.mockRejectedValue(new Error("repository service offline"));
 
     await useProjectGateStore.getState().refresh();
 
     expect(useProjectGateStore.getState()).toMatchObject({
-      hasProject: true,
+      hasProject: null,
       projectNeedingImage: null,
-      pendingProjectId: null,
+      error: "repository service offline",
       isChecking: false,
     });
-    expect(mocks.fetchDevcontainerStatus).not.toHaveBeenCalled();
   });
 
-  it("persists and routes only the project just added by this browser", async () => {
-    useProjectGateStore.getState().markPendingProject(project);
+  it("uses durable server status to route an image-less project after reload", async () => {
     mocks.fetchProjects.mockResolvedValue([project]);
     mocks.fetchDevcontainerStatus.mockResolvedValue({ needs_image: true });
 
@@ -71,16 +75,48 @@ describe("projectGateStore", () => {
     expect(useProjectGateStore.getState()).toMatchObject({
       hasProject: true,
       projectNeedingImage: project,
-      pendingProjectId: project.id,
       isChecking: false,
     });
-    expect(window.localStorage.length).toBe(1);
-    expect(window.localStorage.getItem(window.localStorage.key(0)!)).toBe(project.id);
+    expect(mocks.fetchDevcontainerStatus).toHaveBeenCalledWith(project.id);
   });
 
-  it("clears pending setup after the image has been assigned", async () => {
+  it("exposes a just-added project immediately and confirms it from the server", async () => {
     useProjectGateStore.getState().markPendingProject(project);
+    expect(useProjectGateStore.getState()).toMatchObject({
+      hasProject: true,
+      projectNeedingImage: project,
+    });
+
     mocks.fetchProjects.mockResolvedValue([project]);
+    mocks.fetchDevcontainerStatus.mockResolvedValue({ needs_image: true });
+
+    await useProjectGateStore.getState().refresh();
+
+    expect(useProjectGateStore.getState()).toMatchObject({
+      hasProject: true,
+      projectNeedingImage: project,
+      isChecking: false,
+    });
+  });
+
+  it("checks every project and routes the first one whose image is incomplete", async () => {
+    mocks.fetchProjects.mockResolvedValue([project, secondProject]);
+    mocks.fetchDevcontainerStatus
+      .mockResolvedValueOnce({ needs_image: false })
+      .mockResolvedValueOnce({ needs_image: true });
+
+    await useProjectGateStore.getState().refresh();
+
+    expect(useProjectGateStore.getState()).toMatchObject({
+      hasProject: true,
+      projectNeedingImage: secondProject,
+      isChecking: false,
+    });
+    expect(mocks.fetchDevcontainerStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens the app only after every project has an assigned image", async () => {
+    mocks.fetchProjects.mockResolvedValue([project, secondProject]);
     mocks.fetchDevcontainerStatus.mockResolvedValue({ needs_image: false });
 
     await useProjectGateStore.getState().refresh();
@@ -88,10 +124,10 @@ describe("projectGateStore", () => {
     expect(useProjectGateStore.getState()).toMatchObject({
       hasProject: true,
       projectNeedingImage: null,
-      pendingProjectId: null,
+      error: null,
       isChecking: false,
     });
-    expect(window.localStorage.length).toBe(0);
+    expect(mocks.fetchDevcontainerStatus).toHaveBeenCalledTimes(2);
   });
 
   it("does not let a stale completion clear a newer pending project", () => {
@@ -100,35 +136,32 @@ describe("projectGateStore", () => {
     useProjectGateStore.getState().clearPendingProject("older-project");
     expect(useProjectGateStore.getState()).toMatchObject({
       projectNeedingImage: project,
-      pendingProjectId: project.id,
     });
 
     useProjectGateStore.getState().clearPendingProject(project.id);
     expect(useProjectGateStore.getState()).toMatchObject({
       projectNeedingImage: null,
-      pendingProjectId: null,
     });
-    expect(window.localStorage.length).toBe(0);
   });
 
-  it("opens the app on a transient status error but retains reload recovery", async () => {
-    useProjectGateStore.getState().markPendingProject(project);
-    mocks.fetchProjects.mockResolvedValue([project]);
-    mocks.fetchDevcontainerStatus.mockRejectedValue(new Error("offline"));
+  it("routes the first unresolved status to image setup", async () => {
+    mocks.fetchProjects.mockResolvedValue([project, secondProject]);
+    mocks.fetchDevcontainerStatus
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ needs_image: true });
 
     await useProjectGateStore.getState().refresh();
 
     expect(useProjectGateStore.getState()).toMatchObject({
       hasProject: true,
-      projectNeedingImage: null,
-      pendingProjectId: project.id,
+      projectNeedingImage: project,
+      error: "offline",
       isChecking: false,
     });
-    expect(window.localStorage.length).toBe(1);
+    expect(mocks.fetchDevcontainerStatus).toHaveBeenCalledTimes(2);
   });
 
-  it("retains reload recovery for a resolved semantic status error", async () => {
-    useProjectGateStore.getState().markPendingProject(project);
+  it("keeps required image setup visible for a resolved semantic status error", async () => {
     mocks.fetchProjects.mockResolvedValue([project]);
     mocks.fetchDevcontainerStatus.mockResolvedValue({
       needs_image: false,
@@ -139,11 +172,24 @@ describe("projectGateStore", () => {
 
     expect(useProjectGateStore.getState()).toMatchObject({
       hasProject: true,
-      projectNeedingImage: null,
-      pendingProjectId: project.id,
+      projectNeedingImage: project,
+      error: "database unavailable",
       isChecking: false,
     });
-    expect(window.localStorage.length).toBe(1);
+  });
+
+  it("fails closed when a status payload does not prove image assignment", async () => {
+    mocks.fetchProjects.mockResolvedValue([project]);
+    mocks.fetchDevcontainerStatus.mockResolvedValue({});
+
+    await useProjectGateStore.getState().refresh();
+
+    expect(useProjectGateStore.getState()).toMatchObject({
+      hasProject: true,
+      projectNeedingImage: project,
+      error: "Image setup status was incomplete",
+      isChecking: false,
+    });
   });
 
   it("does not let an older refresh overwrite a newly-marked project", async () => {
@@ -168,7 +214,6 @@ describe("projectGateStore", () => {
     expect(useProjectGateStore.getState()).toMatchObject({
       hasProject: true,
       projectNeedingImage: project,
-      pendingProjectId: project.id,
       isChecking: false,
     });
   });

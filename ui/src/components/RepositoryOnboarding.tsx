@@ -8,6 +8,7 @@ import { AddProjectFromGithubDialog } from '@/components/AddProjectFromGithubDia
 import { fetchProjects, type Project } from '@/api/server';
 import { projectStore } from '@/stores/projectStore';
 import { useProjectGateStore } from '@/stores/projectGateStore';
+import { OnboardingProgress } from '@/components/onboarding/OnboardingProgress';
 
 /**
  * Onboarding gate rendered when no repository has been added to the
@@ -51,6 +52,8 @@ export function RepositoryOnboarding() {
             className="relative h-20 w-auto drop-shadow-[0_0_40px_rgba(168,139,250,0.35)]"
           />
         </div>
+
+        <OnboardingProgress current="repository" />
 
         <div className="text-center space-y-2">
           <h2 className="text-2xl font-semibold">Add a repository</h2>

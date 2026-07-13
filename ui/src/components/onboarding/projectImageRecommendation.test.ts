@@ -109,4 +109,21 @@ describe("project image recommendation", () => {
 
     expect(findReusableImage([image], config)).toBeUndefined();
   });
+
+  it("does not auto-reuse an image whose build failed", () => {
+    const config = catalogConfigFromStack({
+      runtimes: { node: "22" },
+      package_managers: ["npm"],
+      workspaces: [{ root: "", language: "node", package_manager: "npm" }],
+    });
+    const image = {
+      id: "failed-image",
+      name: "Node 22 + npm",
+      status: "failed",
+      config,
+      servicePresets: [],
+    } satisfies CatalogImage;
+
+    expect(findReusableImage([image], config)).toBeUndefined();
+  });
 });

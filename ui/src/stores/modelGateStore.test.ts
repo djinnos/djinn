@@ -63,21 +63,21 @@ describe("modelGateStore", () => {
     expect(useModelGateStore.getState().hasModels).toBe(true);
   });
 
-  it("treats org-locked lanes as complete because the user cannot edit them", async () => {
+  it("keeps locked-but-empty org lanes blocked for an admin to fix", async () => {
     mocks.fetchUserModelSelection.mockResolvedValue(
       selection({ plan: [], implement: [], review: [] }, true),
     );
 
     await useModelGateStore.getState().refresh();
 
-    expect(useModelGateStore.getState().hasModels).toBe(true);
+    expect(useModelGateStore.getState().hasModels).toBe(false);
   });
 
-  it("fails open when model settings cannot be loaded", async () => {
+  it("fails closed when model settings cannot be loaded", async () => {
     mocks.fetchUserModelSelection.mockRejectedValue(new Error("offline"));
 
     await useModelGateStore.getState().refresh();
 
-    expect(useModelGateStore.getState().hasModels).toBe(true);
+    expect(useModelGateStore.getState().hasModels).toBe(false);
   });
 });

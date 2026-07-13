@@ -160,7 +160,9 @@ export function findReusableImage(
   const wanted = canonicalJson(config);
   return images.find(
     (image) =>
-      image.servicePresets.length === 0 && canonicalJson(image.config) === wanted,
+      image.status !== "failed" &&
+      image.servicePresets.length === 0 &&
+      canonicalJson(image.config) === wanted,
   );
 }
 
