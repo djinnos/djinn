@@ -340,6 +340,7 @@ pub fn mock_externalize_rendered_result(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod externalization_seam_tests {
     use super::*;
 

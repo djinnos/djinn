@@ -3720,6 +3720,11 @@ export namespace MemoryGraphOutputSchema {
    */
   connection_count: number
   /**
+   * Creation time (ISO-8601 UTC string, as stored). Drives the graph
+   * canvas time axis; optional so older serialized responses stay valid.
+   */
+  created_at?: string
+  /**
    * Entity type discriminator: `"note"` for note rows, `"proposal"` for
    * proposal rows. Defaults to `"note"` so existing serialized responses
    * remain backward-compatible.

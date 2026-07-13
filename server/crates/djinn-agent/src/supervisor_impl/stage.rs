@@ -1232,9 +1232,24 @@ pub(crate) async fn execute_stage(
         &mut conversation,
         false,
     );
+    let revision_caller =
+        djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent(
+            runtime_role_name,
+        )
+        .map(|context| {
+            context.with_execution_provenance(
+                Some(session_id.clone()),
+                Some(task.id.clone()),
+                Some(task_run_id.to_owned()),
+            )
+        });
     let (reply_result, final_output, tokens_in, tokens_out, cache_read, cache_write) =
         djinn_core::auth_context::SESSION_USER_ID
-            .scope(task.created_by_user_id.clone(), reply_loop_fut)
+            .scope(
+                task.created_by_user_id.clone(),
+                djinn_core::auth_context::REVISION_CALLER_CONTEXT
+                    .scope(revision_caller, reply_loop_fut),
+            )
             .await;
 
     // ── Map the reply-loop outcome to StageOutcome ───────────────────────────
