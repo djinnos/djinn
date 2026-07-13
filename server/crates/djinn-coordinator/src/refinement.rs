@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 // Bounded proposal-refinement workflow state machine.
 //
 // Orchestrates Advocate revision, Adversary attack, and Judge adjudication
@@ -1029,7 +1030,8 @@ mod tests {
     fn normalization_truncates_on_char_boundary_with_multibyte_chars() {
         // A multi-byte char straddling the 200-char cut must not panic
         // (byte-index slicing inside '”' killed the coordinator actor).
-        let sig = normalize_objection_signature(&format!("{}”{}", "a".repeat(199), "b".repeat(300)));
+        let sig =
+            normalize_objection_signature(&format!("{}”{}", "a".repeat(199), "b".repeat(300)));
         assert_eq!(sig.chars().count(), 200);
         assert!(sig.ends_with('”'));
     }
