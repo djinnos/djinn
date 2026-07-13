@@ -32,8 +32,11 @@ use std::sync::Arc;
 
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{
-    CreateConsolidationRunMetric, NoteConsolidationRepository, NoteRepository, ProjectRepository,
-    SessionRepository, TaskRepository, assess_note_quality, folder_for_type, permalink_for,
+    CreateConsolidationRunMetric, NoteConsolidationRepository, NoteRepository,
+    NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation, NoteRevisionReason,
+    NoteRevisionSubsystem, ProjectRepository, SessionRepository, TaskRepository,
+    TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance, assess_note_quality,
+    folder_for_type, permalink_for,
 };
 use djinn_provider::provider::{LlmProvider, TelemetryMeta, create_provider};
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
@@ -1091,6 +1094,32 @@ async fn run_llm_extraction_inner(
     // EMPTY (success) case: the call + parse succeeded, but after dedup there is
     // nothing novel to record. This is normal — log at debug, not warn.
     if total == 0 {
+        if let (Ok(provenance), Ok(reason)) = (
+            TrustedNoteRevisionProvenance::new(
+                Some(session_id.clone()),
+                Some(task.id.clone()),
+                session.task_run_id.clone(),
+            ),
+            NoteRevisionReason::new("extraction completed with no candidate notes"),
+        ) {
+            let repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            if let Err(error) = repo
+                .mutate_with_revision(NoteRevisionMutation {
+                    project_id: project.id.clone(),
+                    note_id: None,
+                    event_kind: NoteRevisionEventKind::ExtractionSkipped,
+                    desired: NoteRevisionDesiredState::ExtractionSkipped,
+                    attribution: TrustedNoteRevisionAttribution::system(
+                        NoteRevisionSubsystem::Extraction,
+                    ),
+                    provenance,
+                    reason,
+                })
+                .await
+            {
+                tracing::warn!(session_id = %session_id, %error, "llm_extraction: failed to record no-output extraction revision");
+            }
+        }
         persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
         tracing::debug!(
             session_id = %session_id,
