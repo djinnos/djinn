@@ -87,13 +87,19 @@ const PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS: &str =
 const CACHE_CLEANUP_TOTAL: &str = "djinn_cache_cleanup_total";
 const CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL: &str = "djinn_cache_cleanup_reclaimed_bytes_total";
 const CACHE_CLEANUP_CANDIDATES_TOTAL: &str = "djinn_cache_cleanup_candidates_total";
-const CACHE_CLEANUP_COMPONENTS: [&str; 3] = ["sccache", "cargo_target_runs", "cargo_warm_base"];
-const CACHE_CLEANUP_OUTCOMES: [&str; 13] = [
+const CACHE_CLEANUP_COMPONENTS: [&str; 4] = [
+    "sccache",
+    "cargo_target_runs",
+    "cargo_warm_base",
+    "cargo_warm_base_fingerprint",
+];
+const CACHE_CLEANUP_OUTCOMES: [&str; 14] = [
     "deleted",
     "skipped",
     "retained",
     "error",
     "dry_run",
+    "safety_disabled_report_only",
     "uuid_orphan_deleted",
     "malformed_dir_deleted",
     "loose_file_deleted",
@@ -1515,6 +1521,7 @@ pub mod cache_cleanup {
     pub const COMPONENT_SCCACHE: &str = "sccache";
     pub const COMPONENT_CARGO_TARGET_RUNS: &str = "cargo_target_runs";
     pub const COMPONENT_CARGO_WARM_BASE: &str = "cargo_warm_base";
+    pub const COMPONENT_CARGO_WARM_BASE_FINGERPRINT: &str = "cargo_warm_base_fingerprint";
 
     /// Stable outcome labels for `djinn_cache_cleanup_total`.
     pub const OUTCOME_DELETED: &str = "deleted";
@@ -1522,6 +1529,7 @@ pub mod cache_cleanup {
     pub const OUTCOME_RETAINED: &str = "retained";
     pub const OUTCOME_ERROR: &str = "error";
     pub const OUTCOME_DRY_RUN: &str = "dry_run";
+    pub const OUTCOME_SAFETY_DISABLED_REPORT_ONLY: &str = "safety_disabled_report_only";
 
     /// Granular cargo-target-runs outcome labels for distinguishing
     /// UUID orphan, malformed-dir, loose-file, retained fresh malformed,
@@ -1545,20 +1553,22 @@ pub mod cache_cleanup {
 
     /// All bounded component labels — used for registration seeding.
     #[cfg(test)]
-    pub(crate) const ALL_COMPONENTS: [&str; 3] = [
+    pub(crate) const ALL_COMPONENTS: [&str; 4] = [
         COMPONENT_SCCACHE,
         COMPONENT_CARGO_TARGET_RUNS,
         COMPONENT_CARGO_WARM_BASE,
+        COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
     ];
 
     /// All bounded outcome labels — used for registration seeding.
     #[cfg(test)]
-    pub(crate) const ALL_OUTCOMES: [&str; 13] = [
+    pub(crate) const ALL_OUTCOMES: [&str; 14] = [
         OUTCOME_DELETED,
         OUTCOME_SKIPPED,
         OUTCOME_RETAINED,
         OUTCOME_ERROR,
         OUTCOME_DRY_RUN,
+        OUTCOME_SAFETY_DISABLED_REPORT_ONLY,
         OUTCOME_UUID_ORPHAN_DELETED,
         OUTCOME_MALFORMED_DIR_DELETED,
         OUTCOME_LOOSE_FILE_DELETED,

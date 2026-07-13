@@ -3202,4 +3202,34 @@ async fn sweep_cargo_warm_base_guard(
     )
     .await;
     gc::log_pressure_eviction_completion(&pressure, config.mode);
+
+    // Report-only fingerprint-unit inventory after the destructive phases so
+    // the report reflects the current warm-base state. The sweep reuses the
+    // same activity, warm-job, and lock guards; it never deletes artifacts.
+    let fingerprint_inventory = match gc::inventory_under(Path::new(gc::CARGO_WARM_BASE_ROOT)) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            tracing::warn!(
+                component = metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
+                mode = config.mode.as_metric_label(),
+                error = %error,
+                "fingerprint report-only sweep inventory failed; skipping"
+            );
+            metrics::increment_cleanup_total(
+                metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
+                metrics::OUTCOME_ERROR,
+                config.mode.as_metric_label(),
+            );
+            return;
+        }
+    };
+    let fingerprint_locks = gc::BaseLockPlanningAdapter::new(gc::FlockBaseLock);
+    gc::report_only_fingerprint_sweep(
+        fingerprint_inventory,
+        &activity,
+        guard.as_ref(),
+        &fingerprint_locks,
+        config.mode,
+    )
+    .await;
 }
