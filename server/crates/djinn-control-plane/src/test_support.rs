@@ -154,12 +154,21 @@ impl LspOps for StubLsp {
 #[derive(Clone, Default)]
 pub struct StubRuntime {
     taskrun_jobs: Vec<TaskrunJobRef>,
+    image_enqueue_error: Option<String>,
 }
 
 impl StubRuntime {
     pub fn with_taskrun_jobs(mut taskrun_jobs: Vec<TaskrunJobRef>) -> Self {
         taskrun_jobs.sort_by(|a, b| a.job_name.cmp(&b.job_name));
-        Self { taskrun_jobs }
+        Self {
+            taskrun_jobs,
+            image_enqueue_error: None,
+        }
+    }
+
+    pub fn with_image_enqueue_error(mut self, error: impl Into<String>) -> Self {
+        self.image_enqueue_error = Some(error.into());
+        self
     }
 }
 
@@ -185,7 +194,10 @@ impl RuntimeOps for StubRuntime {
     }
     async fn trigger_mirror_refresh(&self, _project_id: &str) {}
     async fn enqueue_image_build(&self, _image_id: &str) -> Result<(), String> {
-        Ok(())
+        match &self.image_enqueue_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
     async fn trigger_graph_warm(&self, _project_id: &str) {}
     async fn apply_user_model_change(&self) {}
@@ -614,6 +626,12 @@ impl McpTestHarness {
 
     /// Escape hatch for tests that need a pre-seeded DB.
     pub fn from_db(db: Database) -> Self {
+        Self::from_db_with_runtime(db, Arc::new(StubRuntime::default()))
+    }
+
+    /// Build a harness with a caller-supplied runtime bridge while retaining
+    /// the standard strict stubs for every other subsystem.
+    pub fn from_db_with_runtime(db: Database, runtime: Arc<dyn RuntimeOps>) -> Self {
         let state = McpState::new(
             db.clone(),
             EventBus::noop(),
@@ -624,7 +642,7 @@ impl McpTestHarness {
             Some(Arc::new(StubNoteEmbedding) as Arc<dyn NoteEmbeddingProvider>),
             Some(Arc::new(StubNoteVectorStore) as Arc<dyn NoteVectorStore>),
             Arc::new(StubLsp),
-            Arc::new(StubRuntime::default()),
+            runtime,
             Arc::new(StubGit),
             Arc::new(StubRepoGraph),
         );

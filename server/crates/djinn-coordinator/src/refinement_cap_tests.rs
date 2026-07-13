@@ -3,7 +3,8 @@ use crate::SharedCoordinatorState;
 use crate::consolidation::DbConsolidationRunner;
 use crate::roles::RoleRegistry;
 use crate::types::{
-    AutoMergeTracker, BackgroundWorkTracker, DEFAULT_MODEL_ID, PrCleanupConfig, STUCK_INTERVAL,
+    AutoMergeTracker, BackgroundWorkTracker, DEFAULT_MODEL_ID, InflightDispatch, PrCleanupConfig,
+    STUCK_INTERVAL,
 };
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_db::{
@@ -20,6 +21,14 @@ use tokio_util::sync::CancellationToken;
 /// The model used for refinement dispatch in `#[cfg(test)]` builds
 /// (hardcoded by `resolve_dispatch_models_for_role`).
 pub(crate) const TEST_MODEL: &str = DEFAULT_MODEL_ID; // "test/mock"
+
+fn inflight_entry(creator: &str, model: &str) -> InflightDispatch {
+    InflightDispatch {
+        creator: Some(creator.to_owned()),
+        model: model.to_owned(),
+        lane: djinn_core::models::ModelLane::Plan,
+    }
+}
 
 // ── Fixture ──────────────────────────────────────────────────────────
 
@@ -595,10 +604,8 @@ async fn same_tick_session_row_lag_defers_second_admission() {
     assert!(running.is_empty(), "precondition: cold DB");
 
     // In-flight ledger: one admitted refinement for (user, model).
-    let inflight: HashMap<String, (Option<String>, String)> = HashMap::from([(
-        "refinement-task-1".to_string(),
-        (Some(user.to_string()), model.to_string()),
-    )]);
+    let inflight: HashMap<String, InflightDispatch> =
+        HashMap::from([("refinement-task-1".to_string(), inflight_entry(user, model))]);
 
     overlay_inflight_ledger(&mut running, &inflight);
 
@@ -620,10 +627,7 @@ async fn same_tick_session_row_lag_defers_second_admission() {
 
     // Adding a second inflight entry fills the cap=2 slot too.
     let mut inflight2 = inflight.clone();
-    inflight2.insert(
-        "normal-task-1".to_string(),
-        (Some(user.to_string()), model.to_string()),
-    );
+    inflight2.insert("normal-task-1".to_string(), inflight_entry(user, model));
     let mut running2: HashMap<(String, String), u32> = HashMap::new();
     overlay_inflight_ledger(&mut running2, &inflight2);
 
@@ -750,15 +754,9 @@ async fn refinement_and_normal_dispatch_share_inflight_ledger() {
 
     // Cap = 2. Two different dispatch sources: one normal task, one
     // refinement. They share the same (user, model) ledger.
-    let inflight: HashMap<String, (Option<String>, String)> = HashMap::from([
-        (
-            "normal-task-1".to_string(),
-            (Some(user.to_string()), model.to_string()),
-        ),
-        (
-            "refinement-task-1".to_string(),
-            (Some(user.to_string()), model.to_string()),
-        ),
+    let inflight: HashMap<String, InflightDispatch> = HashMap::from([
+        ("normal-task-1".to_string(), inflight_entry(user, model)),
+        ("refinement-task-1".to_string(), inflight_entry(user, model)),
     ]);
 
     let mut running: HashMap<(String, String), u32> = HashMap::new();
@@ -775,10 +773,8 @@ async fn refinement_and_normal_dispatch_share_inflight_ledger() {
     );
 
     // Removing one entry (e.g. normal task completes) frees a slot.
-    let inflight_one: HashMap<String, (Option<String>, String)> = HashMap::from([(
-        "refinement-task-1".to_string(),
-        (Some(user.to_string()), model.to_string()),
-    )]);
+    let inflight_one: HashMap<String, InflightDispatch> =
+        HashMap::from([("refinement-task-1".to_string(), inflight_entry(user, model))]);
     let mut running_one: HashMap<(String, String), u32> = HashMap::new();
     overlay_inflight_ledger(&mut running_one, &inflight_one);
 
@@ -794,17 +790,16 @@ async fn refinement_and_normal_dispatch_share_inflight_ledger() {
         "cap=2 with one in-flight entry allows one more admission"
     );
 
-    // Max semantics: if DB already shows count=2 for (user, model),
-    // the overlay takes max(db, ledger) — a ledger count of 1 does
-    // NOT reduce the effective count.
+    // The caller reconciles away ledger entries whose session row has landed,
+    // so a remaining ledger entry is disjoint booting work and adds to DB.
     let mut running_with_db = HashMap::from([((user.to_string(), model.to_string()), 2u32)]);
     overlay_inflight_ledger(&mut running_with_db, &inflight_one);
     assert_eq!(
         running_with_db
             .get(&(user.to_string(), model.to_string()))
             .copied(),
-        Some(2),
-        "max(db=2, ledger=1) = 2"
+        Some(3),
+        "two running plus one booting reservation = 3"
     );
 }
 

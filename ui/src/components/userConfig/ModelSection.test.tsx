@@ -295,7 +295,9 @@ describe("groupModelsByProvider", () => {
   });
 
   it("uses 'unknown' for models without provider_id", () => {
-    const model = um("custom-model", { provider_id: undefined as unknown as string });
+    const model = um("custom-model", {
+      provider_id: undefined as unknown as UserModel["provider_id"],
+    });
     const groups = groupModelsByProvider([model]);
     expect(groups).toHaveLength(1);
     expect(groups[0]!.providerId).toBe("unknown");
@@ -452,11 +454,12 @@ describe("ModelSection picker (browse/search)", () => {
     // The save mutation's onSuccess reads saved.lanes/maxSessions — return a
     // valid echo so it does not crash.
     vi.mocked(saveUserModelSelection).mockImplementation(
-      async (_targetId, lanes, maxSessions, diverseReview, diverseRefinement) => ({
+      async (_targetId, lanes, maxSessions, options) => ({
         lanes,
         maxSessions,
-        diverseReview: diverseReview ?? true,
-        diverseRefinement: diverseRefinement ?? true,
+        laneMaxSessions: options?.laneMaxSessions,
+        diverseReview: options?.diverseReview ?? true,
+        diverseRefinement: options?.diverseRefinement ?? true,
       }),
     );
   });
@@ -577,16 +580,32 @@ describe("ModelSection picker (browse/search)", () => {
     // The multi-segment fireworks model with full metadata is found.
     const mimoRow = await screen.findByText("MiMo v2.5 Pro");
     expect(mimoRow).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Add a model" })).toHaveClass(
+      "sm:max-w-xl",
+    );
 
-    // Metadata pieces render within the same item.
+    // Keep the model identity on the primary line and the dense technical
+    // metadata on its own wrapping line so it cannot collapse the name.
     const item = mimoRow.closest("[data-slot='command-item']");
     expect(item).not.toBeNull();
+    expect(item).toHaveClass("items-start", "hover:bg-primary/10");
+    expect(mimoRow).toHaveAttribute("data-slot", "model-picker-name");
+    expect(mimoRow).toHaveClass("whitespace-normal", "font-medium");
+    const metadata = (item as HTMLElement).querySelector(
+      "[data-slot='model-picker-metadata']",
+    );
+    expect(metadata).not.toBeNull();
+    expect(metadata).toHaveClass("block", "whitespace-normal", "text-xs");
     const itemText = (item as HTMLElement).textContent ?? "";
     expect(itemText).toContain("1M ctx");
     expect(itemText).toContain("$3.00/$12.00 per M tok");
     expect(itemText).toContain("reasoning");
     expect(itemText).toContain("tools");
     expect(itemText).toContain("vision");
+    expect(metadata).toHaveAttribute(
+      "title",
+      "1M ctx · $3.00/$12.00 per M tok · reasoning tools vision",
+    );
   });
 
   it("renders the Recommended badge for a recommended model in browse/search", async () => {
@@ -812,6 +831,16 @@ describe("ModelSection", () => {
       diverseReview: true,
       diverseRefinement: true,
     });
+    vi.mocked(saveUserModelSelection).mockClear();
+    vi.mocked(saveUserModelSelection).mockImplementation(
+      async (_targetId, lanes, maxSessions, options) => ({
+        lanes,
+        maxSessions,
+        laneMaxSessions: options?.laneMaxSessions,
+        diverseReview: options?.diverseReview ?? true,
+        diverseRefinement: options?.diverseRefinement ?? true,
+      }),
+    );
   });
 
   it("strips provider prefixes for fallback model display", () => {
@@ -827,9 +856,173 @@ describe("ModelSection", () => {
     expect(await screen.findByText("GPT-5")).toBeInTheDocument();
     expect(screen.getByText("OpenAI")).toBeInTheDocument();
     expect(screen.getByDisplayValue("3")).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Plan parallel agents" }),
+    ).toHaveTextContent("1");
+    expect(
+      screen.getByText("Autonomous planning, Architect, Lead, Refinement"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Planner, Architect, Chat")).not.toBeInTheDocument();
+    expect(screen.getByText(/automatically raises a too-low/i)).toBeInTheDocument();
     // Each lane exposes its own Add model trigger.
     expect(
       screen.getAllByRole("button", { name: "Add model" }).length,
     ).toBeGreaterThanOrEqual(3);
   });
+
+  it("keeps legacy unset lane limits omitted on an unrelated Settings save", async () => {
+    const user = userEvent.setup();
+    render(<ModelSection targetId="target-user" />);
+
+    const modelCap = await screen.findByDisplayValue("3");
+    await user.clear(modelCap);
+    await user.type(modelCap, "4");
+    await user.tab();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(saveUserModelSelection).toHaveBeenCalledOnce());
+    expect(saveUserModelSelection).toHaveBeenCalledWith(
+      "target-user",
+      { plan: ["openai/gpt-5"], implement: [], review: [] },
+      { "openai/gpt-5": 4 },
+      {
+        diverseReview: true,
+        diverseRefinement: true,
+      },
+    );
+    expect(
+      vi.mocked(saveUserModelSelection).mock.calls[0]?.[3],
+    ).not.toHaveProperty("laneMaxSessions");
+  });
+
+  it("keeps persisted lane limits effective when saving another setting", async () => {
+    vi.mocked(fetchUserModelSelection).mockResolvedValue({
+      lanes: {
+        plan: ["openai/gpt-5"],
+        implement: ["openai/gpt-5"],
+        review: ["openai/gpt-5"],
+      },
+      maxSessions: { "openai/gpt-5": 1 },
+      laneMaxSessions: { plan: 2, implement: 3, review: 1 },
+      diverseReview: true,
+      diverseRefinement: true,
+    });
+    const user = userEvent.setup();
+    render(<ModelSection targetId="target-user" />);
+
+    const modelCap = (await screen.findAllByDisplayValue("1")).find((element) =>
+      element.matches("input[data-slot='input']"),
+    );
+    expect(modelCap).toBeDefined();
+    if (!modelCap) throw new Error("missing model Sessions input");
+    await user.clear(modelCap);
+    await user.type(modelCap, "2");
+    await user.tab();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(saveUserModelSelection).toHaveBeenCalledOnce());
+    expect(vi.mocked(saveUserModelSelection).mock.calls[0]?.[2]).toEqual({
+      "openai/gpt-5": 6,
+    });
+    expect(
+      vi.mocked(saveUserModelSelection).mock.calls[0]?.[3],
+    ).not.toHaveProperty("laneMaxSessions");
+  });
+
+  it("saves 1–10 lane limits and raises one shared model cap to their sum", async () => {
+    vi.mocked(fetchUserModelSelection).mockResolvedValue({
+      lanes: {
+        plan: ["openai/gpt-5"],
+        implement: ["openai/gpt-5"],
+        review: ["openai/gpt-5"],
+      },
+      maxSessions: { "openai/gpt-5": 1 },
+      laneMaxSessions: { plan: 1, implement: 1, review: 1 },
+      diverseReview: true,
+      diverseRefinement: true,
+    });
+    const user = userEvent.setup();
+
+    render(<ModelSection targetId="target-user" />);
+    await screen.findAllByText("GPT-5");
+    await chooseLaneLimit(user, "Plan", 2);
+    await chooseLaneLimit(user, "Implement", 4);
+    await chooseLaneLimit(user, "Review", 3);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(saveUserModelSelection).toHaveBeenCalledOnce());
+    expect(saveUserModelSelection).toHaveBeenCalledWith(
+      "target-user",
+      {
+        plan: ["openai/gpt-5"],
+        implement: ["openai/gpt-5"],
+        review: ["openai/gpt-5"],
+      },
+      { "openai/gpt-5": 9 },
+      {
+        diverseReview: true,
+        diverseRefinement: true,
+        laneMaxSessions: { plan: 2, implement: 4, review: 3 },
+      },
+    );
+  });
+
+  it("floors distinct model caps only by the lanes each model serves", async () => {
+    vi.mocked(fetchUserModelSelection).mockResolvedValue({
+      lanes: {
+        plan: ["openai/gpt-5"],
+        implement: ["anthropic/claude-sonnet-4"],
+        review: ["anthropic/claude-sonnet-4"],
+      },
+      maxSessions: {
+        "openai/gpt-5": 1,
+        "anthropic/claude-sonnet-4": 1,
+      },
+      laneMaxSessions: { plan: 1, implement: 1, review: 1 },
+      diverseReview: true,
+      diverseRefinement: true,
+    });
+    const user = userEvent.setup();
+
+    render(<ModelSection targetId="target-user" />);
+    await screen.findAllByText("GPT-5");
+    await chooseLaneLimit(user, "Plan", 2);
+    await chooseLaneLimit(user, "Implement", 3);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(saveUserModelSelection).toHaveBeenCalledOnce());
+    expect(vi.mocked(saveUserModelSelection).mock.calls[0]?.[2]).toEqual({
+      "openai/gpt-5": 2,
+      "anthropic/claude-sonnet-4": 4,
+    });
+    expect(vi.mocked(saveUserModelSelection).mock.calls[0]?.[3]).toMatchObject({
+      laneMaxSessions: { plan: 2, implement: 3, review: 1 },
+    });
+  });
+
+  it("hides advanced diversity toggles in onboarding mode", async () => {
+    render(<ModelSection targetId="target-user" onboarding />);
+
+    expect(await screen.findByText("GPT-5")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: "Thorough review" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: "Diverse refinement" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Plan" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Implement" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Review" })).toBeInTheDocument();
+  });
 });
+
+async function chooseLaneLimit(
+  user: ReturnType<typeof userEvent.setup>,
+  lane: string,
+  value: number,
+) {
+  await user.click(
+    screen.getByRole("combobox", { name: `${lane} parallel agents` }),
+  );
+  await user.click(await screen.findByRole("option", { name: String(value) }));
+}
