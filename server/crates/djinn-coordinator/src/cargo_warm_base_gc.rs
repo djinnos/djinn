@@ -1,10 +1,14 @@
-//! Conservative inventory and guard planning for Cargo warm bases, plus idle
-//! whole-base eviction.
+//! Conservative inventory and guard planning for Cargo warm bases, including
+//! whole-base eviction and a report-only fingerprint-unit inventory.
 //!
 //! The inventory and guard-planning phase deliberately does not remove
 //! directories.  The idle evictor consumes guard-plan candidates and performs
 //! the destructive work only after re-checking every safety condition under a
 //! held per-base lock.
+//!
+//! The fingerprint-unit inventory is additive and side-effect-free: it only
+//! reports what it observes, and it never calls removal APIs or interprets a
+//! newest fingerprint mtime as a last-use signal.
 
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -16,6 +20,12 @@ use async_trait::async_trait;
 use djinn_core::clock::Clock;
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+mod fingerprint_inventory;
+
+pub use fingerprint_inventory::{
+    FINGERPRINT_DIR, FingerprintUnitEntry, FingerprintUnitInventory, inventory_fingerprint_units,
+};
 
 pub const CARGO_WARM_BASE_ROOT: &str = "/cache/cargo-target";
 pub const WARM_BASE_GC_LOCK_FILE: &str = ".djinn-gc.lock";
