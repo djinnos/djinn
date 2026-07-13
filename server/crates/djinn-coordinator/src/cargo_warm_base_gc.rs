@@ -1,3 +1,4 @@
+// djinn:allow-oversize — whole-base guardrails and report-only fingerprint orchestration share this safety boundary.
 //! Conservative inventory and guard planning for Cargo warm bases, including
 //! whole-base eviction and a report-only fingerprint-unit inventory.
 //!
@@ -498,6 +499,147 @@ pub(crate) fn log_pressure_eviction_completion(
         reached_high_watermark = pressure.reached_high_watermark,
         remeasurement_failed = pressure.remeasurement_failed,
         "warm-base pressure GC completed"
+    );
+}
+
+/// Report-only result of a fingerprint-unit inventory sweep.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FingerprintSweepReport {
+    /// Number of fingerprint units discovered across all passing bases.
+    pub candidate_count: u64,
+    /// Measured bytes inside all discovered fingerprint units.
+    pub projected_bytes: u64,
+    /// Always zero while fingerprint sweeping remains report-only.
+    pub reclaimed_bytes: u64,
+    /// Bases retained by guard failure (active task, warm job, lock, etc.).
+    pub retained: Vec<(String, RetainReason)>,
+    /// Bases whose inventory traversal failed after passing guards.
+    pub error_bases: Vec<(String, String)>,
+}
+
+/// Report-only fingerprint-unit inventory sweep.
+///
+/// Runs the existing whole-base guard surfaces (activity, warm-job, lock) for
+/// every base in `inventory`. For each base that passes, performs a
+/// side-effect-free inventory of `.fingerprint/<unit>` directories. No
+/// artifacts are deleted in any mode; delete mode emits an explicit
+/// safety-disabled outcome.
+///
+/// Errors from DB, Kubernetes, lock, or fingerprint traversal fail closed and
+/// are recorded in the report.
+pub async fn report_only_fingerprint_sweep(
+    inventory: WarmBaseInventory,
+    activity: &dyn ActivityGuard,
+    warm_jobs: &dyn WarmJobGuard,
+    locks: &dyn BaseLockGuard,
+    mode: crate::context::CacheCleanupMode,
+) -> FingerprintSweepReport {
+    use crate::context::CacheCleanupMode;
+    use djinn_telemetry::cache_cleanup as metrics;
+
+    let mut report = FingerprintSweepReport::default();
+    let (candidates, retained) = evaluate_guards(inventory, activity, warm_jobs, locks).await;
+    report.retained = retained.clone();
+
+    for (project_id, reason) in &retained {
+        let outcome = match reason {
+            RetainReason::ActivityError
+            | RetainReason::WarmJobError
+            | RetainReason::LockError
+            | RetainReason::Young
+            | RetainReason::DeleteError
+            | RetainReason::FreeSpaceError => metrics::OUTCOME_ERROR,
+            RetainReason::ActiveTaskRun => metrics::OUTCOME_RETAINED_ACTIVE,
+            RetainReason::WarmJobInFlight => metrics::OUTCOME_RETAINED,
+            RetainReason::LockBusy => metrics::OUTCOME_RETAINED_LOCK_BUSY,
+        };
+        metrics::increment_cleanup_total(
+            metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
+            outcome,
+            mode.as_metric_label(),
+        );
+        tracing::info!(
+            project_id = %project_id,
+            reason = ?reason,
+            "fingerprint report-only sweep retained base"
+        );
+    }
+
+    for eval in candidates {
+        match inventory_fingerprint_units(&eval.entry.path) {
+            Ok(inventory) => {
+                let unit_count = inventory.units.len() as u64;
+                let projected: u64 = inventory
+                    .units
+                    .iter()
+                    .map(|unit| unit.projected_bytes)
+                    .fold(0u64, u64::saturating_add);
+                report.candidate_count = report.candidate_count.saturating_add(unit_count);
+                report.projected_bytes = report.projected_bytes.saturating_add(projected);
+                if unit_count > 0 {
+                    metrics::increment_candidates(
+                        metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
+                        mode.as_metric_label(),
+                        unit_count,
+                    );
+                }
+            }
+            Err(error) => {
+                report
+                    .error_bases
+                    .push((eval.entry.project_id.clone(), error.clone()));
+                metrics::increment_cleanup_total(
+                    metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
+                    metrics::OUTCOME_ERROR,
+                    mode.as_metric_label(),
+                );
+                tracing::warn!(
+                    project_id = %eval.entry.project_id,
+                    error = %error,
+                    "fingerprint inventory traversal failed; retaining base"
+                );
+            }
+        }
+    }
+
+    let outcome = match mode {
+        CacheCleanupMode::DryRun => metrics::OUTCOME_DRY_RUN,
+        CacheCleanupMode::Delete => metrics::OUTCOME_SAFETY_DISABLED_REPORT_ONLY,
+    };
+    metrics::increment_cleanup_total(
+        metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
+        outcome,
+        mode.as_metric_label(),
+    );
+
+    log_fingerprint_sweep_completion(&report, mode);
+
+    report
+}
+
+/// Emit the fingerprint report-only sweep completion event with bounded fields.
+/// Delete mode explicitly reports the safety-disabled outcome; no per-project
+/// identifiers are exposed.
+pub(crate) fn log_fingerprint_sweep_completion(
+    report: &FingerprintSweepReport,
+    mode: crate::context::CacheCleanupMode,
+) {
+    use djinn_telemetry::cache_cleanup as metrics;
+
+    let outcome = match mode {
+        crate::context::CacheCleanupMode::DryRun => metrics::OUTCOME_DRY_RUN,
+        crate::context::CacheCleanupMode::Delete => metrics::OUTCOME_SAFETY_DISABLED_REPORT_ONLY,
+    };
+    tracing::info!(
+        component = metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
+        mode = mode.as_metric_label(),
+        outcome = outcome,
+        candidate_count = report.candidate_count,
+        projected_bytes = report.projected_bytes,
+        reclaimed_bytes = report.reclaimed_bytes,
+        retained = report.retained.len(),
+        error_bases = report.error_bases.len(),
+        "fingerprint report-only sweep completed"
     );
 }
 
