@@ -460,12 +460,16 @@ fn classify_seed_outcome(
 /// `spawn_blocking` task, which Tokio cannot reliably abort.
 enum SeedAttemptTerminal<'a> {
     Join(&'a Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError>),
+    // Deterministic failure injection for telemetry tests. Production
+    // cancellation is represented by a cancelled JoinError above.
+    #[cfg(test)]
     Cancelled,
 }
 
 fn classify_seed_terminal(terminal: SeedAttemptTerminal<'_>) -> &'static str {
     match terminal {
         SeedAttemptTerminal::Join(result) => classify_seed_outcome(result),
+        #[cfg(test)]
         SeedAttemptTerminal::Cancelled => djinn_telemetry::workspace_seed::OUTCOME_CANCELLED,
     }
 }
@@ -479,6 +483,15 @@ fn classify_seed_terminal(terminal: SeedAttemptTerminal<'_>) -> &'static str {
 fn record_seed_terminal_seconds(elapsed: Duration, terminal: SeedAttemptTerminal<'_>) {
     let outcome = classify_seed_terminal(terminal);
     djinn_telemetry::workspace_seed::record_seconds(outcome, elapsed);
+}
+
+/// Build a deterministic successful join boundary for telemetry tests without
+/// starting an unabortable blocking task.
+#[cfg(test)]
+fn completed_seed_join(
+    result: std::io::Result<CargoTargetSeedResult>,
+) -> Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError> {
+    Ok(result)
 }
 
 async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> PathBuf {
@@ -3506,8 +3519,8 @@ warning: something
 
     /// A successful seed records exactly one `ok` `workspace_seed_seconds`
     /// sample and does not change existing cold-start fallback behavior.
-    #[tokio::test]
-    async fn seed_records_one_ok_sample_on_success() {
+    #[test]
+    fn seed_records_one_ok_sample_on_success() {
         let _guard = seed_telemetry_guard();
         djinn_telemetry::init().expect("telemetry init");
 
@@ -3524,12 +3537,8 @@ warning: something
         let ok_sum_before = seed_sum(&before, "ok");
         let elapsed = Duration::from_millis(300);
 
-        let base_clone = base.clone();
-        let run_clone = run.clone();
-        let join_result = tokio::task::spawn_blocking(move || {
-            cargo_target_seed::seed_cargo_target_dir(base_clone, run_clone)
-        })
-        .await;
+        let join_result =
+            completed_seed_join(cargo_target_seed::seed_cargo_target_dir(&base, &run));
         record_seed_terminal_seconds(elapsed, SeedAttemptTerminal::Join(&join_result));
 
         let result = join_result
@@ -3553,8 +3562,8 @@ warning: something
     /// A cold-start fallback seed (missing base) records exactly one `ok`
     /// sample — the seed helper returns `Ok` with a fallback reason, so the
     /// seed attempt itself completed successfully.
-    #[tokio::test]
-    async fn seed_records_ok_on_cold_start_fallback() {
+    #[test]
+    fn seed_records_ok_on_cold_start_fallback() {
         let _guard = seed_telemetry_guard();
         djinn_telemetry::init().expect("telemetry init");
 
@@ -3567,12 +3576,8 @@ warning: something
         let ok_sum_before = seed_sum(&before, "ok");
         let elapsed = Duration::from_millis(180);
 
-        let base_clone = base.clone();
-        let run_clone = run.clone();
-        let join_result = tokio::task::spawn_blocking(move || {
-            cargo_target_seed::seed_cargo_target_dir(base_clone, run_clone)
-        })
-        .await;
+        let join_result =
+            completed_seed_join(cargo_target_seed::seed_cargo_target_dir(&base, &run));
         record_seed_terminal_seconds(elapsed, SeedAttemptTerminal::Join(&join_result));
 
         let result = join_result
@@ -3598,8 +3603,8 @@ warning: something
     }
 
     /// A seed that returns a setup error records exactly one `error` sample.
-    #[tokio::test]
-    async fn seed_records_one_error_sample_on_setup_failure() {
+    #[test]
+    fn seed_records_one_error_sample_on_setup_failure() {
         let _guard = seed_telemetry_guard();
         djinn_telemetry::init().expect("telemetry init");
 
@@ -3615,15 +3620,12 @@ warning: something
         let err_sum_before = seed_sum(&before, "error");
         let elapsed = Duration::from_millis(90);
 
-        let base_clone = tmp.path().join("any-base");
-        let run_clone = run.clone();
-        let join_result = tokio::task::spawn_blocking(move || {
-            cargo_target_seed::seed_cargo_target_dir(base_clone, run_clone)
-        })
-        .await;
+        let base = tmp.path().join("any-base");
+        let join_result =
+            completed_seed_join(cargo_target_seed::seed_cargo_target_dir(&base, &run));
         record_seed_terminal_seconds(elapsed, SeedAttemptTerminal::Join(&join_result));
 
-        // The join succeeds but the seed returns Err (create_dir_all failed).
+        // The injected join succeeds but the seed returns Err (create_dir_all failed).
         assert!(
             join_result.is_ok(),
             "spawn_blocking join must succeed even if seed returns Err"

@@ -699,7 +699,7 @@ mod tests {
         // fingerprint + dep-info + .rustc_info.json are byte-copied.
         assert_eq!(result.copied_file_count, 3);
         assert!(
-            result.skipped_file_count >= 1 + lock_files.len() as u64,
+            result.skipped_file_count > lock_files.len() as u64,
             "incremental state and every cargo lock variant should be skipped"
         );
 
