@@ -41,6 +41,7 @@ use djinn_supervisor::{
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
 
+use crate::actors::slot::lifecycle::memory_intent_planner::parse_planned_queries;
 use crate::context::AgentContext;
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
 use djinn_provider::catalog::builtin::classify_provider;
@@ -973,6 +974,23 @@ impl SupervisorServices for DirectServices {
         let event_bus = ctx.event_bus.clone();
         let repo = LlmCallAttemptRepository::new(db.clone(), event_bus);
 
+        // This primitive is deliberately attributed-only. Reject empty values
+        // before credential resolution or ledger insertion so an RPC caller
+        // cannot downgrade an enabled planner call into an anonymous attempt.
+        for (name, value) in [
+            ("project_id", request.project_id.as_str()),
+            ("task_id", request.task_id.as_str()),
+            ("task_run_id", request.task_run_id.as_str()),
+            ("session_id", request.session_id.as_str()),
+            ("created_by_user_id", request.created_by_user_id.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!(
+                    "attributed planner request requires non-empty {name}"
+                ));
+            }
+        }
+
         let conversation: Conversation = serde_json::from_str(&request.conversation)
             .map_err(|e| format!("decode planner conversation: {e}"))?;
         let tools: Vec<serde_json::Value> = serde_json::from_str(&request.tools)
@@ -982,7 +1000,7 @@ impl SupervisorServices for DirectServices {
 
         // Resolve model + credential under the caller-scoped policy.
         let (provider_config, model_id) =
-            resolve_memory_provider_config_for_user_db(db, request.created_by_user_id.as_deref())
+            resolve_memory_provider_config_for_user_db(db, Some(&request.created_by_user_id))
                 .await
                 .map_err(|e| format!("resolve memory provider for planner: {e}"))?;
 
@@ -1003,9 +1021,9 @@ impl SupervisorServices for DirectServices {
                 id: &call_id,
                 project_id: &request.project_id,
                 task_id: &request.task_id,
-                task_run_id: request.task_run_id.as_deref(),
-                session_id: request.session_id.as_deref(),
-                created_by_user_id: request.created_by_user_id.as_deref(),
+                task_run_id: Some(&request.task_run_id),
+                session_id: Some(&request.session_id),
+                created_by_user_id: Some(&request.created_by_user_id),
                 operation: &request.operation,
                 prompt_id: &request.prompt_id,
                 model_id: &model_id,
@@ -1029,35 +1047,30 @@ impl SupervisorServices for DirectServices {
         let mut outcome = LlmCallOutcome::ProviderError;
         let mut diagnostic: Option<String> = None;
 
-        // Host-owned timeout around the stream; cancellation outside this
-        // boundary cannot erase the terminal write.
-        let stream_fut = provider.stream(&conversation, &tools, request.tool_choice);
-        let stream_result = match timeout(timeout_dur, stream_fut).await {
-            Ok(Ok(mut stream)) => {
-                let mut stream_err: Option<String> = None;
-                while let Some(ev) = stream.next().await {
-                    match ev {
-                        Ok(StreamEvent::Delta(block)) => response.content.push(block),
-                        Ok(StreamEvent::Thinking(s)) => response.thinking.push_str(&s),
-                        Ok(StreamEvent::Usage(u)) => response.usage = u,
-                        Ok(StreamEvent::Done) => break,
-                        Err(e) => {
-                            // Retain the latest observed usage across a late
-                            // stream error without dropping it.
-                            stream_err = Some(format!("provider stream error: {e}"));
-                            break;
-                        }
-                    }
-                }
-                if let Some(err) = stream_err {
-                    diagnostic = Some(err);
-                    Err(())
-                } else {
-                    Ok(())
+        // The timeout encloses both provider initialization and *all* stream
+        // collection. `response` is updated as usage events arrive, so a
+        // timeout after a usage event still finalizes the attempt with that
+        // latest observed usage.
+        let collect_stream = async {
+            let mut stream = provider
+                .stream(&conversation, &tools, request.tool_choice)
+                .await
+                .map_err(|e| format!("provider stream init failed: {e}"))?;
+            while let Some(ev) = stream.next().await {
+                match ev {
+                    Ok(StreamEvent::Delta(block)) => response.content.push(block),
+                    Ok(StreamEvent::Thinking(s)) => response.thinking.push_str(&s),
+                    Ok(StreamEvent::Usage(u)) => response.usage = u,
+                    Ok(StreamEvent::Done) => break,
+                    Err(e) => return Err(format!("provider stream error: {e}")),
                 }
             }
+            Ok::<(), String>(())
+        };
+        let stream_result = match timeout(timeout_dur, collect_stream).await {
+            Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => {
-                diagnostic = Some(format!("provider stream init failed: {e}"));
+                diagnostic = Some(e);
                 Err(())
             }
             Err(_) => {
@@ -1081,13 +1094,12 @@ impl SupervisorServices for DirectServices {
             .collect::<String>();
 
         if stream_result.is_ok() {
-            // Validate completed payload before finalizing success. For the
-            // memory-intent planner, valid output is non-empty JSON. More
-            // specific contract validation lives in the lifecycle planner
-            // boundary; here we gate the primitive on well-formed payload.
+            // Validate the complete typed planner contract before terminal
+            // success persistence. This includes JSON shape, the closed note
+            // type set, query count, and the Phase-1 query style rules.
             let valid = !content_text.trim().is_empty()
                 && (request.operation != "memory_intent_planner"
-                    || serde_json::from_str::<serde_json::Value>(&content_text).is_ok());
+                    || parse_planned_queries(&content_text).is_ok());
             if valid {
                 outcome = LlmCallOutcome::Success;
             } else {
