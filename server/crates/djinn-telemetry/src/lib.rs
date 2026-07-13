@@ -104,6 +104,11 @@ const BUILD_SLOTS_IN_USE: &str = "djinn_build_slots_in_use";
 const BUILD_SLOTS_QUEUED: &str = "djinn_build_slots_queued";
 const AGENT_SESSION_PHASE_SECONDS_TOTAL: &str = "djinn_agent_session_phase_seconds_total";
 
+// ─── Linux PSI telemetry (proposal zp5t) ──────────────────────────────
+const NODE_PSI_SOME_AVG10_RATIO: &str = "node_psi_some_avg10_ratio";
+const NODE_PSI_AVAILABLE: &str = "node_psi_available";
+const NODE_PSI_READ_ERRORS_TOTAL: &str = "node_psi_read_errors_total";
+
 // ─── Cache cleanup observability ────────────────────────────────────
 const CACHE_CLEANUP_TOTAL: &str = "djinn_cache_cleanup_total";
 const CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL: &str = "djinn_cache_cleanup_reclaimed_bytes_total";
@@ -983,6 +988,32 @@ fn register_metrics() {
                 AGENT_SESSION_PHASE_SECONDS_TOTAL,
                 "phase" => phase,
                 "role" => role,
+            )
+            .absolute(0);
+        }
+    }
+
+    // ─── Linux PSI telemetry (proposal zp5t) ──────────────────────────
+    metrics::describe_gauge!(
+        NODE_PSI_SOME_AVG10_RATIO,
+        "Linux pressure stall information some avg10 pressure ratio, converted from the kernel percent value."
+    );
+    metrics::describe_gauge!(
+        NODE_PSI_AVAILABLE,
+        "Whether the Linux pressure stall information some avg10 sample is currently available: 1 for available, 0 for unavailable."
+    );
+    metrics::describe_counter!(
+        NODE_PSI_READ_ERRORS_TOTAL,
+        "Linux pressure stall information read failures partitioned by bounded resource and reason labels."
+    );
+    for resource in psi::ALL_RESOURCES {
+        metrics::gauge!(NODE_PSI_SOME_AVG10_RATIO, "resource" => resource).set(f64::NAN);
+        metrics::gauge!(NODE_PSI_AVAILABLE, "resource" => resource).set(0.0);
+        for reason in psi::ALL_READ_ERROR_REASONS {
+            metrics::counter!(
+                NODE_PSI_READ_ERRORS_TOTAL,
+                "resource" => resource,
+                "reason" => reason,
             )
             .absolute(0);
         }
@@ -1925,6 +1956,53 @@ pub mod agent_session_phase {
             "role" => role,
         )
         .increment(duration.as_secs());
+    }
+}
+
+/// Linux pressure stall information (PSI) telemetry (proposal zp5t).
+///
+/// PSI reports percentages; [`record_success`] converts the supplied percent to
+/// a Prometheus ratio. Failed reads deliberately replace the previous value
+/// with `NaN`, rather than retaining a stale pressure sample.
+pub mod psi {
+    pub const RESOURCE_CPU: &str = "cpu";
+    pub const RESOURCE_MEMORY: &str = "memory";
+    pub const RESOURCE_IO: &str = "io";
+
+    pub const REASON_MISSING: &str = "missing";
+    pub const REASON_PERMISSION: &str = "permission";
+    pub const REASON_PARSE: &str = "parse";
+    pub const REASON_IO: &str = "io";
+
+    pub(crate) const ALL_RESOURCES: [&str; 3] = [RESOURCE_CPU, RESOURCE_MEMORY, RESOURCE_IO];
+    pub(crate) const ALL_READ_ERROR_REASONS: [&str; 4] =
+        [REASON_MISSING, REASON_PERMISSION, REASON_PARSE, REASON_IO];
+
+    /// Publish a successful `some avg10` PSI sample.
+    ///
+    /// `percent` is the kernel PSI percentage (for example `12.5`); the gauge
+    /// publishes its ratio (`0.125`). `resource` MUST be an `RESOURCE_*`
+    /// constant, keeping the metric label domain closed.
+    pub fn record_success(resource: &'static str, percent: f64) {
+        metrics::gauge!(super::NODE_PSI_SOME_AVG10_RATIO, "resource" => resource)
+            .set(percent / 100.0);
+        metrics::gauge!(super::NODE_PSI_AVAILABLE, "resource" => resource).set(1.0);
+    }
+
+    /// Publish a failed PSI read without leaving a stale pressure value behind.
+    ///
+    /// `resource` and `reason` MUST be the corresponding `RESOURCE_*` and
+    /// `REASON_*` constants. This synchronous best-effort helper records exactly
+    /// one bounded error counter increment for each call.
+    pub fn record_failure(resource: &'static str, reason: &'static str) {
+        metrics::gauge!(super::NODE_PSI_SOME_AVG10_RATIO, "resource" => resource).set(f64::NAN);
+        metrics::gauge!(super::NODE_PSI_AVAILABLE, "resource" => resource).set(0.0);
+        metrics::counter!(
+            super::NODE_PSI_READ_ERRORS_TOTAL,
+            "resource" => resource,
+            "reason" => reason,
+        )
+        .increment(1);
     }
 }
 
@@ -4270,6 +4348,141 @@ mod tests {
                 );
             }
         }
+    }
+    // ─── Linux PSI telemetry tests (proposal zp5t) ─────────────────────
+
+    #[test]
+    fn psi_helpers_are_synchronous_unit_functions() {
+        let _guard = test_guard();
+        fn assert_sync_unit<F: FnOnce()>(f: F) {
+            f();
+        }
+        init().unwrap();
+        assert_sync_unit(|| psi::record_success(psi::RESOURCE_CPU, 12.5));
+        assert_sync_unit(|| psi::record_failure(psi::RESOURCE_CPU, psi::REASON_PARSE));
+    }
+
+    #[test]
+    fn psi_descriptors_and_all_bounded_label_domains_render() {
+        let _guard = test_guard();
+        init().unwrap();
+        let rendered = render().unwrap();
+
+        for (metric, metric_type, help) in [
+            (
+                NODE_PSI_SOME_AVG10_RATIO,
+                "gauge",
+                "Linux pressure stall information some avg10 pressure ratio",
+            ),
+            (
+                NODE_PSI_AVAILABLE,
+                "gauge",
+                "Whether the Linux pressure stall information some avg10 sample is currently available",
+            ),
+            (
+                NODE_PSI_READ_ERRORS_TOTAL,
+                "counter",
+                "Linux pressure stall information read failures",
+            ),
+        ] {
+            assert!(rendered.contains(&format!("# TYPE {metric} {metric_type}")));
+            assert!(rendered.contains(&format!("# HELP {metric} {help}")));
+        }
+
+        for resource in psi::ALL_RESOURCES {
+            assert!(rendered.contains(&format!(
+                "{NODE_PSI_SOME_AVG10_RATIO}{{resource=\"{resource}\"}}"
+            )));
+            assert!(rendered.contains(&format!("{NODE_PSI_AVAILABLE}{{resource=\"{resource}\"}}")));
+            for reason in psi::ALL_READ_ERROR_REASONS {
+                assert!(rendered.contains(&format!(
+                    "{NODE_PSI_READ_ERRORS_TOTAL}{{reason=\"{reason}\",resource=\"{resource}\"}}"
+                )) || rendered.contains(&format!(
+                    "{NODE_PSI_READ_ERRORS_TOTAL}{{resource=\"{resource}\",reason=\"{reason}\"}}"
+                )));
+            }
+        }
+        assert!(!rendered.contains("verify_cache_hit_total"));
+    }
+
+    #[test]
+    fn psi_success_failure_recovery_and_resources_are_independent() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        psi::record_success(psi::RESOURCE_CPU, 12.5);
+        psi::record_success(psi::RESOURCE_MEMORY, 40.0);
+        let successful = render().unwrap();
+        assert_eq!(
+            labeled_sample_value(
+                &successful,
+                NODE_PSI_SOME_AVG10_RATIO,
+                &[("resource", "cpu")]
+            ),
+            0.125
+        );
+        assert_eq!(
+            labeled_sample_value(&successful, NODE_PSI_AVAILABLE, &[("resource", "cpu")]),
+            1.0
+        );
+        assert_eq!(
+            labeled_sample_value(
+                &successful,
+                NODE_PSI_SOME_AVG10_RATIO,
+                &[("resource", "memory")]
+            ),
+            0.4
+        );
+
+        let parse_before = labeled_sample_value(
+            &successful,
+            NODE_PSI_READ_ERRORS_TOTAL,
+            &[("resource", "cpu"), ("reason", "parse")],
+        );
+        psi::record_failure(psi::RESOURCE_CPU, psi::REASON_PARSE);
+        let failed = render().unwrap();
+        let failed_value =
+            rendered_sample(&failed, NODE_PSI_SOME_AVG10_RATIO, &[("resource", "cpu")]);
+        assert!(
+            failed_value.ends_with(" NaN"),
+            "PSI failures must replace stale values: {failed_value}"
+        );
+        assert_eq!(
+            labeled_sample_value(&failed, NODE_PSI_AVAILABLE, &[("resource", "cpu")]),
+            0.0
+        );
+        assert_eq!(
+            labeled_sample_value(
+                &failed,
+                NODE_PSI_READ_ERRORS_TOTAL,
+                &[("resource", "cpu"), ("reason", "parse")],
+            ),
+            parse_before + 1.0
+        );
+        assert_eq!(
+            labeled_sample_value(
+                &failed,
+                NODE_PSI_SOME_AVG10_RATIO,
+                &[("resource", "memory")]
+            ),
+            0.4,
+            "a CPU failure must not overwrite another resource series"
+        );
+
+        psi::record_success(psi::RESOURCE_CPU, 25.0);
+        let recovered = render().unwrap();
+        assert_eq!(
+            labeled_sample_value(
+                &recovered,
+                NODE_PSI_SOME_AVG10_RATIO,
+                &[("resource", "cpu")]
+            ),
+            0.25
+        );
+        assert_eq!(
+            labeled_sample_value(&recovered, NODE_PSI_AVAILABLE, &[("resource", "cpu")]),
+            1.0
+        );
     }
 }
 
