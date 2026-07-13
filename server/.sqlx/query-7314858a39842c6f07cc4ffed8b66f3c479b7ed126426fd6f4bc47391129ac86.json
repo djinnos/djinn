@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, short_id, title, description, emoji, color, status,\n                owner, created_at, updated_at, closed_at, memory_refs::text AS \"memory_refs!\",\n                auto_breakdown AS \"auto_breakdown!: bool\",\n                originating_adr_id, created_by_user_id\n         FROM epics WHERE id = $1",
+  "query": "SELECT id, project_id, short_id, title, description, emoji, color,\n                    status AS \"status!\", owner, created_at, updated_at, closed_at,\n                    memory_refs::text AS \"memory_refs!\", auto_breakdown AS \"auto_breakdown!: bool\",\n                    originating_adr_id, created_by_user_id, proposal_id\n             FROM epics ORDER BY created_at",
   "describe": {
     "columns": [
       {
@@ -40,7 +40,7 @@
       },
       {
         "ordinal": 7,
-        "name": "status",
+        "name": "status!",
         "type_info": "Varchar"
       },
       {
@@ -82,12 +82,15 @@
         "ordinal": 15,
         "name": "created_by_user_id",
         "type_info": "Varchar"
+      },
+      {
+        "ordinal": 16,
+        "name": "proposal_id",
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
-      "Left": [
-        "Text"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -105,8 +108,9 @@
       null,
       false,
       true,
+      true,
       true
     ]
   },
-  "hash": "2daa1e0f1b319e2a668fde38b8902384a9b61565c1caa23b15097dc8adb566aa"
+  "hash": "7314858a39842c6f07cc4ffed8b66f3c479b7ed126426fd6f4bc47391129ac86"
 }

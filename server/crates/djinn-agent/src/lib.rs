@@ -22,6 +22,7 @@ pub mod chat_tools;
 pub mod direct_services;
 pub mod environment;
 pub(crate) mod extension;
+pub(crate) mod extension_diagnostics;
 pub mod file_time;
 pub(crate) mod github_error_render;
 pub(crate) mod knowledge_promotion;
