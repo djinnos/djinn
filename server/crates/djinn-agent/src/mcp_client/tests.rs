@@ -1171,3 +1171,41 @@ fn server_instructions_clone_shares_same_data() {
         Some("Shared instructions.")
     );
 }
+
+#[test]
+fn startup_diagnostic_facts_are_canonical_and_exclude_runtime_paths() {
+    let placeholder = mcp_diagnostic(
+        "project-server",
+        ExtensionLoadPhase::PlaceholderResolution,
+        ExtensionLoadRemedyCode::CheckPlaceholder,
+        "A configured MCP placeholder value is unavailable.",
+    );
+    let transport = McpStartupFailure::Transport.diagnostic("project-server");
+    let handshake = McpStartupFailure::Handshake.diagnostic("project-server");
+    let initial_list = McpStartupFailure::ToolsList.diagnostic("project-server");
+
+    for fact in [&placeholder, &transport, &handshake, &initial_list] {
+        assert_eq!(fact.source_kind, ExtensionLoadSourceKind::ProjectMcp);
+        assert_eq!(fact.source_key, "project-server");
+        assert_eq!(fact.severity, ExtensionLoadSeverity::Warning);
+        assert!(!fact.summary_material.contains("Authorization"));
+        assert!(!fact.summary_material.contains("Bearer"));
+    }
+    assert_eq!(placeholder.phase, ExtensionLoadPhase::PlaceholderResolution);
+    assert_eq!(
+        placeholder.remedy_code,
+        ExtensionLoadRemedyCode::CheckPlaceholder
+    );
+    assert_eq!(transport.phase, ExtensionLoadPhase::Transport);
+    assert_eq!(
+        transport.remedy_code,
+        ExtensionLoadRemedyCode::CheckTransport
+    );
+    assert_eq!(handshake.phase, ExtensionLoadPhase::Handshake);
+    assert_eq!(handshake.remedy_code, ExtensionLoadRemedyCode::CheckServer);
+    assert_eq!(initial_list.phase, ExtensionLoadPhase::ToolsList);
+    assert_eq!(
+        initial_list.remedy_code,
+        ExtensionLoadRemedyCode::CheckServer
+    );
+}

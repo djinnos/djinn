@@ -27,7 +27,11 @@ use rmcp::transport::{
 
 use crate::context::AgentContext;
 use crate::extension::shared_schemas;
+use crate::extension_diagnostics::ExtensionDiagnosticFact;
 use crate::mcp_settings::McpServerConfig;
+use djinn_core::extension_diagnostics::{
+    ExtensionLoadPhase, ExtensionLoadRemedyCode, ExtensionLoadSeverity, ExtensionLoadSourceKind,
+};
 
 mod config;
 use config::{McpTransportKind, resolve_server_config};
@@ -863,8 +867,78 @@ fn call_tool_result_to_json(result: CallToolResult) -> Result<serde_json::Value,
     }
 }
 
-/// Connect to resolved MCP servers and discover their tools.
+/// Additive result from MCP startup discovery.
 ///
+/// Lifecycle owns load-attempt association and persistence. This result only
+/// carries bounded facts to the shared diagnostic producer.
+pub(crate) struct McpDiscoveryResult {
+    pub registry: Option<McpToolRegistry>,
+    #[expect(
+        dead_code,
+        reason = "lifecycle consumes diagnostics when it owns attempt persistence"
+    )]
+    pub diagnostics: Vec<ExtensionDiagnosticFact>,
+}
+
+/// The reachable startup boundaries exposed by this HTTP-only loader.
+#[derive(Debug, Clone, Copy)]
+enum McpStartupFailure {
+    Transport,
+    // rmcp serves connection and initialize at the same boundary.
+    Handshake,
+    ToolsList,
+}
+
+impl std::fmt::Display for McpStartupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Transport => "MCP transport configuration failed",
+            Self::Handshake => "MCP transport handshake failed",
+            Self::ToolsList => "MCP tools/list failed",
+        })
+    }
+}
+
+impl McpStartupFailure {
+    fn diagnostic(self, server_name: &str) -> ExtensionDiagnosticFact {
+        let (phase, remedy_code, summary_material) = match self {
+            Self::Transport => (
+                ExtensionLoadPhase::Transport,
+                ExtensionLoadRemedyCode::CheckTransport,
+                "MCP transport configuration could not be initialized.",
+            ),
+            Self::Handshake => (
+                ExtensionLoadPhase::Handshake,
+                ExtensionLoadRemedyCode::CheckServer,
+                "MCP connection or initialization failed.",
+            ),
+            Self::ToolsList => (
+                ExtensionLoadPhase::ToolsList,
+                ExtensionLoadRemedyCode::CheckServer,
+                "Initial MCP tools/list request failed.",
+            ),
+        };
+        mcp_diagnostic(server_name, phase, remedy_code, summary_material)
+    }
+}
+
+fn mcp_diagnostic(
+    server_name: &str,
+    phase: ExtensionLoadPhase,
+    remedy_code: ExtensionLoadRemedyCode,
+    summary_material: &'static str,
+) -> ExtensionDiagnosticFact {
+    ExtensionDiagnosticFact {
+        source_kind: ExtensionLoadSourceKind::ProjectMcp,
+        source_key: server_name.to_owned(),
+        phase,
+        severity: ExtensionLoadSeverity::Warning,
+        remedy_code,
+        // Facts never include raw URL/header/command/args/env/stderr or rmcp errors.
+        summary_material: summary_material.to_owned(),
+    }
+}
+
 /// For each `(name, config)` pair:
 /// 1. Resolve `${VAR_NAME}` placeholders against environment/credentials.
 /// 2. If the config resolves to HTTP, connect via Streamable HTTP transport.
@@ -879,8 +953,27 @@ pub async fn connect_and_discover(
     servers: &[(String, McpServerConfig)],
     app_state: &AgentContext,
 ) -> Option<McpToolRegistry> {
+    connect_and_discover_with_diagnostics(task_short_id, role_name, servers, app_state)
+        .await
+        .registry
+}
+
+/// Diagnostics-capable MCP startup entry point for lifecycle integration.
+///
+/// It preserves the legacy non-fatal policy: a failed server is skipped and
+/// later servers still load. Facts cover only configured-server startup; tool
+/// calls, schema serialization, disconnects, and refreshes do not enter here.
+pub(crate) async fn connect_and_discover_with_diagnostics(
+    task_short_id: &str,
+    role_name: &str,
+    servers: &[(String, McpServerConfig)],
+    app_state: &AgentContext,
+) -> McpDiscoveryResult {
     if servers.is_empty() {
-        return None;
+        return McpDiscoveryResult {
+            registry: None,
+            diagnostics: Vec::new(),
+        };
     }
 
     // Create the shared routing state early so notification handlers
@@ -904,11 +997,18 @@ pub async fn connect_and_discover(
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
     let mut server_instructions: BTreeMap<String, String> = BTreeMap::new();
     let mut resource_servers_set: HashSet<String> = HashSet::new();
+    let mut diagnostics = Vec::new();
 
     for (name, config) in servers {
         let resolved = match resolve_server_config(name, config, app_state).await {
             Ok(resolved) => resolved,
             Err(missing) => {
+                diagnostics.push(mcp_diagnostic(
+                    name,
+                    ExtensionLoadPhase::PlaceholderResolution,
+                    ExtensionLoadRemedyCode::CheckPlaceholder,
+                    "A configured MCP placeholder value is unavailable.",
+                ));
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
@@ -924,6 +1024,13 @@ pub async fn connect_and_discover(
         let url = match resolved.transport_kind() {
             McpTransportKind::Http => resolved.url.clone().expect("HTTP transport requires URL"),
             McpTransportKind::Stdio => {
+                // No stdio process is launched by this loader, so process_start is not reached.
+                diagnostics.push(mcp_diagnostic(
+                    name,
+                    ExtensionLoadPhase::Transport,
+                    ExtensionLoadRemedyCode::CheckTransport,
+                    "MCP stdio transport is not supported for agent sessions.",
+                ));
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
@@ -936,6 +1043,12 @@ pub async fn connect_and_discover(
                 continue;
             }
             McpTransportKind::Unsupported => {
+                diagnostics.push(mcp_diagnostic(
+                    name,
+                    ExtensionLoadPhase::Transport,
+                    ExtensionLoadRemedyCode::CheckTransport,
+                    "MCP transport configuration is unsupported.",
+                ));
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
@@ -975,18 +1088,26 @@ pub async fn connect_and_discover(
                 );
                 (Arc::new(peer), list_result)
             }
-            Ok(Err(e)) => {
+            Ok(Err(failure)) => {
+                diagnostics.push(failure.diagnostic(name));
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
                     server = %name,
                     url = %url,
-                    error = %e,
+                    error = %failure,
                     "Failed to connect to MCP server; skipping"
                 );
                 continue;
             }
             Err(_elapsed) => {
+                // The combined timeout cannot prove initial tools/list was reached.
+                diagnostics.push(mcp_diagnostic(
+                    name,
+                    ExtensionLoadPhase::Handshake,
+                    ExtensionLoadRemedyCode::CheckServer,
+                    "MCP connection or initialization timed out.",
+                ));
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
@@ -1082,7 +1203,10 @@ pub async fn connect_and_discover(
     }
 
     if tool_schemas.is_empty() {
-        return None;
+        return McpDiscoveryResult {
+            registry: None,
+            diagnostics,
+        };
     }
 
     // Populate the shared routing state with all discovered data.
@@ -1101,14 +1225,17 @@ pub async fn connect_and_discover(
     let mut resource_server_names: Vec<String> = resource_servers_set.into_iter().collect();
     resource_server_names.sort();
 
-    Some(McpToolRegistry {
-        routing,
-        tool_schemas,
-        server_instructions,
-        resource_servers: resource_server_names,
-        #[cfg(test)]
-        test_dispatch: None,
-    })
+    McpDiscoveryResult {
+        registry: Some(McpToolRegistry {
+            routing,
+            tool_schemas,
+            server_instructions,
+            resource_servers: resource_server_names,
+            #[cfg(test)]
+            test_dispatch: None,
+        }),
+        diagnostics,
+    }
 }
 
 /// Establish a connection to an MCP server via Streamable HTTP transport.
@@ -1125,13 +1252,13 @@ async fn connect_to_server(
     server_name: &str,
     task_short_id: &str,
     routing: Arc<RwLock<RoutingState>>,
-) -> Result<Peer<RoleClient>, String> {
+) -> Result<Peer<RoleClient>, McpStartupFailure> {
     let mut custom_headers = HashMap::new();
     for (name, value) in headers {
-        let header_name = HeaderName::try_from(name.as_str())
-            .map_err(|e| format!("invalid header name `{name}` for `{url}`: {e}"))?;
-        let header_value = HeaderValue::try_from(value.as_str())
-            .map_err(|e| format!("invalid header value for `{name}` on `{url}`: {e}"))?;
+        let header_name =
+            HeaderName::try_from(name.as_str()).map_err(|_| McpStartupFailure::Transport)?;
+        let header_value =
+            HeaderValue::try_from(value.as_str()).map_err(|_| McpStartupFailure::Transport)?;
         custom_headers.insert(header_name, header_value);
     }
 
@@ -1147,7 +1274,7 @@ async fn connect_to_server(
     let service = handler
         .serve(transport)
         .await
-        .map_err(|e| format!("MCP transport handshake failed: {e}"))?;
+        .map_err(|_| McpStartupFailure::Handshake)?;
     let peer = service.peer().clone();
     // Keep the service alive in the background so notification processing
     // continues for the lifetime of the connection.
@@ -1172,12 +1299,12 @@ async fn startup_and_list(
     server_name: &str,
     task_short_id: &str,
     routing: Arc<RwLock<RoutingState>>,
-) -> Result<(Peer<RoleClient>, rmcp::model::ListToolsResult), String> {
+) -> Result<(Peer<RoleClient>, rmcp::model::ListToolsResult), McpStartupFailure> {
     let peer = connect_to_server(url, headers, server_name, task_short_id, routing).await?;
     let result = peer
         .list_tools(None)
         .await
-        .map_err(|e| format!("MCP tools/list failed: {e}"))?;
+        .map_err(|_| McpStartupFailure::ToolsList)?;
     Ok((peer, result))
 }
 
