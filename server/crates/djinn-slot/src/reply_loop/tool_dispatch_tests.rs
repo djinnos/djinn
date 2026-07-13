@@ -165,6 +165,7 @@ fn test_dispatch_context<'a>(
         tool_metadata,
         tool_dispatcher: ctx.tool_dispatcher.as_ref().unwrap().as_ref(),
         otel_session: None,
+        phase_tracker: None,
     }
 }
 
@@ -627,17 +628,17 @@ async fn collect_tool_results_preserves_stash_tool_name() {
     assert!(!collected[0].name_missing);
 }
 
-/// Per-turn inline-character budget post-pass tests (v9ie).
-///
-/// Launch-readiness constraints (see design/v9ie-launch-readiness-notes):
-/// - The canonical stub preserves `tool_use_id`, `tool_name`, and
-///   `reason="turn_budget"` for compaction-placeholder compatibility.
-/// - Extra sub-30k stash writes are bounded by the number of tool results per
-///   turn, so they remain within existing retention/GC assumptions.
-/// - Chat is outside the group pass; these tests cover reply-loop tool
-///   results only.
-/// - Coordinator duplicate stash code is unchanged because the durable
-///   format is unchanged.
+// Per-turn inline-character budget post-pass tests (v9ie).
+//
+// Launch-readiness constraints (see design/v9ie-launch-readiness-notes):
+// - The canonical stub preserves `tool_use_id`, `tool_name`, and
+//   `reason="turn_budget"` for compaction-placeholder compatibility.
+// - Extra sub-30k stash writes are bounded by the number of tool results per
+//   turn, so they remain within existing retention/GC assumptions.
+// - Chat is outside the group pass; these tests cover reply-loop tool
+//   results only.
+// - Coordinator duplicate stash code is unchanged because the durable
+//   format is unchanged.
 
 /// Build a `CollectedToolResult` for a single text-block tool result.
 fn collected_text(
