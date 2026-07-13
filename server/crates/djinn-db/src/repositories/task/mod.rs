@@ -23,7 +23,7 @@ mod writes;
 // construct the scope and inspect the classification plan.
 pub use parent_disposition::{
     ChildDisposition, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
-    apply_parent_disposition_tx, classify_child_tx,
+    DoctorRepairOutcome, apply_doctor_repair_tx, apply_parent_disposition_tx, classify_child_tx,
 };
 
 // ── Query / result types ──────────────────────────────────────────────────────

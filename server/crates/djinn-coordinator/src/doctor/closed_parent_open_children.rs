@@ -9,7 +9,8 @@
 use std::sync::Arc;
 
 use djinn_core::doctor::{
-    DoctorCheck, DoctorCheckCadence, DoctorResult, Finding, FindingSeverity, ResolverSnapshot,
+    DoctorCheck, DoctorCheckCadence, DoctorError, DoctorResult, Finding, FindingSeverity,
+    ResolverSnapshot,
 };
 use serde_json::json;
 use tracing::warn;
@@ -28,14 +29,50 @@ pub trait ClosedParentOpenChildrenSource: Send + Sync {
     fn refresh_for_run(&self) {}
 }
 
+/// Opt-in repair source for the closed-parent orphan doctor fix.
+///
+/// The production implementation wraps a database transaction that locks the
+/// target task, re-runs the shared classifier under the lock, and applies the
+/// safe mutation subset. In-memory test doubles return a fabricated outcome.
+pub trait ClosedParentOpenChildrenRepairSource: Send + Sync {
+    /// Apply the transactional repair for one finding.
+    ///
+    /// `terminal_epic_ids` and `terminal_proposal_ids` are taken from the
+    /// board-health finding so the repair can reconstruct the correct scope.
+    /// Returns the outcome (applied or skipped) so the caller can surface it.
+    fn repair(
+        &self,
+        task_id: &str,
+        snapshot_status: &str,
+        snapshot_action: &str,
+        terminal_epic_ids: &[String],
+        terminal_proposal_ids: &[String],
+    ) -> Result<djinn_db::repositories::task::DoctorRepairOutcome, String>;
+}
+
 /// Read-only doctor check that persists the board-health evidence verbatim.
+/// When a [`ClosedParentOpenChildrenRepairSource`] is attached, `fix()`
+/// performs the opt-in mutating repair.
 pub struct ClosedParentOpenChildrenCheck {
     source: Arc<dyn ClosedParentOpenChildrenSource>,
+    repair_source: Option<Arc<dyn ClosedParentOpenChildrenRepairSource>>,
 }
 
 impl ClosedParentOpenChildrenCheck {
     pub fn new(source: Arc<dyn ClosedParentOpenChildrenSource>) -> Self {
-        Self { source }
+        Self {
+            source,
+            repair_source: None,
+        }
+    }
+
+    /// Attach a repair source so `fix()` can perform the mutating repair.
+    pub fn with_repair_source(
+        mut self,
+        repair_source: Arc<dyn ClosedParentOpenChildrenRepairSource>,
+    ) -> Self {
+        self.repair_source = Some(repair_source);
+        self
     }
 
     fn finding_for(raw: &serde_json::Value) -> Option<Finding> {
@@ -112,6 +149,67 @@ impl DoctorCheck for ClosedParentOpenChildrenCheck {
             })
             .collect())
     }
+
+    fn fix(&self, finding: &Finding) -> DoctorResult<()> {
+        let Some(repair_source) = &self.repair_source else {
+            return Err(DoctorError::FixNotSupported {
+                check: self.name().to_string(),
+            });
+        };
+
+        // Extract the task_id and snapshot evidence from the persisted finding.
+        // The finding's resolver_snapshot.inputs carries the full board-health
+        // child snapshot (status, recommended_disposition, terminal_epic_ids,
+        // etc.). The evidence also carries the same data.
+        let task_id = finding
+            .entity_ids
+            .get("task_id")
+            .ok_or_else(|| {
+                DoctorError::InvalidInput(
+                    "closed_parent_open_children fix: finding missing task_id entity".to_string(),
+                )
+            })?
+            .clone();
+
+        let board_health_finding = &finding.evidence["board_health_finding"];
+        let snapshot_status = board_health_finding
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let snapshot_action = board_health_finding
+            .get("recommended_disposition")
+            .and_then(|d| d.get("action"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("retain");
+
+        let terminal_epic_ids = extract_string_array(board_health_finding, "terminal_epic_ids");
+        let terminal_proposal_ids =
+            extract_string_array(board_health_finding, "terminal_proposal_ids");
+
+        repair_source
+            .repair(
+                &task_id,
+                snapshot_status,
+                snapshot_action,
+                &terminal_epic_ids,
+                &terminal_proposal_ids,
+            )
+            .map(|_| ())
+            .map_err(DoctorError::Backend)
+    }
+}
+
+/// Extract string values from a JSON array field.
+fn extract_string_array(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// In-memory source for unit tests.
@@ -205,6 +303,61 @@ impl ClosedParentOpenChildrenSource for TaskRepositoryClosedParentOpenChildrenSo
                 Err(error) => {
                     warn!(%error, "closed_parent_open_children doctor: failed to create refresh runtime")
                 }
+            },
+        }
+    }
+}
+
+impl ClosedParentOpenChildrenRepairSource for TaskRepositoryClosedParentOpenChildrenSource {
+    fn repair(
+        &self,
+        task_id: &str,
+        snapshot_status: &str,
+        snapshot_action: &str,
+        terminal_epic_ids: &[String],
+        terminal_proposal_ids: &[String],
+    ) -> Result<djinn_db::repositories::task::DoctorRepairOutcome, String> {
+        let db = self.db.clone();
+        let task_id = task_id.to_owned();
+        let snapshot_status = snapshot_status.to_owned();
+        let snapshot_action = snapshot_action.to_owned();
+        let terminal_epic_ids = terminal_epic_ids.to_owned();
+        let terminal_proposal_ids = terminal_proposal_ids.to_owned();
+
+        let run = async move {
+            let mut tx = db.pool().begin().await.map_err(|e| e.to_string())?;
+            let outcome = djinn_db::repositories::task::apply_doctor_repair_tx(
+                &mut tx,
+                &task_id,
+                &snapshot_status,
+                &snapshot_action,
+                &terminal_epic_ids,
+                &terminal_proposal_ids,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            tx.commit().await.map_err(|e| e.to_string())?;
+            Ok::<_, String>(outcome)
+        };
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| handle.block_on(run))
+            }
+            Ok(_) => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let result = match tokio::runtime::Runtime::new() {
+                        Ok(runtime) => runtime.block_on(run),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    let _ = tx.send(result);
+                });
+                rx.recv().map_err(|e| e.to_string())?
+            }
+            Err(_) => match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime.block_on(run),
+                Err(error) => Err(error.to_string()),
             },
         }
     }
