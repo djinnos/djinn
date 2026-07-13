@@ -539,7 +539,11 @@ async fn dispatch_state_snapshot_filters_clones_and_does_not_mutate() {
         .insert("task-zero-1234".to_owned(), 0);
     actor.inflight_dispatches.insert(
         "task-inflight-1234".to_owned(),
-        (Some("user-1".to_owned()), "model-a".to_owned()),
+        InflightDispatch {
+            creator: Some("user-1".to_owned()),
+            model: "model-a".to_owned(),
+            lane: djinn_core::models::ModelLane::Implement,
+        },
     );
     actor.last_dispatched.insert(
         "task-inflight-1234".to_owned(),
@@ -610,7 +614,11 @@ async fn rehydration_loads_active_cooldown_and_durable_counters() {
     assert_eq!(actor.last_dispatched["task-active"].role, "reviewer");
     assert_eq!(
         actor.inflight_dispatches["task-active"],
-        (Some("user-1".to_owned()), "provider/model".to_owned())
+        InflightDispatch {
+            creator: Some("user-1".to_owned()),
+            model: "provider/model".to_owned(),
+            lane: djinn_core::models::ModelLane::Review,
+        }
     );
     let remaining = actor.dispatch_cooldowns["task-active"].duration_since(instant_now);
     assert!(remaining >= std::time::Duration::from_secs(89));
@@ -833,7 +841,11 @@ async fn restart_rehydrates_persisted_inflight_ledger_for_cap_overlay() {
 
     assert_eq!(
         actor.inflight_dispatches.get("task-inflight"),
-        Some(&(Some("user-a".to_owned()), DEFAULT_MODEL_ID.to_owned())),
+        Some(&InflightDispatch {
+            creator: Some("user-a".to_owned()),
+            model: DEFAULT_MODEL_ID.to_owned(),
+            lane: djinn_core::models::ModelLane::Implement,
+        }),
         "chosen design: inflight ledger is persisted in dispatch_state and rehydrated at boot, so the existing cap overlay counts pre-running dispatches immediately after restart"
     );
 }
@@ -867,9 +879,14 @@ async fn live_mover_evidence_collects_dispatch_markers_pr_review_and_blockers() 
             role: "worker".to_owned(),
         },
     );
-    actor
-        .inflight_dispatches
-        .insert(task.id.clone(), (None, DEFAULT_MODEL_ID.to_owned()));
+    actor.inflight_dispatches.insert(
+        task.id.clone(),
+        InflightDispatch {
+            creator: None,
+            model: DEFAULT_MODEL_ID.to_owned(),
+            lane: djinn_core::models::ModelLane::Implement,
+        },
+    );
 
     let evidence = actor.collect_live_mover_evidence(&task).await.unwrap();
 

@@ -454,11 +454,12 @@ describe("ModelSection picker (browse/search)", () => {
     // The save mutation's onSuccess reads saved.lanes/maxSessions — return a
     // valid echo so it does not crash.
     vi.mocked(saveUserModelSelection).mockImplementation(
-      async (_targetId, lanes, maxSessions, diverseReview, diverseRefinement) => ({
+      async (_targetId, lanes, maxSessions, options) => ({
         lanes,
         maxSessions,
-        diverseReview: diverseReview ?? true,
-        diverseRefinement: diverseRefinement ?? true,
+        laneMaxSessions: options?.laneMaxSessions,
+        diverseReview: options?.diverseReview ?? true,
+        diverseRefinement: options?.diverseRefinement ?? true,
       }),
     );
   });
@@ -830,6 +831,16 @@ describe("ModelSection", () => {
       diverseReview: true,
       diverseRefinement: true,
     });
+    vi.mocked(saveUserModelSelection).mockClear();
+    vi.mocked(saveUserModelSelection).mockImplementation(
+      async (_targetId, lanes, maxSessions, options) => ({
+        lanes,
+        maxSessions,
+        laneMaxSessions: options?.laneMaxSessions,
+        diverseReview: options?.diverseReview ?? true,
+        diverseRefinement: options?.diverseRefinement ?? true,
+      }),
+    );
   });
 
   it("strips provider prefixes for fallback model display", () => {
@@ -845,10 +856,148 @@ describe("ModelSection", () => {
     expect(await screen.findByText("GPT-5")).toBeInTheDocument();
     expect(screen.getByText("OpenAI")).toBeInTheDocument();
     expect(screen.getByDisplayValue("3")).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Plan parallel agents" }),
+    ).toHaveTextContent("1");
+    expect(
+      screen.getByText("Autonomous planning, Architect, Lead, Refinement"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Planner, Architect, Chat")).not.toBeInTheDocument();
+    expect(screen.getByText(/automatically raises a too-low/i)).toBeInTheDocument();
     // Each lane exposes its own Add model trigger.
     expect(
       screen.getAllByRole("button", { name: "Add model" }).length,
     ).toBeGreaterThanOrEqual(3);
+  });
+
+  it("keeps legacy unset lane limits omitted on an unrelated Settings save", async () => {
+    const user = userEvent.setup();
+    render(<ModelSection targetId="target-user" />);
+
+    const modelCap = await screen.findByDisplayValue("3");
+    await user.clear(modelCap);
+    await user.type(modelCap, "4");
+    await user.tab();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(saveUserModelSelection).toHaveBeenCalledOnce());
+    expect(saveUserModelSelection).toHaveBeenCalledWith(
+      "target-user",
+      { plan: ["openai/gpt-5"], implement: [], review: [] },
+      { "openai/gpt-5": 4 },
+      {
+        diverseReview: true,
+        diverseRefinement: true,
+      },
+    );
+    expect(
+      vi.mocked(saveUserModelSelection).mock.calls[0]?.[3],
+    ).not.toHaveProperty("laneMaxSessions");
+  });
+
+  it("keeps persisted lane limits effective when saving another setting", async () => {
+    vi.mocked(fetchUserModelSelection).mockResolvedValue({
+      lanes: {
+        plan: ["openai/gpt-5"],
+        implement: ["openai/gpt-5"],
+        review: ["openai/gpt-5"],
+      },
+      maxSessions: { "openai/gpt-5": 1 },
+      laneMaxSessions: { plan: 2, implement: 3, review: 1 },
+      diverseReview: true,
+      diverseRefinement: true,
+    });
+    const user = userEvent.setup();
+    render(<ModelSection targetId="target-user" />);
+
+    const modelCap = (await screen.findAllByDisplayValue("1")).find((element) =>
+      element.matches("input[data-slot='input']"),
+    );
+    expect(modelCap).toBeDefined();
+    if (!modelCap) throw new Error("missing model Sessions input");
+    await user.clear(modelCap);
+    await user.type(modelCap, "2");
+    await user.tab();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(saveUserModelSelection).toHaveBeenCalledOnce());
+    expect(vi.mocked(saveUserModelSelection).mock.calls[0]?.[2]).toEqual({
+      "openai/gpt-5": 6,
+    });
+    expect(
+      vi.mocked(saveUserModelSelection).mock.calls[0]?.[3],
+    ).not.toHaveProperty("laneMaxSessions");
+  });
+
+  it("saves 1–10 lane limits and raises one shared model cap to their sum", async () => {
+    vi.mocked(fetchUserModelSelection).mockResolvedValue({
+      lanes: {
+        plan: ["openai/gpt-5"],
+        implement: ["openai/gpt-5"],
+        review: ["openai/gpt-5"],
+      },
+      maxSessions: { "openai/gpt-5": 1 },
+      laneMaxSessions: { plan: 1, implement: 1, review: 1 },
+      diverseReview: true,
+      diverseRefinement: true,
+    });
+    const user = userEvent.setup();
+
+    render(<ModelSection targetId="target-user" />);
+    await screen.findAllByText("GPT-5");
+    await chooseLaneLimit(user, "Plan", 2);
+    await chooseLaneLimit(user, "Implement", 4);
+    await chooseLaneLimit(user, "Review", 3);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(saveUserModelSelection).toHaveBeenCalledOnce());
+    expect(saveUserModelSelection).toHaveBeenCalledWith(
+      "target-user",
+      {
+        plan: ["openai/gpt-5"],
+        implement: ["openai/gpt-5"],
+        review: ["openai/gpt-5"],
+      },
+      { "openai/gpt-5": 9 },
+      {
+        diverseReview: true,
+        diverseRefinement: true,
+        laneMaxSessions: { plan: 2, implement: 4, review: 3 },
+      },
+    );
+  });
+
+  it("floors distinct model caps only by the lanes each model serves", async () => {
+    vi.mocked(fetchUserModelSelection).mockResolvedValue({
+      lanes: {
+        plan: ["openai/gpt-5"],
+        implement: ["anthropic/claude-sonnet-4"],
+        review: ["anthropic/claude-sonnet-4"],
+      },
+      maxSessions: {
+        "openai/gpt-5": 1,
+        "anthropic/claude-sonnet-4": 1,
+      },
+      laneMaxSessions: { plan: 1, implement: 1, review: 1 },
+      diverseReview: true,
+      diverseRefinement: true,
+    });
+    const user = userEvent.setup();
+
+    render(<ModelSection targetId="target-user" />);
+    await screen.findAllByText("GPT-5");
+    await chooseLaneLimit(user, "Plan", 2);
+    await chooseLaneLimit(user, "Implement", 3);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(saveUserModelSelection).toHaveBeenCalledOnce());
+    expect(vi.mocked(saveUserModelSelection).mock.calls[0]?.[2]).toEqual({
+      "openai/gpt-5": 2,
+      "anthropic/claude-sonnet-4": 4,
+    });
+    expect(vi.mocked(saveUserModelSelection).mock.calls[0]?.[3]).toMatchObject({
+      laneMaxSessions: { plan: 2, implement: 3, review: 1 },
+    });
   });
 
   it("hides advanced diversity toggles in onboarding mode", async () => {
@@ -866,3 +1015,14 @@ describe("ModelSection", () => {
     expect(screen.getByRole("heading", { name: "Review" })).toBeInTheDocument();
   });
 });
+
+async function chooseLaneLimit(
+  user: ReturnType<typeof userEvent.setup>,
+  lane: string,
+  value: number,
+) {
+  await user.click(
+    screen.getByRole("combobox", { name: `${lane} parallel agents` }),
+  );
+  await user.click(await screen.findByRole("option", { name: String(value) }));
+}

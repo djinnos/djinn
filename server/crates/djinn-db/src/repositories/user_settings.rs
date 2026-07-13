@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use djinn_core::models::{ModelLanes, UserSettings};
+use djinn_core::models::{LaneMaxSessions, ModelLanes, UserSettings};
 
 use crate::Result;
 use crate::database::Database;
@@ -38,6 +38,21 @@ fn parse_max_sessions(raw: Option<&str>) -> Option<HashMap<String, u32>> {
     }
 }
 
+/// Parse the `lane_max_sessions` TEXT column (a JSON
+/// `{plan, implement, review}` object). Values outside the supported 1..=10
+/// range, missing fields, `NULL`, empty strings, or invalid JSON all read as
+/// `None` so legacy/corrupt rows preserve the unbounded fallback.
+fn parse_lane_max_sessions(raw: Option<&str>) -> Option<LaneMaxSessions> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<LaneMaxSessions>(raw) {
+        Ok(limits) if limits.is_valid() => Some(limits),
+        _ => None,
+    }
+}
+
 pub struct UserSettingsRepository {
     db: Database,
 }
@@ -50,6 +65,7 @@ struct UserSettingsRow {
     diverse_refinement: bool,
     model_lanes: Option<String>,
     max_sessions: Option<String>,
+    lane_max_sessions: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -69,7 +85,8 @@ impl UserSettingsRepository {
             r#"SELECT user_id, auto_approve_prs,
                       diverse_review,
                       diverse_refinement,
-                      model_lanes, max_sessions, created_at, updated_at
+                      model_lanes, max_sessions, lane_max_sessions,
+                      created_at, updated_at
                FROM user_settings WHERE user_id = $1"#,
         )
         .bind(user_id)
@@ -80,6 +97,7 @@ impl UserSettingsRepository {
             auto_approve_prs: r.auto_approve_prs,
             lanes: parse_lanes(r.model_lanes.as_deref()),
             max_sessions: parse_max_sessions(r.max_sessions.as_deref()),
+            lane_max_sessions: parse_lane_max_sessions(r.lane_max_sessions.as_deref()),
             diverse_review: r.diverse_review,
             diverse_refinement: r.diverse_refinement,
             created_at: r.created_at,
@@ -245,6 +263,45 @@ impl UserSettingsRepository {
                      to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
              ON CONFLICT (user_id) DO UPDATE SET
                  max_sessions = EXCLUDED.max_sessions,
+                 updated_at = EXCLUDED.updated_at"#,
+        )
+        .bind(user_id)
+        .bind(json)
+        .execute(self.db.pool())
+        .await?;
+        self.get(user_id).await?.ok_or_else(|| {
+            crate::Error::Internal(format!(
+                "user_settings row missing after upsert for {user_id}"
+            ))
+        })
+    }
+
+    /// Upsert per-user lane concurrency ceilings, stored as a JSON-object TEXT
+    /// value. Validation belongs at the control-plane boundary; repository
+    /// callers are still protected from persisting an invalid typed value.
+    pub async fn upsert_lane_max_sessions(
+        &self,
+        user_id: &str,
+        lane_max_sessions: &LaneMaxSessions,
+    ) -> Result<UserSettings> {
+        self.db.ensure_initialized().await?;
+        if !lane_max_sessions.is_valid() {
+            return Err(crate::Error::Internal(format!(
+                "lane_max_sessions values must be between {} and {}",
+                LaneMaxSessions::MIN,
+                LaneMaxSessions::MAX
+            )));
+        }
+        let json = serde_json::to_string(lane_max_sessions).map_err(|e| {
+            crate::Error::Internal(format!("serialize user lane_max_sessions: {e}"))
+        })?;
+        sqlx::query(
+            r#"INSERT INTO user_settings (user_id, auto_approve_prs, lane_max_sessions, created_at, updated_at)
+             VALUES ($1, FALSE, $2,
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (user_id) DO UPDATE SET
+                 lane_max_sessions = EXCLUDED.lane_max_sessions,
                  updated_at = EXCLUDED.updated_at"#,
         )
         .bind(user_id)
@@ -586,6 +643,83 @@ mod tests {
                 .unwrap()
                 .max_sessions
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn lane_max_sessions_defaults_unset_and_round_trips() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let user_id = seed_user(&db, "lane-caps").await;
+        let repo = UserSettingsRepository::new(db);
+
+        assert!(
+            repo.get_or_default(&user_id)
+                .await
+                .unwrap()
+                .lane_max_sessions
+                .is_none(),
+            "legacy users must remain unbounded"
+        );
+
+        let limits = LaneMaxSessions {
+            plan: 1,
+            implement: 3,
+            review: 2,
+        };
+        let saved = repo
+            .upsert_lane_max_sessions(&user_id, &limits)
+            .await
+            .unwrap();
+        assert_eq!(saved.lane_max_sessions.as_ref(), Some(&limits));
+
+        // Independent column patches must not clobber either form of cap.
+        repo.upsert_max_sessions(
+            &user_id,
+            &HashMap::from([("openai/gpt-5.5".to_string(), 4)]),
+        )
+        .await
+        .unwrap();
+        let read_back = repo.get(&user_id).await.unwrap().unwrap();
+        assert_eq!(read_back.lane_max_sessions, Some(limits));
+        assert_eq!(
+            read_back.max_sessions.unwrap().get("openai/gpt-5.5"),
+            Some(&4)
+        );
+    }
+
+    #[tokio::test]
+    async fn lane_max_sessions_rejects_invalid_values_and_degrades_corrupt_rows() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let user_id = seed_user(&db, "invalid-lane-caps").await;
+        let repo = UserSettingsRepository::new(db.clone());
+
+        let invalid = LaneMaxSessions {
+            plan: 0,
+            implement: 3,
+            review: 1,
+        };
+        assert!(
+            repo.upsert_lane_max_sessions(&user_id, &invalid)
+                .await
+                .is_err()
+        );
+
+        repo.upsert_auto_approve_prs(&user_id, false).await.unwrap();
+        sqlx::query("UPDATE user_settings SET lane_max_sessions = $1 WHERE user_id = $2")
+            .bind(r#"{"plan":1,"implement":11,"review":1}"#)
+            .bind(&user_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert!(
+            repo.get(&user_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .lane_max_sessions
+                .is_none(),
+            "invalid persisted data must fall back to legacy unbounded behavior"
         );
     }
 }

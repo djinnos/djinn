@@ -29,6 +29,7 @@ use super::evidence_lifecycle_state::EvidenceLifecycleState;
 use super::refinement::{RefinementPhase, StopReason};
 
 use super::actor::CoordinatorActor;
+use super::types::InflightDispatch;
 use djinn_core::clock::{Clock, SystemClock};
 
 /// How long a refinement agent session may run (measured from **session
@@ -622,11 +623,23 @@ impl CoordinatorActor {
         // user has room for one more session on the selected model. If at-cap,
         // defer non-terminally — no task row, no spawn-budget consumption, no
         // pool dispatch. The state machine retries on the next tick.
-        let user_caps = self.resolve_model_caps_for_user(user_id).await;
-        let cap = user_caps.get(&model_id).copied().unwrap_or(1);
+        let settings = djinn_db::UserSettingsRepository::new(self.db.clone())
+            .get(user_id)
+            .await
+            .ok()
+            .flatten();
+        let model_cap = settings
+            .as_ref()
+            .and_then(|s| s.max_sessions.as_ref())
+            .and_then(|caps| caps.get(&model_id))
+            .copied()
+            .unwrap_or(1);
+        let lane_cap = settings
+            .and_then(|s| s.lane_max_sessions)
+            .map(|limits| limits.for_role(&agent_type));
 
         if !self
-            .check_user_model_admission(user_id, &model_id, cap)
+            .check_user_model_admission(user_id, &model_id, model_cap, &agent_type, lane_cap)
             .await
         {
             tracing::info!(
@@ -634,8 +647,9 @@ impl CoordinatorActor {
                 phase = ?phase,
                 user_id = %user_id,
                 model_id = %model_id,
-                cap,
-                "Refinement dispatch deferred: user at per-model concurrency cap \
+                model_cap,
+                lane_cap,
+                "Refinement dispatch deferred: user at model or plan-lane concurrency cap \
                  (retryable — no task row, no spawn-budget, no pool dispatch)"
             );
             return;
@@ -648,7 +662,11 @@ impl CoordinatorActor {
         let provisional_key = format!("refinement:{proposal_id}");
         self.provisional_admissions.insert(
             provisional_key.clone(),
-            (Some(user_id.clone()), model_id.clone()),
+            InflightDispatch {
+                creator: Some(user_id.clone()),
+                model: model_id.clone(),
+                lane: djinn_core::models::ModelLane::for_role(&agent_type),
+            },
         );
 
         // Build a readiness-enriched task description so the agent sees
@@ -722,8 +740,14 @@ impl CoordinatorActor {
         // existing reconciliation (pool liveness check) and session-start
         // cleanup can clear it, and so subsequent candidates for the same
         // (user, model) see the reservation under the durable key.
-        self.rekey_provisional_to_inflight(&provisional_key, &task_id, user_id, &model_id)
-            .await;
+        self.rekey_provisional_to_inflight(
+            &provisional_key,
+            &task_id,
+            user_id,
+            &model_id,
+            &agent_type,
+        )
+        .await;
 
         // ── Step 4: Consume spawn budget ────────────────────────────────────
         //

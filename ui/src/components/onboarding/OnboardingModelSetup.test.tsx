@@ -92,7 +92,10 @@ describe("OnboardingModelSetup", () => {
           implement: [onlyModel.id],
           review: [onlyModel.id],
         },
-        { [onlyModel.id]: 1 },
+        { [onlyModel.id]: 3 },
+        {
+          laneMaxSessions: { plan: 1, implement: 1, review: 1 },
+        },
       ),
     );
     expect(onSaved).toHaveBeenCalledOnce();
@@ -140,7 +143,10 @@ describe("OnboardingModelSetup", () => {
           implement: [models[0]!.id],
           review: [models[0]!.id],
         },
-        { [models[0]!.id]: 1 },
+        { [models[0]!.id]: 3 },
+        {
+          laneMaxSessions: { plan: 1, implement: 1, review: 1 },
+        },
       ),
     );
   });
@@ -179,7 +185,7 @@ describe("OnboardingModelSetup", () => {
       models[1]!.name,
     );
     expect(screen.queryByText(/fallback/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/sessions/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Sessions$/i)).not.toBeInTheDocument();
 
     await chooseModel(user, "Plan", "gpt-5.3", models[1]!.name);
     await user.click(
@@ -196,9 +202,12 @@ describe("OnboardingModelSetup", () => {
         },
         {
           [models[0]!.id]: 4,
-          [models[1]!.id]: 1,
+          [models[1]!.id]: 2,
           "retired/old-model": 7,
           "unrelated/stored-cap": 9,
+        },
+        {
+          laneMaxSessions: { plan: 1, implement: 1, review: 1 },
         },
       ),
     );
@@ -295,7 +304,61 @@ describe("OnboardingModelSetup", () => {
         },
         {
           [hidden.id]: 1,
-          [recommended.id]: 1,
+          [recommended.id]: 2,
+        },
+        {
+          laneMaxSessions: { plan: 1, implement: 1, review: 1 },
+        },
+      ),
+    );
+  });
+
+  it("sets 1–3 parallel agents per lane and raises a shared model cap to the aggregate", async () => {
+    const onlyModel = model("openai/gpt-5.3-codex", "GPT-5.3 Codex", true);
+    vi.mocked(fetchUserConnectedModels).mockResolvedValue([onlyModel]);
+    vi.mocked(saveUserModelSelection).mockResolvedValue(
+      selection({
+        plan: [onlyModel.id],
+        implement: [onlyModel.id],
+        review: [onlyModel.id],
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <OnboardingModelSetup
+        targetId="__self__"
+        selection={selection()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByText(/maximum number djinn can run/i),
+    ).toHaveTextContent(/1–3/i);
+    for (const role of ["Plan", "Code", "Review"]) {
+      expect(
+        screen.getByRole("combobox", { name: `${role} parallel agents` }),
+      ).toHaveTextContent("1");
+    }
+
+    await chooseParallelAgents(user, "Plan", 2);
+    await chooseParallelAgents(user, "Code", 3);
+    await user.click(
+      screen.getByRole("button", { name: "Save models and continue" }),
+    );
+
+    await waitFor(() =>
+      expect(saveUserModelSelection).toHaveBeenCalledWith(
+        "__self__",
+        {
+          plan: [onlyModel.id],
+          implement: [onlyModel.id],
+          review: [onlyModel.id],
+        },
+        { [onlyModel.id]: 6 },
+        {
+          laneMaxSessions: { plan: 2, implement: 3, review: 1 },
         },
       ),
     );
@@ -330,4 +393,15 @@ function findModelTrigger(role: string): Promise<HTMLElement> {
   return screen.findByRole("button", {
     name: new RegExp(`^${role} model:`, "i"),
   });
+}
+
+async function chooseParallelAgents(
+  user: ReturnType<typeof userEvent.setup>,
+  role: string,
+  value: number,
+) {
+  await user.click(
+    screen.getByRole("combobox", { name: `${role} parallel agents` }),
+  );
+  await user.click(await screen.findByRole("option", { name: String(value) }));
 }

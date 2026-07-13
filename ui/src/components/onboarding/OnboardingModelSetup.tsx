@@ -13,12 +13,23 @@ import {
   type UserModelSelection,
 } from "@/api/userConfig";
 import {
+  aggregateModelCapacity,
+  defaultLaneMaxSessions,
   MODEL_LANE_KEYS,
+  type LaneMaxSessions,
   type ModelLaneKey,
   type ModelLanes,
 } from "@/api/userSettings";
 import { InlineError } from "@/components/InlineError";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { ConnectedModelPicker } from "@/components/userConfig/ConnectedModelPicker";
 import { userConfigKeys } from "@/components/userConfig/userConfigKeys";
 import { formatProvider } from "@/components/userConfig/providerDisplay";
@@ -65,6 +76,9 @@ export function OnboardingModelSetup({
   const queryClient = useQueryClient();
   const [overrides, setOverrides] = useState<Partial<Record<ModelLaneKey, string>>>(
     {},
+  );
+  const [laneMaxSessions, setLaneMaxSessions] = useState<LaneMaxSessions>(() =>
+    onboardingLaneLimits(selection.laneMaxSessions),
   );
 
   const connectedModels = useQuery({
@@ -120,7 +134,19 @@ export function OnboardingModelSetup({
       for (const modelId of retainedModelIds) {
         maxSessions[modelId] ??= 1;
       }
-      return saveUserModelSelection(targetId, lanes, maxSessions);
+      // A model cap is shared across every lane using that model. Raise it to
+      // the combined configured lane capacity so it cannot silently undercut
+      // the user's onboarding choices.
+      const requiredModelSessions = aggregateModelCapacity(
+        lanes,
+        laneMaxSessions,
+      );
+      for (const [modelId, required] of Object.entries(requiredModelSessions)) {
+        maxSessions[modelId] = Math.max(maxSessions[modelId] ?? 1, required);
+      }
+      return saveUserModelSelection(targetId, lanes, maxSessions, {
+        laneMaxSessions,
+      });
     },
     onSuccess: (saved) => {
       queryClient.setQueryData(userConfigKeys.modelSelection(targetId), saved);
@@ -225,10 +251,54 @@ export function OnboardingModelSetup({
                   }))
                 }
               />
+              <div className="flex items-center justify-between gap-3 border-t pt-3">
+                <div className="min-w-0">
+                  <Label
+                    htmlFor={`onboarding-${lane}-parallel-agents`}
+                    className="text-xs font-medium"
+                  >
+                    Parallel agents
+                  </Label>
+                  <p className="text-[11px] text-muted-foreground">
+                    Maximum running at once
+                  </p>
+                </div>
+                <Select
+                  value={String(laneMaxSessions[lane])}
+                  onValueChange={(value) =>
+                    setLaneMaxSessions((current) => ({
+                      ...current,
+                      [lane]: Number(value),
+                    }))
+                  }
+                  disabled={saveMutation.isPending}
+                >
+                  <SelectTrigger
+                    id={`onboarding-${lane}-parallel-agents`}
+                    aria-label={`${meta.label} parallel agents`}
+                    className="h-8 w-[72px]"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {[1, 2, 3].map((value) => (
+                      <SelectItem key={value} value={String(value)}>
+                        {value}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
           );
         })}
       </div>
+
+      <p className="text-center text-xs text-muted-foreground">
+        Parallel agents is the maximum number Djinn can run at the same time in
+        each lane; Code controls workers. Start with 1 (onboarding allows 1–3).
+        You can change this later in Settings → Model Roles.
+      </p>
 
       {saveMutation.isError && (
         <InlineError
@@ -250,6 +320,17 @@ export function OnboardingModelSetup({
       </Button>
     </div>
   );
+}
+
+function onboardingLaneLimits(
+  persisted: LaneMaxSessions | undefined,
+): LaneMaxSessions {
+  const defaults = defaultLaneMaxSessions();
+  return {
+    plan: Math.min(persisted?.plan ?? defaults.plan, 3),
+    implement: Math.min(persisted?.implement ?? defaults.implement, 3),
+    review: Math.min(persisted?.review ?? defaults.review, 3),
+  };
 }
 
 function modelName(model: UserModel): string {

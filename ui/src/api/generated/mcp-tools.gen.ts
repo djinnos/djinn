@@ -11001,10 +11001,16 @@ export namespace UserSettingsGetOutputSchema {
    * edit lanes (UI disables the controls; the server rejects lane writes).
    */
   lane_locked: boolean
+  /**
+   * Per-lane concurrency ceilings. `None` means this user has no
+   * lane-specific ceiling (legacy/unbounded behavior).
+   */
+  lane_max_sessions?: (LaneMaxSessionsPayload | null)
   lanes: ModelLanesPayload
   /**
    * This user's per-model concurrency caps (`{ "provider/model": cap }`).
-   * The sole admission control at dispatch; empty ⇒ default 1 per model.
+   * Per-model admission ceilings at dispatch, composed with any per-lane
+   * ceiling; empty ⇒ default 1 per model.
    */
   max_sessions: {
   [k: string]: number
@@ -11014,6 +11020,25 @@ export namespace UserSettingsGetOutputSchema {
    * `users.id` of the signed-in caller (echoed so the UI can sanity-check identity).
    */
   user_id?: string
+  [k: string]: any
+  }
+  /**
+   * Per-user concurrency ceilings for each role lane.
+   */
+  export interface LaneMaxSessionsPayload {
+  /**
+   * Concurrent worker sessions.
+   */
+  implement: number
+  /**
+   * Concurrent autonomous planning and refinement sessions. Interactive
+   * chat is not subject to this ceiling.
+   */
+  plan: number
+  /**
+   * Concurrent reviewer sessions.
+   */
+  review: number
   [k: string]: any
   }
   /**
@@ -11061,6 +11086,11 @@ export namespace UserSettingsSetInputSchema {
    */
   diverse_review?: boolean
   /**
+   * Per-lane concurrency ceilings for THIS user. Every value must be in
+   * 1..=10. Omit to keep the current value.
+   */
+  lane_max_sessions?: (LaneMaxSessionsPayload | null)
+  /**
    * Per-ROLE ordered model lanes for THIS user (each highest priority first),
    * as full `provider/model` ids: `plan` (planner/architect/chat),
    * `implement` (worker), `review` (reviewer). Each id must be a model on a
@@ -11071,8 +11101,9 @@ export namespace UserSettingsSetInputSchema {
   /**
    * Per-model concurrency caps for THIS user (`{ "provider/model": cap }`).
    * How many sessions of each model may run concurrently for this user — the
-   * sole admission control (no global ceiling). Pass `{}` to clear (→ default
-   * 1 per model). Omit to keep the current value.
+   * per-model admission ceiling (there is no global ceiling), composed with
+   * any per-lane ceiling. Pass `{}` to clear (→ default 1 per model). Omit to
+   * keep the current value.
    */
   max_sessions?: {
   [k: string]: number
@@ -11082,6 +11113,25 @@ export namespace UserSettingsSetInputSchema {
    * configure). Non-admins must omit it.
    */
   target_user_id?: string
+  [k: string]: any
+  }
+  /**
+   * Per-user concurrency ceilings for each role lane.
+   */
+  export interface LaneMaxSessionsPayload {
+  /**
+   * Concurrent worker sessions.
+   */
+  implement: number
+  /**
+   * Concurrent autonomous planning and refinement sessions. Interactive
+   * chat is not subject to this ceiling.
+   */
+  plan: number
+  /**
+   * Concurrent reviewer sessions.
+   */
+  review: number
   [k: string]: any
   }
   /**
@@ -11122,6 +11172,11 @@ export namespace UserSettingsSetOutputSchema {
   diverse_review?: boolean
   error?: string
   /**
+   * The resulting per-lane concurrency ceilings after the patch. `None`
+   * means no lane-specific ceiling.
+   */
+  lane_max_sessions?: (LaneMaxSessionsPayload | null)
+  /**
    * The resulting per-role model lanes after the patch.
    */
   lanes?: (ModelLanesPayload | null)
@@ -11132,6 +11187,25 @@ export namespace UserSettingsSetOutputSchema {
   [k: string]: number
   }
   ok: boolean
+  [k: string]: any
+  }
+  /**
+   * Per-user concurrency ceilings for each role lane.
+   */
+  export interface LaneMaxSessionsPayload {
+  /**
+   * Concurrent worker sessions.
+   */
+  implement: number
+  /**
+   * Concurrent autonomous planning and refinement sessions. Interactive
+   * chat is not subject to this ceiling.
+   */
+  plan: number
+  /**
+   * Concurrent reviewer sessions.
+   */
+  review: number
   [k: string]: any
   }
   /**

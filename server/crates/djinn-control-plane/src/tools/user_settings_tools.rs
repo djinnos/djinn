@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user;
-use djinn_core::models::{ModelLanes, OrgAiPolicy};
+use djinn_core::models::{LaneMaxSessions, ModelLanes, OrgAiPolicy};
 use djinn_db::UserSettingsRepository;
 
 /// The org-default lanes as a wire payload (all-empty when unset → global).
@@ -61,6 +61,58 @@ impl From<ModelLanesPayload> for ModelLanes {
     }
 }
 
+/// Per-user concurrency ceilings for each role lane.
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LaneMaxSessionsPayload {
+    /// Concurrent autonomous planning and refinement sessions. Interactive
+    /// chat is not subject to this ceiling.
+    #[schemars(range(min = 1, max = 10))]
+    pub plan: u32,
+    /// Concurrent worker sessions.
+    #[schemars(range(min = 1, max = 10))]
+    pub implement: u32,
+    /// Concurrent reviewer sessions.
+    #[schemars(range(min = 1, max = 10))]
+    pub review: u32,
+}
+
+impl From<LaneMaxSessions> for LaneMaxSessionsPayload {
+    fn from(limits: LaneMaxSessions) -> Self {
+        Self {
+            plan: limits.plan,
+            implement: limits.implement,
+            review: limits.review,
+        }
+    }
+}
+
+impl From<LaneMaxSessionsPayload> for LaneMaxSessions {
+    fn from(payload: LaneMaxSessionsPayload) -> Self {
+        Self {
+            plan: payload.plan,
+            implement: payload.implement,
+            review: payload.review,
+        }
+    }
+}
+
+fn validate_lane_max_sessions(payload: &LaneMaxSessionsPayload) -> Result<(), String> {
+    for (lane, value) in [
+        ("plan", payload.plan),
+        ("implement", payload.implement),
+        ("review", payload.review),
+    ] {
+        if !(LaneMaxSessions::MIN..=LaneMaxSessions::MAX).contains(&value) {
+            return Err(format!(
+                "lane_max_sessions.{lane} must be between {} and {}",
+                LaneMaxSessions::MIN,
+                LaneMaxSessions::MAX
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 pub struct UserSettingsGetParams {
     /// Admin-only: act on behalf of this user id (e.g. another user to
@@ -92,9 +144,13 @@ pub struct UserSettingsGetResponse {
     /// edit lanes (UI disables the controls; the server rejects lane writes).
     pub lane_locked: bool,
     /// This user's per-model concurrency caps (`{ "provider/model": cap }`).
-    /// The sole admission control at dispatch; empty ⇒ default 1 per model.
+    /// Per-model admission ceilings at dispatch, composed with any per-lane
+    /// ceiling; empty ⇒ default 1 per model.
     #[schemars(with = "std::collections::HashMap<String, i64>")]
     pub max_sessions: HashMap<String, u32>,
+    /// Per-lane concurrency ceilings. `None` means this user has no
+    /// lane-specific ceiling (legacy/unbounded behavior).
+    pub lane_max_sessions: Option<LaneMaxSessionsPayload>,
     /// Cross-model ("Thorough") review. When true (the default), a task
     /// dispatched to the reviewer role prefers a model id different from the one
     /// that implemented it. A degenerate single-model selection falls back to
@@ -120,10 +176,14 @@ pub struct UserSettingsSetParams {
     pub lanes: Option<ModelLanesPayload>,
     /// Per-model concurrency caps for THIS user (`{ "provider/model": cap }`).
     /// How many sessions of each model may run concurrently for this user — the
-    /// sole admission control (no global ceiling). Pass `{}` to clear (→ default
-    /// 1 per model). Omit to keep the current value.
+    /// per-model admission ceiling (there is no global ceiling), composed with
+    /// any per-lane ceiling. Pass `{}` to clear (→ default 1 per model). Omit to
+    /// keep the current value.
     #[schemars(with = "Option<std::collections::HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
+    /// Per-lane concurrency ceilings for THIS user. Every value must be in
+    /// 1..=10. Omit to keep the current value.
+    pub lane_max_sessions: Option<LaneMaxSessionsPayload>,
     /// Enable or disable cross-model ("Thorough") review for THIS user. When on
     /// (the default), the reviewer prefers a model id different from the
     /// implementer's. Omit to keep the current value.
@@ -149,6 +209,9 @@ pub struct UserSettingsSetResponse {
     /// The resulting per-model concurrency caps after the patch.
     #[schemars(with = "Option<std::collections::HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
+    /// The resulting per-lane concurrency ceilings after the patch. `None`
+    /// means no lane-specific ceiling.
+    pub lane_max_sessions: Option<LaneMaxSessionsPayload>,
     /// The resulting cross-model review toggle after the patch.
     pub diverse_review: Option<bool>,
     /// The resulting cross-model refinement toggle after the patch.
@@ -184,6 +247,7 @@ impl DjinnMcpServer {
                         lanes: ModelLanesPayload::default(),
                         lane_locked: false,
                         max_sessions: HashMap::new(),
+                        lane_max_sessions: None,
                         diverse_review: true,
                         diverse_refinement: true,
                         error: Some(missing_session()),
@@ -197,6 +261,7 @@ impl DjinnMcpServer {
                         lanes: ModelLanesPayload::default(),
                         lane_locked: false,
                         max_sessions: HashMap::new(),
+                        lane_max_sessions: None,
                         diverse_review: true,
                         diverse_refinement: true,
                         error: Some(e),
@@ -224,6 +289,7 @@ impl DjinnMcpServer {
                     lanes,
                     lane_locked,
                     max_sessions: s.max_sessions.unwrap_or_default(),
+                    lane_max_sessions: s.lane_max_sessions.map(Into::into),
                     diverse_review: s.diverse_review,
                     diverse_refinement: s.diverse_refinement,
                     error: None,
@@ -236,6 +302,7 @@ impl DjinnMcpServer {
                 lanes: ModelLanesPayload::default(),
                 lane_locked: false,
                 max_sessions: HashMap::new(),
+                lane_max_sessions: None,
                 diverse_review: true,
                 diverse_refinement: true,
                 error: Some(e.to_string()),
@@ -264,6 +331,7 @@ impl DjinnMcpServer {
                         auto_approve_prs: None,
                         lanes: None,
                         max_sessions: None,
+                        lane_max_sessions: None,
                         diverse_review: None,
                         diverse_refinement: None,
                         error: Some(missing_session()),
@@ -276,6 +344,7 @@ impl DjinnMcpServer {
                         auto_approve_prs: None,
                         lanes: None,
                         max_sessions: None,
+                        lane_max_sessions: None,
                         diverse_review: None,
                         diverse_refinement: None,
                         error: Some(e),
@@ -291,6 +360,7 @@ impl DjinnMcpServer {
                 auto_approve_prs: None,
                 lanes: None,
                 max_sessions: None,
+                lane_max_sessions: None,
                 diverse_review: None,
                 diverse_refinement: None,
                 error: Some(msg),
@@ -298,6 +368,14 @@ impl DjinnMcpServer {
         };
 
         let mut applied = false;
+
+        // Validate all supplied limits before performing any patch writes, so
+        // an invalid lane limit cannot leave earlier fields partially applied.
+        if let Some(limits) = p.lane_max_sessions.as_ref()
+            && let Err(e) = validate_lane_max_sessions(limits)
+        {
+            return err(e);
+        }
 
         // Per-user model lanes: validate every id (union across lanes) against
         // THIS user's connected providers before persisting, so a user can't
@@ -337,6 +415,14 @@ impl DjinnMcpServer {
             applied = true;
         }
 
+        if let Some(limits_payload) = p.lane_max_sessions.as_ref() {
+            let limits: LaneMaxSessions = limits_payload.clone().into();
+            if let Err(e) = repo.upsert_lane_max_sessions(&user_id, &limits).await {
+                return err(e.to_string());
+            }
+            applied = true;
+        }
+
         if let Some(target) = p.auto_approve_prs {
             if let Err(e) = repo.upsert_auto_approve_prs(&user_id, target).await {
                 return err(e.to_string());
@@ -367,7 +453,7 @@ impl DjinnMcpServer {
 
         // A changed model selection or cap can make more work dispatchable now,
         // so kick a dispatch pass. No-op for auto-approve-only patches.
-        if p.lanes.is_some() || p.max_sessions.is_some() {
+        if p.lanes.is_some() || p.max_sessions.is_some() || p.lane_max_sessions.is_some() {
             self.state.apply_user_model_change().await;
         }
 
@@ -378,6 +464,7 @@ impl DjinnMcpServer {
                 auto_approve_prs: Some(s.auto_approve_prs),
                 lanes: Some(s.lanes.unwrap_or_default().into()),
                 max_sessions: Some(s.max_sessions.unwrap_or_default()),
+                lane_max_sessions: s.lane_max_sessions.map(Into::into),
                 diverse_review: Some(s.diverse_review),
                 diverse_refinement: Some(s.diverse_refinement),
                 error: None,
