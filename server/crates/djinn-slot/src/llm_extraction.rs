@@ -33,10 +33,10 @@ use std::sync::Arc;
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{
     CreateConsolidationRunMetric, NoteConsolidationRepository, NoteRepository,
-    NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation, NoteRevisionReason,
-    NoteRevisionSubsystem, ProjectRepository, SessionRepository, TaskRepository,
-    TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance, assess_note_quality,
-    folder_for_type, permalink_for,
+    NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation,
+    NoteRevisionReason, NoteRevisionSubsystem, ProjectRepository, SessionRepository,
+    TaskRepository, TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance,
+    assess_note_quality, folder_for_type, permalink_for,
 };
 use djinn_provider::provider::{LlmProvider, TelemetryMeta, create_provider};
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
@@ -456,6 +456,41 @@ fn dedup_extracted_notes(
 }
 
 impl ExtractionContext<'_> {
+    fn revision_provenance(&self) -> djinn_db::Result<TrustedNoteRevisionProvenance> {
+        TrustedNoteRevisionProvenance::new(
+            Some(self.session_id.to_owned()),
+            Some(self.task_id.to_owned()),
+            self.task_run_id.map(ToOwned::to_owned),
+        )
+        .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))
+    }
+    async fn mutate_existing(
+        &self,
+        existing: &djinn_memory::Note,
+        content: String,
+        confidence: f64,
+        event_kind: NoteRevisionEventKind,
+        reason: &str,
+    ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
+        self.note_repo
+            .mutate_with_revision(NoteRevisionMutation {
+                project_id: self.project_id.to_owned(),
+                note_id: Some(existing.id.clone()),
+                event_kind,
+                desired: NoteRevisionDesiredState::Existing {
+                    content,
+                    confidence,
+                },
+                attribution: TrustedNoteRevisionAttribution::system(
+                    NoteRevisionSubsystem::Extraction,
+                ),
+                provenance: self.revision_provenance()?,
+                reason: NoteRevisionReason::new(reason)
+                    .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
+            })
+            .await
+    }
+
     async fn create_extracted_note(
         &self,
         title: &str,
@@ -464,35 +499,35 @@ impl ExtractionContext<'_> {
         scope_paths_json: &str,
         retrieval_anchor: Option<&str>,
     ) -> djinn_db::Result<djinn_memory::Note> {
-        match self.knowledge_branch_target {
-            KnowledgeBranchTarget::Main => {
-                self.note_repo
-                    .create_db_note_with_scope_and_retrieval_anchor(
-                        self.project_id,
-                        title,
-                        content,
-                        note_type,
-                        "[]",
-                        scope_paths_json,
-                        retrieval_anchor,
-                    )
-                    .await
-            }
-            KnowledgeBranchTarget::TaskScoped { .. } => {
-                self.note_repo
-                    .create_with_scope_and_retrieval_anchor(
-                        self.project_id,
-                        title,
-                        content,
-                        note_type,
-                        None,
-                        "[]",
-                        scope_paths_json,
-                        retrieval_anchor,
-                    )
-                    .await
-            }
-        }
+        let result = self
+            .note_repo
+            .mutate_with_revision(NoteRevisionMutation {
+                project_id: self.project_id.to_owned(),
+                note_id: Some(uuid::Uuid::now_v7().to_string()),
+                event_kind: NoteRevisionEventKind::Created,
+                desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
+                    title: title.to_owned(),
+                    permalink: permalink_for(note_type, title),
+                    content: content.to_owned(),
+                    note_type: note_type.to_owned(),
+                    folder: folder_for_type(note_type).to_owned(),
+                    status: "active".to_owned(),
+                    tags: "[]".to_owned(),
+                    retrieval_anchor: retrieval_anchor.map(ToOwned::to_owned),
+                    scope_paths: scope_paths_json.to_owned(),
+                    confidence: 0.5,
+                }),
+                attribution: TrustedNoteRevisionAttribution::system(
+                    NoteRevisionSubsystem::Extraction,
+                ),
+                provenance: self.revision_provenance()?,
+                reason: NoteRevisionReason::new("created note from completed session extraction")
+                    .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
+            })
+            .await?;
+        result.note.ok_or_else(|| {
+            djinn_db::Error::Internal("created extraction note missing result".to_owned())
+        })
     }
 }
 
@@ -565,6 +600,10 @@ pub type CandidateLookupOverride = fn(&str, &str, &str, &str) -> Vec<djinn_db::N
 #[allow(clippy::too_many_arguments)]
 #[async_trait::async_trait]
 pub(crate) trait ExtractionNoteRepository: Send + Sync {
+    async fn mutate_with_revision(
+        &self,
+        mutation: NoteRevisionMutation,
+    ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult>;
     async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>>;
     async fn update(
         &self,
@@ -628,6 +667,12 @@ pub(crate) trait ExtractionNoteRepository: Send + Sync {
 
 #[async_trait::async_trait]
 impl ExtractionNoteRepository for NoteRepository {
+    async fn mutate_with_revision(
+        &self,
+        mutation: NoteRevisionMutation,
+    ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
+        NoteRepository::mutate_with_revision(self, mutation).await
+    }
     async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
         NoteRepository::get(self, id).await
     }
@@ -747,6 +792,8 @@ struct ExtractionContext<'a> {
     project_path: &'a str,
     knowledge_branch_target: &'a KnowledgeBranchTarget,
     session_id: &'a str,
+    task_id: &'a str,
+    task_run_id: Option<&'a str>,
     task_short_id: &'a str,
     task_title: &'a str,
     task_description: &'a str,
@@ -1178,6 +1225,8 @@ async fn run_llm_extraction_inner(
         project_path: &project_path,
         knowledge_branch_target: &knowledge_branch_target,
         session_id: &session_id,
+        task_id: &task.id,
+        task_run_id: session.task_run_id.as_deref(),
         task_short_id: &task.short_id,
         task_title: &task.title,
         task_description: &task.description,
@@ -1199,6 +1248,25 @@ async fn run_llm_extraction_inner(
             &mut extraction_quality,
         )
         .await;
+    }
+    if extraction_quality.written == 0
+        && extraction_quality.evidence_merged == 0
+        && extraction_quality.boost_fallback == 0
+        && extraction_quality.downgraded == 0
+    {
+        let skipped = NoteRevisionMutation {
+            project_id: project.id.clone(),
+            note_id: None,
+            event_kind: NoteRevisionEventKind::ExtractionSkipped,
+            desired: NoteRevisionDesiredState::ExtractionSkipped,
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction),
+            provenance: extraction_context.revision_provenance().unwrap_or_default(),
+            reason: NoteRevisionReason::new("extraction completed without durable note output")
+                .unwrap_or_else(|_| unreachable!()),
+        };
+        if let Err(error) = note_repo.mutate_with_revision(skipped).await {
+            tracing::warn!(session_id = %session_id, %error, "llm_extraction: failed to record no-output extraction revision");
+        }
     }
     taxonomy.extraction_quality = extraction_quality;
     persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
@@ -1285,9 +1353,19 @@ async fn persist_merged_extraction_content(
     content: &str,
 ) -> djinn_db::Result<djinn_memory::Note> {
     context
-        .note_repo
-        .update(&existing.id, &existing.title, content, &existing.tags)
+        .mutate_existing(
+            existing,
+            content.to_owned(),
+            existing.confidence,
+            NoteRevisionEventKind::Updated,
+            "merged extracted evidence into existing note",
+        )
         .await
+        .and_then(|r| {
+            r.note.ok_or_else(|| {
+                djinn_db::Error::Internal("updated extraction note missing result".to_owned())
+            })
+        })
 }
 
 fn split_provenance_footer(content: &str) -> (&str, Option<&str>) {
@@ -1327,12 +1405,27 @@ async fn boost_duplicate_confidence(
     title: &str,
     outcome: &str,
 ) {
+    let existing = match context.note_repo.get(candidate_id).await {
+        Ok(Some(note)) => note,
+        Ok(None) | Err(_) => return,
+    };
+    let updated_confidence = (existing.confidence * DUPLICATE_CONFIDENCE_SIGNAL)
+        / (existing.confidence * DUPLICATE_CONFIDENCE_SIGNAL
+            + (1.0 - existing.confidence) * (1.0 - DUPLICATE_CONFIDENCE_SIGNAL));
+    if updated_confidence == existing.confidence {
+        return;
+    }
     match context
-        .note_repo
-        .update_confidence(candidate_id, DUPLICATE_CONFIDENCE_SIGNAL)
+        .mutate_existing(
+            &existing,
+            existing.content.clone(),
+            updated_confidence,
+            NoteRevisionEventKind::ConfidenceChanged,
+            "confirmed duplicate extracted knowledge",
+        )
         .await
     {
-        Ok(updated_confidence) => {
+        Ok(_) => {
             tracing::debug!(session_id = %context.session_id, note_type, title, existing_note_id = candidate_id, updated_confidence, outcome, "llm_extraction: duplicate confidence updated")
         }
         Err(error) => {
@@ -1549,18 +1642,6 @@ async fn process_extracted_note(
         .await
     {
         Ok(created) => {
-            if let Err(e) = extraction_context
-                .note_repo
-                .set_confidence(&created.id, 0.5)
-                .await
-            {
-                tracing::warn!(
-                    session_id = %extraction_context.session_id,
-                    note_id = %created.id,
-                    error = %e,
-                    "llm_extraction: failed to set confidence on extracted note"
-                );
-            }
             tracing::debug!(
                 session_id = %extraction_context.session_id,
                 note_id = %created.id,
@@ -1605,23 +1686,20 @@ async fn persist_working_spec(
         Ok(Some(existing)) => {
             let merged = merge_working_spec_content(&existing.content, &section);
             match extraction_context
-                .note_repo
-                .update(&existing.id, &title, &merged, "[]")
+                .mutate_existing(
+                    &existing,
+                    merged.clone(),
+                    existing.confidence,
+                    NoteRevisionEventKind::Updated,
+                    "updated extraction working specification",
+                )
                 .await
-            {
+                .and_then(|r| {
+                    r.note.ok_or_else(|| {
+                        djinn_db::Error::Internal("updated working spec missing result".to_owned())
+                    })
+                }) {
                 Ok(updated) => {
-                    if let Err(error) = extraction_context
-                        .note_repo
-                        .update_scope_paths(&updated.id, &scope_paths_json)
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %extraction_context.session_id,
-                            note_id = %updated.id,
-                            error = %error,
-                            "llm_extraction: failed to update working spec scope paths"
-                        );
-                    }
                     tracing::debug!(
                         session_id = %extraction_context.session_id,
                         note_id = %updated.id,
@@ -1638,15 +1716,12 @@ async fn persist_working_spec(
             }
         }
         Ok(None) => match extraction_context
-            .note_repo
-            .create_with_scope(
-                extraction_context.project_id,
+            .create_extracted_note(
                 &title,
                 &render_working_spec_document(extraction_context, &section, &scope_paths),
                 "design",
-                None,
-                "[]",
                 &scope_paths_json,
+                None,
             )
             .await
         {
@@ -3133,6 +3208,44 @@ mod evidence_merge_regression_tests {
 
     #[async_trait::async_trait]
     impl ExtractionNoteRepository for RecordingExtractionRepository {
+        async fn mutate_with_revision(
+            &self,
+            mutation: NoteRevisionMutation,
+        ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
+            let mut existing = self.existing.lock().unwrap();
+            let note = existing
+                .as_mut()
+                .ok_or_else(|| djinn_db::Error::Internal("missing test note".to_owned()))?;
+            let NoteRevisionDesiredState::Existing {
+                content,
+                confidence,
+            } = mutation.desired
+            else {
+                return Err(djinn_db::Error::Internal(
+                    "unsupported test mutation".to_owned(),
+                ));
+            };
+            self.ops.lock().unwrap().push(RepoOp::Update {
+                id: note.id.clone(),
+                title: note.title.clone(),
+                content: content.clone(),
+                tags: note.tags.clone(),
+            });
+            if self.fail_updates {
+                return Err(djinn_db::Error::Internal(
+                    "controlled revision update failure".to_owned(),
+                ));
+            }
+            let changed = note.content != content || note.confidence != confidence;
+            note.content = content;
+            note.confidence = confidence;
+            Ok(djinn_db::NoteRevisionMutationResult {
+                changed,
+                note: Some(note.clone()),
+                note_seq: changed.then_some(1),
+                revision_id: changed.then(|| "test-revision".to_owned()),
+            })
+        }
         async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
             self.ops.lock().unwrap().push(RepoOp::Get(id.to_string()));
             Ok(self.existing.lock().unwrap().clone())
@@ -3383,6 +3496,8 @@ mod evidence_merge_regression_tests {
             project_path: "/projects/project-1",
             knowledge_branch_target: &KnowledgeBranchTarget::Main,
             session_id: "new",
+            task_id: "task-1",
+            task_run_id: None,
             task_short_id: "t1",
             task_title: "Test task",
             task_description: "Test task description",
@@ -3446,6 +3561,8 @@ mod evidence_merge_regression_tests {
             project_path: "/projects/project-1",
             knowledge_branch_target: &KnowledgeBranchTarget::Main,
             session_id: "new",
+            task_id: "task-1",
+            task_run_id: None,
             task_short_id: "t1",
             task_title: "Test task",
             task_description: "Test task description",
@@ -3493,6 +3610,8 @@ mod evidence_merge_regression_tests {
             project_path: "/projects/project-1",
             knowledge_branch_target: &KnowledgeBranchTarget::Main,
             session_id: "new",
+            task_id: "task-1",
+            task_run_id: None,
             task_short_id: "t1",
             task_title: "Test task",
             task_description: "Test task description",
@@ -3547,6 +3666,8 @@ mod evidence_merge_regression_tests {
             project_path: "/projects/project-1",
             knowledge_branch_target: &KnowledgeBranchTarget::Main,
             session_id: "new",
+            task_id: "task-1",
+            task_run_id: None,
             task_short_id: "t1",
             task_title: "Test task",
             task_description: "Test task description",
@@ -3592,6 +3713,8 @@ mod evidence_merge_regression_tests {
             project_path: "/projects/project-1",
             knowledge_branch_target: &KnowledgeBranchTarget::Main,
             session_id: "new",
+            task_id: "task-1",
+            task_run_id: None,
             task_short_id: "t1",
             task_title: "Test task",
             task_description: "Test task description",
