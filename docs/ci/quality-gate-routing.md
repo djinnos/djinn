@@ -18,11 +18,11 @@ This runbook is the operating contract for the routed quality-gate roadmap (refe
 | `workflowCi` | workflow configuration | all outputs |
 | `unknown` | unclassified executable/configuration path or unsafe/empty scope | all outputs (fail closed) |
 
-The manifest outputs are `cargoDeny`, `clippy`, `aarch64`, `size`, `migrations`, `rawSql`, `capability`, `boundaries`, `serverTest`, `sqlxFreshness`, `memoryEval`, and `ui`. The protected server jobs are cargo-deny, clippy, size, migration, raw-SQL, capability, architectural-boundary, server-test, SQLx freshness, and memory evaluation. The server test plan publishes its matrix rows (stable shard ID, zero-based `shardIndex`, test IDs, and exact nextest filter) and exact-once proof alongside timing artifacts; timing data balances discovered tests only and never selects tests.
+The manifest outputs are `cargoDeny`, `clippy`, `aarch64`, `size`, `migrations`, `rawSql`, `capability`, `boundaries`, `serverTest`, `sqlxFreshness`, `memoryEval`, and `ui`. The protected server jobs are cargo-deny, clippy, size, migration, raw-SQL, capability, architectural-boundary, server-test, SQLx freshness, and memory evaluation. The server-test plan (`nextest-plan`) publishes a compact matrix output (stable shard ID and zero-based `shardIndex`) and transfers the full plan, matrix, and exact-once proof by artifact. Each shard materializes its filter and test IDs as files and generates a temporary nextest profile that injects the filter as `default-filter`; the filter is never expanded into a command-line argument, `$GITHUB_OUTPUT`, or `$GITHUB_ENV` because Linux limits a single argv string to 131,072 bytes. Timing data balances discovered tests only and never selects tests.
 
 A documentation-only **pull request** intentionally has no selected product lane, so the aggregate can complete from preflight. A documentation-only **merge_group** is different: merge-queue safety selects cargo-deny, clippy, size/migration/raw-SQL/capability/boundary guards, server tests, SQLx freshness, and memory evaluation. UI remains unselected unless its lane (or full validation) is selected. `workflow_dispatch` and a full-validation fallback validate all lanes.
 
-`quality-gate` is the protected aggregate check. It is fail closed: preflight must succeed, every selected job must report `success`, and an unselected job must report only `skipped`. A failed, cancelled, absent, or unexpected result is a gate failure; a neutral skip is acceptable only when the manifest explicitly did not select that work.
+`quality-gate` is the protected aggregate check. It is fail closed: preflight must succeed, every selected job must report `success`, and an unselected job must report only `skipped`. For server tests this explicitly includes the planner (`nextest-plan`), the shard family (`server-test`), and the timing publisher (`nextest-timing-publish`). A failed, cancelled, absent, or unexpected result is a gate failure; a neutral skip is acceptable only when the manifest explicitly did not select that work.
 
 ## Cache ownership policy
 
@@ -31,7 +31,7 @@ The only saving owners are deliberately isolated warmers:
 | Cache family / shared key | Single saving owner | Restore-only consumers |
 | --- | --- | --- |
 | `server-quality` | `cache-warm-x86_64-quality` | clippy, SQLx freshness, memory evaluation, and any quality consumer |
-| `server-test` | `cache-warm-x86_64-test` | all selected server-test shards |
+| `server-test` | `cache-warm-x86_64-test` | `nextest-plan` and all selected `server-test` shards |
 | `server-aarch64-check` | `cache-warm-aarch64` | `server-aarch64-check` |
 
 Consumers must use `Swatinem/rust-cache` with `save-if: false` (or an explicitly restore-only `actions/cache/restore` action). They must never become a fallback saver. The `cache-warm-aarch64` owner is reachable from both `push` to `main` and `workflow_dispatch`; this is necessary to recover an architecture-specific cache without opening a PR.
@@ -42,7 +42,7 @@ Consumers must use `Swatinem/rust-cache` with `save-if: false` (or an explicitly
 
 The nextest planner accepts only a compatible `ci-nextest-timing/v1` timing artifact within its freshness window (seven days by default). It discards unknown/deleted test IDs and uses current `cargo nextest list` discovery as the sole test-selection authority. When no artifact is available, the version is incompatible, the data is stale, or no usable samples remain, it cold-starts deterministically with four shards and fallback duration estimates. The resulting plan/matrix/exact-once proof make the fallback auditable.
 
-Each test shard uploads its current timing result and the workflow retains the plan, matrix, and proof artifacts. Recover from a bad or unavailable timing artifact by allowing the cold-start plan to run successfully, then use the newly uploaded compatible timing artifact for the next run. Do not hand-edit timing data to omit tests or change selection.
+Each test shard uploads its current timing result and the workflow retains the plan, matrix, and proof artifacts. The timing publisher (`nextest-timing-publish`) downloads the full plan and exact-once proof artifacts, validates that every expected shard timing file is present and non-empty, checks that each timing file's IDs match its matrix row, and verifies that the merged test-ID union exactly equals the proof's assigned IDs before uploading the merged timing artifact. Recover from a bad or unavailable timing artifact by allowing the cold-start plan to run successfully, then use the newly uploaded compatible timing artifact for the next run. Do not hand-edit timing data to omit tests or change selection.
 
 ## Concurrency and admission
 

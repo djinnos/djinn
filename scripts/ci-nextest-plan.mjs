@@ -19,6 +19,7 @@ export const WIDE_DEFAULT_SHARDS = 4;
 export const COLD_START_SHARDS = 4;
 export const PR_WIDEN_TEST_THRESHOLD = 200;
 export const PR_WIDEN_DURATION_THRESHOLD_SECONDS = 600;
+export const MAX_ARG_STRLEN = 131072;
 
 const ID_SEP = '|';
 
@@ -256,6 +257,25 @@ export function buildFilterExpression(shard) {
     return binaryFilters[0];
   }
   return `(${binaryFilters.join(') | (')})`;
+}
+
+/**
+ * Inject a `default-filter` into the requested nextest profile section without
+ * expanding the filter into argv or an environment variable. The filter is
+ * serialized as a TOML-safe JSON-encoded basic string so punctuation already
+ * emitted by `buildFilterExpression` stays valid. The requested profile header
+ * must exist exactly once; existing profile settings are preserved.
+ */
+export function injectDefaultFilter(baseToml, profile, filter) {
+  const header = `[profile.${profile}]`;
+  if (!baseToml.includes(header)) {
+    throw new Error(`missing nextest profile ${profile}`);
+  }
+  const occurrences = baseToml.split(header).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(`duplicate nextest profile ${profile}`);
+  }
+  return baseToml.replace(header, `${header}\ndefault-filter = ${JSON.stringify(filter)}`);
 }
 
 /**

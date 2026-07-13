@@ -27,8 +27,8 @@ use djinn_core::doctor::{DoctorCheck, DoctorRegistry};
 
 pub use closed_parent_open_children::{
     CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, ClosedParentOpenChildrenCheck,
-    ClosedParentOpenChildrenSource, MemoryClosedParentOpenChildrenSource,
-    TaskRepositoryClosedParentOpenChildrenSource,
+    ClosedParentOpenChildrenRepairSource, ClosedParentOpenChildrenSource,
+    MemoryClosedParentOpenChildrenSource, TaskRepositoryClosedParentOpenChildrenSource,
 };
 pub use live_mover::{ActiveTask, LiveMoverPredicateCheck, LiveMoverSource};
 pub use stranded_ready::{
@@ -81,6 +81,18 @@ pub fn register_closed_parent_open_children_check(
     source: Arc<dyn ClosedParentOpenChildrenSource>,
 ) -> Option<String> {
     registry.register(Arc::new(ClosedParentOpenChildrenCheck::new(source)))
+}
+
+/// Register the closed-parent orphan check with an attached repair source so
+/// `doctor_fix` can perform the opt-in mutating repair.
+pub fn register_closed_parent_open_children_check_with_repair(
+    registry: &DoctorRegistry,
+    source: Arc<dyn ClosedParentOpenChildrenSource>,
+    repair_source: Arc<dyn ClosedParentOpenChildrenRepairSource>,
+) -> Option<String> {
+    registry.register(Arc::new(
+        ClosedParentOpenChildrenCheck::new(source).with_repair_source(repair_source),
+    ))
 }
 
 // ---------------------------------------------------------------------------
