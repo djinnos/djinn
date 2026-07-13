@@ -2,6 +2,7 @@
 // while rrdr budget wind-down hooks land; split-out is a separate refactor.
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
 use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
@@ -37,6 +38,7 @@ use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
     ToolCallSignature, ToolFailureClass,
 };
+use super::phase::SessionPhaseTracker;
 use super::persistence::{
     complete_compaction_boundary, flush_in_flight_turn, persist_session_message,
     record_compaction_started, serialize_llm_input, serialize_message,
@@ -530,6 +532,7 @@ pub async fn run_reply_loop(
         }
     };
     let tool_metadata = tool_runtime_metadata(tools);
+    let phase_tracker = Arc::new(Mutex::new(SessionPhaseTracker::new(slot_ctx, role_name)));
     // Register activity tracker.
     let activity_ts = slot_ctx.register_activity(task_id);
     let last_rpc_touch = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -763,6 +766,7 @@ pub async fn run_reply_loop(
             // provider-agnostic conversation — covers all wire formats without
             // mutating stored history.
             let request_conversation = conversation.with_synthesized_tool_results();
+            phase_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).enter_provider_wait();
             let stream_result = provider
                 .stream(request_conversation.as_ref(), tools, tool_choice)
                 .await;
@@ -851,6 +855,7 @@ pub async fn run_reply_loop(
                 total_reasoning_out: &mut total_reasoning_out,
             })
             .await?;
+            phase_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).exit_provider_wait();
             // Flush any observed assistant/tool content before returning on
             // interrupt, cancellation, or early stream end.  This persists the
             // in-flight turn so it survives session release and is visible on
