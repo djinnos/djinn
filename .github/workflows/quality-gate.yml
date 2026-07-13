@@ -516,6 +516,13 @@ jobs:
             merge_group) profile=merge-group ;;
             *) profile=full-validation ;;
           esac
+          # Discover first so each candidate can be checked by the planner against
+          # the authoritative current test set before that candidate is selected.
+          mkdir -p nextest-plan
+          (
+            cd server
+            cargo nextest list --workspace --all-targets --features qdrant --message-format json
+          ) > nextest-plan/discovery.json
           # Restore the latest successful timing artifact. This can fail because of
           # missing artifacts, stale/incompatible data, or GitHub API rate limits;
           # in every failure case the planner cold-starts safely from current discovery.
@@ -577,6 +584,29 @@ jobs:
                 rm -f nextest-timing/timing.json
                 continue
               fi
+              # Apply the planner's own compatibility parser to this candidate. An
+              # obsolete artifact with no samples for current discovery cannot improve
+              # balancing, so continue to the next older successful candidate.
+              if ! node --input-type=module - \
+                nextest-plan/discovery.json nextest-timing/timing.json <<'NODE'
+          import { readFile } from 'node:fs/promises';
+          import { loadTiming, parseDiscovery } from './scripts/ci-nextest-plan.mjs';
+
+          const [discoveryPath, timingPath] = process.argv.slice(2);
+          const tests = parseDiscovery(await readFile(discoveryPath, 'utf8'));
+          const timing = loadTiming(await readFile(timingPath, 'utf8'), {
+            discoveredIds: new Set(tests.map(({ id }) => id)),
+          });
+          if (!timing.valid || timing.timings.size === 0) {
+            console.error(timing.reason ?? 'Timing artifact has no samples for current discovery');
+            process.exit(1);
+          }
+          NODE
+              then
+                echo "::notice::Timing artifact $artifact_id is not planner-compatible; trying next older candidate."
+                rm -f nextest-timing/timing.json
+                continue
+              fi
               echo "::notice::Restored compatible timing artifact $artifact_id for shard balancing."
               restored=1
               break 2
@@ -586,11 +616,6 @@ jobs:
           if [ "$restored" -ne 1 ]; then
             echo "::notice::No compatible prior timing artifact found; using cold-start balancing."
           fi
-          mkdir -p nextest-plan
-          (
-            cd server
-            cargo nextest list --workspace --all-targets --features qdrant --message-format json
-          ) > nextest-plan/discovery.json
           args=(
             --discovery nextest-plan/discovery.json
             --profile "$profile"
