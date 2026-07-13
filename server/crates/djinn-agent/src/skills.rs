@@ -172,15 +172,28 @@ pub(crate) fn load_skills_with_sources_detailed(
     let mut diagnostics = Vec::new();
 
     for requested_name in names {
-        let Some(path) = skill_path(project_root, requested_name) else {
-            diagnostics.push(missing_file_fact(requested_name));
+        // A project-skill request is an identifier, not a filesystem path.
+        // Reject non-project-relative values before resolution so neither a
+        // path escape nor an absolute path can become a diagnostic key.
+        let Some(requested_name) = project_skill_identifier(requested_name) else {
+            continue;
+        };
+        // Native skills are loaded from the platform registry later in prompt
+        // assembly. They are not project extension material and must never
+        // produce project-loader observations.
+        if crate::native_skills::native_skill(&requested_name).is_some() {
+            continue;
+        }
+
+        let Some(path) = skill_path(project_root, &requested_name) else {
+            diagnostics.push(missing_file_fact(&requested_name));
             continue;
         };
 
-        match load_skill_detailed(&path, requested_name) {
-            Ok(skill) => skills.push((requested_name.clone(), skill, path)),
-            Err(LoadSkillFailure::Frontmatter) => diagnostics.push(frontmatter_fact(requested_name)),
-            Err(LoadSkillFailure::MissingFile) => diagnostics.push(missing_file_fact(requested_name)),
+        match load_skill_detailed(&path, &requested_name) {
+            Ok(skill) => skills.push((requested_name, skill, path)),
+            Err(LoadSkillFailure::Frontmatter) => diagnostics.push(frontmatter_fact(&requested_name)),
+            Err(LoadSkillFailure::MissingFile) => diagnostics.push(missing_file_fact(&requested_name)),
         }
     }
 
@@ -254,7 +267,11 @@ fn skill_fact(
 ) -> ExtensionDiagnosticFact {
     ExtensionDiagnosticFact {
         source_kind: ExtensionLoadSourceKind::ProjectSkill,
-        source_key: requested_name.to_string(),
+        // Callers normally supply a validated identifier. Keep this final
+        // boundary defensive because facts may later be produced from a
+        // checked manifest whose contents are untrusted project material.
+        source_key: project_skill_identifier(requested_name)
+            .unwrap_or_else(|| "invalid-project-skill".to_string()),
         phase,
         severity: ExtensionLoadSeverity::Warning,
         remedy_code,
@@ -263,16 +280,17 @@ fn skill_fact(
 }
 
 pub(crate) fn skill_path(project_root: &Path, name: &str) -> Option<PathBuf> {
+    let name = project_skill_identifier(name)?;
     let candidates = [
         project_root
             .join(".claude")
             .join("skills")
-            .join(name)
+            .join(&name)
             .join("SKILL.md"),
         project_root
             .join(".opencode")
             .join("skills")
-            .join(name)
+            .join(&name)
             .join("SKILL.md"),
         project_root
             .join(".djinn")
@@ -281,11 +299,38 @@ pub(crate) fn skill_path(project_root: &Path, name: &str) -> Option<PathBuf> {
         project_root
             .join(".djinn")
             .join("skills")
-            .join(name)
+            .join(&name)
             .join("SKILL.md"),
     ];
 
     candidates.into_iter().find(|path| path.is_file())
+}
+
+/// Return a canonical project-relative skill identifier, rejecting values that
+/// could be interpreted as absolute or traversing filesystem paths. Forward
+/// slash-separated nested identifiers remain supported for legacy layouts.
+pub(crate) fn project_skill_identifier(requested_name: &str) -> Option<String> {
+    if requested_name.is_empty() || requested_name.contains('\\') {
+        return None;
+    }
+
+    let path = Path::new(requested_name);
+    if path.is_absolute() {
+        return None;
+    }
+
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(component) => components.push(component.to_str()?),
+            // `.` is canonicalized away; roots and parents are never valid
+            // project skill identifiers.
+            std::path::Component::CurDir => {}
+            std::path::Component::RootDir | std::path::Component::ParentDir => return None,
+            std::path::Component::Prefix(_) => return None,
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
 }
 
 fn skill_references_content(skill_path: &Path) -> Option<String> {
@@ -644,6 +689,34 @@ mod tests {
             !fact.summary_material.contains(tmp.path().to_str().unwrap())
                 && !fact.summary_material.contains("not frontmatter")
         }));
+    }
+
+    #[test]
+    fn detailed_load_rejects_non_project_relative_identifiers_without_facts() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-invalid-request-");
+        let detailed = load_skills_detailed(
+            tmp.path(),
+            &[
+                "/private/skill".to_string(),
+                "../outside-skill".to_string(),
+                "..\\outside-skill".to_string(),
+            ],
+        );
+
+        assert!(detailed.skills.is_empty());
+        assert!(detailed.diagnostics.is_empty());
+        assert_eq!(project_skill_identifier("./nested/skill"), Some("nested/skill".to_string()));
+        assert!(skill_path(tmp.path(), "/private/skill").is_none());
+        assert!(skill_path(tmp.path(), "../outside-skill").is_none());
+    }
+
+    #[test]
+    fn detailed_load_never_diagnoses_native_skills() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-native-request-");
+        let detailed = load_skills_detailed(tmp.path(), &["visual-spec".to_string()]);
+
+        assert!(detailed.skills.is_empty());
+        assert!(detailed.diagnostics.is_empty());
     }
 
     #[test]

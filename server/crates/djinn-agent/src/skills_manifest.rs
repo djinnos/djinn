@@ -48,7 +48,8 @@ use sha2::{Digest, Sha256};
 
 use crate::skills::{
     DEFAULT_TRUST_LEVEL, ResolvedSkill, collect_reference_files, load_skills_with_sources,
-    load_skills_with_sources_detailed, manifest_drift_fact, missing_file_fact, skill_path,
+    load_skills_with_sources_detailed, manifest_drift_fact, missing_file_fact,
+    project_skill_identifier, skill_path,
 };
 use crate::extension_diagnostics::ExtensionDiagnosticFact;
 
@@ -72,6 +73,30 @@ pub struct SkillsManifest {
     pub generated_by: String,
     /// All skills discovered under the canonical directories, sorted by `id`.
     pub skills: Vec<ManifestSkill>,
+}
+
+/// Retain only canonical project-skill identifiers. Native identifiers belong
+/// to the platform registry and must not be verified or diagnosed as project
+/// extensions.
+fn project_requested_names(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter_map(|name| project_skill_identifier(name))
+        .filter(|name| crate::native_skills::native_skill(name).is_none())
+        .collect()
+}
+
+fn is_frontmatter_failure_already_observed(
+    diagnostics: &[ExtensionDiagnosticFact],
+    error: &ManifestError,
+) -> bool {
+    let ManifestError::SkillMissing(skill) = error else {
+        return false;
+    };
+    diagnostics.iter().any(|fact| {
+        fact.source_key == *skill
+            && fact.phase == djinn_core::extension_diagnostics::ExtensionLoadPhase::Frontmatter
+    })
 }
 
 fn push_manifest_error_fact(diagnostics: &mut Vec<ExtensionDiagnosticFact>, error: &ManifestError) {
@@ -343,23 +368,36 @@ pub(crate) fn load_verified_skills_detailed(
     project_root: &Path,
     names: &[String],
 ) -> DetailedVerifiedSkillsLoad {
-    let detailed = load_skills_with_sources_detailed(project_root, names);
+    let requested_names = project_requested_names(names);
+    let detailed = load_skills_with_sources_detailed(project_root, &requested_names);
     let mut diagnostics = detailed.diagnostics;
     let loaded = detailed.skills;
 
-    let error = match read_manifest_if_present(project_root) {
-        Ok(Some(manifest)) => verify_loaded_skills(project_root, &manifest, names, &loaded)
-            .err()
-            .map(|error| {
-                push_manifest_error_fact(&mut diagnostics, &error);
-                RuntimeSkillManifestError::Verification(error)
-            }),
-        Ok(None) => None,
-        Err(error) => {
-            for requested_name in names {
-                push_unique_fact(&mut diagnostics, manifest_drift_fact(requested_name));
+    let error = if requested_names.is_empty() {
+        None
+    } else {
+        match read_manifest_if_present(project_root) {
+            Ok(Some(manifest)) => {
+                verify_loaded_skills(project_root, &manifest, &requested_names, &loaded)
+                    .err()
+                    .map(|error| {
+                        // A manifest-declared top-level file can exist but fail
+                        // frontmatter parsing. Its primary loader fact is canonical;
+                        // verification still fails closed, but must not add the
+                        // contradictory "missing file" observation.
+                        if !is_frontmatter_failure_already_observed(&diagnostics, &error) {
+                            push_manifest_error_fact(&mut diagnostics, &error);
+                        }
+                        RuntimeSkillManifestError::Verification(error)
+                    })
             }
-            Some(error)
+            Ok(None) => None,
+            Err(error) => {
+                for requested_name in &requested_names {
+                    push_unique_fact(&mut diagnostics, manifest_drift_fact(requested_name));
+                }
+                Some(error)
+            }
         }
     };
 
@@ -378,10 +416,13 @@ pub(crate) fn load_verified_skills_with_sources(
     project_root: &Path,
     names: &[String],
 ) -> Result<Vec<(String, ResolvedSkill, PathBuf)>, RuntimeSkillManifestError> {
-    let loaded = load_skills_with_sources_detailed(project_root, names).skills;
+    let requested_names = project_requested_names(names);
+    let loaded = load_skills_with_sources_detailed(project_root, &requested_names).skills;
 
-    if let Some(manifest) = read_manifest_if_present(project_root)? {
-        verify_loaded_skills(project_root, &manifest, names, &loaded)?;
+    if !requested_names.is_empty()
+        && let Some(manifest) = read_manifest_if_present(project_root)?
+    {
+        verify_loaded_skills(project_root, &manifest, &requested_names, &loaded)?;
     }
 
     Ok(loaded)
@@ -1464,6 +1505,47 @@ mod tests {
         );
         assert!(!fact.summary_material.contains(tmp.path().to_str().unwrap()));
         assert!(!fact.summary_material.contains("Changed"));
+    }
+
+    #[test]
+    fn detailed_verified_load_reports_only_frontmatter_for_malformed_declared_skill() {
+        let tmp = test_tempdir("djinn-skills-detailed-frontmatter-");
+        let skills_dir = djinn_skills_dir(tmp.path());
+        write_flat_skill(
+            &skills_dir,
+            "declared",
+            "---\ndescription: Valid before manifest generation\n---\n\nBody.\n",
+        );
+        write_checked_manifest(tmp.path());
+        write_flat_skill(&skills_dir, "declared", "not frontmatter\n");
+
+        let detailed = load_verified_skills_detailed(tmp.path(), &["declared".to_string()]);
+
+        assert!(detailed.error.is_some(), "manifest verification remains fail-closed");
+        assert_eq!(detailed.skills.len(), 0);
+        assert_eq!(detailed.diagnostics.len(), 1);
+        let fact = &detailed.diagnostics[0];
+        assert_eq!(fact.source_key, "declared");
+        assert_eq!(
+            fact.phase,
+            djinn_core::extension_diagnostics::ExtensionLoadPhase::Frontmatter
+        );
+        assert_eq!(
+            fact.remedy_code,
+            djinn_core::extension_diagnostics::ExtensionLoadRemedyCode::CheckSkillFrontmatter
+        );
+    }
+
+    #[test]
+    fn detailed_verified_load_never_diagnoses_native_skill_requests() {
+        let tmp = test_tempdir("djinn-skills-detailed-native-");
+        write_checked_manifest(tmp.path());
+
+        let detailed = load_verified_skills_detailed(tmp.path(), &["visual-spec".to_string()]);
+
+        assert!(detailed.error.is_none());
+        assert!(detailed.skills.is_empty());
+        assert!(detailed.diagnostics.is_empty());
     }
 
     #[test]
