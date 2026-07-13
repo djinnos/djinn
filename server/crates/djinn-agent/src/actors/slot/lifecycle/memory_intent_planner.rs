@@ -487,16 +487,40 @@ mod tests {
     }
 
     #[test]
-    fn parser_rejects_interrogative_question() {
-        let raw = payload_with_first_query("Can you find migration failures?");
-        let err = parse_planned_queries(&raw).unwrap_err();
-        assert!(matches!(
-            err,
-            PlannerError::InvalidQuery {
-                index: 0,
-                reason: "query must be declarative, not interrogative"
-            }
-        ));
+    fn parser_rejects_empty_and_surrounding_whitespace_queries() {
+        for query in [
+            "",
+            " Database migration timeout E_CONNRESET",
+            "Database migration timeout E_CONNRESET ",
+        ] {
+            let raw = payload_with_first_query(query);
+            assert_eq!(
+                parse_planned_queries(&raw),
+                Err(PlannerError::InvalidQuery {
+                    index: 0,
+                    reason: "query must be non-empty and have no surrounding whitespace",
+                }),
+                "query should be rejected: {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_rejects_trailing_question_mark_and_interrogative_prefix() {
+        for query in [
+            "Migration timeout policy?",
+            "How migration timeout policy works",
+        ] {
+            let raw = payload_with_first_query(query);
+            assert_eq!(
+                parse_planned_queries(&raw),
+                Err(PlannerError::InvalidQuery {
+                    index: 0,
+                    reason: "query must be declarative, not interrogative",
+                }),
+                "query should be rejected: {query}"
+            );
+        }
     }
 
     #[test]
@@ -552,29 +576,35 @@ mod tests {
     }
 
     #[test]
-    fn parser_rejects_non_self_contained_query() {
-        let raw = payload_with_first_query("This migration failure");
-        let err = parse_planned_queries(&raw).unwrap_err();
-        assert!(matches!(
-            err,
-            PlannerError::InvalidQuery {
-                index: 0,
-                reason: "query is not self-contained"
-            }
-        ));
+    fn parser_rejects_each_documented_deictic_pronoun() {
+        for pronoun in ["this", "that", "these", "those", "it", "they", "them"] {
+            let raw = payload_with_first_query(&format!("Migration timeout policy for {pronoun}"));
+            assert_eq!(
+                parse_planned_queries(&raw),
+                Err(PlannerError::InvalidQuery {
+                    index: 0,
+                    reason: "query is not self-contained",
+                }),
+                "pronoun should be rejected: {pronoun}"
+            );
+        }
     }
 
     #[test]
-    fn parser_rejects_multiple_needs() {
-        let raw = payload_with_first_query("Migration retries and timeout policy");
-        let err = parse_planned_queries(&raw).unwrap_err();
-        assert!(matches!(
-            err,
-            PlannerError::InvalidQuery {
-                index: 0,
-                reason: "query must express one information need"
-            }
-        ));
+    fn parser_rejects_each_documented_multi_need_delimiter() {
+        for delimiter in ["; ", " and ", " or ", " versus "] {
+            let raw = payload_with_first_query(&format!(
+                "Migration timeout policy{delimiter}retry policy"
+            ));
+            assert_eq!(
+                parse_planned_queries(&raw),
+                Err(PlannerError::InvalidQuery {
+                    index: 0,
+                    reason: "query must express one information need",
+                }),
+                "delimiter should be rejected: {delimiter:?}"
+            );
+        }
     }
 
     #[tokio::test]
