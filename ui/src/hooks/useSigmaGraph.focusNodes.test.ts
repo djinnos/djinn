@@ -108,6 +108,7 @@ function mountHarness(graph: Graph): {
   const resultRef: { current: UseSigmaGraphResult | null } = { current: null };
   const containerRef = createRef<HTMLDivElement>();
   function CapturingHarness() {
+    // eslint-disable-next-line react-hooks/immutability -- test harness intentionally captures the hook result into an outer holder for assertions.
     resultRef.current = useSigmaGraph(containerRef, graph);
     return createElement("div", { ref: containerRef });
   }

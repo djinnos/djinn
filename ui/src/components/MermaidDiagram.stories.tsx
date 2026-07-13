@@ -10,7 +10,7 @@ import { MermaidDiagram } from "./MermaidDiagram";
  */
 
 const meta = {
-  title: "Codegraph/MermaidDiagram",
+  title: "CodeGraph/MermaidDiagram",
   component: MermaidDiagram,
   parameters: {
     layout: "padded",
@@ -69,7 +69,7 @@ export const ImpactFlowchart: Story = {
       "  n0 --> target",
       "  n1 --> target",
       "  n2 --> n0",
-      "  classDef target fill:#fde68a,stroke:#b45309;",
+      "  classDef target fill:#fde68a,stroke:#b45309,color:#78350f;",
     ].join("\n"),
   },
 };

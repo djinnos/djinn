@@ -50,7 +50,7 @@ function revisionBodyFormat(revision: ProposalRevision): string {
  * Keeping stable section headings makes title, body, and acceptance-criteria
  * drift show up as ordinary line-level changes in the shared DiffView.
  */
-export function proposalRevisionMarkdown(revision: ProposalRevision): string {
+function proposalRevisionMarkdown(revision: ProposalRevision): string {
   const criteria = revision.acceptance_criteria.length
     ? revision.acceptance_criteria.map(acceptanceCriterionLine).join("\n")
     : "_No acceptance criteria._";

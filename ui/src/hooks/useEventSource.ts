@@ -76,10 +76,14 @@ export function useEventSource() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const livenessTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastReceivedAtRef = useRef<number>(Date.now());
+  const lastReceivedAtRef = useRef<number>(0);
   const cleanupHandlersRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     let isActive = true;
+    // Seed the liveness baseline on mount (kept out of render so `Date.now()`
+    // isn't called during the render phase). The watchdog only reads this ref
+    // from inside the effect, so it is always initialized before first use.
+    lastReceivedAtRef.current = Date.now();
 
     const hydrateSnapshot = async () => {
       const slugs = projectStore
@@ -133,8 +137,6 @@ export function useEventSource() {
       }
     };
 
-    let connect: () => Promise<void>;
-
     const scheduleReconnect = (source?: EventSource | null) => {
       if (!isActive) return;
 
@@ -181,7 +183,7 @@ export function useEventSource() {
       }, LIVENESS_WATCHDOG_INTERVAL_MS);
     };
 
-    connect = async () => {
+    const connect = async (): Promise<void> => {
       try {
         await hydrateSnapshot();
 
@@ -322,8 +324,4 @@ export function useEventSource() {
       }
     };
   }, [projectIdsKey]);
-
-  return {
-    eventSource: eventSourceRef.current,
-  };
 }

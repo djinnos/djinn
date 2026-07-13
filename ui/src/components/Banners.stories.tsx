@@ -99,7 +99,7 @@ function BoardHealthBannerMock({
  * --------------------------------------------------------------------------- */
 
 const meta: Meta = {
-  title: "Banners",
+  title: "Shared/Banners",
   parameters: {
     layout: "padded",
   },

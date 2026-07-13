@@ -71,7 +71,6 @@ const CATALOG_TAG_SET = new Set(CATALOG_TAGS);
 // Authoritative type SET from the Rust catalog. Mirrors CATALOG_TAGS but keyed
 // by the stable Rust-side block `type` (e.g. "rich-text", "question-form").
 const CATALOG_TYPES: readonly string[] = CATALOG.map((entry) => entry.type);
-const CATALOG_TYPE_SET = new Set(CATALOG_TYPES);
 
 // Fixture/spec order (QuestionForm last), filtered to the catalog set so the
 // ordered list and the authoritative set are kept in lockstep by construction.

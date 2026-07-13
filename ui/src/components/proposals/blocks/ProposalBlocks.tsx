@@ -9,6 +9,7 @@ import { parseMdxBody } from "./parseMdxBody";
 
 /** Wide GFM tables (e.g. a multi-column criteria catalog) overflow the proposal
  *  column and break the layout. Wrap them so they scroll horizontally instead. */
+// eslint-disable-next-line react-refresh/only-export-components -- shared ReactMarkdown component map, consumed by ProposalsPage and re-exported via blocks/index.ts.
 export const proposalMarkdownComponents: Components = {
   table({ node: _node, ...props }) {
     return (
