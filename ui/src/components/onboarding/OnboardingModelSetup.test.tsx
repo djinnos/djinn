@@ -245,8 +245,13 @@ describe("OnboardingModelSetup", () => {
     expect(list).toHaveClass("max-h-[300px]", "overflow-y-auto");
     expect(within(dialog).queryByText(hidden.name)).not.toBeInTheDocument();
 
+    const searchInput = within(dialog).getByPlaceholderText("Search models…");
+    await user.type(searchInput, "sss");
+    expect(searchInput).toHaveValue("sss");
+    await user.clear(searchInput);
+
     await user.type(
-      within(dialog).getByPlaceholderText("Search models…"),
+      searchInput,
       "   legacy.v2.5   ",
     );
     const hiddenResult = await within(dialog).findByText(hidden.name);

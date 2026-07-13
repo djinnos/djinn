@@ -134,7 +134,7 @@ export function ConnectedModelPicker({
         <ModelSelectorInput
           placeholder="Search models…"
           aria-label={`Search ${title.toLowerCase()}`}
-          onInputCapture={(event) => setSearch(event.currentTarget.value)}
+          onChange={(event) => setSearch(event.currentTarget.value)}
         />
         <ModelSelectorList>
           {groups.length === 0 && (

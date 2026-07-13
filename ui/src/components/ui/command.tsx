@@ -62,7 +62,11 @@ function CommandDialog({
   );
 }
 
-function CommandInput({ className, ...props }: React.ComponentProps<"input">) {
+function CommandInput({
+  className,
+  onChange,
+  ...props
+}: React.ComponentProps<"input">) {
   const { query, setQuery } = useCommandContext();
 
   return (
@@ -71,7 +75,13 @@ function CommandInput({ className, ...props }: React.ComponentProps<"input">) {
       <input
         data-slot="command-input"
         value={query}
-        onChange={(event) => setQuery(event.target.value)}
+        onChange={(event) => {
+          // Keep the controlled query and consumer observer in one event.
+          // A capture-phase observer can restore the controlled value before
+          // React's change handler runs, which swallows fast keystrokes.
+          setQuery(event.target.value);
+          onChange?.(event);
+        }}
         className={cn(
           "placeholder:text-muted-foreground flex h-10 w-full rounded-md bg-transparent py-3 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-50",
           className,
