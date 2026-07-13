@@ -453,17 +453,31 @@ fn classify_seed_outcome(
     }
 }
 
+/// Terminal state of a started cargo-target seed attempt.
+///
+/// `Cancelled` is separate from the join result so the terminal recording
+/// boundary can be failure-injected without aborting a started
+/// `spawn_blocking` task, which Tokio cannot reliably abort.
+enum SeedAttemptTerminal<'a> {
+    Join(&'a Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError>),
+    Cancelled,
+}
+
+fn classify_seed_terminal(terminal: SeedAttemptTerminal<'_>) -> &'static str {
+    match terminal {
+        SeedAttemptTerminal::Join(result) => classify_seed_outcome(result),
+        SeedAttemptTerminal::Cancelled => djinn_telemetry::workspace_seed::OUTCOME_CANCELLED,
+    }
+}
+
 /// Record one `workspace_seed_seconds` sample for the cargo-target seed
-/// attempt, classifying the outcome from the `spawn_blocking` join result.
-/// Called exactly once per started seed attempt.
+/// attempt, classifying its terminal state. Called exactly once per started
+/// seed attempt.
 ///
 /// Accepts `elapsed` directly so tests can assert deterministic `_sum`
 /// deltas without a wall-clock dependency.
-fn record_seed_seconds(
-    elapsed: Duration,
-    result: &Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError>,
-) {
-    let outcome = classify_seed_outcome(result);
+fn record_seed_terminal_seconds(elapsed: Duration, terminal: SeedAttemptTerminal<'_>) {
+    let outcome = classify_seed_terminal(terminal);
     djinn_telemetry::workspace_seed::record_seconds(outcome, elapsed);
 }
 
@@ -547,7 +561,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
     let seed_elapsed = seed_start.elapsed();
     // Record exactly one workspace_seed_seconds sample per started seed
     // attempt, regardless of outcome (ok / error / cancelled).
-    record_seed_seconds(seed_elapsed, &seed_join_result);
+    record_seed_terminal_seconds(seed_elapsed, SeedAttemptTerminal::Join(&seed_join_result));
     match seed_join_result {
         Ok(Ok(result)) => {
             record_cargo_target_seed_result("task_run", &result);
@@ -3394,7 +3408,7 @@ warning: something
     /// Serialize telemetry-scrape tests so each can use a precise delta.
     static SEED_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn seed_telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn seed_telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
         SEED_TELEMETRY_MUTEX
             .lock()
             .expect("seed telemetry test mutex poisoned")
@@ -3478,34 +3492,14 @@ warning: something
         );
     }
 
-    /// `classify_seed_outcome`: Err(cancelled JoinError) → cancelled.
-    ///
-    /// A `JoinError` from a cancelled `spawn_blocking` task is classified as
-    /// `cancelled` (not `error`) because the runtime is shutting down, not
-    /// because the seed work itself failed.
-    #[tokio::test]
-    async fn classify_seed_outcome_cancelled_join() {
-        // Spawn a blocking task that never completes, then cancel it by
-        // aborting the handle. tokio::task::JoinError::is_cancelled() returns
-        // true for an aborted task.
-        let handle = tokio::task::spawn_blocking(|| {
-            // Park forever; the abort will produce a cancelled JoinError.
-            std::thread::park();
-            42_u8
-        });
-        handle.abort();
-        let join_err = handle
-            .await
-            .expect_err("aborted task must produce JoinError");
-        assert!(
-            join_err.is_cancelled(),
-            "abort must produce a cancelled error"
-        );
-
-        let result: Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError> =
-            Err(join_err);
+    /// A deterministic terminal cancellation is classified as `cancelled`.
+    /// This injects cancellation at the terminal recording seam rather than
+    /// aborting `spawn_blocking`, because started blocking tasks cannot be
+    /// reliably aborted by Tokio.
+    #[test]
+    fn classify_seed_terminal_cancelled() {
         assert_eq!(
-            classify_seed_outcome(&result),
+            classify_seed_terminal(SeedAttemptTerminal::Cancelled),
             djinn_telemetry::workspace_seed::OUTCOME_CANCELLED,
         );
     }
@@ -3536,7 +3530,7 @@ warning: something
             cargo_target_seed::seed_cargo_target_dir(base_clone, run_clone)
         })
         .await;
-        record_seed_seconds(elapsed, &join_result);
+        record_seed_terminal_seconds(elapsed, SeedAttemptTerminal::Join(&join_result));
 
         let result = join_result
             .expect("join must succeed")
@@ -3579,7 +3573,7 @@ warning: something
             cargo_target_seed::seed_cargo_target_dir(base_clone, run_clone)
         })
         .await;
-        record_seed_seconds(elapsed, &join_result);
+        record_seed_terminal_seconds(elapsed, SeedAttemptTerminal::Join(&join_result));
 
         let result = join_result
             .expect("join must succeed")
@@ -3627,7 +3621,7 @@ warning: something
             cargo_target_seed::seed_cargo_target_dir(base_clone, run_clone)
         })
         .await;
-        record_seed_seconds(elapsed, &join_result);
+        record_seed_terminal_seconds(elapsed, SeedAttemptTerminal::Join(&join_result));
 
         // The join succeeds but the seed returns Err (create_dir_all failed).
         assert!(
@@ -3648,11 +3642,11 @@ warning: something
         assert_no_seed_identity_labels(&after);
     }
 
-    /// A cancelled `spawn_blocking` seed attempt records exactly one `cancelled`
-    /// sample via `record_seed_seconds`, verified through scrape deltas (not just
-    /// the pure classification function).
-    #[tokio::test]
-    async fn seed_records_one_cancelled_sample_on_abort() {
+    /// A deterministically injected terminal cancellation records exactly one
+    /// `cancelled` sample via the same terminal recording boundary used after
+    /// the worker seed join resolves.
+    #[test]
+    fn seed_records_one_cancelled_sample() {
         let _guard = seed_telemetry_guard();
         djinn_telemetry::init().expect("telemetry init");
 
@@ -3661,23 +3655,7 @@ warning: something
         let cancel_sum_before = seed_sum(&before, "cancelled");
         let elapsed = Duration::from_millis(50);
 
-        // Spawn a blocking task that never completes, then abort it to get a
-        // cancelled JoinError — the same path production cancellation takes.
-        let handle = tokio::task::spawn_blocking(|| {
-            std::thread::park();
-            42_u8
-        });
-        handle.abort();
-        let join_err = handle
-            .await
-            .expect_err("aborted task must produce JoinError");
-        assert!(
-            join_err.is_cancelled(),
-            "abort must produce cancelled JoinError"
-        );
-        let join_result: Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError> =
-            Err(join_err);
-        record_seed_seconds(elapsed, &join_result);
+        record_seed_terminal_seconds(elapsed, SeedAttemptTerminal::Cancelled);
 
         let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
