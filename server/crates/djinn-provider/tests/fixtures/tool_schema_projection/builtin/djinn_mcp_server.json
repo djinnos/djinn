@@ -1979,11 +1979,15 @@
     },
     "outputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "AnyJson": {}
+      },
       "required": [
         "ok",
         "check_name",
         "finding_id"
       ],
+      "type": "object",
       "properties": {
         "ok": {
           "type": "boolean"
@@ -1994,14 +1998,23 @@
         "finding_id": {
           "type": "string"
         },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnyJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "error": {
           "type": [
             "string",
             "null"
           ]
         }
-      },
-      "type": "object"
+      }
     },
     "readOnly": false,
     "destructive": true,
