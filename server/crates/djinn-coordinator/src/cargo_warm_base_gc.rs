@@ -1002,6 +1002,8 @@ impl WarmJobGuard for WarmJobListerGuard {
 
 pub struct StatvfsFreeSpaceGuard;
 impl FreeSpaceGuard for StatvfsFreeSpaceGuard {
+    // statvfs field widths vary by platform (u32 on macOS, u64 on Linux).
+    #[allow(clippy::unnecessary_cast)]
     fn free_space_bytes(&self, path: &Path) -> Result<u64, String> {
         let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
             .map_err(|error| error.to_string())?;
@@ -1017,6 +1019,8 @@ impl FreeSpaceGuard for StatvfsFreeSpaceGuard {
 
 pub struct StatvfsFilesystemCapacity;
 impl FilesystemCapacity for StatvfsFilesystemCapacity {
+    // statvfs field widths vary by platform (u32 on macOS, u64 on Linux).
+    #[allow(clippy::unnecessary_cast)]
     fn capacity(&self, path: &Path) -> Result<CapacitySnapshot, String> {
         let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
             .map_err(|error| error.to_string())?;
