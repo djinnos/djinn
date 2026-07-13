@@ -82,6 +82,7 @@ pub use repositories::{
         EpicRepository, EpicTaskCounts, EpicUpdateInput,
     },
     events::EventsRepository,
+    extension_load_diagnostic::{ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic},
     git_settings::GitSettingsRepository,
     image::{Image, ImageRepository, ImageStatus, SelectedCatalogImage},
     liveness::{
