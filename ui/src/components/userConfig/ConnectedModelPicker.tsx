@@ -130,7 +130,7 @@ export function ConnectedModelPicker({
       >
         {triggerLabel}
       </ModelSelectorTrigger>
-      <ModelSelectorContent title={title}>
+      <ModelSelectorContent title={title} className="overflow-hidden sm:max-w-xl">
         <ModelSelectorInput
           placeholder="Search models…"
           aria-label={`Search ${title.toLowerCase()}`}
@@ -145,47 +145,69 @@ export function ConnectedModelPicker({
               key={group.providerId}
               heading={formatProvider(group.providerId)}
             >
-              {group.items.map((model) => (
-                <ModelSelectorItem
-                  key={model.id}
-                  searchValue={
-                    search.length > 0 ? search : modelSearchValue(model)
-                  }
-                  aria-current={
-                    selectedModelId === model.id ? "true" : undefined
-                  }
-                  onSelect={() => {
-                    onSelect(model);
-                    setOpen(false);
-                    resetPicker();
-                  }}
-                >
-                  <ModelSelectorLogo provider={group.providerId} />
-                  <ModelSelectorName>
-                    {model.name || stripProviderPrefix(model.id)}
-                  </ModelSelectorName>
-                  {model.recommended && (
-                    <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                      Recommended
+              {group.items.map((model) => {
+                const name = model.name || stripProviderPrefix(model.id);
+                const metadata = formatModelMetadata(model);
+
+                return (
+                  <ModelSelectorItem
+                    key={model.id}
+                    className="group cursor-pointer items-start gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-primary/10 hover:text-foreground focus-visible:bg-primary/10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/50 aria-[current=true]:bg-primary/10 aria-[current=true]:text-foreground aria-[current=true]:ring-1 aria-[current=true]:ring-inset aria-[current=true]:ring-primary/30"
+                    searchValue={
+                      search.length > 0 ? search : modelSearchValue(model)
+                    }
+                    aria-current={
+                      selectedModelId === model.id ? "true" : undefined
+                    }
+                    onSelect={() => {
+                      onSelect(model);
+                      setOpen(false);
+                      resetPicker();
+                    }}
+                  >
+                    <ModelSelectorLogo
+                      provider={group.providerId}
+                      className="mt-0.5 size-4 shrink-0"
+                    />
+                    <span className="min-w-0 flex-1 text-left">
+                      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                        <ModelSelectorName
+                          data-slot="model-picker-name"
+                          className="min-w-0 overflow-visible text-clip whitespace-normal break-words font-medium leading-5 text-foreground"
+                        >
+                          {name}
+                        </ModelSelectorName>
+                        {model.recommended && (
+                          <span className="shrink-0 rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 text-[11px] font-medium leading-4 text-primary">
+                            Recommended
+                          </span>
+                        )}
+                      </span>
+                      {metadata && (
+                        <span
+                          data-slot="model-picker-metadata"
+                          className="mt-0.5 block whitespace-normal break-words text-left text-xs leading-4 text-muted-foreground group-hover:text-foreground/75 group-focus-visible:text-foreground/75 group-aria-[current=true]:text-foreground/75"
+                          title={metadata}
+                        >
+                          {metadata}
+                        </span>
+                      )}
                     </span>
-                  )}
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    {formatModelMetadata(model)}
-                  </span>
-                  {selectedModelId === model.id && (
-                    <span className="shrink-0 text-primary">
-                      <HugeiconsIcon icon={Tick02Icon} size={14} />
-                      <span className="sr-only">Selected</span>
-                    </span>
-                  )}
-                </ModelSelectorItem>
-              ))}
+                    {selectedModelId === model.id && (
+                      <span className="mt-0.5 shrink-0 text-primary">
+                        <HugeiconsIcon icon={Tick02Icon} size={16} />
+                        <span className="sr-only">Selected</span>
+                      </span>
+                    )}
+                  </ModelSelectorItem>
+                );
+              })}
               {!normalizedSearch &&
                 !expandedProviders.has(group.providerId) &&
                 group.hiddenCount > 0 && (
                   <button
                     type="button"
-                    className="w-full rounded-sm px-2 py-1.5 text-left text-xs font-medium text-primary hover:bg-accent"
+                    className="w-full rounded-md px-3 py-2 text-left text-xs font-medium text-primary hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/50"
                     onClick={() =>
                       setExpandedProviders((current) => {
                         const next = new Set(current);

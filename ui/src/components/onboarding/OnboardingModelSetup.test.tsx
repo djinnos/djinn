@@ -240,6 +240,7 @@ describe("OnboardingModelSetup", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "Select plan model",
     });
+    expect(dialog).toHaveClass("sm:max-w-xl");
     const list = dialog.querySelector('[data-slot="command-list"]');
     expect(list).toHaveClass("max-h-[300px]", "overflow-y-auto");
     expect(within(dialog).queryByText(hidden.name)).not.toBeInTheDocument();

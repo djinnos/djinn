@@ -295,7 +295,9 @@ describe("groupModelsByProvider", () => {
   });
 
   it("uses 'unknown' for models without provider_id", () => {
-    const model = um("custom-model", { provider_id: undefined as unknown as string });
+    const model = um("custom-model", {
+      provider_id: undefined as unknown as UserModel["provider_id"],
+    });
     const groups = groupModelsByProvider([model]);
     expect(groups).toHaveLength(1);
     expect(groups[0]!.providerId).toBe("unknown");
@@ -577,16 +579,32 @@ describe("ModelSection picker (browse/search)", () => {
     // The multi-segment fireworks model with full metadata is found.
     const mimoRow = await screen.findByText("MiMo v2.5 Pro");
     expect(mimoRow).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Add a model" })).toHaveClass(
+      "sm:max-w-xl",
+    );
 
-    // Metadata pieces render within the same item.
+    // Keep the model identity on the primary line and the dense technical
+    // metadata on its own wrapping line so it cannot collapse the name.
     const item = mimoRow.closest("[data-slot='command-item']");
     expect(item).not.toBeNull();
+    expect(item).toHaveClass("items-start", "hover:bg-primary/10");
+    expect(mimoRow).toHaveAttribute("data-slot", "model-picker-name");
+    expect(mimoRow).toHaveClass("whitespace-normal", "font-medium");
+    const metadata = (item as HTMLElement).querySelector(
+      "[data-slot='model-picker-metadata']",
+    );
+    expect(metadata).not.toBeNull();
+    expect(metadata).toHaveClass("block", "whitespace-normal", "text-xs");
     const itemText = (item as HTMLElement).textContent ?? "";
     expect(itemText).toContain("1M ctx");
     expect(itemText).toContain("$3.00/$12.00 per M tok");
     expect(itemText).toContain("reasoning");
     expect(itemText).toContain("tools");
     expect(itemText).toContain("vision");
+    expect(metadata).toHaveAttribute(
+      "title",
+      "1M ctx · $3.00/$12.00 per M tok · reasoning tools vision",
+    );
   });
 
   it("renders the Recommended badge for a recommended model in browse/search", async () => {
