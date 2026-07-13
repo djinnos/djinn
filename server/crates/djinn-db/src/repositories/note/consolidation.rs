@@ -90,11 +90,22 @@ pub struct CreatedCanonicalConsolidatedNote {
 
 pub struct NoteConsolidationRepository {
     db: Database,
+    note_repo: NoteRepository,
 }
 
 impl NoteConsolidationRepository {
     pub fn new(db: Database) -> Self {
-        Self { db }
+        Self {
+            note_repo: NoteRepository::new(db.clone(), EventBus::noop()),
+            db,
+        }
+    }
+
+    /// Test-only dependency injection for proving that a failed revision
+    /// insert rolls back repository-owned canonical creation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_note_repository_for_test(db: Database, note_repo: NoteRepository) -> Self {
+        Self { db, note_repo }
     }
 
     /// Return distinct session IDs that have at least one provenance entry,
@@ -273,9 +284,9 @@ impl NoteConsolidationRepository {
             }
         }
 
-        let note_repo = NoteRepository::new(self.db.clone(), EventBus::noop());
         let note_id = uuid::Uuid::now_v7().to_string();
-        let created = note_repo
+        let created = self
+            .note_repo
             .mutate_with_revision(NoteRevisionMutation {
                 project_id: project_id.to_owned(),
                 note_id: Some(note_id),
@@ -322,7 +333,7 @@ impl NoteConsolidationRepository {
         // are recorded and the count is zero.
         let mut superseded_source_note_count = 0usize;
         for source_id in source_note_ids {
-            note_repo
+            self.note_repo
                 .record_supersedes(&created.id, source_id, 1.0)
                 .await?;
             superseded_source_note_count += 1;
