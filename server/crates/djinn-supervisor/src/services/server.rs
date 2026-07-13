@@ -1511,8 +1511,12 @@ mod tests {
             Ok(super::super::wire::PlannerAttemptResult {
                 outcome: super::super::wire::PlannerOutcome::Success,
                 content: Some(format!(
-                    "{}:{}:{}",
-                    request.project_id, request.task_run_id, request.session_id
+                    "{}:{}:{}:{}:{}",
+                    request.project_id,
+                    request.task_id,
+                    request.task_run_id,
+                    request.session_id,
+                    request.created_by_user_id,
                 )),
                 tokens_in: 13,
                 tokens_out: 8,
@@ -2030,7 +2034,13 @@ mod tests {
             .await
             .expect("planner RPC round trip");
         assert_eq!(result.outcome, super::super::wire::PlannerOutcome::Success);
-        assert_eq!(result.content.as_deref(), Some("project-1:run-1:session-1"));
+        // The fake reflects every required attribution field. This is a wire
+        // regression: losing task or creator in the RPC forwarding path must
+        // fail just as visibly as losing project/task-run/session.
+        assert_eq!(
+            result.content.as_deref(),
+            Some("project-1:task-1:run-1:session-1:creator-1")
+        );
         assert_eq!(
             (
                 result.tokens_in,
