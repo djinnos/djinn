@@ -73,7 +73,7 @@ mod checkpoint_safety;
 mod lifecycle;
 mod worker_services;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -456,12 +456,14 @@ fn classify_seed_outcome(
 /// Record one `workspace_seed_seconds` sample for the cargo-target seed
 /// attempt, classifying the outcome from the `spawn_blocking` join result.
 /// Called exactly once per started seed attempt.
+///
+/// Accepts `elapsed` directly so tests can assert deterministic `_sum`
+/// deltas without a wall-clock dependency.
 fn record_seed_seconds(
-    start: Instant,
+    elapsed: Duration,
     result: &Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError>,
 ) {
     let outcome = classify_seed_outcome(result);
-    let elapsed = start.elapsed();
     djinn_telemetry::workspace_seed::record_seconds(outcome, elapsed);
 }
 
@@ -542,9 +544,10 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
         seed_cargo_target_dir(seed_source_base, seed_destination_run_dir)
     })
     .await;
+    let seed_elapsed = seed_start.elapsed();
     // Record exactly one workspace_seed_seconds sample per started seed
     // attempt, regardless of outcome (ok / error / cancelled).
-    record_seed_seconds(seed_start, &seed_join_result);
+    record_seed_seconds(seed_elapsed, &seed_join_result);
     match seed_join_result {
         Ok(Ok(result)) => {
             record_cargo_target_seed_result("task_run", &result);
@@ -3409,6 +3412,18 @@ warning: something
             .unwrap_or(0.0)
     }
 
+    /// Read the `_sum` value for `workspace_seed_seconds` for a given outcome.
+    fn seed_sum(rendered: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_seed_seconds_sum")
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
     /// Assert that rendered workspace_seed samples carry no high-cardinality
     /// identity labels.
     fn assert_no_seed_identity_labels(rendered: &str) {
@@ -3512,15 +3527,16 @@ warning: something
 
         let before = djinn_telemetry::render().expect("render before");
         let ok_before = seed_count(&before, "ok");
+        let ok_sum_before = seed_sum(&before, "ok");
+        let elapsed = Duration::from_millis(300);
 
-        let start = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
         let base_clone = base.clone();
         let run_clone = run.clone();
         let join_result = tokio::task::spawn_blocking(move || {
             cargo_target_seed::seed_cargo_target_dir(base_clone, run_clone)
         })
         .await;
-        record_seed_seconds(start, &join_result);
+        record_seed_seconds(elapsed, &join_result);
 
         let result = join_result
             .expect("join must succeed")
@@ -3532,6 +3548,10 @@ warning: something
             seed_count(&after, "ok"),
             ok_before + 1.0,
             "one ok seed sample expected"
+        );
+        assert!(
+            (seed_sum(&after, "ok") - ok_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
+            "ok seed sum delta must equal elapsed"
         );
         assert_no_seed_identity_labels(&after);
     }
@@ -3550,15 +3570,16 @@ warning: something
 
         let before = djinn_telemetry::render().expect("render before");
         let ok_before = seed_count(&before, "ok");
+        let ok_sum_before = seed_sum(&before, "ok");
+        let elapsed = Duration::from_millis(180);
 
-        let start = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
         let base_clone = base.clone();
         let run_clone = run.clone();
         let join_result = tokio::task::spawn_blocking(move || {
             cargo_target_seed::seed_cargo_target_dir(base_clone, run_clone)
         })
         .await;
-        record_seed_seconds(start, &join_result);
+        record_seed_seconds(elapsed, &join_result);
 
         let result = join_result
             .expect("join must succeed")
@@ -3574,6 +3595,10 @@ warning: something
             seed_count(&after, "ok"),
             ok_before + 1.0,
             "cold-start fallback seed is a successful attempt: one ok sample"
+        );
+        assert!(
+            (seed_sum(&after, "ok") - ok_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
+            "ok seed sum delta must equal elapsed for cold-start fallback"
         );
         assert_no_seed_identity_labels(&after);
     }
@@ -3593,15 +3618,16 @@ warning: something
 
         let before = djinn_telemetry::render().expect("render before");
         let err_before = seed_count(&before, "error");
+        let err_sum_before = seed_sum(&before, "error");
+        let elapsed = Duration::from_millis(90);
 
-        let start = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
         let base_clone = tmp.path().join("any-base");
         let run_clone = run.clone();
         let join_result = tokio::task::spawn_blocking(move || {
             cargo_target_seed::seed_cargo_target_dir(base_clone, run_clone)
         })
         .await;
-        record_seed_seconds(start, &join_result);
+        record_seed_seconds(elapsed, &join_result);
 
         // The join succeeds but the seed returns Err (create_dir_all failed).
         assert!(
@@ -3614,6 +3640,55 @@ warning: something
             seed_count(&after, "error"),
             err_before + 1.0,
             "one error seed sample expected for setup failure"
+        );
+        assert!(
+            (seed_sum(&after, "error") - err_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
+            "error seed sum delta must equal elapsed"
+        );
+        assert_no_seed_identity_labels(&after);
+    }
+
+    /// A cancelled `spawn_blocking` seed attempt records exactly one `cancelled`
+    /// sample via `record_seed_seconds`, verified through scrape deltas (not just
+    /// the pure classification function).
+    #[tokio::test]
+    async fn seed_records_one_cancelled_sample_on_abort() {
+        let _guard = seed_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let before = djinn_telemetry::render().expect("render before");
+        let cancel_before = seed_count(&before, "cancelled");
+        let cancel_sum_before = seed_sum(&before, "cancelled");
+        let elapsed = Duration::from_millis(50);
+
+        // Spawn a blocking task that never completes, then abort it to get a
+        // cancelled JoinError — the same path production cancellation takes.
+        let handle = tokio::task::spawn_blocking(|| {
+            std::thread::park();
+            42_u8
+        });
+        handle.abort();
+        let join_err = handle
+            .await
+            .expect_err("aborted task must produce JoinError");
+        assert!(
+            join_err.is_cancelled(),
+            "abort must produce cancelled JoinError"
+        );
+        let join_result: Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError> =
+            Err(join_err);
+        record_seed_seconds(elapsed, &join_result);
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            seed_count(&after, "cancelled"),
+            cancel_before + 1.0,
+            "one cancelled seed sample expected"
+        );
+        assert!(
+            (seed_sum(&after, "cancelled") - cancel_sum_before - elapsed.as_secs_f64()).abs()
+                < 0.001,
+            "cancelled seed sum delta must equal elapsed"
         );
         assert_no_seed_identity_labels(&after);
     }

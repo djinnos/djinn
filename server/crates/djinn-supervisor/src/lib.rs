@@ -2889,6 +2889,7 @@ mod tests {
     use djinn_workspace::Workspace;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
     /// Compile-time assertion: `SupervisorServices` is object-safe.
@@ -5282,6 +5283,18 @@ mod tests {
             .unwrap_or(0.0)
     }
 
+    /// Read the `_sum` value for `workspace_clone_seconds` for a given outcome.
+    fn clone_sum(rendered: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_clone_seconds_sum")
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
     /// Assert that rendered workspace_clone / workspace_seed samples carry no
     /// high-cardinality identity labels.
     fn assert_no_identity_labels(rendered: &str, metric_prefix: &str) {
@@ -5319,15 +5332,22 @@ mod tests {
         let clock = Arc::new(TestClock::new(
             std::time::SystemTime::UNIX_EPOCH,
             std::time::Instant::now(),
-        )) as Arc<dyn Clock>;
+        ));
         let cancel = CancellationToken::new();
 
         let before = djinn_telemetry::render().expect("render before");
         let ok_before = clone_count(&before, "ok");
+        let ok_sum_before = clone_sum(&before, "ok");
+        let elapsed = Duration::from_millis(200);
 
-        timed_clone_attempt(&*clock, &cancel, async {
-            mgr.clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
-                .await
+        let clock_clone = clock.clone();
+        timed_clone_attempt(&*clock, &cancel, async move {
+            let result = mgr
+                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                .await;
+            // Advance the TestClock mono time so elapsed is deterministic.
+            clock_clone.advance_mono(elapsed);
+            result
         })
         .await
         .expect("clone must succeed");
@@ -5337,6 +5357,10 @@ mod tests {
             clone_count(&after, "ok"),
             ok_before + 1.0,
             "one ok clone sample expected"
+        );
+        assert!(
+            (clone_sum(&after, "ok") - ok_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
+            "ok clone sum delta must equal elapsed"
         );
         // Error/cancelled must not increase.
         assert_eq!(
@@ -5364,15 +5388,21 @@ mod tests {
         let clock = Arc::new(TestClock::new(
             std::time::SystemTime::UNIX_EPOCH,
             std::time::Instant::now(),
-        )) as Arc<dyn Clock>;
+        ));
         let cancel = CancellationToken::new();
 
         let before = djinn_telemetry::render().expect("render before");
         let err_before = clone_count(&before, "error");
+        let err_sum_before = clone_sum(&before, "error");
+        let elapsed = Duration::from_millis(150);
 
-        let result = timed_clone_attempt(&*clock, &cancel, async {
-            mgr.clone_ephemeral("nonexistent-project", RESUME_TEST_BASE)
-                .await
+        let clock_clone = clock.clone();
+        let result = timed_clone_attempt(&*clock, &cancel, async move {
+            let result = mgr
+                .clone_ephemeral("nonexistent-project", RESUME_TEST_BASE)
+                .await;
+            clock_clone.advance_mono(elapsed);
+            result
         })
         .await;
         assert!(result.is_err(), "clone of missing project must fail");
@@ -5382,6 +5412,10 @@ mod tests {
             clone_count(&after, "error"),
             err_before + 1.0,
             "one error clone sample expected"
+        );
+        assert!(
+            (clone_sum(&after, "error") - err_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
+            "error clone sum delta must equal elapsed"
         );
         assert_eq!(
             clone_count(&after, "ok"),
@@ -5403,18 +5437,24 @@ mod tests {
         let clock = Arc::new(TestClock::new(
             std::time::SystemTime::UNIX_EPOCH,
             std::time::Instant::now(),
-        )) as Arc<dyn Clock>;
+        ));
         let cancel = CancellationToken::new();
         cancel.cancel();
 
         let before = djinn_telemetry::render().expect("render before");
         let cancel_before = clone_count(&before, "cancelled");
+        let cancel_sum_before = clone_sum(&before, "cancelled");
+        let elapsed = Duration::from_millis(100);
 
         // Even though the clone succeeds, the cancel token is set so the
         // outcome is `cancelled`.
-        timed_clone_attempt(&*clock, &cancel, async {
-            mgr.clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
-                .await
+        let clock_clone = clock.clone();
+        timed_clone_attempt(&*clock, &cancel, async move {
+            let result = mgr
+                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                .await;
+            clock_clone.advance_mono(elapsed);
+            result
         })
         .await
         .expect("clone itself succeeds");
@@ -5424,6 +5464,11 @@ mod tests {
             clone_count(&after, "cancelled"),
             cancel_before + 1.0,
             "one cancelled clone sample expected when token is set"
+        );
+        assert!(
+            (clone_sum(&after, "cancelled") - cancel_sum_before - elapsed.as_secs_f64()).abs()
+                < 0.001,
+            "cancelled clone sum delta must equal elapsed"
         );
         assert_eq!(
             clone_count(&after, "ok"),
@@ -5447,25 +5492,38 @@ mod tests {
         let clock = Arc::new(TestClock::new(
             std::time::SystemTime::UNIX_EPOCH,
             std::time::Instant::now(),
-        )) as Arc<dyn Clock>;
+        ));
         let cancel = CancellationToken::new();
 
         let before = djinn_telemetry::render().expect("render before");
         let ok_before = clone_count(&before, "ok");
         let err_before = clone_count(&before, "error");
+        let ok_sum_before = clone_sum(&before, "ok");
+        let err_sum_before = clone_sum(&before, "error");
+        let err_elapsed = Duration::from_millis(120);
+        let ok_elapsed = Duration::from_millis(250);
 
         // First attempt: task_branch doesn't exist → error.
-        let first = timed_clone_attempt(&*clock, &cancel, async {
-            mgr.clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_TASK)
-                .await
+        let clock_clone = clock.clone();
+        let first = timed_clone_attempt(&*clock, &cancel, async move {
+            let result = mgr
+                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_TASK)
+                .await;
+            clock_clone.advance_mono(err_elapsed);
+            result
         })
         .await;
         assert!(first.is_err(), "task_branch clone must fail (first cycle)");
 
         // Second attempt (fallback): base_branch exists → ok.
-        timed_clone_attempt(&*clock, &cancel, async {
-            mgr.clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
-                .await
+        let clock_clone2 = clock.clone();
+        timed_clone_attempt(&*clock, &cancel, async move {
+            let (mgr2, _tip2) = build_resume_test_mirror(tmp.path(), false).await;
+            let result = mgr2
+                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                .await;
+            clock_clone2.advance_mono(ok_elapsed);
+            result
         })
         .await
         .expect("base_branch clone must succeed");
@@ -5480,6 +5538,14 @@ mod tests {
             clone_count(&after, "ok"),
             ok_before + 1.0,
             "one ok sample for the successful base_branch fallback attempt"
+        );
+        assert!(
+            (clone_sum(&after, "error") - err_sum_before - err_elapsed.as_secs_f64()).abs() < 0.001,
+            "error clone sum delta must equal first attempt elapsed"
+        );
+        assert!(
+            (clone_sum(&after, "ok") - ok_sum_before - ok_elapsed.as_secs_f64()).abs() < 0.001,
+            "ok clone sum delta must equal fallback attempt elapsed"
         );
         assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
     }
