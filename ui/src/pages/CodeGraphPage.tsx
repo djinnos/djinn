@@ -167,6 +167,7 @@ export function CodeGraphPage() {
     setSelectedWorkspaceSlug(null);
 
     if (!selectedProjectId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- async workspace-fetch state machine: reset/loading transition around the network read.
       setWorkspaceState(INITIAL_WORKSPACE_STATE);
       return;
     }

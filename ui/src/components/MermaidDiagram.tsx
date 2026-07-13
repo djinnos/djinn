@@ -103,7 +103,15 @@ async function renderWithBeautifulMermaid(source: string): Promise<string> {
     // Defer to page CSS instead of pulling a renderer-specific font.
     font: "inherit",
   });
-  return DOMPurify.sanitize(svg, SVG_SANITIZE_CONFIG);
+  // beautiful-mermaid unconditionally emits a Google Fonts @import for the
+  // `font` name, so `font: "inherit"` yields a bogus `family=inherit` request
+  // (CORS error in the console). Strip just that import — real font imports
+  // (e.g. JetBrains Mono for `.mono`) are left alone.
+  const withoutInheritFontImport = svg.replace(
+    /@import url\('https:\/\/fonts\.googleapis\.com\/[^']*family=inherit[^']*'\);?/g,
+    "",
+  );
+  return DOMPurify.sanitize(withoutInheritFontImport, SVG_SANITIZE_CONFIG);
 }
 
 let mermaidInitialized = false;
@@ -122,6 +130,9 @@ async function renderWithStockMermaid(
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: "strict",
+      // Don't inject mermaid's "Syntax error in text" bomb SVG into the
+      // document body on parse failure — our own fallback handles errors.
+      suppressErrorRendering: true,
       theme: "dark",
       htmlLabels: false,
       flowchart: { htmlLabels: false },
@@ -204,6 +215,7 @@ function MermaidDiagramImpl({
 
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async render pipeline: flip to the loading state before the off-thread mermaid render.
     setState({ status: "rendering" });
 
     (async () => {

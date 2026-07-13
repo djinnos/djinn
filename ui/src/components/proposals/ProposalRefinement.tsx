@@ -120,7 +120,7 @@ export function ProposalRefinement({
     async (decision: "accept" | "reject") => {
       setBusy(true);
       try {
-        const res = await callMcpTool("proposal_refinement_resolve" as any, {
+        const res = await callMcpTool("proposal_refinement_resolve", {
           proposal_id: proposalId,
           decision,
           feedback: feedback || undefined,

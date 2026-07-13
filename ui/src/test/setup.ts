@@ -31,12 +31,13 @@ if (!Element.prototype.scrollIntoView) {
 
 // Mock Electron API — the shim layer (`@/electron/shims/*`) delegates to
 // `window.electronAPI.*` at runtime, so mocking at this boundary is sufficient.
-const mockListeners = new Map<string, Set<Function>>();
+type MockListener = (...args: unknown[]) => void;
+const mockListeners = new Map<string, Set<MockListener>>();
 
 Object.defineProperty(window, 'electronAPI', {
   value: {
     invoke: vi.fn().mockRejectedValue(new Error('invoke not mocked for this command')),
-    on: vi.fn((event: string, callback: Function) => {
+    on: vi.fn((event: string, callback: MockListener) => {
       if (!mockListeners.has(event)) mockListeners.set(event, new Set());
       mockListeners.get(event)!.add(callback);
       return Promise.resolve(() => { mockListeners.get(event)?.delete(callback); });
