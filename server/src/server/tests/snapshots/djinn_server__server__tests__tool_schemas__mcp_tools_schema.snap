@@ -1966,6 +1966,9 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "check_name": {
@@ -1982,6 +1985,16 @@ expression: signatures
         },
         "ok": {
           "type": "boolean"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnyJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
