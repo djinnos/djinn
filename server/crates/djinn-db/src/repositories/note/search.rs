@@ -20,6 +20,15 @@ fn merge_candidate_ids(lists: &[&[(String, f64)]]) -> Vec<String> {
     ids
 }
 
+#[derive(Debug, Clone, Default)]
+struct NoteSearchStageTimings {
+    lexical: Option<Duration>,
+    semantic: Option<Duration>,
+    temporal: Option<Duration>,
+    graph: Option<Duration>,
+    rrf_fuse: Option<Duration>,
+}
+
 impl NoteRepository {
     pub(crate) fn lexical_search_backend(&self) -> LexicalSearchBackend {
         match self.db.backend_capabilities().lexical_search {
@@ -243,7 +252,7 @@ impl NoteRepository {
     async fn search_rows(
         &self,
         params: NoteSearchParams<'_>,
-    ) -> Result<Vec<MemorySearchEntityRow>> {
+    ) -> Result<(Vec<MemorySearchEntityRow>, NoteSearchStageTimings)> {
         self.db.ensure_initialized().await?;
 
         let NoteSearchParams {
@@ -268,15 +277,15 @@ impl NoteRepository {
 
         // Some([]) → no entities requested → empty result.
         if entity_types.is_some_and(|ets| ets.is_empty()) {
-            return Ok(vec![]);
+            return Ok((vec![], NoteSearchStageTimings::default()));
         }
         // Some with values but none matching "note" or "proposal" → empty.
         if !wants_notes && !wants_proposals {
-            return Ok(vec![]);
+            return Ok((vec![], NoteSearchStageTimings::default()));
         }
 
         // ── note-side RRF pipeline ──────────────────────────────────────────
-        let note_results: Vec<NoteSearchResult> = if wants_notes {
+        let (note_results, note_timings) = if wants_notes {
             self.search_notes_inner(
                 project_id,
                 query,
@@ -289,7 +298,7 @@ impl NoteRepository {
             )
             .await?
         } else {
-            vec![]
+            (vec![], NoteSearchStageTimings::default())
         };
 
         // ── proposal-side FTS ───────────────────────────────────────────────
@@ -305,7 +314,10 @@ impl NoteRepository {
             vec![]
         };
 
-        Ok(merge_search_results(note_results, proposal_results, limit))
+        Ok((
+            merge_search_results(note_results, proposal_results, limit),
+            note_timings,
+        ))
     }
 
     /// Compatibility search surface returning only rows.
@@ -321,21 +333,18 @@ impl NoteRepository {
         &self,
         params: NoteSearchParams<'_>,
     ) -> Result<TimedNoteSearchResult> {
-        let semantic_requested = params.semantic_scores.is_some();
-        let started = Instant::now();
-        let rows = self.search_rows(params).await?;
-        let elapsed = started.elapsed();
+        let (rows, note_timings) = self.search_rows(params).await?;
         Ok(TimedNoteSearchResult {
             summary: NoteSearchSummary {
                 candidate_count: rows.iter().filter(|row| row.entity == "note").count(),
                 result_count: rows.len(),
             },
             rows,
-            lexical_duration: Some(elapsed),
-            semantic_duration: semantic_requested.then_some(Duration::ZERO),
-            temporal_duration: None,
-            graph_duration: None,
-            rrf_fuse_duration: None,
+            lexical_duration: note_timings.lexical,
+            semantic_duration: note_timings.semantic,
+            temporal_duration: note_timings.temporal,
+            graph_duration: note_timings.graph,
+            rrf_fuse_duration: note_timings.rrf_fuse,
         })
     }
 
@@ -352,28 +361,54 @@ impl NoteRepository {
         limit: i64,
         semantic_scores: Option<Vec<(String, f64)>>,
         edge_kinds: Option<&[String]>,
-    ) -> Result<Vec<NoteSearchResult>> {
+    ) -> Result<(Vec<NoteSearchResult>, NoteSearchStageTimings)> {
         let folder = folder.unwrap_or("");
         let note_type = note_type.unwrap_or("");
 
+        let lexical_start = Instant::now();
         let lexical_scores = self
             .ranked_lexical_scores(project_id, folder, note_type, query, limit)
             .await?;
+        let lexical_duration = lexical_start.elapsed();
+
+        let semantic_requested = semantic_scores.is_some();
         let semantic_scores = semantic_scores.unwrap_or_default();
-        let candidate_ids = merge_candidate_ids(&[&lexical_scores, &semantic_scores]);
+
+        let (candidate_ids, semantic_duration) = if semantic_requested {
+            let semantic_start = Instant::now();
+            let candidate_ids = merge_candidate_ids(&[&lexical_scores, &semantic_scores]);
+            (candidate_ids, Some(semantic_start.elapsed()))
+        } else {
+            let candidate_ids = lexical_scores.iter().map(|(id, _)| id.clone()).collect();
+            (candidate_ids, None)
+        };
 
         if candidate_ids.is_empty() {
-            return Ok(vec![]);
+            return Ok((
+                vec![],
+                NoteSearchStageTimings {
+                    lexical: Some(lexical_duration),
+                    semantic: semantic_duration,
+                    ..NoteSearchStageTimings::default()
+                },
+            ));
         }
 
+        let temporal_start = Instant::now();
         let temporal_scores = self.temporal_scores(project_id, &candidate_ids).await?;
+        let temporal_duration = temporal_start.elapsed();
+
+        let graph_start = Instant::now();
         let (graph_scores, _graph_warnings) = self
             .graph_proximity_scores_with_edge_kinds(&candidate_ids, 2, edge_kinds)
             .await?;
+        let graph_duration = graph_start.elapsed();
+
         let task_scores = self.task_affinity_scores(project_id, task_id).await?;
 
         let confidence_map = self.note_confidence_map(&candidate_ids).await?;
 
+        let rrf_start = Instant::now();
         let signals = vec![
             (lexical_scores, 60.0),
             (semantic_scores, 60.0),
@@ -382,6 +417,7 @@ impl NoteRepository {
             (task_scores, 60.0),
         ];
         let fused = rrf_fuse(&signals, &confidence_map);
+        let rrf_fuse_duration = rrf_start.elapsed();
         let fused_score_map: HashMap<String, f64> = fused.iter().cloned().collect();
         let ranked_ids: Vec<String> = fused
             .into_iter()
@@ -390,7 +426,16 @@ impl NoteRepository {
             .collect();
 
         if ranked_ids.is_empty() {
-            return Ok(vec![]);
+            return Ok((
+                vec![],
+                NoteSearchStageTimings {
+                    lexical: Some(lexical_duration),
+                    semantic: semantic_duration,
+                    temporal: Some(temporal_duration),
+                    graph: Some(graph_duration),
+                    rrf_fuse: Some(rrf_fuse_duration),
+                },
+            ));
         }
 
         // NOTE: dynamic SQL (IN list built from ranked candidate ids).
@@ -416,7 +461,7 @@ impl NoteRepository {
             })
             .collect();
 
-        Ok(ranked_ids
+        let note_results = ranked_ids
             .into_iter()
             .filter_map(|id| {
                 let score = fused_score_map.get(&id).copied().unwrap_or(0.0);
@@ -434,7 +479,18 @@ impl NoteRepository {
                         },
                     )
             })
-            .collect())
+            .collect();
+
+        Ok((
+            note_results,
+            NoteSearchStageTimings {
+                lexical: Some(lexical_duration),
+                semantic: semantic_duration,
+                temporal: Some(temporal_duration),
+                graph: Some(graph_duration),
+                rrf_fuse: Some(rrf_fuse_duration),
+            },
+        ))
     }
 
     /// Delegate to `ProposalRepository::search_proposals`. Constructed
