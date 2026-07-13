@@ -130,6 +130,36 @@ impl SessionPhaseTracker {
         }
     }
 
+    /// Atomically completes the outermost tool dispatch and starts provider wait.
+    ///
+    /// Use this at a direct tool-to-provider handoff. A single monotonic reading
+    /// closes the tool interval and starts provider wait, so neither a gap nor an
+    /// overlap can be introduced by two independent clock reads. For a return to
+    /// local prompt/DB/orchestration work, use [`Self::exit_tool_execution`]
+    /// instead; it closes tool execution without starting another phase.
+    pub fn exit_tool_execution_to_provider_wait(&mut self) {
+        if self.finished || self.role.is_none() || self.tool_depth == 0 {
+            return;
+        }
+
+        self.tool_depth -= 1;
+        if self.tool_depth != 0 {
+            return;
+        }
+
+        let now = self.clock.now_instant();
+        if self
+            .active
+            .is_some_and(|active| active.phase == SessionPhase::ToolExecution)
+        {
+            self.close_active(now);
+        }
+        self.active = Some(ActivePhase {
+            phase: SessionPhase::ProviderWait,
+            started_at: now,
+        });
+    }
+
     /// Flushes the active interval exactly once.
     pub fn finish(&mut self) {
         if self.finished {
@@ -182,10 +212,11 @@ impl Drop for SessionPhaseTracker {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime};
 
-    use djinn_core::clock::TestClock;
+    use djinn_core::clock::{Clock, TestClock};
 
     use super::{SessionPhase, SessionPhaseRole, SessionPhaseTracker};
 
@@ -207,6 +238,36 @@ mod tests {
 
     fn emitted(intervals: &Intervals) -> Vec<(SessionPhase, SessionPhaseRole, Duration)> {
         intervals.lock().unwrap().clone()
+    }
+
+    /// A fake clock whose monotonic value advances on every read. This detects
+    /// accidental independent reads for a transition that must be atomic.
+    struct SequentialClock {
+        now: Mutex<Instant>,
+        instant_reads: AtomicUsize,
+    }
+
+    impl SequentialClock {
+        fn new(now: Instant) -> Self {
+            Self {
+                now: Mutex::new(now),
+                instant_reads: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Clock for SequentialClock {
+        fn now(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH
+        }
+
+        fn now_instant(&self) -> Instant {
+            self.instant_reads.fetch_add(1, Ordering::Relaxed);
+            let mut now = self.now.lock().unwrap();
+            let result = *now;
+            *now += Duration::from_secs(1);
+            result
+        }
     }
 
     #[test]
@@ -252,12 +313,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_to_provider_handoff_is_non_overlapping() {
+    fn direct_tool_to_provider_handoff_uses_one_clock_instant() {
         let (clock, mut tracker, intervals) = tracker("planner");
         tracker.enter_tool_execution();
         clock.advance_mono(Duration::from_secs(5));
-        tracker.exit_tool_execution();
-        tracker.enter_provider_wait();
+        tracker.exit_tool_execution_to_provider_wait();
         clock.advance_mono(Duration::from_secs(7));
         tracker.finish();
         assert_eq!(
@@ -272,6 +332,41 @@ mod tests {
                     SessionPhase::ProviderWait,
                     SessionPhaseRole::Planner,
                     Duration::from_secs(7)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_tool_to_provider_handoff_reads_the_clock_once() {
+        let clock = Arc::new(SequentialClock::new(Instant::now()));
+        let intervals = Arc::new(Mutex::new(Vec::new()));
+        let mut tracker = SessionPhaseTracker {
+            clock: clock.clone(),
+            role: Some(SessionPhaseRole::Planner),
+            active: None,
+            tool_depth: 0,
+            finished: false,
+            emitted: intervals.clone(),
+        };
+
+        tracker.enter_tool_execution();
+        tracker.exit_tool_execution_to_provider_wait();
+        tracker.finish();
+
+        assert_eq!(clock.instant_reads.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            emitted(&intervals),
+            vec![
+                (
+                    SessionPhase::ToolExecution,
+                    SessionPhaseRole::Planner,
+                    Duration::from_secs(1)
+                ),
+                (
+                    SessionPhase::ProviderWait,
+                    SessionPhaseRole::Planner,
+                    Duration::from_secs(1)
                 ),
             ]
         );
