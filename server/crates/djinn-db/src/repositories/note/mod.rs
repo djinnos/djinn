@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use djinn_core::events::EventBus;
 use djinn_memory::{
@@ -160,6 +161,35 @@ pub struct NoteSearchParams<'a> {
     ///   `"proposal"` — treated as "no matching entities"; returns an
     ///   empty result.
     pub entity_types: Option<&'a [String]>,
+}
+
+/// Bounded aggregate facts about a timed note search.
+///
+/// This deliberately stores counts rather than candidate rows or score samples,
+/// so collecting search timings cannot retain unbounded query data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoteSearchSummary {
+    /// Number of unique note candidates entering the note-side ranking pipeline.
+    pub candidate_count: usize,
+    /// Number of unified note/proposal rows returned after applying the limit.
+    pub result_count: usize,
+}
+
+/// Result of [`NoteRepository::search_with_stats`].
+///
+/// A duration is present only when that stage actually ran. In particular,
+/// semantic scoring is absent when no semantic candidates were supplied, and
+/// temporal, graph, and RRF fusion are absent when lexical/semantic candidate
+/// generation produced no note candidates.
+#[derive(Debug, Clone)]
+pub struct TimedNoteSearchResult {
+    pub rows: Vec<djinn_memory::MemorySearchEntityRow>,
+    pub lexical_duration: Option<Duration>,
+    pub semantic_duration: Option<Duration>,
+    pub temporal_duration: Option<Duration>,
+    pub graph_duration: Option<Duration>,
+    pub rrf_fuse_duration: Option<Duration>,
+    pub summary: NoteSearchSummary,
 }
 
 // ── SQL constant ─────────────────────────────────────────────────────────────
