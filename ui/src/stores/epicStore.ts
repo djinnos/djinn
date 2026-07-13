@@ -37,9 +37,27 @@ export const epicStore = createStore<EpicState>()(
       set((state) => {
         const existingEpic = state.epics.get(payload.id);
         if (!existingEpic) return state;
-        
+
         const newEpics = new Map(state.epics);
-        newEpics.set(payload.id, payload);
+        // SSE epic payloads carry `proposal_id` but not the list-only
+        // proposal label enrichment (short_id/title/status); preserve the
+        // known labels unless the linkage itself changed.
+        const sameProposal = payload.proposal_id === existingEpic.proposal_id;
+        newEpics.set(payload.id, {
+          ...payload,
+          proposal_short_id:
+            payload.proposal_short_id ??
+            (sameProposal ? existingEpic.proposal_short_id : null),
+          proposal_title:
+            payload.proposal_title ??
+            (sameProposal ? existingEpic.proposal_title : null),
+          proposal_status:
+            payload.proposal_status ??
+            (sameProposal ? existingEpic.proposal_status : null),
+          proposal_build_owner_user_id:
+            payload.proposal_build_owner_user_id ??
+            (sameProposal ? existingEpic.proposal_build_owner_user_id : null),
+        });
         return { epics: newEpics };
       });
     },
