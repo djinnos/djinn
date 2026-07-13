@@ -27,7 +27,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRef } from "react";
 import Graph from "graphology";
 import { PRECOMPUTED_LAYOUT_ATTRIBUTE } from "@/lib/codeGraphAdapter";
-import { useCodeGraphStore } from "@/stores/codeGraphStore";
 
 // Module mocks must be hoisted — keep factory bodies self-contained
 // (no top-level references to vars defined below).
@@ -136,6 +135,7 @@ function mountHarness(
   const ref: { current: UseSigmaGraphResult | null } = { current: null };
   function CapturingHarness() {
     const containerRef = createRef<HTMLDivElement>();
+    // eslint-disable-next-line react-hooks/immutability -- test harness intentionally captures the hook result into an outer holder for assertions.
     ref.current = useSigmaGraph(containerRef, graph);
     return <div data-testid="harness-root" ref={containerRef} />;
   }

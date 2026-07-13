@@ -25,6 +25,7 @@ const AuthUserContext = createContext<User | null>(null);
  * Returns null when called outside an AuthGate (shouldn't happen in practice,
  * since AuthGate wraps the entire app).
  */
+// eslint-disable-next-line react-refresh/only-export-components -- context hook colocated with its provider; used by 14 call sites.
 export function useAuthUser(): User | null {
   return useContext(AuthUserContext);
 }

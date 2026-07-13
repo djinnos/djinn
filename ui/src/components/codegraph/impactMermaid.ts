@@ -72,7 +72,7 @@ export function buildImpactMermaid(impact: ImpactDetailedResult): string {
   lines.push(`  ${targetId}["${escapeLabel(targetLabel)}"]:::target`);
 
   if (impact.entries.length === 0) {
-    lines.push("classDef target fill:#fde68a,stroke:#b45309;");
+    lines.push("classDef target fill:#fde68a,stroke:#b45309,color:#78350f;");
     return lines.join("\n");
   }
 
@@ -121,8 +121,10 @@ export function buildImpactMermaid(impact: ImpactDetailedResult): string {
     }
   }
 
-  // Style the target so the eye snaps to it.
-  lines.push("  classDef target fill:#fde68a,stroke:#b45309;");
+  // Style the target so the eye snaps to it. The explicit dark `color` keeps
+  // the label legible on the amber fill (the dark theme's light foreground
+  // text would otherwise wash out on #fde68a).
+  lines.push("  classDef target fill:#fde68a,stroke:#b45309,color:#78350f;");
   return lines.join("\n");
 }
 

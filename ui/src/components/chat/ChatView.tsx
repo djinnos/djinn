@@ -70,6 +70,10 @@ export function ChatView() {
   useChatToolCallHarvest({ projectSlug });
 
   const [abortController, setAbortController] = useState<AbortController | null>(null);
+  // Stable mount timestamp for synthetic UI-only placeholder bubbles (greeting,
+  // streaming, thinking). `createdAt` is not displayed for these, so a single
+  // captured value keeps render pure instead of calling Date.now() per frame.
+  const [placeholderCreatedAt] = useState(() => Date.now());
   type StreamingToolCall = { name: string; input?: unknown };
   const toolCallsRef = useRef<StreamingToolCall[]>([]);
   const [toolCalls, setToolCalls] = useState<StreamingToolCall[]>([]);
@@ -144,6 +148,7 @@ export function ChatView() {
 
   useEffect(() => {
     if (modelOptions.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- selection-sync effect: reads localStorage (impure) and persists via setSessionModel, so the default-model choice must live in an effect.
       setSelectedModel('unknown/model');
       return;
     }
@@ -308,7 +313,7 @@ export function ChatView() {
                       id: 'proposal-greeting',
                       role: 'assistant',
                       content: `I can help apply this feedback to **${activeScope.proposalTitle}**. Tell me what you'd like to do — for example *“apply points 1 and 3, ignore 2”* — and I'll revise the spec and resolve the feedback.`,
-                      createdAt: Date.now(),
+                      createdAt: placeholderCreatedAt,
                     }}
                   />
                 )}
@@ -322,7 +327,7 @@ export function ChatView() {
                       role: 'assistant',
                       content: streamingText,
                       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-                      createdAt: Date.now(),
+                      createdAt: placeholderCreatedAt,
                     }}
                   />
                 )}
@@ -341,7 +346,7 @@ export function ChatView() {
                             role: 'assistant',
                             content: '',
                             toolCalls: toolCalls,
-                            createdAt: Date.now(),
+                            createdAt: placeholderCreatedAt,
                           }}
                         />
                       )}
