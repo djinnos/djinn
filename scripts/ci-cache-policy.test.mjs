@@ -209,9 +209,10 @@ function assertMainAndDispatchReachable(parsed, job) {
     'main push must trigger the workflow');
   assert.match(trigger, /^ {2}workflow_dispatch:\s*(?:null)?\s*$/m,
     'workflow_dispatch must trigger the workflow');
-  const condition = job.lines.filter(({ text }) => /^ {4}if:/.test(text)).map(({ text }) => text).join(' ');
-  assert.match(condition, /github\.event_name\s*==\s*['"]push['"]/, 'cache-warm-aarch64 must be reachable from main');
-  assert.match(condition, /github\.event_name\s*==\s*['"]workflow_dispatch['"]/, 'cache-warm-aarch64 must be reachable from workflow_dispatch');
+  assert.ok(jobCanRun(parsed, job, 'push'),
+    'cache-warm-aarch64 must be reachable from a main push event');
+  assert.ok(jobCanRun(parsed, job, 'workflow_dispatch'),
+    'cache-warm-aarch64 must be reachable from workflow_dispatch');
 }
 
 test('quality-gate has one saving owner and restore-only consumers per cache family', () => {
@@ -247,4 +248,36 @@ test('quality-gate has one saving owner and restore-only consumers per cache fam
   }
 
   assertMainAndDispatchReachable(parsed, parsed.jobs.get('cache-warm-aarch64'));
+});
+
+test('cache-warm-aarch64 rejects a main-unreachable owner condition', () => {
+  const parsed = parseJobs(readFileSync(WORKFLOW, 'utf8'));
+  const job = parsed.jobs.get('cache-warm-aarch64');
+  assert.ok(job, 'cache-warm-aarch64 must be declared');
+
+  // The checked-in owner is reachable from both required events.
+  assert.ok(jobCanRun(parsed, job, 'push'),
+    'checked-in owner must be reachable from a main push event');
+  assert.ok(jobCanRun(parsed, job, 'workflow_dispatch'),
+    'checked-in owner must be reachable from workflow_dispatch');
+
+  // Mutate the owner condition so that the push route is logically disabled
+  // while the workflow_dispatch route stays open. This catches reachability
+  // checks that only look for the event-name literal instead of evaluating it.
+  const adversarial = "(github.event_name == 'push' && false) || github.event_name == 'workflow_dispatch'";
+  const mutatedLines = job.lines.map(({ text, number }) => {
+    if (/^ {4}if:/.test(text)) {
+      return { text: `    if: ${adversarial}`, number };
+    }
+    return { text, number };
+  });
+  const mutated = { ...job, lines: mutatedLines };
+
+  assert.equal(jobCanRun(parsed, mutated, 'push'), false,
+    'adversarial condition must be unreachable from push');
+  assert.ok(jobCanRun(parsed, mutated, 'workflow_dispatch'),
+    'adversarial condition remains reachable from workflow_dispatch');
+  assert.throws(() => assertMainAndDispatchReachable(parsed, mutated),
+    /reachable from a main push event/,
+    'policy must reject an owner that is not reachable from main push');
 });
