@@ -1002,6 +1002,8 @@ impl WarmJobGuard for WarmJobListerGuard {
 
 pub struct StatvfsFreeSpaceGuard;
 impl FreeSpaceGuard for StatvfsFreeSpaceGuard {
+    // statvfs field widths vary by platform (u32 on macOS, u64 on Linux).
+    #[allow(clippy::unnecessary_cast)]
     fn free_space_bytes(&self, path: &Path) -> Result<u64, String> {
         let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
             .map_err(|error| error.to_string())?;
@@ -1011,12 +1013,14 @@ impl FreeSpaceGuard for StatvfsFreeSpaceGuard {
             return Err(std::io::Error::last_os_error().to_string());
         }
         let stat = unsafe { stat.assume_init() };
-        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+        Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
     }
 }
 
 pub struct StatvfsFilesystemCapacity;
 impl FilesystemCapacity for StatvfsFilesystemCapacity {
+    // statvfs field widths vary by platform (u32 on macOS, u64 on Linux).
+    #[allow(clippy::unnecessary_cast)]
     fn capacity(&self, path: &Path) -> Result<CapacitySnapshot, String> {
         let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
             .map_err(|error| error.to_string())?;
@@ -1026,8 +1030,8 @@ impl FilesystemCapacity for StatvfsFilesystemCapacity {
             return Err(std::io::Error::last_os_error().to_string());
         }
         let stat = unsafe { stat.assume_init() };
-        let total_bytes = stat.f_blocks.saturating_mul(stat.f_frsize);
-        let available_bytes = stat.f_bavail.saturating_mul(stat.f_frsize);
+        let total_bytes = (stat.f_blocks as u64).saturating_mul(stat.f_frsize as u64);
+        let available_bytes = (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
         Ok(CapacitySnapshot {
             total_bytes,
             available_bytes,

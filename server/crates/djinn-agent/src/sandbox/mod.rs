@@ -15,6 +15,7 @@ pub use djinn_sandbox::*;
 #[cfg(target_os = "linux")]
 #[allow(unused_imports)]
 pub use djinn_sandbox::chat_shell;
+#[cfg(target_os = "linux")]
 #[allow(unused_imports)]
 pub use djinn_sandbox::linux;
 #[cfg(target_os = "macos")]

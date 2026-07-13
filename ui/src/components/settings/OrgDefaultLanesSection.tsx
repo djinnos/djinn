@@ -5,7 +5,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 
 import { Button } from "@/components/ui/button";
 import { InlineError } from "@/components/InlineError";
-import { AddModelButton } from "@/components/userConfig/ModelSection";
+import { ConnectedModelPicker } from "@/components/userConfig/ConnectedModelPicker";
 import { stripProviderPrefix } from "@/components/userConfig/modelPicker";
 import { formatProvider } from "@/components/userConfig/providerDisplay";
 import { userConfigKeys } from "@/components/userConfig/userConfigKeys";
@@ -42,7 +42,7 @@ interface Props {
  *
  * The model picker is seeded from the admin's own connected models — the
  * realistic universe an admin chooses an org default from. It reuses the Model
- * Roles tab's `AddModelButton`; the rest is a minimal ordered list (priority
+ * Roles tab's `ConnectedModelPicker`; the rest is a minimal ordered list (priority
  * high → low per lane) so it stays independent of the per-user lane editor.
  */
 export function OrgDefaultLanesSection({ policy, saving, onSave }: Props) {
@@ -187,7 +187,7 @@ function OrgLaneEditor({
           <h4 className="text-sm font-semibold text-foreground">{meta.title}</h4>
           <p className="text-xs text-muted-foreground/70">{meta.roles}</p>
         </div>
-        <AddModelButton models={availableToAdd} onSelect={onAdd} />
+        <ConnectedModelPicker models={availableToAdd} onSelect={onAdd} />
       </div>
       {order.length === 0 ? (
         <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">

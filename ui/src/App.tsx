@@ -28,9 +28,11 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useProviderGateStore } from "@/stores/providerGateStore";
 import { useModelGateStore } from "@/stores/modelGateStore";
 import { FirstRunOnboarding } from "@/components/onboarding/FirstRunOnboarding";
-import { isFirstRunDismissed } from "@/components/onboarding/firstRun";
 import { useProjectGateStore } from "@/stores/projectGateStore";
 import { RepositoryOnboarding } from "@/components/RepositoryOnboarding";
+import { ProjectImageOnboarding } from "@/components/onboarding/ProjectImageOnboarding";
+import { OnboardingGateStatus } from "@/components/onboarding/OnboardingGateStatus";
+import { resolveOnboardingDestination } from "@/components/onboarding/onboardingFlow";
 import { useDispatchPauseHydration } from "@/hooks/useDispatchPauseHydration";
 
 export function MainLayout() {
@@ -116,13 +118,17 @@ export function MainLayout() {
 }
 
 function AuthenticatedApp() {
-  const { status } = useServerHealth();
-  const userId = useAuthUser()?.id ?? null;
+  const { status, error: serverError, retry: retryServer } = useServerHealth();
   const { hasProvider, refresh: refreshGate } = useProviderGateStore();
   const { hasModels, refresh: refreshModelGate } = useModelGateStore();
-  const { hasProject, refresh: refreshProjectGate } = useProjectGateStore();
+  const {
+    hasProject,
+    projectNeedingImage,
+    error: projectGateError,
+    clearPendingProject,
+    refresh: refreshProjectGate,
+  } = useProjectGateStore();
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
-
   useProjectsBootstrap(status);
   useDispatchPauseHydration(status);
   useEventSource();
@@ -149,17 +155,46 @@ function AuthenticatedApp() {
     return <MainLayout />;
   }
 
-  // First-run model-setup sheet: a single sequential flow (connect a
-  // subscription → done) shown when this user has no connected provider and/or
-  // no model lanes. Replaces the old separate provider + model onboarding
-  // gates; per-role model lanes are configured later in Settings → Model Roles.
-  // A client-side dismissal (localStorage, keyed by user id) suppresses it for
-  // someone who skipped without finishing.
-  const needsModelSetup = hasProvider === false || hasModels === false;
-  if (needsModelSetup && !isFirstRunDismissed(userId)) {
+  const onboardingDestination = resolveOnboardingDestination({
+    hasProject,
+    hasProvider,
+    hasModels,
+    projectNeedingImage,
+    projectError: projectGateError,
+    serverStatus: status,
+  });
+
+  if (onboardingDestination === "checking") {
+    return <OnboardingGateStatus />;
+  }
+
+  if (onboardingDestination === "connection-error") {
+    return (
+      <OnboardingGateStatus
+        error={serverError ?? "Could not connect to Djinn"}
+        onRetry={() => void retryServer()}
+      />
+    );
+  }
+
+  if (onboardingDestination === "project-error") {
+    return (
+      <OnboardingGateStatus
+        error={projectGateError}
+        onRetry={() => void refreshProjectGate()}
+      />
+    );
+  }
+
+  // Start the repository first so cloning + stack detection run in parallel
+  // with the user's model-provider and role setup.
+  if (onboardingDestination === "repository") {
+    return <RepositoryOnboarding />;
+  }
+
+  if (onboardingDestination === "models") {
     return (
       <FirstRunOnboarding
-        userId={userId}
         onFinished={() => {
           void refreshGate();
           void refreshModelGate();
@@ -168,8 +203,16 @@ function AuthenticatedApp() {
     );
   }
 
-  if (hasProject === false) {
-    return <RepositoryOnboarding />;
+  if (onboardingDestination === "image" && projectNeedingImage) {
+    return (
+      <ProjectImageOnboarding
+        project={projectNeedingImage}
+        onFinished={async () => {
+          clearPendingProject(projectNeedingImage.id);
+          await refreshProjectGate();
+        }}
+      />
+    );
   }
 
   return <MainLayout />;
@@ -179,7 +222,7 @@ export default function App() {
   // Gate 1: Authentication (currently passthrough until server exposes /auth)
   return (
     <AuthGate>
-      {/* Gate 2 & 3: Provider + Model onboarding, then main app */}
+      {/* Required setup: Repository → Models → Environment → app. */}
       <AuthenticatedApp />
     </AuthGate>
   );
