@@ -5051,6 +5051,7 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
 // loop below. The scripts advance SlotContext's monotonic clock at provider
 // boundaries, making the exported counter delta deterministic without sleeps.
 static PHASE_METRIC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PHASE_TOOL_CLOCK: std::sync::Mutex<Option<Arc<TestClock>>> = std::sync::Mutex::new(None);
 
 struct PhaseEvent {
     advance: Duration,
@@ -5064,6 +5065,9 @@ enum PhaseTurn {
     Stream {
         init_advance: Duration,
         events: Vec<PhaseEvent>,
+    },
+    Pending {
+        init_advance: Duration,
     },
 }
 
@@ -5130,6 +5134,17 @@ impl LlmProvider for PhaseScriptedProvider {
                             Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
                         >)
                 }
+                PhaseTurn::Pending { init_advance } => {
+                    clock.advance_mono(init_advance);
+                    let stream = async_stream::stream! {
+                        futures::future::pending::<()>().await;
+                        yield Ok(StreamEvent::Done);
+                    };
+                    Ok(Box::pin(stream)
+                        as Pin<
+                            Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                        >)
+                }
             }
         })
     }
@@ -5184,69 +5199,186 @@ async fn run_phase_script(turns: Vec<PhaseTurn>) -> anyhow::Result<()> {
     harness.run(&provider, &tools).await.0
 }
 
+async fn phase_harness(clock: Arc<TestClock>) -> ReplyLoopHarness {
+    let mut harness = ReplyLoopHarness::new().await;
+    harness.slot_ctx.clock = clock;
+    harness
+}
+
+fn phase_side_tool(
+    _: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    PHASE_TOOL_CLOCK
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("phase side-tool clock installed")
+        .advance_mono(Duration::from_secs(5));
+    Ok(serde_json::json!({"side":"done"}))
+}
+
 #[tokio::test]
 async fn provider_phase_script_counts_stream_init_consumption_and_errors() {
     let _lock = PHASE_METRIC_LOCK.lock().unwrap();
     djinn_telemetry::init().expect("telemetry init");
-
     let before = render().expect("render phase metrics");
-    let result = run_phase_script(vec![final_turn(2, 3)]).await;
-    assert!(result.is_ok(), "successful scripted turn: {result:?}");
+    assert!(run_phase_script(vec![final_turn(2, 3)]).await.is_ok());
     let after = render().expect("render phase metrics");
     assert_eq!(phase_delta(&before, &after, "provider_wait"), 5);
     assert_eq!(phase_delta(&before, &after, "tool_execution"), 0);
-
     let before = after;
-    let result = run_phase_script(vec![PhaseTurn::InitError {
-        advance: Duration::from_secs(7),
-    }])
-    .await;
     assert!(
-        result.is_err(),
-        "initialization error must escape reply loop"
+        run_phase_script(vec![PhaseTurn::InitError {
+            advance: Duration::from_secs(7)
+        }])
+        .await
+        .is_err()
     );
     let after = render().expect("render phase metrics");
-    assert_eq!(
-        phase_delta(&before, &after, "provider_wait"),
-        7,
-        "drop backstop flushes init failure once"
-    );
-
+    assert_eq!(phase_delta(&before, &after, "provider_wait"), 7);
     let before = after;
-    let result = run_phase_script(vec![PhaseTurn::Stream {
-        init_advance: Duration::from_secs(2),
-        events: vec![PhaseEvent {
-            advance: Duration::from_secs(4),
-            event: Err(anyhow::anyhow!("scripted stream failure")),
-        }],
-    }])
-    .await;
-    assert!(result.is_err(), "stream error must escape reply loop");
+    assert!(
+        run_phase_script(vec![PhaseTurn::Stream {
+            init_advance: Duration::from_secs(2),
+            events: vec![PhaseEvent {
+                advance: Duration::from_secs(4),
+                event: Err(anyhow::anyhow!("scripted stream failure"))
+            }]
+        }])
+        .await
+        .is_err()
+    );
     let after = render().expect("render phase metrics");
     assert_eq!(phase_delta(&before, &after, "provider_wait"), 6);
 }
 
 #[tokio::test(start_paused = true)]
-async fn provider_phase_script_keeps_empty_retry_backoff_and_local_time_owned_by_provider() {
+async fn provider_phase_script_counts_empty_assistant_backoff_not_local_time() {
     let _lock = PHASE_METRIC_LOCK.lock().unwrap();
     djinn_telemetry::init().expect("telemetry init");
-    let before = render().expect("render phase metrics");
-    // The second init hook advances fake monotonic time across the reply-loop's
-    // virtual-time backoff plus request setup. No wall-clock sleep is involved.
-    let result = run_phase_script(vec![
-        PhaseTurn::Stream {
-            init_advance: Duration::from_secs(2),
-            events: vec![],
-        },
-        final_turn(9, 4),
-    ])
-    .await;
-    assert!(result.is_ok(), "empty stream should retry: {result:?}");
-    let after = render().expect("render phase metrics");
-    assert_eq!(phase_delta(&before, &after, "provider_wait"), 15);
-    assert_eq!(
-        phase_delta(&before, &after, "tool_execution"),
-        0,
-        "unrelated local work has no phase owner"
+    let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    let provider = PhaseScriptedProvider::new(
+        Arc::clone(&clock),
+        vec![
+            PhaseTurn::Stream {
+                init_advance: Duration::from_secs(2),
+                events: vec![PhaseEvent {
+                    advance: Duration::from_secs(3),
+                    event: Ok(StreamEvent::Done),
+                }],
+            },
+            final_turn(4, 2),
+        ],
     );
+    let mut harness = phase_harness(Arc::clone(&clock)).await;
+    clock.advance_mono(Duration::from_secs(11)); // unrelated local setup time
+    let before = render().expect("render phase metrics");
+    let tools = vec![dummy_tool_schema("submit_work")];
+    let run = harness.run(&provider, &tools);
+    tokio::pin!(run);
+    tokio::task::yield_now().await;
+    // Advance the real empty-assistant provider-loop backoff on both clocks.
+    clock.advance_mono(Duration::from_secs(1));
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(run.await.0.is_ok());
+    let after = render().expect("render phase metrics");
+    assert_eq!(phase_delta(&before, &after, "provider_wait"), 12);
+    assert_eq!(phase_delta(&before, &after, "tool_execution"), 0);
+}
+
+#[tokio::test]
+async fn provider_phase_script_hands_streaming_side_tool_back_to_provider() {
+    let _lock = PHASE_METRIC_LOCK.lock().unwrap();
+    djinn_telemetry::init().expect("telemetry init");
+    let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    *PHASE_TOOL_CLOCK.lock().unwrap() = Some(Arc::clone(&clock));
+    let provider = PhaseScriptedProvider::new(
+        Arc::clone(&clock),
+        vec![
+            PhaseTurn::Stream {
+                init_advance: Duration::from_secs(2),
+                events: vec![
+                    PhaseEvent {
+                        advance: Duration::from_secs(1),
+                        event: Ok(StreamEvent::Delta(ContentBlock::ToolUse {
+                            id: "side".into(),
+                            name: "side_query".into(),
+                            input: serde_json::json!({}),
+                        })),
+                    },
+                    PhaseEvent {
+                        advance: Duration::from_secs(3),
+                        event: Ok(StreamEvent::Done),
+                    },
+                ],
+            },
+            final_turn(4, 2),
+        ],
+    );
+    let mut harness = phase_harness(clock).await;
+    harness.slot_ctx.tool_dispatcher =
+        Some(Arc::new(test_helpers::ConfigurableToolDispatcher::new(
+            vec![],
+            std::collections::HashMap::from([(
+                "side_query".to_string(),
+                phase_side_tool as test_helpers::ToolHandlerFn,
+            )]),
+        )));
+    let tools = vec![
+        serde_json::json!({"name":"side_query","readOnly":true,"idempotent":true,"concurrent_safe":true}),
+        dummy_tool_schema("submit_work"),
+    ];
+    let before = render().expect("render phase metrics");
+    assert!(harness.run(&provider, &tools).await.0.is_ok());
+    *PHASE_TOOL_CLOCK.lock().unwrap() = None;
+    let after = render().expect("render phase metrics");
+    assert_eq!(phase_delta(&before, &after, "provider_wait"), 12);
+    assert_eq!(phase_delta(&before, &after, "tool_execution"), 5);
+}
+
+#[tokio::test]
+async fn provider_phase_script_cancellation_and_drop_flush_active_interval_once() {
+    let _lock = PHASE_METRIC_LOCK.lock().unwrap();
+    djinn_telemetry::init().expect("telemetry init");
+    let tools = vec![dummy_tool_schema("submit_work")];
+    let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    let provider = PhaseScriptedProvider::new(
+        Arc::clone(&clock),
+        vec![PhaseTurn::Pending {
+            init_advance: Duration::from_secs(2),
+        }],
+    );
+    let mut harness = phase_harness(Arc::clone(&clock)).await;
+    let before = render().expect("render phase metrics");
+    let cancel = harness.cancel.clone();
+    let mut run = Box::pin(harness.run(&provider, &tools));
+    tokio::select! {
+        _ = &mut run => panic!("pending provider unexpectedly finished"),
+        _ = tokio::task::yield_now() => {}
+    }
+    clock.advance_mono(Duration::from_secs(7));
+    cancel.cancel();
+    assert!(run.await.0.is_err());
+    let after = render().expect("render phase metrics");
+    assert_eq!(phase_delta(&before, &after, "provider_wait"), 9);
+    let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    let provider = PhaseScriptedProvider::new(
+        Arc::clone(&clock),
+        vec![PhaseTurn::Pending {
+            init_advance: Duration::from_secs(3),
+        }],
+    );
+    let mut harness = phase_harness(Arc::clone(&clock)).await;
+    let before = after;
+    {
+        let mut run = Box::pin(harness.run(&provider, &tools));
+        tokio::select! {
+            _ = &mut run => panic!("pending provider unexpectedly finished"),
+            _ = tokio::task::yield_now() => {}
+        }
+        clock.advance_mono(Duration::from_secs(8));
+        drop(run); // drop the active reply-loop future; tracker Drop is the backstop
+    }
+    let after = render().expect("render phase metrics");
+    assert_eq!(phase_delta(&before, &after, "provider_wait"), 11);
 }
