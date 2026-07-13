@@ -790,14 +790,21 @@ impl DoctorRepairOutcome {
 /// and re-runs [`classify_child_tx`] under the same lock so stale findings
 /// cannot mutate rows whose state changed after the snapshot.
 ///
+/// # Scope
+///
+/// `terminal_epic_ids` and `terminal_proposal_ids` are taken verbatim from the
+/// board-health finding. The repair reconstructs the full disposition scope by
+/// including every epic linked to a terminal proposal, so the external-dependent
+/// guard treats siblings in the same proposal scope as internal.
+///
 /// # Guards (all checked under the row lock)
 ///
 /// 1. **Not found** — the task row was deleted → `SkippedNotFound`.
 /// 2. **Already closed** — current status is `closed` → `SkippedAlreadyClosed`.
 /// 3. **Retain finding** — the snapshot's recommended action was `retain` →
 ///    `SkippedRetain`.
-/// 4. **Status drift** — the current status is neither close-ready nor park,
-///    meaning the finding is stale → `SkippedStatusDrift`.
+/// 4. **Status drift** — the current status differs from `snapshot_status`
+///    (the finding is stale) → `SkippedStatusDrift`.
 /// 5. **Other open parent** — `classify_child_tx` returns
 ///    `RetainedOtherParent` → `SkippedOtherOpenParent`.
 /// 6. **External open dependent** — `classify_child_tx` returns
@@ -820,7 +827,8 @@ pub async fn apply_doctor_repair_tx(
     task_id: &str,
     snapshot_status: &str,
     snapshot_action: &str,
-    original_parent_ids: &[String],
+    terminal_epic_ids: &[String],
+    terminal_proposal_ids: &[String],
 ) -> Result<DoctorRepairOutcome> {
     // Lock the task row for the duration of the repair so no concurrent
     // transition can race us between the re-check and the mutation.
@@ -851,11 +859,9 @@ pub async fn apply_doctor_repair_tx(
         });
     }
 
-    // Guard: status drift. If the current status is neither close-ready nor
-    // park, the finding is stale and must not be mutated.
-    let in_close_ready = CLOSE_READY_STATUSES.contains(&current_status.as_str());
-    let in_park = PARK_STATUSES.contains(&current_status.as_str());
-    if !in_close_ready && !in_park {
+    // Guard: status drift. The persisted finding snapshot must still describe
+    // the locked row; any mismatch means the finding is stale.
+    if current_status != snapshot_status {
         return Ok(DoctorRepairOutcome::SkippedStatusDrift {
             task_id: task_id.to_owned(),
             snapshot_status: snapshot_status.to_owned(),
@@ -863,18 +869,44 @@ pub async fn apply_doctor_repair_tx(
         });
     }
 
-    // Re-run the shared classifier under the lock. The scope for repair uses
-    // the child's own epic_id so the external-dependent guard correctly
-    // treats siblings in the same epic as internal.
-    let epic_id: Option<String> = sqlx::query_scalar("SELECT epic_id FROM tasks WHERE id = $1")
-        .bind(task_id)
-        .fetch_one(&mut *conn)
+    // Re-run the shared classifier under the lock. The repair scope uses the
+    // terminal epic ids from the finding plus every epic linked to a terminal
+    // proposal, so the external-dependent guard treats dependents inside the
+    // same proposal scope as internal.
+    let mut scope_epic_ids: Vec<String> = terminal_epic_ids.to_vec();
+    if !terminal_proposal_ids.is_empty() {
+        let linked: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT epic_id FROM proposal_epics WHERE proposal_id = ANY($1)",
+        )
+        .bind(terminal_proposal_ids)
+        .fetch_all(&mut *conn)
         .await?;
-    let scope = DispositionScope {
-        entry_point: DispositionEntryPoint::EpicClose,
-        epic_ids: epic_id.into_iter().collect(),
-        proposal_id: None,
+        for id in linked {
+            if !scope_epic_ids.contains(&id) {
+                scope_epic_ids.push(id);
+            }
+        }
+    }
+    if scope_epic_ids.is_empty() {
+        let epic_id: Option<String> = sqlx::query_scalar("SELECT epic_id FROM tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(&mut *conn)
+            .await?;
+        if let Some(epic_id) = epic_id {
+            scope_epic_ids.push(epic_id);
+        }
+    }
+    let scope = if let Some(proposal_id) = terminal_proposal_ids.first() {
+        DispositionScope::for_proposal_abort(proposal_id, scope_epic_ids)
+    } else {
+        DispositionScope::for_epic_close(&scope_epic_ids[0])
     };
+
+    let original_parent_ids: Vec<String> = terminal_epic_ids
+        .iter()
+        .chain(terminal_proposal_ids.iter())
+        .cloned()
+        .collect();
 
     let disposition = classify_child_tx(conn, task_id, &current_status, &scope).await?;
 
@@ -909,7 +941,7 @@ pub async fn apply_doctor_repair_tx(
                 &current_status,
                 "closed",
                 "parent_closed",
-                original_parent_ids,
+                &original_parent_ids,
             )
             .await?;
 
@@ -937,7 +969,7 @@ pub async fn apply_doctor_repair_tx(
                 &current_status,
                 "needs_lead_intervention",
                 reason,
-                original_parent_ids,
+                &original_parent_ids,
             )
             .await?;
 
@@ -1743,9 +1775,10 @@ mod tests {
         let child = make_task(&db, &epic, "open", "t1").await;
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()])
-            .await
-            .unwrap();
+        let outcome =
+            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
+                .await
+                .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -1775,7 +1808,7 @@ mod tests {
 
         let mut tx = db.pool().begin().await.unwrap();
         let outcome =
-            apply_doctor_repair_tx(&mut tx, &child, "in_progress", "park", &[epic.clone()])
+            apply_doctor_repair_tx(&mut tx, &child, "in_progress", "park", &[epic.clone()], &[])
                 .await
                 .unwrap();
         tx.commit().await.unwrap();
@@ -1805,9 +1838,10 @@ mod tests {
         let child = make_task(&db, &epic, "pr_review", "t1").await;
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome = apply_doctor_repair_tx(&mut tx, &child, "pr_review", "park", &[epic.clone()])
-            .await
-            .unwrap();
+        let outcome =
+            apply_doctor_repair_tx(&mut tx, &child, "pr_review", "park", &[epic.clone()], &[])
+                .await
+                .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -1835,7 +1869,7 @@ mod tests {
         let child = make_task(&db, &epic, "closed", "t1").await;
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[])
+        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[], &[])
             .await
             .unwrap();
         tx.commit().await.unwrap();
@@ -1853,22 +1887,25 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let project = make_project(&db).await;
         let epic = make_epic(&db, &project, "e1").await;
-        // Task is now 'closed' but snapshot said 'open'. Since it's already
-        // closed, it's caught by the already-closed guard first.
-        let child = make_task(&db, &epic, "closed", "t1").await;
+        // Task is currently 'in_progress' but the snapshot said 'open'.
+        let child = make_task(&db, &epic, "in_progress", "t1").await;
 
         let mut tx = db.pool().begin().await.unwrap();
-        // Simulate a stale snapshot where status was "open" but is now "closed".
-        // The already-closed guard fires first.
-        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[])
-            .await
-            .unwrap();
+        // Simulate a stale snapshot where status was "open" but is now "in_progress".
+        let outcome =
+            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
+                .await
+                .unwrap();
         tx.commit().await.unwrap();
 
-        assert!(matches!(
+        assert_eq!(
             outcome,
-            DoctorRepairOutcome::SkippedAlreadyClosed { .. }
-        ));
+            DoctorRepairOutcome::SkippedStatusDrift {
+                task_id: child.clone(),
+                snapshot_status: "open".to_owned(),
+                current_status: "in_progress".to_owned(),
+            }
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1879,7 +1916,7 @@ mod tests {
         let child = make_task(&db, &epic, "open", "t1").await;
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "retain", &[])
+        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "retain", &[], &[])
             .await
             .unwrap();
         tx.commit().await.unwrap();
@@ -1911,9 +1948,10 @@ mod tests {
         link_epic(&db, &proposal, &epic, &project).await;
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()])
-            .await
-            .unwrap();
+        let outcome =
+            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
+                .await
+                .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -1943,10 +1981,16 @@ mod tests {
         add_blocker(&db, &dependent, &child).await;
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome =
-            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[closing_epic.clone()])
-                .await
-                .unwrap();
+        let outcome = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "open",
+            "close",
+            &[closing_epic.clone()],
+            &[],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -1970,7 +2014,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome = apply_doctor_repair_tx(&mut tx, "nonexistent-id", "open", "close", &[])
+        let outcome = apply_doctor_repair_tx(&mut tx, "nonexistent-id", "open", "close", &[], &[])
             .await
             .unwrap();
         tx.commit().await.unwrap();
@@ -1998,9 +2042,10 @@ mod tests {
                 .unwrap();
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()])
-            .await
-            .unwrap();
+        let outcome =
+            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
+                .await
+                .unwrap();
         tx.commit().await.unwrap();
         assert!(outcome.applied());
 
@@ -2046,9 +2091,10 @@ mod tests {
             .unwrap();
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome = apply_doctor_repair_tx(&mut tx, &child, "pr_review", "park", &[epic.clone()])
-            .await
-            .unwrap();
+        let outcome =
+            apply_doctor_repair_tx(&mut tx, &child, "pr_review", "park", &[epic.clone()], &[])
+                .await
+                .unwrap();
         tx.commit().await.unwrap();
         assert!(outcome.applied());
 
@@ -2077,17 +2123,19 @@ mod tests {
 
         // First repair: closes the task.
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome1 = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()])
-            .await
-            .unwrap();
+        let outcome1 =
+            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
+                .await
+                .unwrap();
         tx.commit().await.unwrap();
         assert!(outcome1.applied());
 
         // Second repair with the same snapshot: must skip (already closed).
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome2 = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()])
-            .await
-            .unwrap();
+        let outcome2 =
+            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
+                .await
+                .unwrap();
         tx.commit().await.unwrap();
         assert!(!outcome2.applied());
         assert!(matches!(
@@ -2115,7 +2163,7 @@ mod tests {
         // Repair parks the in-flight orphan.
         let mut tx = db.pool().begin().await.unwrap();
         let outcome =
-            apply_doctor_repair_tx(&mut tx, &child, "in_progress", "park", &[epic.clone()])
+            apply_doctor_repair_tx(&mut tx, &child, "in_progress", "park", &[epic.clone()], &[])
                 .await
                 .unwrap();
         tx.commit().await.unwrap();
@@ -2135,5 +2183,50 @@ mod tests {
             row.0, "needs_lead_intervention",
             "parked task must not be in_progress (dispatchable)"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_uses_proposal_scope_for_internal_dependents() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let e1 = make_epic(&db, &project, "e1").await;
+        let e2 = make_epic(&db, &project, "e2").await;
+        let proposal = make_proposal(&db, "p1", "rejected").await;
+        link_epic(&db, &proposal, &e1, &project).await;
+        link_epic(&db, &proposal, &e2, &project).await;
+
+        let child = make_task(&db, &e1, "open", "t1").await;
+        let dependent = make_task(&db, &e2, "open", "t2").await;
+        add_blocker(&db, &dependent, &child).await;
+
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "open",
+            "close",
+            &[e1.clone()],
+            &[proposal.clone()],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            outcome,
+            DoctorRepairOutcome::Closed {
+                task_id: child.clone(),
+                from_status: "open".to_owned(),
+            }
+        );
+
+        let row: (String, String) =
+            sqlx::query_as("SELECT status, close_reason FROM tasks WHERE id = $1")
+                .bind(&child)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(row.0, "closed");
+        assert_eq!(row.1, "parent_closed");
     }
 }

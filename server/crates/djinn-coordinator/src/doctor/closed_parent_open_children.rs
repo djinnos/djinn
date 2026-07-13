@@ -37,13 +37,16 @@ pub trait ClosedParentOpenChildrenSource: Send + Sync {
 pub trait ClosedParentOpenChildrenRepairSource: Send + Sync {
     /// Apply the transactional repair for one finding.
     ///
+    /// `terminal_epic_ids` and `terminal_proposal_ids` are taken from the
+    /// board-health finding so the repair can reconstruct the correct scope.
     /// Returns the outcome (applied or skipped) so the caller can surface it.
     fn repair(
         &self,
         task_id: &str,
         snapshot_status: &str,
         snapshot_action: &str,
-        original_parent_ids: &[String],
+        terminal_epic_ids: &[String],
+        terminal_proposal_ids: &[String],
     ) -> Result<djinn_db::repositories::task::DoctorRepairOutcome, String>;
 }
 
@@ -179,39 +182,34 @@ impl DoctorCheck for ClosedParentOpenChildrenCheck {
             .and_then(|v| v.as_str())
             .unwrap_or("retain");
 
-        // Collect the original parent ids for audit evidence.
-        let mut original_parent_ids = Vec::new();
-        if let Some(arr) = board_health_finding
-            .get("terminal_epic_ids")
-            .and_then(|v| v.as_array())
-        {
-            for id in arr {
-                if let Some(s) = id.as_str() {
-                    original_parent_ids.push(s.to_owned());
-                }
-            }
-        }
-        if let Some(arr) = board_health_finding
-            .get("terminal_proposal_ids")
-            .and_then(|v| v.as_array())
-        {
-            for id in arr {
-                if let Some(s) = id.as_str() {
-                    original_parent_ids.push(s.to_owned());
-                }
-            }
-        }
+        let terminal_epic_ids = extract_string_array(board_health_finding, "terminal_epic_ids");
+        let terminal_proposal_ids =
+            extract_string_array(board_health_finding, "terminal_proposal_ids");
 
         repair_source
             .repair(
                 &task_id,
                 snapshot_status,
                 snapshot_action,
-                &original_parent_ids,
+                &terminal_epic_ids,
+                &terminal_proposal_ids,
             )
             .map(|_| ())
             .map_err(DoctorError::Backend)
     }
+}
+
+/// Extract string values from a JSON array field.
+fn extract_string_array(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// In-memory source for unit tests.
@@ -316,13 +314,15 @@ impl ClosedParentOpenChildrenRepairSource for TaskRepositoryClosedParentOpenChil
         task_id: &str,
         snapshot_status: &str,
         snapshot_action: &str,
-        original_parent_ids: &[String],
+        terminal_epic_ids: &[String],
+        terminal_proposal_ids: &[String],
     ) -> Result<djinn_db::repositories::task::DoctorRepairOutcome, String> {
         let db = self.db.clone();
         let task_id = task_id.to_owned();
         let snapshot_status = snapshot_status.to_owned();
         let snapshot_action = snapshot_action.to_owned();
-        let original_parent_ids = original_parent_ids.to_owned();
+        let terminal_epic_ids = terminal_epic_ids.to_owned();
+        let terminal_proposal_ids = terminal_proposal_ids.to_owned();
 
         let run = async move {
             let mut tx = db.pool().begin().await.map_err(|e| e.to_string())?;
@@ -331,7 +331,8 @@ impl ClosedParentOpenChildrenRepairSource for TaskRepositoryClosedParentOpenChil
                 &task_id,
                 &snapshot_status,
                 &snapshot_action,
-                &original_parent_ids,
+                &terminal_epic_ids,
+                &terminal_proposal_ids,
             )
             .await
             .map_err(|e| e.to_string())?;
