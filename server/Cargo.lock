@@ -1207,6 +1207,7 @@ dependencies = [
  "djinn-provider",
  "djinn-slot",
  "djinn-stack",
+ "djinn-telemetry",
  "futures",
  "globset",
  "http",

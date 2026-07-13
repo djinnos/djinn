@@ -9,8 +9,10 @@ use std::time::{Duration, SystemTime};
 
 const RETRIEVAL_DURATION_SECONDS: &str = "djinn_memory_retrieval_duration_seconds";
 const RETRIEVAL_CANDIDATES: &str = "djinn_memory_retrieval_candidates";
+const RETRIEVAL_STAGE_DURATION_SECONDS: &str = "djinn_memory_retrieval_stage_duration_seconds";
 const ENTRY_POINT_COUNT: usize = 4;
 const OUTCOME_COUNT: usize = 3;
+const STAGE_COUNT: usize = 6;
 
 /// A fixed retrieval workload entry point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -76,6 +78,51 @@ impl RetrievalOutcome {
     }
 }
 
+/// A fixed retrieval pipeline stage whose duration is forwarded from the
+/// repository search result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RetrievalStage {
+    Lexical,
+    Semantic,
+    Temporal,
+    Graph,
+    RrfFuse,
+    Embedding,
+}
+
+impl RetrievalStage {
+    pub const ALL: [Self; STAGE_COUNT] = [
+        Self::Lexical,
+        Self::Semantic,
+        Self::Temporal,
+        Self::Graph,
+        Self::RrfFuse,
+        Self::Embedding,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Lexical => "lexical",
+            Self::Semantic => "semantic",
+            Self::Temporal => "temporal",
+            Self::Graph => "graph",
+            Self::RrfFuse => "rrf_fuse",
+            Self::Embedding => "embedding",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Lexical => 0,
+            Self::Semantic => 1,
+            Self::Temporal => 2,
+            Self::Graph => 3,
+            Self::RrfFuse => 4,
+            Self::Embedding => 5,
+        }
+    }
+}
+
 /// Count and sums for one fixed `(entry_point, outcome)` bucket.
 ///
 /// Averages are intentionally not retained; consumers derive them from sums
@@ -93,6 +140,7 @@ pub struct RetrievalAggregate {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryRetrievalSnapshot {
     aggregates: [[RetrievalAggregate; OUTCOME_COUNT]; ENTRY_POINT_COUNT],
+    stage_aggregates: [[RetrievalAggregate; STAGE_COUNT]; ENTRY_POINT_COUNT],
 }
 
 impl MemoryRetrievalSnapshot {
@@ -103,6 +151,15 @@ impl MemoryRetrievalSnapshot {
         outcome: RetrievalOutcome,
     ) -> RetrievalAggregate {
         self.aggregates[entry_point.index()][outcome.index()]
+    }
+
+    /// Return the aggregate for a fixed `(entry_point, stage)` dimension pair.
+    pub fn stage_aggregate(
+        &self,
+        entry_point: RetrievalEntryPoint,
+        stage: RetrievalStage,
+    ) -> RetrievalAggregate {
+        self.stage_aggregates[entry_point.index()][stage.index()]
     }
 }
 
@@ -144,6 +201,7 @@ impl MemoryRetrievalMetrics {
             started_at: SystemTime::now(),
             snapshot: Mutex::new(MemoryRetrievalSnapshot {
                 aggregates: [[RetrievalAggregate::default(); OUTCOME_COUNT]; ENTRY_POINT_COUNT],
+                stage_aggregates: [[RetrievalAggregate::default(); STAGE_COUNT]; ENTRY_POINT_COUNT],
             }),
         }
     }
@@ -194,6 +252,33 @@ impl MemoryRetrievalMetrics {
         Ok(())
     }
 
+    /// Record one retrieval pipeline stage duration.
+    ///
+    /// Snapshot mutation and Prometheus histogram observation happen while the
+    /// same mutex is held.
+    pub fn observe_stage(
+        &self,
+        entry_point: RetrievalEntryPoint,
+        stage: RetrievalStage,
+        duration: Duration,
+    ) -> Result<(), MemoryRetrievalMetricsError> {
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| MemoryRetrievalMetricsError::Poisoned)?;
+        let aggregate = &mut snapshot.stage_aggregates[entry_point.index()][stage.index()];
+        aggregate.count += 1;
+        aggregate.duration_sum_seconds += duration.as_secs_f64();
+
+        metrics::histogram!(
+            RETRIEVAL_STAGE_DURATION_SECONDS,
+            "entry_point" => entry_point.label(),
+            "stage" => stage.label(),
+        )
+        .record(duration.as_secs_f64());
+        Ok(())
+    }
+
     /// Copy the complete aggregate state while holding its single mutex.
     pub fn snapshot(&self) -> Result<MemoryRetrievalSnapshot, MemoryRetrievalMetricsError> {
         self.snapshot
@@ -211,6 +296,10 @@ pub(crate) fn register_metrics() {
     metrics::describe_histogram!(
         RETRIEVAL_CANDIDATES,
         "Candidates considered by memory retrieval, partitioned by fixed entry_point and outcome labels."
+    );
+    metrics::describe_histogram!(
+        RETRIEVAL_STAGE_DURATION_SECONDS,
+        "Memory retrieval stage duration in seconds, partitioned by fixed entry_point and stage labels."
     );
 }
 
@@ -399,5 +488,59 @@ mod tests {
         );
         assert_eq!(aggregate.count, (writers * per_writer) as u64);
         assert_eq!(aggregate.candidate_sum, (writers * per_writer * 2) as f64);
+    }
+
+    fn stage_sample_value(rendered: &str, entry_point: &str, stage: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_memory_retrieval_stage_duration_seconds_sum")
+                    && line.contains(&format!("entry_point=\"{entry_point}\""))
+                    && line.contains(&format!("stage=\"{stage}\""))
+            })
+            .and_then(|line| line.rsplit_once(' '))
+            .and_then(|(_, value)| value.parse().ok())
+            .unwrap_or_else(|| panic!("missing stage sample in:\n{rendered}"))
+    }
+
+    #[test]
+    fn stage_duration_snapshot_matches_prometheus_histogram() {
+        crate::init().expect("install recorder");
+        let metrics = MemoryRetrievalMetrics::new();
+        metrics
+            .observe_stage(
+                RetrievalEntryPoint::Dispatch,
+                RetrievalStage::Lexical,
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        metrics
+            .observe_stage(
+                RetrievalEntryPoint::Dispatch,
+                RetrievalStage::Semantic,
+                Duration::from_millis(200),
+            )
+            .unwrap();
+
+        let snapshot = metrics.snapshot().unwrap();
+        let lexical =
+            snapshot.stage_aggregate(RetrievalEntryPoint::Dispatch, RetrievalStage::Lexical);
+        let semantic =
+            snapshot.stage_aggregate(RetrievalEntryPoint::Dispatch, RetrievalStage::Semantic);
+
+        assert_eq!(lexical.count, 1);
+        assert_eq!(semantic.count, 1);
+        assert!((lexical.duration_sum_seconds - 0.1).abs() < 1e-12);
+        assert!((semantic.duration_sum_seconds - 0.2).abs() < 1e-12);
+
+        let rendered = crate::render().unwrap();
+        assert_eq!(
+            lexical.duration_sum_seconds,
+            stage_sample_value(&rendered, "dispatch", "lexical")
+        );
+        assert_eq!(
+            semantic.duration_sum_seconds,
+            stage_sample_value(&rendered, "dispatch", "semantic")
+        );
     }
 }

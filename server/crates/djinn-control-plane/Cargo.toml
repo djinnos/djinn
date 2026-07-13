@@ -8,6 +8,7 @@ edition = "2024"
 doctest = false
 
 [dependencies]
+djinn-telemetry = { path = "../djinn-telemetry" }
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
 djinn-db = { path = "../djinn-db" }
 djinn-memory = { path = "../djinn-memory" }
