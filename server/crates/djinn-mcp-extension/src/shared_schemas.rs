@@ -654,7 +654,7 @@ pub fn tool_memory_read() -> RmcpTool {
 pub fn tool_memory_search() -> RmcpTool {
     RmcpTool::new(
         "memory_search".to_string(),
-        "Search notes and proposals in project memory. Returns a unified result set interleaved by relevance.".to_string(),
+        "Search notes and proposals in project memory. Query formulation rules: (1) write a declarative statement, not an interrogative question; (2) express one information need per query; (3) make each query self-contained; (4) omit retrieval-meta wording such as `find`, `information about`, and `search for`; (5) preserve discriminative symbol names, exact error strings, and config keys verbatim. Good query: `Authentication timeout handling for E_CONNRESET`. Bad query: `Can you find information about authentication timeout errors?` Worker-issued searches remain lexical/BM25-only until proposal 72iu supplies worker embeddings. Returns a unified result set interleaved by relevance.".to_string(),
         object!({
             "type": "object",
             "required": ["query"],
