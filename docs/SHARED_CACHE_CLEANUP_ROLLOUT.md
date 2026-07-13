@@ -320,7 +320,11 @@ whole-base eviction as authorization to add a fingerprint sweep.
 
 The cache operator closes this runbook only after recording all of the
 following, without asserting that production actions happened merely because
-the document exists:
+the document exists. For the mechanically checkable per-component confirmation
+artifact with owner, mode, expected bounded evidence, enable/stop decision,
+rollback action, and explicit operator signature/record fields, use the
+[Shared-cache cleanup rollout confirmation checklist](SHARED_CACHE_CLEANUP_CONFIRMATION_CHECKLIST.md).
+That checklist is validated by `scripts/check-shared-cache-rollout.sh`.
 
 - [ ] Zot Helm render, dry-run preflight report, selected-image pullability,
   and retention/GC observation; destructive Zot was either left dry-run or
