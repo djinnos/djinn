@@ -953,8 +953,6 @@ async fn closed_parent_open_children_db_dry_run_is_read_only() {
     assert_eq!(activity_before, activity_after);
 }
 
-/// End-to-end repair regression: `doctor_fix` applies the safe disposition row
-/// from the persisted finding and leaves guarded orphans untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
     use djinn_agent::doctor::{
@@ -1141,8 +1139,6 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
     assert_eq!(findings2.len(), 0);
 }
 
-/// End-to-end regression: a closed-parent orphan with an external open dependent
-/// is retained by `doctor_fix` and the dependent task remains open.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closed_parent_open_children_repair_skips_external_open_dependent() {
     use djinn_agent::doctor::{
@@ -1217,9 +1213,6 @@ async fn closed_parent_open_children_repair_skips_external_open_dependent() {
     );
 }
 
-/// End-to-end regression: an orphan that only blocks another task in the same
-/// closed-parent scope is disposed in the same repair transaction. The internal
-/// dependent is closed too, so it does not count as an external guard.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closed_parent_open_children_repair_cascades_internal_blocker() {
     use djinn_agent::doctor::{
@@ -1291,8 +1284,6 @@ async fn closed_parent_open_children_repair_cascades_internal_blocker() {
     }
 }
 
-/// End-to-end regression: if a task's status changes after the finding snapshot,
-/// `doctor_fix` skips the stale row and leaves the task unchanged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closed_parent_open_children_repair_skips_stale_snapshot() {
     use djinn_agent::doctor::{

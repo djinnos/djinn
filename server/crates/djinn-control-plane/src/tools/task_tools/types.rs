@@ -1,4 +1,5 @@
 use super::*;
+// djinn:allow-oversize
 
 // ── Param structs ─────────────────────────────────────────────────────────────
 
