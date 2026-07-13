@@ -48,6 +48,7 @@ const ShimmerComponent = ({
   );
 
   return (
+    // eslint-disable-next-line react-hooks/static-components -- `MotionComponent` is a stable, module-level-cached motion element keyed by the `as` prop (see getMotionComponent), not a component freshly created per render.
     <MotionComponent
       animate={{ backgroundPosition: "0% center" }}
       className={cn(

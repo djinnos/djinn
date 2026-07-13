@@ -63,6 +63,7 @@ export function MemoryPage() {
   }, [projectSlug]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- triggers the async notes load on project change; the synchronous reset is the fetch transition, not derivable state.
     refresh();
   }, [refresh]);
 
