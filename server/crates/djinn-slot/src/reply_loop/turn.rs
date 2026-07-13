@@ -38,11 +38,11 @@ use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
     ToolCallSignature, ToolFailureClass,
 };
-use super::phase::SessionPhaseTracker;
 use super::persistence::{
     complete_compaction_boundary, flush_in_flight_turn, persist_session_message,
     record_compaction_started, serialize_llm_input, serialize_message,
 };
+use super::phase::SessionPhaseTracker;
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
 use djinn_db::SessionCompactionBoundaryRepository;
@@ -784,6 +784,11 @@ pub async fn run_reply_loop(
                     if let Some(llm) = otel_llm {
                         llm.end_error("context_length_exceeded");
                     }
+                    // Compaction is local orchestration, not provider wait.
+                    phase_tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .exit_provider_wait();
                     let compacted = compact_conversation_in_critical_section(
                         provider,
                         conversation,
@@ -987,6 +992,11 @@ pub async fn run_reply_loop(
                         backoff_secs = backoff.as_secs(),
                         "ReplyLoop: provider stream ended without events; backing off then retrying"
                     );
+                    // Keep provider ownership through provider-loop backoff.
+                    phase_tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .enter_provider_wait();
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
@@ -1066,6 +1076,11 @@ pub async fn run_reply_loop(
                         backoff_secs = backoff.as_secs(),
                         "ReplyLoop: provider returned empty assistant turn; backing off then retrying"
                     );
+                    // Keep provider ownership through provider-loop backoff.
+                    phase_tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .enter_provider_wait();
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
@@ -2019,7 +2034,9 @@ mod tests {
             .tool_dispatcher
             .as_deref()
             .expect("test SlotContext has a tool dispatcher");
-        let phase_tracker = Arc::new(std::sync::Mutex::new(super::super::phase::SessionPhaseTracker::new(&slot_ctx, "worker")));
+        let phase_tracker = Arc::new(std::sync::Mutex::new(
+            super::super::phase::SessionPhaseTracker::new(&slot_ctx, "worker"),
+        ));
         let dispatch_ctx = super::super::tool_dispatch::ToolDispatchContext {
             ctx: &slot_ctx,
             task_id: "task",

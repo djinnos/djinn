@@ -6,8 +6,8 @@
 
 use std::collections::HashSet;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -117,6 +117,15 @@ pub(super) async fn consume_provider_stream(
     let mut state = StreamTurnState::new();
     let mut streaming_inflight: FuturesUnordered<StreamingFut<'_>> = FuturesUnordered::new();
     loop {
+        // A concurrent-safe side tool may have temporarily taken phase
+        // ownership. Every select iteration waits for the provider again, so
+        // reclaim provider wait before polling the stream. This closes an
+        // active tool phase at the same instant; the outstanding guard later
+        // only balances depth and cannot emit overlapping time.
+        ctx.phase_tracker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enter_provider_wait();
         tokio::select! {
             biased;
             _ = ctx.cancel.cancelled() => {

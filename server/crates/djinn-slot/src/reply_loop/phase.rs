@@ -103,7 +103,10 @@ impl SessionPhaseTracker {
         if self.finished || self.role.is_none() || self.tool_depth != 0 {
             return;
         }
-        if self.active.is_some_and(|active| active.phase == SessionPhase::ProviderWait) {
+        if self
+            .active
+            .is_some_and(|active| active.phase == SessionPhase::ProviderWait)
+        {
             self.close_active(self.clock.now_instant());
         }
     }
@@ -114,7 +117,15 @@ impl SessionPhaseTracker {
         if self.finished || self.role.is_none() {
             return;
         }
-        if self.tool_depth == 0 {
+        // A streaming side tool can still be outstanding when provider event
+        // consumption resumes. That outstanding call contributes to depth, but
+        // a newly-polled tool must nevertheless take ownership from provider
+        // wait at this instant. Only entries while tool execution is already
+        // active are true nested entries.
+        if !self
+            .active
+            .is_some_and(|active| active.phase == SessionPhase::ToolExecution)
+        {
             self.enter(SessionPhase::ToolExecution);
         }
         self.tool_depth = self.tool_depth.saturating_add(1);
