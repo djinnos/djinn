@@ -1,5 +1,7 @@
 use super::*;
 use djinn_core::clock::TestClock;
+use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 struct Activity(Result<ActivitySnapshot, String>);
 #[async_trait]
@@ -1409,4 +1411,5 @@ async fn pressure_lock_busy_and_error_retained() {
     assert_eq!(plan.retained[1].1, PressureSkipReason::LockError);
 }
 
+mod fingerprint_inventory;
 mod pressure_execution;
