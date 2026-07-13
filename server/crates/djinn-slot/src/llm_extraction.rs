@@ -498,9 +498,8 @@ impl ExtractionContext<'_> {
         note_type: &str,
         scope_paths_json: &str,
         retrieval_anchor: Option<&str>,
-    ) -> djinn_db::Result<djinn_memory::Note> {
-        let result = self
-            .note_repo
+    ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
+        self.note_repo
             .mutate_with_revision(NoteRevisionMutation {
                 project_id: self.project_id.to_owned(),
                 note_id: Some(uuid::Uuid::now_v7().to_string()),
@@ -524,10 +523,7 @@ impl ExtractionContext<'_> {
                 reason: NoteRevisionReason::new("created note from completed session extraction")
                     .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
             })
-            .await?;
-        result.note.ok_or_else(|| {
-            djinn_db::Error::Internal("created extraction note missing result".to_owned())
-        })
+            .await
     }
 }
 
@@ -1240,8 +1236,9 @@ async fn run_llm_extraction_inner(
             .map(|lookup| CandidateLookup::with_override(lookup))
             .unwrap_or_else(CandidateLookup::production),
     };
+    let mut durable_output_count = 0usize;
     for (note_type, note) in &deduped_notes {
-        process_extracted_note(
+        durable_output_count += process_extracted_note(
             &extraction_context,
             note_type,
             note,
@@ -1249,11 +1246,7 @@ async fn run_llm_extraction_inner(
         )
         .await;
     }
-    if extraction_quality.written == 0
-        && extraction_quality.evidence_merged == 0
-        && extraction_quality.boost_fallback == 0
-        && extraction_quality.downgraded == 0
-    {
+    if durable_output_count == 0 {
         let skipped = NoteRevisionMutation {
             project_id: project.id.clone(),
             note_id: None,
@@ -1354,7 +1347,7 @@ async fn persist_merged_extraction_content(
     context: &ExtractionContext<'_>,
     existing: &djinn_memory::Note,
     content: &str,
-) -> djinn_db::Result<djinn_memory::Note> {
+) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
     context
         .mutate_existing(
             existing,
@@ -1364,11 +1357,6 @@ async fn persist_merged_extraction_content(
             "merged extracted evidence into existing note",
         )
         .await
-        .and_then(|r| {
-            r.note.ok_or_else(|| {
-                djinn_db::Error::Internal("updated extraction note missing result".to_owned())
-            })
-        })
 }
 
 fn split_provenance_footer(content: &str) -> (&str, Option<&str>) {
@@ -1407,16 +1395,16 @@ async fn boost_duplicate_confidence(
     note_type: &str,
     title: &str,
     outcome: &str,
-) {
+) -> bool {
     let existing = match context.note_repo.get(candidate_id).await {
         Ok(Some(note)) => note,
-        Ok(None) | Err(_) => return,
+        Ok(None) | Err(_) => return false,
     };
     let updated_confidence = (existing.confidence * DUPLICATE_CONFIDENCE_SIGNAL)
         / (existing.confidence * DUPLICATE_CONFIDENCE_SIGNAL
             + (1.0 - existing.confidence) * (1.0 - DUPLICATE_CONFIDENCE_SIGNAL));
     if updated_confidence == existing.confidence {
-        return;
+        return false;
     }
     match context
         .mutate_existing(
@@ -1428,11 +1416,13 @@ async fn boost_duplicate_confidence(
         )
         .await
     {
-        Ok(_) => {
-            tracing::debug!(session_id = %context.session_id, note_type, title, existing_note_id = candidate_id, updated_confidence, outcome, "llm_extraction: duplicate confidence updated")
+        Ok(result) => {
+            tracing::debug!(session_id = %context.session_id, note_type, title, existing_note_id = candidate_id, updated_confidence, outcome, "llm_extraction: duplicate confidence updated");
+            result.changed
         }
         Err(error) => {
-            tracing::warn!(session_id = %context.session_id, note_type, title, existing_note_id = candidate_id, %error, outcome, "llm_extraction: duplicate confidence update failed")
+            tracing::warn!(session_id = %context.session_id, note_type, title, existing_note_id = candidate_id, %error, outcome, "llm_extraction: duplicate confidence update failed");
+            false
         }
     }
 }
@@ -1441,16 +1431,16 @@ async fn merge_duplicate_evidence(
     context: &ExtractionContext<'_>,
     note: &ExtractedNote,
     selected: Option<&djinn_db::NoteDedupCandidate>,
-) -> bool {
+) -> usize {
     let Some(selected) = selected else {
-        return false;
+        return 0;
     };
     let existing = match context.note_repo.get(&selected.id).await {
         Ok(Some(note)) => note,
-        Ok(None) | Err(_) => return false,
+        Ok(None) | Err(_) => return 0,
     };
     if !eligible_evidence_merge(&existing, context.caller_attributed) {
-        return false;
+        return 0;
     }
     let prompt = format!(
         "Existing full note body:\n{}\n\nFresh extracted evidence:\n{}\n\nReturn JSON only: {{\"content\":\"merged markdown body\"}}. Preserve concrete evidence from both bodies; do not wholesale replace the existing note. The session provenance footer is managed by the caller.",
@@ -1467,19 +1457,19 @@ async fn merge_duplicate_evidence(
     .await
     {
         Ok(response) => response,
-        Err(_) => return false,
+        Err(_) => return 0,
     };
     let merged: EvidenceMergeResponse =
         match serde_json::from_str::<EvidenceMergeResponse>(response.text.trim()) {
             Ok(merged) if !merged.content.trim().is_empty() => merged,
-            _ => return false,
+            _ => return 0,
         };
     let content =
         content_with_one_provenance_footer(&merged.content, &existing.content, context.provenance);
     // Persistence completes before the confidence signal; failure reaches boost-only fallback.
     match persist_merged_extraction_content(context, &existing, &content).await {
-        Ok(_) => {
-            boost_duplicate_confidence(
+        Ok(result) => {
+            let confidence_changed = boost_duplicate_confidence(
                 context,
                 &existing.id,
                 "merge",
@@ -1487,9 +1477,9 @@ async fn merge_duplicate_evidence(
                 "evidence_merged",
             )
             .await;
-            true
+            usize::from(result.changed) + usize::from(confidence_changed)
         }
-        Err(_) => false,
+        Err(_) => 0,
     }
 }
 
@@ -1498,7 +1488,7 @@ async fn process_extracted_note(
     note_type: &str,
     note: &ExtractedNote,
     extraction_quality: &mut super::session_extraction::ExtractionQuality,
-) {
+) -> usize {
     // Runs BEFORE the novelty judge and BEFORE `create_extracted_note`. A
     // candidate that fails the structural gate is dropped without a novelty
     // LLM call, without a working-spec fallback, and without any note write
@@ -1520,7 +1510,7 @@ async fn process_extracted_note(
                 reasons = ?quality.reasons,
                 "llm_extraction: dropping underspecified note at admission gate"
             );
-            return;
+            return 0;
         }
     }
     let novelty = match novelty_decision(extraction_context, note_type, note).await {
@@ -1558,14 +1548,14 @@ async fn process_extracted_note(
     match assessment.outcome {
         ExtractionOutcome::MergeIntoExisting => {
             if let Some(candidate_id) = novelty.existing_note_id.as_deref() {
-                let merged = merge_duplicate_evidence(
+                let durable_outputs = merge_duplicate_evidence(
                     extraction_context,
                     note,
                     novelty.selected_candidate.as_ref(),
                 )
                 .await;
-                if !merged {
-                    boost_duplicate_confidence(
+                if durable_outputs == 0 {
+                    let boosted = boost_duplicate_confidence(
                         extraction_context,
                         candidate_id,
                         note_type,
@@ -1582,6 +1572,7 @@ async fn process_extracted_note(
                         outcome = "boost_fallback",
                         "llm_extraction: already-known decision completed with confidence-only fallback"
                     );
+                    return usize::from(boosted);
                 } else {
                     extraction_quality.evidence_merged += 1;
                     tracing::debug!(
@@ -1595,17 +1586,18 @@ async fn process_extracted_note(
                 }
                 extraction_quality.novelty_skipped += 1;
                 extraction_quality.merged += 1;
+                return durable_outputs;
             }
-            return;
+            return 0;
         }
         ExtractionOutcome::DowngradeToWorkingSpec => {
-            persist_working_spec(extraction_context, note, &assessment.reasons).await;
+            let changed = persist_working_spec(extraction_context, note, &assessment.reasons).await;
             extraction_quality.downgraded += 1;
-            return;
+            return usize::from(changed);
         }
         ExtractionOutcome::Discard => {
             extraction_quality.discarded += 1;
-            return;
+            return 0;
         }
         ExtractionOutcome::DurableWrite => {}
     }
@@ -1644,15 +1636,21 @@ async fn process_extracted_note(
         )
         .await
     {
-        Ok(created) => {
+        Ok(result) => {
+            let created_id = result
+                .note
+                .as_ref()
+                .map(|note| note.id.as_str())
+                .unwrap_or("unknown");
             tracing::debug!(
                 session_id = %extraction_context.session_id,
-                note_id = %created.id,
+                note_id = %created_id,
                 note_type = %note_type,
                 title = %note.title,
                 "llm_extraction: note created"
             );
             extraction_quality.written += 1;
+            return 1;
         }
         Err(e) => {
             tracing::warn!(
@@ -1664,13 +1662,14 @@ async fn process_extracted_note(
             );
         }
     }
+    0
 }
 
 async fn persist_working_spec(
     extraction_context: &ExtractionContext<'_>,
     note: &ExtractedNote,
     reasons: &[&'static str],
-) {
+) -> bool {
     let scope_paths = if note.scope_paths.is_empty() {
         extraction_context.session_scope_paths.to_vec()
     } else {
@@ -1697,18 +1696,20 @@ async fn persist_working_spec(
                     "updated extraction working specification",
                 )
                 .await
-                .and_then(|r| {
-                    r.note.ok_or_else(|| {
-                        djinn_db::Error::Internal("updated working spec missing result".to_owned())
-                    })
-                }) {
-                Ok(updated) => {
+            {
+                Ok(result) => {
+                    let updated_id = result
+                        .note
+                        .as_ref()
+                        .map(|note| note.id.as_str())
+                        .unwrap_or("unknown");
                     tracing::debug!(
                         session_id = %extraction_context.session_id,
-                        note_id = %updated.id,
+                        note_id = %updated_id,
                         permalink = %permalink,
                         "llm_extraction: updated task working spec"
                     );
+                    return result.changed;
                 }
                 Err(error) => tracing::warn!(
                     session_id = %extraction_context.session_id,
@@ -1728,12 +1729,20 @@ async fn persist_working_spec(
             )
             .await
         {
-            Ok(created) => tracing::debug!(
+            Ok(result) => {
+                let created_id = result
+                    .note
+                    .as_ref()
+                    .map(|note| note.id.as_str())
+                    .unwrap_or("unknown");
+                tracing::debug!(
                 session_id = %extraction_context.session_id,
-                note_id = %created.id,
+                note_id = %created_id,
                 permalink = %permalink,
                 "llm_extraction: created task working spec"
-            ),
+                );
+                return true;
+            }
             Err(error) => tracing::warn!(
                 session_id = %extraction_context.session_id,
                 permalink = %permalink,
@@ -1748,6 +1757,7 @@ async fn persist_working_spec(
             "llm_extraction: failed to load existing working spec"
         ),
     }
+    false
 }
 
 fn render_working_spec_document(
@@ -3228,12 +3238,20 @@ mod evidence_merge_regression_tests {
                     "unsupported test mutation".to_owned(),
                 ));
             };
-            self.ops.lock().unwrap().push(RepoOp::Update {
-                id: note.id.clone(),
-                title: note.title.clone(),
-                content: content.clone(),
-                tags: note.tags.clone(),
-            });
+            match mutation.event_kind {
+                NoteRevisionEventKind::ConfidenceChanged => {
+                    self.ops.lock().unwrap().push(RepoOp::UpdateConfidence {
+                        id: note.id.clone(),
+                        signal: confidence,
+                    });
+                }
+                _ => self.ops.lock().unwrap().push(RepoOp::Update {
+                    id: note.id.clone(),
+                    title: note.title.clone(),
+                    content: content.clone(),
+                    tags: note.tags.clone(),
+                }),
+            }
             if self.fail_updates {
                 return Err(djinn_db::Error::Internal(
                     "controlled revision update failure".to_owned(),
