@@ -509,6 +509,8 @@ pub struct FingerprintSweepReport {
     pub candidate_count: u64,
     /// Measured bytes inside all discovered fingerprint units.
     pub projected_bytes: u64,
+    /// Always zero while fingerprint sweeping remains report-only.
+    pub reclaimed_bytes: u64,
     /// Bases retained by guard failure (active task, warm job, lock, etc.).
     pub retained: Vec<(String, RetainReason)>,
     /// Bases whose inventory traversal failed after passing guards.
@@ -634,7 +636,7 @@ pub(crate) fn log_fingerprint_sweep_completion(
         outcome = outcome,
         candidate_count = report.candidate_count,
         projected_bytes = report.projected_bytes,
-        reclaimed_bytes = 0,
+        reclaimed_bytes = report.reclaimed_bytes,
         retained = report.retained.len(),
         error_bases = report.error_bases.len(),
         "fingerprint report-only sweep completed"
