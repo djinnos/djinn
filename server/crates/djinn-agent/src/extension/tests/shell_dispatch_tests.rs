@@ -27,6 +27,225 @@ fn shell_args(command: &str) -> Option<serde_json::Map<String, serde_json::Value
     )
 }
 
+// The Prometheus recorder is process-global. Serialize the scrape/dispatch/
+// scrape sequence so each assertion can use a precise delta rather than
+// assuming an empty registry.
+async fn telemetry_test_guard() -> tokio::sync::OwnedMutexGuard<()> {
+    use std::sync::{Arc, OnceLock};
+
+    static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+    LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+        .lock_owned()
+        .await
+}
+
+fn write_fake_cargo(worktree: &std::path::Path, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let cargo = worktree.join("cargo");
+    std::fs::write(&cargo, format!("#!/bin/sh\n{body}\n")).expect("write fake cargo");
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake cargo executable");
+    cargo
+}
+
+fn cargo_metric_lines(rendered: &str) -> Vec<&str> {
+    rendered
+        .lines()
+        .filter(|line| line.starts_with("djinn_cargo_invocation_seconds"))
+        .collect()
+}
+
+fn metric_labels(line: &str) -> Vec<&str> {
+    line.split_once('{')
+        .and_then(|(_, rest)| rest.split_once('}'))
+        .map(|(labels, _)| labels.split(',').collect())
+        .unwrap_or_default()
+}
+
+fn cargo_count(rendered: &str, kind: &str, exit: &str) -> f64 {
+    let expected_exit = format!("exit=\"{exit}\"");
+    let expected_kind = format!("kind=\"{kind}\"");
+    cargo_metric_lines(rendered)
+        .into_iter()
+        .find(|line| {
+            let labels = metric_labels(line);
+            line.starts_with("djinn_cargo_invocation_seconds_count{")
+                && labels.len() == 2
+                && labels.contains(&expected_kind.as_str())
+                && labels.contains(&expected_exit.as_str())
+        })
+        .and_then(|line| line.rsplit_once(' '))
+        .and_then(|(_, value)| value.parse().ok())
+        .unwrap_or(0.0)
+}
+
+fn assert_cargo_schema_and_buckets(rendered: &str, kind: &str, exit: &str, injected: &str) {
+    let lines = cargo_metric_lines(rendered);
+    assert!(
+        !lines.is_empty(),
+        "cargo invocation metric must be rendered"
+    );
+
+    for line in &lines {
+        let labels = metric_labels(line);
+        let expected = if line.contains("_bucket{") {
+            ["exit", "kind", "le"].as_slice()
+        } else {
+            ["exit", "kind"].as_slice()
+        };
+        let mut keys: Vec<_> = labels
+            .iter()
+            .map(|label| label.split_once('=').expect("label key/value").0)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, expected, "unexpected cargo metric labels: {line}");
+        for forbidden in [
+            "command=",
+            "argv=",
+            "path=",
+            "workdir=",
+            "task",
+            "session",
+            "project",
+            "user",
+            "fingerprint",
+            "error",
+        ] {
+            assert!(
+                !line.contains(forbidden),
+                "cargo metric must not expose {forbidden}: {line}"
+            );
+        }
+        assert!(
+            !line.contains(injected),
+            "cargo metric must not expose arbitrary script output: {line}"
+        );
+    }
+
+    let expected_finite = [
+        "1", "2", "5", "10", "30", "60", "120", "300", "600", "1200", "1800",
+    ];
+    let expected_kind = format!("kind=\"{kind}\"");
+    let expected_exit = format!("exit=\"{exit}\"");
+    let buckets: Vec<_> = lines
+        .iter()
+        .filter(|line| line.starts_with("djinn_cargo_invocation_seconds_bucket{"))
+        .filter(|line| {
+            let labels = metric_labels(line);
+            labels.contains(&expected_kind.as_str()) && labels.contains(&expected_exit.as_str())
+        })
+        .filter_map(|line| {
+            metric_labels(line).into_iter().find_map(|label| {
+                label
+                    .strip_prefix("le=\"")
+                    .and_then(|v| v.strip_suffix('"'))
+            })
+        })
+        .collect();
+    assert_eq!(
+        buckets.len(),
+        expected_finite.len() + 1,
+        "cargo series must have every finite bucket plus +Inf"
+    );
+    assert_eq!(&buckets[..expected_finite.len()], expected_finite);
+    assert_eq!(buckets.last(), Some(&"+Inf"));
+}
+
+// ─── Cargo invocation telemetry scrape regressions ───────────────────────
+
+#[tokio::test]
+async fn shell_dispatch_fake_cargo_success_has_exact_telemetry_delta_and_schema() {
+    let _guard = telemetry_test_guard().await;
+    djinn_telemetry::init().expect("initialize telemetry");
+    let (worktree, state) = setup("shell-cargo-telemetry-success-");
+    let injected = "ARBITRARY_CARGO_SUCCESS_OUTPUT_MUST_NOT_BE_A_LABEL";
+    let cargo = write_fake_cargo(worktree.path(), &format!("printf '%s\\n' '{injected}'"));
+    let command = format!("{} clippy", cargo.display());
+    let before = djinn_telemetry::render().expect("render telemetry before dispatch");
+    let count_before = cargo_count(&before, "clippy", "ok");
+
+    let response = call_shell(
+        &state,
+        &shell_args(&command),
+        worktree.path(),
+        Some("reviewer"),
+        &crate::extension::ToolCancellation::never(),
+    )
+    .await
+    .expect("fake cargo success dispatch");
+    assert_eq!(response["ok"], serde_json::json!(true));
+
+    let after = djinn_telemetry::render().expect("render telemetry after dispatch");
+    assert_eq!(cargo_count(&after, "clippy", "ok"), count_before + 1.0);
+    assert!(
+        !after.contains(injected),
+        "arbitrary fake cargo output must not appear in the telemetry scrape"
+    );
+    assert_cargo_schema_and_buckets(&after, "clippy", "ok", injected);
+}
+
+#[tokio::test]
+async fn shell_dispatch_fake_cargo_failure_has_exact_telemetry_delta() {
+    let _guard = telemetry_test_guard().await;
+    djinn_telemetry::init().expect("initialize telemetry");
+    let (worktree, state) = setup("shell-cargo-telemetry-failure-");
+    let injected = "ARBITRARY_CARGO_FAILURE_TEXT_MUST_NOT_BE_A_LABEL";
+    let cargo = write_fake_cargo(
+        worktree.path(),
+        &format!("printf '%s\\n' '{injected}' >&2\nexit 17"),
+    );
+    let command = format!("{} test", cargo.display());
+    let before = djinn_telemetry::render().expect("render telemetry before dispatch");
+    let count_before = cargo_count(&before, "test", "fail");
+
+    let response = call_shell(
+        &state,
+        &shell_args(&command),
+        worktree.path(),
+        Some("reviewer"),
+        &crate::extension::ToolCancellation::never(),
+    )
+    .await
+    .expect("fake cargo failure still returns shell output");
+    assert_eq!(response["ok"], serde_json::json!(false));
+
+    let after = djinn_telemetry::render().expect("render telemetry after dispatch");
+    assert_eq!(cargo_count(&after, "test", "fail"), count_before + 1.0);
+    assert!(
+        !after.contains(injected),
+        "arbitrary fake cargo error text must not appear in the telemetry scrape"
+    );
+    assert_cargo_schema_and_buckets(&after, "test", "fail", injected);
+}
+
+#[tokio::test]
+async fn shell_dispatch_non_cargo_does_not_change_cargo_telemetry() {
+    let _guard = telemetry_test_guard().await;
+    djinn_telemetry::init().expect("initialize telemetry");
+    let (worktree, state) = setup("shell-cargo-telemetry-non-cargo-");
+    let before = djinn_telemetry::render().expect("render telemetry before dispatch");
+
+    let response = call_shell(
+        &state,
+        &shell_args("printf non-cargo-shell-dispatch"),
+        worktree.path(),
+        Some("reviewer"),
+        &crate::extension::ToolCancellation::never(),
+    )
+    .await
+    .expect("non-cargo shell dispatch");
+    assert_eq!(response["ok"], serde_json::json!(true));
+
+    let after = djinn_telemetry::render().expect("render telemetry after dispatch");
+    assert_eq!(
+        cargo_metric_lines(&after),
+        cargo_metric_lines(&before),
+        "non-cargo dispatch must not change any cargo telemetry series"
+    );
+}
+
 // ─── AC 1: worker soft-gate first-deny / second-allow ────────────────────
 
 /// Worker soft-gated command (`rm scratch.txt`) returns a FORCE prompt on
