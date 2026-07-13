@@ -41,6 +41,18 @@ test('Rust core selects protected server policy jobs but not UI or aarch64', () 
   assertOnlyJobs(result, protectedJobs);
 });
 
+test('UI codegen inputs under server/ select the UI lane too', () => {
+  for (const path of [
+    'server/src/server/tests/snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap',
+    'server/schemas/usage-analytics.schema.json',
+  ]) {
+    const result = plan([path]);
+    assert.equal(result.lanes.ui, true, path);
+    assert.equal(result.lanes.rustCore, true, path);
+    assert.equal(result.jobs.ui, true, path);
+  }
+});
+
 test('migrations and SQLx cache classify their lanes and select protected jobs', () => {
   const migration = plan(['server/crates/djinn-db/migrations_postgres/20260101_init.sql']);
   assert.equal(migration.lanes.migrations, true);
