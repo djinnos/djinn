@@ -723,6 +723,24 @@ fn snapshot_worker_tool_schemas() {
     insta::assert_json_snapshot!("worker_tool_schemas", tool_schemas_worker());
 }
 
+/// Phase 1 regression guard: the default model-facing tool surface (edit,
+/// apply_patch, read, write, shell) must not change as a result of the telemetry
+/// exporter/evaluator work. This snapshot is intentionally narrow to the tools
+/// monitored by the GO/STOP decision gate.
+#[test]
+fn phase_1_default_model_facing_tool_surface_unchanged() {
+    const DEFAULT_FACING_TOOLS: [&str; 5] = ["edit", "apply_patch", "read", "write", "shell"];
+    let default_schemas: Vec<serde_json::Value> = tool_schemas_worker()
+        .into_iter()
+        .filter(|v| {
+            v.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|name| DEFAULT_FACING_TOOLS.contains(&name))
+        })
+        .collect();
+    insta::assert_json_snapshot!("phase_1_default_model_facing_tool_schemas", default_schemas);
+}
+
 #[test]
 fn snapshot_reviewer_tool_names() {
     let schemas = tool_schemas_reviewer();

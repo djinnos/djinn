@@ -1268,4 +1268,419 @@ mod tests {
                 || report.decision == Decision::InsufficientData
         );
     }
+
+    // ── End-to-end synthetic transcript fixtures ───────────────────────────
+    //
+    // These fixtures start from persisted-transcript-shaped inputs (SessionRecord +
+    // SessionMessage), run through the exporter (normalize_persisted_transcript),
+    // metric derivation, and the evaluator. They are deterministic and do not
+    // represent production evidence.
+
+    use super::{Decision, EvalInput, ManualAuditResult, WindowSpec};
+    use crate::repositories::tool_call_export::{
+        ExportDimensions, PersistedTranscript, normalize_persisted_transcript,
+    };
+    use djinn_core::message::ContentBlock;
+    use djinn_core::models::{SessionMessage, SessionRecord};
+
+    fn session_record(
+        id: &str,
+        task_id: Option<&str>,
+        model_id: &str,
+        agent_type: &str,
+        started_at: &str,
+    ) -> SessionRecord {
+        SessionRecord {
+            id: id.into(),
+            project_id: Some("project-1".into()),
+            task_id: task_id.map(str::to_owned),
+            model_id: model_id.into(),
+            agent_type: agent_type.into(),
+            started_at: started_at.into(),
+            ended_at: None,
+            status: "completed".into(),
+            tokens_in: 0,
+            tokens_out: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            task_run_id: None,
+            title: None,
+            parked_reason: None,
+            cost_usd: None,
+            input_price_per_million_snapshot: None,
+            output_price_per_million_snapshot: None,
+            cache_read_price_per_million_snapshot: None,
+            cache_write_price_per_million_snapshot: None,
+            cost_basis: "unpriced".into(),
+            billing_source: None,
+        }
+    }
+
+    fn assistant_tool_use(
+        session_id: &str,
+        id: &str,
+        name: &str,
+        input: serde_json::Value,
+    ) -> SessionMessage {
+        let content = serde_json::to_string(&vec![ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input,
+        }])
+        .unwrap();
+        SessionMessage {
+            id: format!("msg-{id}"),
+            session_id: session_id.into(),
+            role: "assistant".into(),
+            content_json: content,
+            token_count: None,
+            created_at: "2026-07-15T12:00:00Z".into(),
+        }
+    }
+
+    fn user_tool_result(
+        session_id: &str,
+        tool_use_id: &str,
+        is_error: bool,
+        text: &str,
+    ) -> SessionMessage {
+        let content = serde_json::to_string(&vec![ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.into(),
+            content: vec![ContentBlock::text(text)],
+            is_error,
+        }])
+        .unwrap();
+        SessionMessage {
+            id: format!("msg-{tool_use_id}-result"),
+            session_id: session_id.into(),
+            role: "user".into(),
+            content_json: content,
+            token_count: None,
+            created_at: "2026-07-15T12:00:01Z".into(),
+        }
+    }
+
+    fn codex_dimensions() -> ExportDimensions {
+        ExportDimensions {
+            provider_id: Some("openai".into()),
+            format_family: Some("OpenAIResponses".into()),
+            tool_surface_family: Some("codex".into()),
+        }
+    }
+
+    fn default_dimensions() -> ExportDimensions {
+        ExportDimensions {
+            provider_id: Some("openai".into()),
+            format_family: Some("OpenAIResponses".into()),
+            tool_surface_family: Some("default".into()),
+        }
+    }
+
+    /// Build a synthetic candidate session with a high edit-failure/retry pattern.
+    /// Emits 8 failed `edit` calls on the same path, then 2 successful `edit`
+    /// calls, plus 10 `apply_patch` calls on a different path (1 failure). Bunching
+    /// the failed edits before the successful ones lets the metric derivation see
+    /// failed edits followed by more failed edits on the same path within the next
+    /// three turns, producing a high retry-after-edit-failure rate.
+    fn build_candidate_session(
+        session_id: &str,
+        task_id: &str,
+        model_id: &str,
+        agent_type: &str,
+    ) -> PersistedTranscript {
+        let mut messages = Vec::new();
+        let edit_path = "src/lib.rs";
+        let patch_path = "src/other.rs";
+        // 8 failed edits on the same path (turns 0-7).
+        for i in 0..8 {
+            let call_id = format!("{session_id}-edit-{i}");
+            messages.push(assistant_tool_use(
+                session_id,
+                &call_id,
+                "edit",
+                serde_json::json!({"path": edit_path, "old_text": "x", "new_text": "y"}),
+            ));
+            messages.push(user_tool_result(
+                session_id,
+                &call_id,
+                true,
+                "edit failed: context mismatch",
+            ));
+        }
+        // 2 successful edits on the same path (turns 8-9). The first successful
+        // edit blocks the failed edit at turn 7 from being counted as a retry,
+        // which is the only failed edit in the candidate that is not counted as a
+        // retry. The earlier failed edits are still within the three-turn window
+        // of each other, so they count.
+        for i in 0..2 {
+            let success_id = format!("{session_id}-edit-success-{i}");
+            messages.push(assistant_tool_use(
+                session_id,
+                &success_id,
+                "edit",
+                serde_json::json!({"path": edit_path, "old_text": "x", "new_text": "y"}),
+            ));
+            messages.push(user_tool_result(session_id, &success_id, false, "ok"));
+        }
+        // 10 apply_patch calls on a different path (turns 10-19).
+        for i in 0..10 {
+            let call_id = format!("{session_id}-patch-{i}");
+            let failed = i == 0;
+            messages.push(assistant_tool_use(
+                session_id,
+                &call_id,
+                "apply_patch",
+                serde_json::json!({"patch": format!("*** Update File: {patch_path}\n-old\n+new")}),
+            ));
+            messages.push(user_tool_result(
+                session_id,
+                &call_id,
+                failed,
+                if failed { "patch failed" } else { "ok" },
+            ));
+        }
+        PersistedTranscript {
+            session: session_record(
+                session_id,
+                Some(task_id),
+                model_id,
+                agent_type,
+                "2026-07-15T10:00:00Z",
+            ),
+            messages,
+            dimensions: codex_dimensions(),
+        }
+    }
+
+    /// Build a synthetic baseline session with low edit failure and no retries.
+    /// Emits 9 successful `edit` calls followed by 1 failed `edit` at the end,
+    /// plus 10 `apply_patch` calls on a different path (1 failure). The failed
+    /// edit is the last edit, so no subsequent same-path modification exists to be
+    /// counted as a retry.
+    fn build_baseline_session(
+        session_id: &str,
+        task_id: &str,
+        model_id: &str,
+        agent_type: &str,
+    ) -> PersistedTranscript {
+        let mut messages = Vec::new();
+        let edit_path = "src/lib.rs";
+        let patch_path = "src/other.rs";
+        for i in 0..9 {
+            let call_id = format!("{session_id}-edit-{i}");
+            messages.push(assistant_tool_use(
+                session_id,
+                &call_id,
+                "edit",
+                serde_json::json!({"path": edit_path, "old_text": "x", "new_text": "y"}),
+            ));
+            messages.push(user_tool_result(session_id, &call_id, false, "ok"));
+        }
+        let fail_id = format!("{session_id}-edit-fail");
+        messages.push(assistant_tool_use(
+            session_id,
+            &fail_id,
+            "edit",
+            serde_json::json!({"path": edit_path, "old_text": "x", "new_text": "y"}),
+        ));
+        messages.push(user_tool_result(session_id, &fail_id, true, "edit failed"));
+        for i in 0..10 {
+            let call_id = format!("{session_id}-patch-{i}");
+            let failed = i == 0;
+            messages.push(assistant_tool_use(
+                session_id,
+                &call_id,
+                "apply_patch",
+                serde_json::json!({"patch": format!("*** Update File: {patch_path}\n-old\n+new")}),
+            ));
+            messages.push(user_tool_result(
+                session_id,
+                &call_id,
+                failed,
+                if failed { "patch failed" } else { "ok" },
+            ));
+        }
+        PersistedTranscript {
+            session: session_record(
+                session_id,
+                Some(task_id),
+                model_id,
+                agent_type,
+                "2026-07-15T10:00:00Z",
+            ),
+            messages,
+            dimensions: default_dimensions(),
+        }
+    }
+
+    /// Create a candidate-shaped session with the same low-failure pattern as the
+    /// baseline. Useful for STOP fixtures where the two populations should be
+    /// equivalent.
+    fn build_candidate_as_baseline(
+        session_id: &str,
+        task_id: &str,
+        model_id: &str,
+        agent_type: &str,
+    ) -> PersistedTranscript {
+        let mut t = build_baseline_session(session_id, task_id, model_id, agent_type);
+        t.dimensions = codex_dimensions();
+        t.session.model_id = model_id.into();
+        t
+    }
+
+    fn window_spec() -> WindowSpec {
+        WindowSpec {
+            start_day: "2026-07-01".into(),
+            end_day: "2026-07-30".into(),
+            source_description: "synthetic transcript fixture".into(),
+        }
+    }
+
+    fn evaluate_transcripts(
+        candidate: Vec<PersistedTranscript>,
+        baseline: Vec<PersistedTranscript>,
+        audit: Option<ManualAuditResult>,
+    ) -> super::GoStopReport {
+        let candidate_rows: Vec<_> = candidate
+            .iter()
+            .flat_map(|t| normalize_persisted_transcript(t))
+            .collect();
+        let baseline_rows: Vec<_> = baseline
+            .iter()
+            .flat_map(|t| normalize_persisted_transcript(t))
+            .collect();
+        let input = EvalInput {
+            window: window_spec(),
+            candidate_rows,
+            baseline_rows,
+            audit,
+        };
+        evaluate(&input, None, None)
+    }
+
+    #[test]
+    fn e2e_transcript_fixture_go() {
+        // 30 candidate sessions with high edit failure + retry, 30 baseline sessions
+        // with low edit failure + no retry. Meets all sample minima and gates.
+        let mut candidate = Vec::new();
+        let mut baseline = Vec::new();
+        for i in 0..30 {
+            let role = if i % 2 == 0 { "worker" } else { "reviewer" };
+            candidate.push(build_candidate_session(
+                &format!("codex-session-{i}"),
+                &format!("task-{i:02}"),
+                "gpt-5-codex",
+                role,
+            ));
+            baseline.push(build_baseline_session(
+                &format!("default-session-{i}"),
+                &format!("task-{i:02}"),
+                "gpt-5",
+                role,
+            ));
+        }
+        let report =
+            evaluate_transcripts(candidate, baseline, Some(ManualAuditResult::new(20, 12)));
+        assert_eq!(report.decision, Decision::Go);
+        assert!(report.gates.iter().all(|g| g.passed));
+        assert!(report.missing_required_fields.is_empty());
+        assert!(report.sample_minima_shortfalls.is_empty());
+    }
+
+    #[test]
+    fn e2e_transcript_fixture_stop() {
+        // Candidate and baseline have the same low edit failure rate and no retry
+        // disadvantage, so the ratio and retry gates fail.
+        let mut candidate = Vec::new();
+        let mut baseline = Vec::new();
+        for i in 0..30 {
+            let role = if i % 2 == 0 { "worker" } else { "reviewer" };
+            candidate.push(build_candidate_as_baseline(
+                &format!("codex-session-stop-{i}"),
+                &format!("task-{i:02}"),
+                "gpt-5-codex",
+                role,
+            ));
+            baseline.push(build_baseline_session(
+                &format!("default-session-stop-{i}"),
+                &format!("task-{i:02}"),
+                "gpt-5",
+                role,
+            ));
+        }
+        let report =
+            evaluate_transcripts(candidate, baseline, Some(ManualAuditResult::new(20, 12)));
+        assert_eq!(report.decision, Decision::Stop);
+        assert!(
+            report
+                .gates
+                .iter()
+                .any(|g| g.gate_name == "pseudo_count_ratio" && !g.passed)
+        );
+    }
+
+    #[test]
+    fn e2e_transcript_fixture_insufficient_data_missing_model_id() {
+        // 30 sessions with enough volume, but the session model_id is empty so the
+        // exporter marks model_id as missing. This makes the report insufficient
+        // data regardless of other rates.
+        let mut candidate = Vec::new();
+        let mut baseline = Vec::new();
+        for i in 0..30 {
+            let role = if i % 2 == 0 { "worker" } else { "reviewer" };
+            let mut c = build_candidate_session(
+                &format!("codex-session-missing-{i}"),
+                &format!("task-{i:02}"),
+                "", // empty model_id -> missing required field
+                role,
+            );
+            c.session.model_id = "".into();
+            candidate.push(c);
+            baseline.push(build_baseline_session(
+                &format!("default-session-missing-{i}"),
+                &format!("task-{i:02}"),
+                "gpt-5",
+                role,
+            ));
+        }
+        let report =
+            evaluate_transcripts(candidate, baseline, Some(ManualAuditResult::new(20, 12)));
+        assert_eq!(report.decision, Decision::InsufficientData);
+        assert!(
+            report
+                .missing_required_fields
+                .contains(&"model_id".to_owned())
+        );
+    }
+
+    #[test]
+    fn e2e_transcript_fixture_insufficient_data_absent_audit() {
+        // 30 sessions with enough volume and clear GO-like rates, but no manual
+        // audit supplied. The report must be insufficient data.
+        let mut candidate = Vec::new();
+        let mut baseline = Vec::new();
+        for i in 0..30 {
+            let role = if i % 2 == 0 { "worker" } else { "reviewer" };
+            candidate.push(build_candidate_session(
+                &format!("codex-session-noaudit-{i}"),
+                &format!("task-{i:02}"),
+                "gpt-5-codex",
+                role,
+            ));
+            baseline.push(build_baseline_session(
+                &format!("default-session-noaudit-{i}"),
+                &format!("task-{i:02}"),
+                "gpt-5",
+                role,
+            ));
+        }
+        let report = evaluate_transcripts(candidate, baseline, None);
+        assert_eq!(report.decision, Decision::InsufficientData);
+        assert!(
+            report
+                .sample_minima_shortfalls
+                .iter()
+                .any(|s| s.contains("manual audit absent"))
+        );
+    }
 }
