@@ -5,6 +5,19 @@ use sqlx::Row;
 use crate::database::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
+/// Database-backed diagnostics are bounded so a verbose provider error cannot
+/// prevent persistence of the terminal usage and outcome.
+pub const LLM_CALL_ATTEMPT_DIAGNOSTIC_MAX_CHARS: usize = 512;
+
+fn bounded_diagnostic(diagnostic: Option<&str>) -> Option<String> {
+    diagnostic.map(|value| {
+        value
+            .chars()
+            .take(LLM_CALL_ATTEMPT_DIAGNOSTIC_MAX_CHARS)
+            .collect()
+    })
+}
+
 /// Append-only attributed LLM-call attempt outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -177,6 +190,7 @@ impl LlmCallAttemptRepository {
         params: FinalizeLlmCallAttemptParams<'_>,
     ) -> Result<LlmCallAttemptRecord> {
         self.db.ensure_initialized().await?;
+        let diagnostic = bounded_diagnostic(params.diagnostic);
 
         let ti_f = params.tokens_in as f64;
         let to_f = params.tokens_out as f64;
@@ -215,7 +229,7 @@ impl LlmCallAttemptRepository {
         .bind(to_f)
         .bind(cr_f)
         .bind(cw_f)
-        .bind(params.diagnostic)
+        .bind(diagnostic)
         .bind(params.outcome.as_db_str())
         .bind(params.id)
         .execute(self.db.pool())
