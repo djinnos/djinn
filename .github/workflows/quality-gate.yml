@@ -725,14 +725,16 @@ jobs:
         run: |
           set -euo pipefail
           jq -e --argjson idx "$SHARD_INDEX" '
-            (.shards[] | select(.shardIndex == $idx)) as $row
-            | ($row.count == ($row.testIds | length))
-            and (all($row.testIds[]; type == "string" and length > 0))
-            and ($row.testIds | unique | length == ($row.testIds | length))
-            and ($row.filter | type == "string" and length > 0)
+            ([.shards[] | select(.shardIndex == $idx)]) as $matches
+            | ($matches | length == 1)
+            and ($matches[0] as $row
+              | ($row.count == ($row.testIds | length))
+              and (all($row.testIds[]; type == "string" and length > 0))
+              and ($row.testIds | unique | length == ($row.testIds | length))
+              and ($row.filter | type == "string" and length > 0))
           ' nextest-plan/matrix.json
-          jq -er --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .filter' nextest-plan/matrix.json > nextest-plan/shard-filter.txt
-          jq -ec --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .testIds' nextest-plan/matrix.json > nextest-plan/shard-test-ids.json
+          jq -er --argjson idx "$SHARD_INDEX" '([.shards[] | select(.shardIndex == $idx)]) as $matches | $matches[0].filter' nextest-plan/matrix.json > nextest-plan/shard-filter.txt
+          jq -ec --argjson idx "$SHARD_INDEX" '([.shards[] | select(.shardIndex == $idx)]) as $matches | $matches[0].testIds' nextest-plan/matrix.json > nextest-plan/shard-test-ids.json
       - name: Generate nextest config with file-backed shard filter
         env:
           NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
@@ -788,10 +790,16 @@ jobs:
     name: Publish Nextest Timing
     needs:
       - preflight
+      - nextest-plan
       - server-test
-    if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push' && needs.server-test.result == 'success'
+    if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push' && needs.nextest-plan.result == 'success' && needs.server-test.result == 'success'
     runs-on: ubuntu-latest
     steps:
+      - name: Download current plan and exact-once proof
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-plan-${{ github.run_id }}
+          path: nextest-plan
       - name: Download current shard timing data
         uses: actions/download-artifact@v4
         with:
@@ -804,6 +812,61 @@ jobs:
           shopt -s nullglob
           files=(nextest-timing-shards/*.json)
           [ ${#files[@]} -gt 0 ] || { echo '::error::No shard timing artifacts were produced'; exit 1; }
+          # Timing is balancing input only. Publish it only if every current plan row
+          # produced its expected timing file and the combined IDs prove exact-once
+          # coverage of this run's authoritative plan.
+          jq -e '
+            .version == "ci-nextest-plan/v1" and
+            .exactOnce == true and
+            (.shardCount | type == "number" and . > 0) and
+            (.discoveredCount | type == "number" and . >= 0) and
+            (.assignedCount == .discoveredCount) and
+            (.uniqueAssignedCount == .assignedCount) and
+            (.assignedIds | type == "array") and
+            (.assignedIds | length == .assignedCount) and
+            (.assignedIds | unique | length == .assignedCount)
+          ' nextest-plan/proof.json > /dev/null
+          jq -e --slurpfile proof nextest-plan/proof.json '
+            ($proof[0]) as $proof
+            | (.version == $proof.version)
+            and (.shardCount == $proof.shardCount)
+            and (.shards | type == "array" and length == $proof.shardCount)
+            and ([.shards[].shardIndex] | sort == [range(0; $proof.shardCount)])
+            and (all(.shards[];
+              (.count | type == "number" and . > 0)
+              and (.testIds | type == "array" and length == .count)
+              and (.testIds | unique | length == .count)
+              and (all(.testIds[]; type == "string" and length > 0))))
+          ' nextest-plan/matrix.json > /dev/null
+          shard_count=$(jq -r '.shardCount' nextest-plan/proof.json)
+          expected_files=()
+          for ((shard_index = 0; shard_index < shard_count; shard_index++)); do
+            expected_files+=("nextest-timing-shards/timing-${shard_index}.json")
+          done
+          [ ${#files[@]} -eq ${#expected_files[@]} ] || { echo '::error::Missing or unexpected shard timing artifact'; exit 1; }
+          for timing_file in "${files[@]}"; do
+            [[ "$timing_file" =~ ^nextest-timing-shards/timing-[0-9]+\.json$ ]] || { echo "::error::Unexpected timing file $timing_file"; exit 1; }
+          done
+          for expected_file in "${expected_files[@]}"; do
+            [ -s "$expected_file" ] || { echo "::error::Missing expected timing file $expected_file"; exit 1; }
+          done
+          jq -e --slurpfile proof nextest-plan/proof.json --slurpfile matrix nextest-plan/matrix.json '
+            ($proof[0]) as $proof
+            | ($matrix[0].shards) as $shards
+            | [inputs | select(
+                .version == "ci-nextest-timing/v1"
+                and (.tests | type == "object")
+                and (.tests | keys | all(type == "string" and length > 0))
+                and (.tests | all(.[]; type == "number" and isfinite and . >= 0))
+              )] as $timings
+            | ($timings | length == $proof.shardCount)
+            and ([range(0; $proof.shardCount)] | all(. as $idx;
+                ($shards[] | select(.shardIndex == $idx).testIds | sort) as $expected_ids
+                | ($timings[$idx].tests | keys | sort) == $expected_ids))
+            and ([$timings[].tests | keys[]] | sort) == ($proof.assignedIds | sort)
+          ' "${expected_files[@]}" > /dev/null || {
+            echo '::error::Shard timing data does not exactly cover the current exact-once proof'; exit 1;
+          }
           mkdir -p nextest-timing
           jq -s '{version: "ci-nextest-timing/v1", generated_at: (now | todateiso8601), tests: (reduce .[] as $timing ({}; . * $timing.tests))}' "${files[@]}" > nextest-timing/timing.json
       - name: Upload latest compatible timing candidate
