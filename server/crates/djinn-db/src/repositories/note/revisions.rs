@@ -97,7 +97,7 @@ fn required(
 }
 
 /// A mandatory, normalized human-readable explanation for a ledger event.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct NoteRevisionReason(String);
 
@@ -134,7 +134,11 @@ impl fmt::Display for NoteRevisionReason {
 }
 
 /// Trusted attribution, whose shape exactly mirrors the database constraint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// This intentionally has no `Deserialize` implementation. Repository callers
+/// must construct it with the trusted constructors instead of accepting raw
+/// caller-supplied attribution at a wire boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TrustedNoteRevisionAttribution {
     actor_kind: NoteRevisionActorKind,
     actor_id: Option<String>,
@@ -180,7 +184,10 @@ impl TrustedNoteRevisionAttribution {
 }
 
 /// Optional trusted execution context attached to an event.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// This intentionally has no `Deserialize` implementation: `new` normalizes
+/// optional IDs and rejects blank values before persistence.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TrustedNoteRevisionProvenance {
     session_id: Option<String>,
     task_id: Option<String>,
@@ -234,7 +241,7 @@ pub struct NoteRevisionSnapshot {
 }
 
 /// Input for the future append-only mutation boundary.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NoteRevisionEventInput {
     pub id: String,
     pub project_id: String,
@@ -248,7 +255,7 @@ pub struct NoteRevisionEventInput {
 }
 
 /// A persisted ledger row, including the server-assigned stable cursor time.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NoteRevisionEventRow {
     pub id: String,
     pub project_id: String,
