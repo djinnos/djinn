@@ -258,6 +258,27 @@ describe("UserConfigDialog", () => {
     });
   });
 
+  it("surfaces a server-reported ChatGPT OAuth failure inline", async () => {
+    vi.mocked(fetchUserConnectedProviders).mockResolvedValue([]);
+    vi.mocked(startUserOAuth).mockResolvedValue({
+      kind: "error",
+      message: "Could not persist Codex credentials",
+    });
+
+    renderDialog();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: /continue with chatgpt/i }));
+
+    expect(
+      await screen.findByText("Could not persist Codex credentials"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+    expect(
+      screen.queryByText(/waiting for sign-in to complete/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows a friendly inline error when model selection fails to load", async () => {
     vi.mocked(fetchUserModelSelection).mockRejectedValue(
       new Error("Failed to load user settings"),

@@ -15,6 +15,7 @@ import {
   listGithubRepos,
   listGithubInstallations,
   addProjectFromGithub,
+  githubRepoToProjectArgs,
   type GithubRepoEntry,
   type Installation,
   type Project,
@@ -28,7 +29,7 @@ interface Props {
   onAdded: (project: Project) => void;
 }
 
-export const INSTALLATIONS_QUERY_KEY = ['github', 'installations'] as const;
+export const INSTALLATIONS_QUERY_KEY = ['github', 'project-installations'] as const;
 export const REPOS_QUERY_KEY = ['github', 'repos'] as const;
 
 /**
@@ -101,11 +102,7 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
     const key = `${entry.owner}/${entry.repo}`;
     setAddingKey(key);
     try {
-      const project = await addProjectFromGithub({
-        owner: entry.owner,
-        repo: entry.repo,
-        installation_id: entry.installation_id,
-      });
+      const project = await addProjectFromGithub(githubRepoToProjectArgs(entry));
       showToast.success(`Added ${key}`);
       onAdded(project);
       onOpenChange(false);

@@ -91,14 +91,10 @@ impl DjinnMcpServer {
         &self,
         Parameters(_): Parameters<GithubAppInstallationsParams>,
     ) -> Json<GithubAppInstallationsResponse> {
-        // If the App itself isn't provisioned yet (no GITHUB_APP_ID), say so
-        // cleanly instead of bubbling a cryptic JWT-mint error. The UI can
-        // route the user to the manifest flow on this signal.
-        if std::env::var("GITHUB_APP_ID")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .is_none()
-        {
+        // If the App itself isn't provisioned yet, say so cleanly instead of
+        // bubbling a cryptic JWT-mint error. `app_id()` resolves the runtime
+        // persisted snapshot before its pre-initialization env fallback.
+        if djinn_provider::github_app::app_id().is_err() {
             return Json(GithubAppInstallationsResponse {
                 status: "error: GitHub App not configured".into(),
                 installations: vec![],

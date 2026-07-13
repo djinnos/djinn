@@ -37,6 +37,7 @@ describe("fetchAuthConfig", () => {
       missing: ["GITHUB_APP_CLIENT_ID"],
       setup_doc_url: "https://example.test/setup",
       self_setup_available: true,
+      setup_launch_available: true,
     });
 
     const config = await fetchAuthConfig();
@@ -46,6 +47,7 @@ describe("fetchAuthConfig", () => {
       missing: ["GITHUB_APP_CLIENT_ID"],
       setupDocUrl: "https://example.test/setup",
       selfSetupAvailable: true,
+      setupLaunchAvailable: true,
     });
   });
 
@@ -61,6 +63,21 @@ describe("fetchAuthConfig", () => {
 
     expect(config.configured).toBe(false);
     expect(config.selfSetupAvailable).toBe(false);
+    expect(config.setupLaunchAvailable).toBe(false);
+  });
+
+  it("defaults setupLaunchAvailable to false when an older server only advertises self-setup", async () => {
+    mockFetchOk({
+      configured: false,
+      missing: ["GITHUB_APP_PRIVATE_KEY"],
+      setup_doc_url: "https://example.test/setup",
+      self_setup_available: true,
+    });
+
+    const config = await fetchAuthConfig();
+
+    expect(config.selfSetupAvailable).toBe(true);
+    expect(config.setupLaunchAvailable).toBe(false);
   });
 
   it("preserves selfSetupAvailable=false when the server explicitly sends false", async () => {
@@ -69,11 +86,13 @@ describe("fetchAuthConfig", () => {
       missing: [],
       setup_doc_url: "https://example.test/setup",
       self_setup_available: false,
+      setup_launch_available: false,
     });
 
     const config = await fetchAuthConfig();
 
     expect(config.selfSetupAvailable).toBe(false);
+    expect(config.setupLaunchAvailable).toBe(false);
     expect(config.configured).toBe(true);
   });
 });
@@ -181,18 +200,25 @@ describe("fetchSetupStatus", () => {
     expect(status.credentialSource).toBeNull();
   });
 
-  it("maps setup_state=unrecoverable as the unrecoverable state", async () => {
+  it("maps canonical setup_state=credentials_unrecoverable as the unrecoverable state", async () => {
     mockFetchOk({
       needs_app_install: true,
       app_credentials_configured: false,
       org_login: null,
-      setup_state: "unrecoverable",
+      credential_source: null,
+      setup_state: "credentials_unrecoverable",
+      setup_error: "Persisted credentials cannot be decrypted",
+      setup_retryable: false,
+      credentials_unrecoverable: true,
     });
 
     const status = await fetchSetupStatus();
 
     expect(status.setupState).toBe("unrecoverable");
-    expect(status.credentialsUnrecoverable).toBe(false);
+    expect(status.credentialSource).toBeNull();
+    expect(status.setupError).toBe("Persisted credentials cannot be decrypted");
+    expect(status.setupRetryable).toBe(false);
+    expect(status.credentialsUnrecoverable).toBe(true);
   });
 
   it("maps setup_state=unconfigured explicitly", async () => {
@@ -208,12 +234,12 @@ describe("fetchSetupStatus", () => {
     expect(status.setupState).toBe("unconfigured");
   });
 
-  it("maps setup_state=valid explicitly", async () => {
+  it("maps canonical setup_state=valid_secret explicitly", async () => {
     mockFetchOk({
       needs_app_install: false,
       app_credentials_configured: true,
       org_login: "acme",
-      setup_state: "valid",
+      setup_state: "valid_secret",
       credential_source: "secret",
     });
 
@@ -221,6 +247,21 @@ describe("fetchSetupStatus", () => {
 
     expect(status.setupState).toBe("valid");
     expect(status.credentialSource).toBe("secret");
+  });
+
+  it("maps canonical setup_state=valid_persisted explicitly", async () => {
+    mockFetchOk({
+      needs_app_install: false,
+      app_credentials_configured: true,
+      org_login: "acme",
+      setup_state: "valid_persisted",
+      credential_source: "persisted",
+    });
+
+    const status = await fetchSetupStatus();
+
+    expect(status.setupState).toBe("valid");
+    expect(status.credentialSource).toBe("persisted");
   });
 
   it("does not surface raw setup tokens or secret material", async () => {

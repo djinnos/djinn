@@ -53,7 +53,7 @@ pub(crate) mod boot_token;
 use axum::{
     Json, Router,
     extract::{Query, Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri, header, uri::Authority},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -64,16 +64,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
 use djinn_db::{
-    CreateUserAuthSession, NewOrgConfig, OrgConfigRepository, SessionAuthRepository, UserRepository,
+    CreateUserAuthSession, NewOrgConfig, OrgConfig, OrgConfigRepository, SessionAuthRepository,
+    UserRepository,
 };
-use djinn_provider::github_app::ManifestConversion;
 use djinn_provider::github_app::jwt::mint_app_jwt_anyhow;
+use djinn_provider::github_app::{CredentialSourceState, ManifestConversion};
 use djinn_provider::github_server::{AppInstallation, GitHubServerClient};
 use djinn_provider::oauth::github_app_user::{self, GithubUserTokens};
 
 pub(super) const SESSION_COOKIE: &str = "djinn_session";
 const OAUTH_STATE_COOKIE: &str = "djinn_oauth_state";
-pub(super) const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8372";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30; // 30 days
 const STATE_COOKIE_TTL_SECS: i64 = 60 * 10; // 10 minutes
 /// CSRF state cookie for the GitHub App manifest creation flow.
@@ -86,6 +86,14 @@ pub(crate) const SETUP_SESSION_COOKIE: &str = "djinn_setup_session";
 const SETUP_SESSION_PATH: &str = "/auth/github";
 /// Setup session TTL: 15 minutes.
 const SETUP_SESSION_TTL_SECS: i64 = 60 * 15;
+/// Browser-only capability cookie that gates the explicit setup CTA.
+const SETUP_LAUNCH_COOKIE: &str = "djinn_setup_launch";
+/// Keep the launch capability off every other auth route, including the
+/// manifest callback that receives a cross-site navigation from GitHub.
+const SETUP_LAUNCH_PATH: &str = "/auth/github/setup-start";
+/// The setup CTA should be used promptly. The server independently enforces
+/// the same lifetime; this is not merely a browser cookie hint.
+const SETUP_LAUNCH_TTL_SECS: i64 = 60 * 2;
 /// Query parameter name for the install-continuation nonce appended to the
 /// GitHub install URL after manifest credential persistence.
 const INSTALL_CONTINUATION_PARAM: &str = "djinn_continuation";
@@ -108,6 +116,42 @@ fn read_github_app_oauth_env(primary: &str) -> Option<String> {
     std::env::var(primary).ok().filter(|v| !v.is_empty())
 }
 
+/// Opt-in for GitHub App installations owned by a personal account. Default
+/// remains organization-only for production deployments.
+pub(super) fn allow_user_installations() -> bool {
+    parse_allow_user_installations(
+        std::env::var("DJINN_ALLOW_USER_INSTALLATIONS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_allow_user_installations(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1" || value.eq_ignore_ascii_case("true")
+    })
+}
+
+/// Account types accepted for deployment binding. Unknown GitHub account
+/// types remain rejected even when personal-account support is enabled.
+pub(super) fn installation_account_type_allowed(account_type: &str, allow_users: bool) -> bool {
+    account_type.eq_ignore_ascii_case("Organization")
+        || (allow_users && account_type.eq_ignore_ascii_case("User"))
+}
+
+/// Personal bindings reuse the legacy `org_config` row, so identify them by
+/// matching the immutable GitHub account id plus login to the signed-in user.
+/// GitHub account ids are global across users and organizations.
+pub(super) fn binding_matches_user(
+    binding: &OrgConfig,
+    github_user_id: i64,
+    github_login: &str,
+) -> bool {
+    binding.github_org_id == github_user_id
+        && binding.github_org_login.eq_ignore_ascii_case(github_login)
+}
+
 pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/auth/me", get(me))
@@ -117,6 +161,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/auth/github/app-setup-callback", get(app_setup_callback))
         // Self-setup routes: gated by DJINN_ENABLE_SELF_SETUP + no usable
         // credentials. When the gate is closed these return 404.
+        .route("/auth/github/setup-start", post(setup_start))
         .route("/auth/github/create-app", get(create_app))
         .route(
             "/auth/github/app-manifest-callback",
@@ -148,13 +193,89 @@ struct ConfigResponse {
     /// `DJINN_ENABLE_SELF_SETUP=true` AND no usable credentials exist.
     #[serde(default)]
     self_setup_available: bool,
+    /// Whether this specific browser request can use the local-only setup
+    /// CTA. This is stricter than `self_setup_available`, which continues to
+    /// describe the boot-token fallback for any deployment.
+    #[serde(default)]
+    setup_launch_available: bool,
+    credential_source: Option<&'static str>,
+    setup_state: &'static str,
+    setup_error: Option<String>,
+    setup_retryable: bool,
+    credentials_unrecoverable: bool,
+}
+
+/// Keep the JSON response shape unchanged while attaching a browser-only
+/// launch cookie when this was a verified same-origin config fetch.
+struct ConfigOutput(ConfigResponse, HeaderMap);
+
+impl IntoResponse for ConfigOutput {
+    fn into_response(self) -> Response {
+        (self.1, Json(self.0)).into_response()
+    }
+}
+
+struct CredentialStatusFields {
+    credential_source: Option<&'static str>,
+    setup_state: &'static str,
+    setup_error: Option<String>,
+    setup_retryable: bool,
+    credentials_unrecoverable: bool,
+}
+
+fn credential_status_fields(state: &CredentialSourceState) -> CredentialStatusFields {
+    match state {
+        CredentialSourceState::ValidSecret(_) => CredentialStatusFields {
+            credential_source: Some("secret"),
+            setup_state: "valid_secret",
+            setup_error: None,
+            setup_retryable: false,
+            credentials_unrecoverable: false,
+        },
+        CredentialSourceState::ValidPersisted(_) => CredentialStatusFields {
+            credential_source: Some("persisted"),
+            setup_state: "valid_persisted",
+            setup_error: None,
+            setup_retryable: false,
+            credentials_unrecoverable: false,
+        },
+        CredentialSourceState::InvalidSecret(detail) => CredentialStatusFields {
+            credential_source: None,
+            setup_state: "invalid_secret",
+            setup_error: Some(format!(
+                "GitHub App Secret is invalid or incomplete: {}",
+                detail.issues.join(", ")
+            )),
+            setup_retryable: false,
+            credentials_unrecoverable: false,
+        },
+        CredentialSourceState::UndecryptablePersisted => CredentialStatusFields {
+            credential_source: None,
+            setup_state: "credentials_unrecoverable",
+            setup_error: Some(
+                "Persisted GitHub App credentials cannot be decrypted; restore the vault key, clear the persisted credentials and rerun setup, or mount a valid Secret"
+                    .to_string(),
+            ),
+            setup_retryable: false,
+            credentials_unrecoverable: true,
+        },
+        CredentialSourceState::Unconfigured => CredentialStatusFields {
+            credential_source: None,
+            setup_state: "unconfigured",
+            setup_error: None,
+            setup_retryable: false,
+            credentials_unrecoverable: false,
+        },
+    }
 }
 
 /// Report whether the GitHub App is configured (env-only after the K8s
 /// migration). Used by the UI to decide between sign-in and a static
 /// "App not configured" notice.
-async fn config(State(state): State<AppState>) -> Json<ConfigResponse> {
-    let active = state.app_config().await;
+async fn config(State(state): State<AppState>, headers: HeaderMap) -> ConfigOutput {
+    let credential_state = state.app_credential_state().await;
+    let active = credential_state.app_config().cloned();
+    let status = credential_status_fields(&credential_state);
     let mut missing: Vec<&'static str> = Vec::new();
 
     if active.is_none() {
@@ -178,14 +299,35 @@ async fn config(State(state): State<AppState>) -> Json<ConfigResponse> {
         }
     }
 
-    let self_setup_available = setup_available(active.is_some());
+    let self_setup_available = setup_available(&credential_state);
+    let setup_launch_available =
+        self_setup_available && local_setup_launch_available(&headers, &public_url());
 
-    Json(ConfigResponse {
-        configured: active.is_some(),
-        missing,
-        setup_doc_url: "https://github.com/djinnos/djinn/blob/main/docs/GITHUB_APP_SETUP.md",
-        self_setup_available,
-    })
+    let mut response_headers = HeaderMap::new();
+    if setup_launch_available {
+        let launch_token = state
+            .issue_setup_launch_capability(std::time::Duration::from_secs(
+                SETUP_LAUNCH_TTL_SECS as u64,
+            ))
+            .await;
+        set_setup_launch_cookie(&mut response_headers, &launch_token);
+    }
+
+    ConfigOutput(
+        ConfigResponse {
+            configured: active.is_some(),
+            missing,
+            setup_doc_url: "https://github.com/djinnos/djinn/blob/main/docs/GITHUB_APP_SETUP.md",
+            self_setup_available,
+            setup_launch_available,
+            credential_source: status.credential_source,
+            setup_state: status.setup_state,
+            setup_error: status.setup_error,
+            setup_retryable: status.setup_retryable,
+            credentials_unrecoverable: status.credentials_unrecoverable,
+        },
+        response_headers,
+    )
 }
 
 use std::sync::atomic::{AtomicI8, Ordering};
@@ -202,18 +344,54 @@ static SELF_SETUP_OVERRIDE: AtomicI8 = AtomicI8::new(-1);
 #[cfg(test)]
 static SELF_SETUP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Serialises self-setup tests and restores the process-global credential
+/// cache when each test finishes. Manifest callback tests intentionally
+/// exercise the production hot-reload path, so leaving that cache populated
+/// would leak one test's App into unrelated auth tests.
+#[cfg(test)]
+struct SelfSetupTestGuard {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for SelfSetupTestGuard {
+    fn drop(&mut self) {
+        SELF_SETUP_OVERRIDE.store(-1, Ordering::SeqCst);
+        djinn_provider::github_app::clear_runtime_config();
+        if let Ok(mut slot) = EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = OAUTH_EXCHANGE_RESULT_OVERRIDE.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = GITHUB_USER_RESULT_OVERRIDE.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = USER_INSTALLATIONS_RESULT_OVERRIDE.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = APP_INSTALLATION_RESULT_OVERRIDE.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = ORG_CONFIG_RESULT_OVERRIDE.lock() {
+            *slot = None;
+        }
+    }
+}
+
 /// Acquire the async test lock, set the override, and return the guard.
 /// The override stays set until the guard is dropped (end of test).
 #[cfg(test)]
-async fn with_self_setup_override(value: Option<bool>) -> tokio::sync::MutexGuard<'static, ()> {
+async fn with_self_setup_override(value: Option<bool>) -> SelfSetupTestGuard {
     let guard = SELF_SETUP_TEST_LOCK.lock().await;
+    djinn_provider::github_app::clear_runtime_config();
     let v = match value {
         None => -1,
         Some(true) => 1,
         Some(false) => 0,
     };
     SELF_SETUP_OVERRIDE.store(v, Ordering::SeqCst);
-    guard
+    SelfSetupTestGuard { _guard: guard }
 }
 
 /// Whether the `DJINN_ENABLE_SELF_SETUP` environment variable is set to true.
@@ -228,9 +406,11 @@ pub(crate) fn self_setup_enabled() -> bool {
 }
 
 /// Whether the self-setup UI/flow should be offered: the gate is enabled AND
-/// no usable GitHub App credentials exist yet.
-fn setup_available(has_usable_credentials: bool) -> bool {
-    self_setup_enabled() && !has_usable_credentials
+/// the retained state is truly unconfigured. Invalid Secret and
+/// undecryptable-persisted states require explicit recovery and never fall
+/// through to setup.
+fn setup_available(state: &CredentialSourceState) -> bool {
+    self_setup_enabled() && matches!(state, CredentialSourceState::Unconfigured)
 }
 
 /// Set a `djinn_setup_session` cookie scoped to the setup route prefix.
@@ -285,6 +465,161 @@ fn clear_setup_cookie(headers: &mut HeaderMap) {
     }
 }
 
+/// Set the short-lived capability used only by the setup CTA POST.
+///
+/// `SameSite=Strict` keeps the browser from attaching it to a cross-site
+/// form or fetch. The exact path avoids carrying it through the GitHub
+/// redirect/callback flow, and HttpOnly keeps UI JavaScript from turning it
+/// into another exposed boot token.
+fn set_setup_launch_cookie(headers: &mut HeaderMap, value: &str) {
+    let secure = if cookie_secure() { "; Secure" } else { "" };
+    let cookie = format!(
+        "{name}={value}; Path={path}; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}",
+        name = SETUP_LAUNCH_COOKIE,
+        path = SETUP_LAUNCH_PATH,
+        max_age = SETUP_LAUNCH_TTL_SECS,
+    );
+    if let Ok(hv) = HeaderValue::from_str(&cookie) {
+        headers.append(header::SET_COOKIE, hv);
+    }
+}
+
+fn clear_setup_launch_cookie(headers: &mut HeaderMap) {
+    let secure = if cookie_secure() { "; Secure" } else { "" };
+    let cookie = format!(
+        "{name}=; Path={path}; HttpOnly; SameSite=Strict; Max-Age=0; \
+         Expires=Thu, 01 Jan 1970 00:00:00 GMT{secure}",
+        name = SETUP_LAUNCH_COOKIE,
+        path = SETUP_LAUNCH_PATH,
+    );
+    if let Ok(hv) = HeaderValue::from_str(&cookie) {
+        headers.append(header::SET_COOKIE, hv);
+    }
+}
+
+/// Recover a same-origin operator from a stale setup page without exposing
+/// why capability validation failed. The SPA reload fetches `/auth/config`,
+/// which mints a fresh launch cookie when the local setup gate remains open.
+fn setup_launch_expired_redirect() -> Response {
+    let mut response_headers = HeaderMap::new();
+    clear_setup_launch_cookie(&mut response_headers);
+    response_headers.insert(
+        header::LOCATION,
+        HeaderValue::from_static("/?setup=expired"),
+    );
+    (StatusCode::SEE_OTHER, response_headers).into_response()
+}
+
+fn sec_fetch_site_is_same_origin(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("same-origin"))
+}
+
+#[derive(Debug, Clone)]
+struct SetupLaunchOrigin {
+    scheme: String,
+    authority: Authority,
+}
+
+/// The browser CTA is deliberately local-only. Fetch metadata and Origin are
+/// browser CSRF defenses, not an authorization boundary for arbitrary HTTP
+/// clients; restricting the configured callback origin to the OS loopback
+/// interface gives the direct-client path an explicit local trust boundary.
+fn configured_loopback_setup_origin(public_url: &str) -> Option<SetupLaunchOrigin> {
+    let uri = public_url.parse::<Uri>().ok()?;
+    let scheme = uri.scheme_str()?;
+    if !matches!(scheme, "http" | "https") {
+        return None;
+    }
+    let authority = uri.authority()?.clone();
+    let host = authority
+        .host()
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or_else(|| authority.host());
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .is_some_and(|address| address.is_loopback());
+    loopback.then(|| SetupLaunchOrigin {
+        scheme: scheme.to_ascii_lowercase(),
+        authority,
+    })
+}
+
+fn request_host_matches_configured(headers: &HeaderMap, configured: &SetupLaunchOrigin) -> bool {
+    headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Authority>().ok())
+        .is_some_and(|authority| {
+            authority
+                .as_str()
+                .eq_ignore_ascii_case(configured.authority.as_str())
+        })
+}
+
+/// Match the browser's serialized `Origin` exactly to `DJINN_PUBLIC_URL`'s
+/// origin. Comparing against configured state (not merely Origin vs Host)
+/// prevents DNS rebinding and catches localhost/127.0.0.1 alias drift before
+/// GitHub sends the callback to a host that lacks the setup cookie.
+fn request_origin_matches_configured(headers: &HeaderMap, configured: &SetupLaunchOrigin) -> bool {
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(uri) = origin.parse::<Uri>() else {
+        return false;
+    };
+    if !uri
+        .scheme_str()
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case(&configured.scheme))
+    {
+        return false;
+    }
+    if uri
+        .path_and_query()
+        .is_some_and(|value| value.as_str() != "/")
+    {
+        return false;
+    }
+    uri.authority().is_some_and(|authority| {
+        authority
+            .as_str()
+            .eq_ignore_ascii_case(configured.authority.as_str())
+    })
+}
+
+/// `/auth/config` is a GET, so browsers normally omit `Origin`. The
+/// browser fetch-metadata header plus exact configured Host are the issuance
+/// gate; if an Origin is present, it must also equal the configured origin.
+fn same_origin_config_fetch(headers: &HeaderMap, configured: &SetupLaunchOrigin) -> bool {
+    sec_fetch_site_is_same_origin(headers)
+        && request_host_matches_configured(headers, configured)
+        && (!headers.contains_key(header::ORIGIN)
+            || request_origin_matches_configured(headers, configured))
+}
+
+fn local_setup_launch_available(headers: &HeaderMap, configured_public_url: &str) -> bool {
+    configured_loopback_setup_origin(configured_public_url)
+        .as_ref()
+        .is_some_and(|configured| same_origin_config_fetch(headers, configured))
+}
+
+/// The form POST has both browser signals. Require both so a same-site page
+/// on another localhost port cannot ride the Strict cookie into setup, and
+/// bind both signals to the configured callback origin.
+fn same_origin_setup_post(headers: &HeaderMap, configured: &SetupLaunchOrigin) -> bool {
+    sec_fetch_site_is_same_origin(headers)
+        && request_host_matches_configured(headers, configured)
+        && request_origin_matches_configured(headers, configured)
+}
+
 /// Set the install-continuation cookie, which carries the manifest-flow
 /// nonce through the cross-domain GitHub install round-trip.
 ///
@@ -321,11 +656,11 @@ fn clear_install_continuation_cookie(headers: &mut HeaderMap) {
 }
 
 /// Guard for setup routes: returns `Some(404 response)` when the self-setup
-/// gate is closed (disabled or usable credentials already exist), or `None`
-/// when setup is available and the handler should proceed.
+/// gate is closed (disabled or state is anything except truly unconfigured),
+/// or `None` when setup is available and the handler should proceed.
 async fn setup_route_guard(state: &AppState) -> Option<Response> {
-    let has_usable = state.app_config().await.is_some();
-    if !setup_available(has_usable) {
+    let credential_state = state.app_credential_state().await;
+    if !setup_available(&credential_state) {
         return Some(StatusCode::NOT_FOUND.into_response());
     }
     None
@@ -557,6 +892,80 @@ struct CallbackQuery {
     setup_action: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum OAuthCallbackOrigin {
+    /// OAuth explicitly started by `/auth/github/start`, protected by the
+    /// normal state parameter + HttpOnly state cookie pair.
+    Stateful {
+        want_install: bool,
+        redirect: String,
+    },
+    /// OAuth automatically started by GitHub after App installation. GitHub
+    /// documents this callback as `code`-only, so the pending manifest
+    /// continuation cookie is the CSRF correlation instead.
+    InstallInitiated { continuation: String },
+}
+
+async fn resolve_oauth_callback_origin(
+    state: &AppState,
+    q: &CallbackQuery,
+    headers: &HeaderMap,
+) -> Result<(String, OAuthCallbackOrigin), Response> {
+    let Some(code) = q.code.as_deref().filter(|code| !code.is_empty()) else {
+        return Err((StatusCode::BAD_REQUEST, "missing code").into_response());
+    };
+
+    if let Some(state_param) = q.state.as_deref().filter(|state| !state.is_empty()) {
+        let Some(cookie_raw) = extract_cookie(headers, OAUTH_STATE_COOKIE) else {
+            return Err((StatusCode::BAD_REQUEST, "missing state cookie").into_response());
+        };
+        // Cookie format: `<state>|i0|<redirect>` or
+        // `<state>|i1|<redirect>`. Legacy `<state>|<redirect>` remains valid
+        // for callbacks already in flight during an upgrade.
+        let mut parts = cookie_raw.splitn(3, '|');
+        let cookie_state = parts.next().unwrap_or("");
+        let (want_install, redirect) = match (parts.next(), parts.next()) {
+            (Some("i1"), Some(redirect)) => (true, redirect.to_string()),
+            (Some("i0"), Some(redirect)) => (false, redirect.to_string()),
+            (Some(redirect), None) => (false, redirect.to_string()),
+            _ => (false, "/".to_string()),
+        };
+        if !constant_time_eq(cookie_state.as_bytes(), state_param.as_bytes()) {
+            return Err((StatusCode::BAD_REQUEST, "state mismatch").into_response());
+        }
+        return Ok((
+            code.to_string(),
+            OAuthCallbackOrigin::Stateful {
+                want_install,
+                redirect,
+            },
+        ));
+    }
+
+    let Some(continuation) = extract_cookie(headers, INSTALL_CONTINUATION_COOKIE) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "missing OAuth state or install continuation cookie",
+        )
+            .into_response());
+    };
+    if !state
+        .validate_pending_install_continuation(&continuation)
+        .await
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "invalid or expired install continuation",
+        )
+            .into_response());
+    }
+
+    Ok((
+        code.to_string(),
+        OAuthCallbackOrigin::InstallInitiated { continuation },
+    ))
+}
+
 async fn github_callback(
     State(state): State<AppState>,
     Query(q): Query<CallbackQuery>,
@@ -569,7 +978,8 @@ async fn github_callback(
     // `installation_id` actually gets captured and `org_config` is written
     // — bouncing straight home (the old behaviour) silently lost the
     // binding and left the deployment half-configured.
-    if let Some(installation_id) = q.installation_id.as_ref()
+    if q.code.as_deref().filter(|code| !code.is_empty()).is_none()
+        && let Some(installation_id) = q.installation_id.as_ref()
         && q.setup_action.as_deref() == Some("install")
     {
         let mut resp_headers = HeaderMap::new();
@@ -600,29 +1010,19 @@ async fn github_callback(
         return (StatusCode::FOUND, resp_headers).into_response();
     }
 
-    let (code, state_param) = match (q.code, q.state) {
-        (Some(c), Some(s)) if !c.is_empty() && !s.is_empty() => (c, s),
-        _ => return (StatusCode::BAD_REQUEST, "missing code or state").into_response(),
+    let (code, callback_origin) = match resolve_oauth_callback_origin(&state, &q, &headers).await {
+        Ok(origin) => origin,
+        Err(response) => return response,
     };
-
-    let Some(cookie_raw) = extract_cookie(&headers, OAUTH_STATE_COOKIE) else {
-        return (StatusCode::BAD_REQUEST, "missing state cookie").into_response();
+    let (want_install, redirect, install_continuation) = match &callback_origin {
+        OAuthCallbackOrigin::Stateful {
+            want_install,
+            redirect,
+        } => (*want_install, redirect.clone(), None),
+        OAuthCallbackOrigin::InstallInitiated { continuation } => {
+            (false, "/".to_string(), Some(continuation.clone()))
+        }
     };
-    // Cookie format: `<state>|i0|<redirect>` or `<state>|i1|<redirect>`.
-    // Legacy format (`<state>|<redirect>`) is accepted for in-flight
-    // sign-ins during the rollout.
-    let mut parts = cookie_raw.splitn(3, '|');
-    let cookie_state = parts.next().unwrap_or("").to_string();
-    let (want_install, redirect) = match (parts.next(), parts.next()) {
-        (Some("i1"), Some(r)) => (true, r.to_string()),
-        (Some("i0"), Some(r)) => (false, r.to_string()),
-        // Legacy 2-part encoding.
-        (Some(r), None) => (false, r.to_string()),
-        _ => (false, "/".to_string()),
-    };
-    if !constant_time_eq(cookie_state.as_bytes(), state_param.as_bytes()) {
-        return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
-    }
 
     let active = state.app_config().await;
     let (client_id, client_secret) = match active.as_ref() {
@@ -645,14 +1045,7 @@ async fn github_callback(
 
     // 1. Exchange code for access token + (optional) refresh token.
     let callback_url = format!("{}/auth/github/callback", public_url());
-    let tokens = match github_app_user::exchange_code(
-        &client_id,
-        &client_secret,
-        &code,
-        &callback_url,
-    )
-    .await
-    {
+    let tokens = match exchange_user_code(&client_id, &client_secret, &code, &callback_url).await {
         Ok(t) => t,
         Err(e) => {
             tracing::error!(error = %e, "auth callback: token exchange failed");
@@ -660,6 +1053,57 @@ async fn github_callback(
         }
     };
     let access_token = tokens.access_token.clone();
+
+    // GitHub's install-triggered OAuth callback is not correlated with
+    // Djinn's normal OAuth `state`, so it must never create a browser session
+    // or bootstrap admin. Use the short-lived user token only to discover the
+    // just-authorized installation, then bind it through the authoritative
+    // App-JWT callback. Session creation happens in a second, stateful OAuth
+    // round-trip after binding.
+    if let Some(continuation) = install_continuation.as_deref() {
+        let installation_id = match list_user_installations(&access_token).await {
+            Ok(installations) => {
+                unique_selectable_installation_id(installations, allow_user_installations())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "install OAuth callback: user installation discovery failed; using picker",
+                );
+                None
+            }
+        };
+
+        let mut response_headers = HeaderMap::new();
+        let location = if let Some(installation_id) = installation_id {
+            format!(
+                "{}/auth/github/app-setup-callback?installation_id={installation_id}\
+                 &setup_action=install&{param}={nonce}",
+                public_url().trim_end_matches('/'),
+                param = INSTALL_CONTINUATION_PARAM,
+                nonce = urlencode(continuation),
+            )
+        } else {
+            // Zero or multiple installations are ambiguous. The existing
+            // setup picker performs the explicit choice. Keep the correlated
+            // nonce pending and move its browser copy into a cookie scoped to
+            // the picker endpoints. GET/POST validate that bearer capability,
+            // and POST consumes it only after the atomic org binding succeeds.
+            // This preserves the code-only no-session/no-admin invariant
+            // without exposing an unauthenticated first-binding surface.
+            clear_install_continuation_cookie(&mut response_headers);
+            crate::server::github_install::set_picker_capability_cookie(
+                &mut response_headers,
+                continuation,
+            );
+            format!("{}/", web_url().trim_end_matches('/'))
+        };
+        response_headers.insert(
+            header::LOCATION,
+            HeaderValue::from_str(&location).unwrap_or_else(|_| HeaderValue::from_static("/")),
+        );
+        return (StatusCode::FOUND, response_headers).into_response();
+    }
 
     // 2. Fetch /user to build the identity.
     let user = match fetch_github_user(&access_token).await {
@@ -673,24 +1117,12 @@ async fn github_callback(
     // 3. Phase 2: enforce "one deployment = one GitHub org". Look up the
     //    deployment's locked org; if absent the deployment isn't set up.
     //
-    //    Exception: the bootstrap flow (`want_install=true` on a fresh
-    //    deployment) routes through this handler *before* `org_config` can
-    //    possibly exist — the install redirect we emit at the end of this
-    //    function is what lets GitHub invoke `app_setup_callback`, which is
-    //    what writes `org_config`. If we rejected here, the setup flow could
-    //    never complete. So in that case we skip the org checks and create
-    //    the session; `app_setup_callback` still writes the binding on its
-    //    own authority (App JWT against `GET /app/installations/{id}`).
-    let org_repo = OrgConfigRepository::new(state.db().clone());
-    let org_cfg = match org_repo.get().await {
+    //    No OAuth mode may create a session before this binding exists. In
+    //    particular, the public `install=1` convenience flag cannot become a
+    //    bootstrap-admin bypass; the manifest flow binds first, then starts a
+    //    separate stateful OAuth callback.
+    let org_cfg = match load_org_config_for_auth(&state).await {
         Ok(Some(cfg)) => Some(cfg),
-        Ok(None) if want_install => {
-            tracing::info!(
-                user = %user.login,
-                "auth callback: bootstrap flow — skipping org_config/membership checks",
-            );
-            None
-        }
         Ok(None) => {
             tracing::warn!("auth callback: rejecting login — deployment has no org_config yet");
             return (
@@ -711,11 +1143,14 @@ async fn github_callback(
     //    *user* token we just got; it returns `state: "active"|"pending"` on
     //    2xx and 404 for non-members. We treat only `state == "active"` as
     //    a pass; pending invites still count as "not a member".
-    //
-    //    Skipped during bootstrap — there's no org yet to check membership
-    //    against; `app_setup_callback` validates the installation target
-    //    separately.
-    if let Some(cfg) = &org_cfg {
+    // A deployment bound to a personal account has no organization
+    // membership endpoint to consult. With the explicit opt-in enabled, only
+    // the exact bound GitHub identity (immutable id + login) is accepted.
+    let is_bound_personal_account = org_cfg.as_ref().is_some_and(|cfg| {
+        allow_user_installations() && binding_matches_user(cfg, user.id as i64, &user.login)
+    });
+
+    if let Some(cfg) = org_cfg.as_ref().filter(|_| !is_bound_personal_account) {
         match check_org_membership(&access_token, &cfg.github_org_login).await {
             Ok(true) => {}
             Ok(false) => {
@@ -767,20 +1202,18 @@ async fn github_callback(
 
     // Bootstrap admin: the first user to sign in (when no admin exists yet)
     // becomes admin. This is the only automatic admin grant — further changes
-    // are manual `UPDATE users SET is_admin = …`. Best-effort: a failure here
-    // must not block sign-in (the next login retries while admin_count is 0).
+    // are manual `UPDATE users SET is_admin = …`. The repository method uses a
+    // transaction-scoped advisory lock so concurrent first logins cannot both
+    // win. Best-effort: a failure here must not block sign-in (the next login
+    // retries while no admin exists).
     if !user_row.is_admin {
-        match users_repo.admin_count().await {
-            Ok(0) => {
-                if let Err(e) = users_repo.set_admin_status(&user_row.id, true).await {
-                    tracing::warn!(error = %e, user_id = %user_row.id, "auth callback: failed to stamp bootstrap admin");
-                } else {
-                    tracing::info!(user_id = %user_row.id, login = %user.login, "auth callback: stamped first user as admin");
-                }
+        match users_repo.grant_bootstrap_admin_if_none(&user_row.id).await {
+            Ok(true) => {
+                tracing::info!(user_id = %user_row.id, login = %user.login, "auth callback: stamped first user as admin");
             }
-            Ok(_) => {}
+            Ok(false) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "auth callback: admin_count check failed; skipping bootstrap");
+                tracing::warn!(error = %e, user_id = %user_row.id, "auth callback: bootstrap admin grant failed; skipping bootstrap");
             }
         }
     }
@@ -824,10 +1257,7 @@ async fn github_callback(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    // 4. Build redirect response with cookies.
-    //    If `?install=1` was passed to /start, we send the user to the App's
-    //    install page instead of the app home. Otherwise, honour the
-    //    site-local redirect.
+    // 7. Build redirect response with cookies.
     let mut resp_headers = HeaderMap::new();
     set_cookie(&mut resp_headers, SESSION_COOKIE, &token, SESSION_TTL_SECS);
     clear_cookie(&mut resp_headers, OAUTH_STATE_COOKIE);
@@ -839,11 +1269,7 @@ async fn github_callback(
             .as_ref()
             .map(|c| c.slug.clone())
             .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                std::env::var("GITHUB_APP_SLUG")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-            });
+            .or_else(djinn_provider::github_app::app_slug);
         match slug {
             Some(s) => format!("https://github.com/apps/{}/installations/new", s.trim()),
             None => {
@@ -859,6 +1285,17 @@ async fn github_callback(
         HeaderValue::from_str(&location).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
     (StatusCode::FOUND, resp_headers).into_response()
+}
+
+fn unique_selectable_installation_id(
+    installations: Vec<djinn_provider::github_app::Installation>,
+    allow_users: bool,
+) -> Option<u64> {
+    let mut selectable = installations.into_iter().filter(|installation| {
+        installation_account_type_allowed(&installation.account_type, allow_users)
+    });
+    let installation = selectable.next()?;
+    selectable.next().is_none().then_some(installation.id)
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -905,7 +1342,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
 
 // ─── GitHub API helpers ───────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 struct GhUser {
     id: u64,
     login: String,
@@ -916,6 +1353,10 @@ struct GhUser {
 }
 
 async fn fetch_github_user(access_token: &str) -> Result<GhUser, String> {
+    #[cfg(test)]
+    if let Some(result) = GITHUB_USER_RESULT_OVERRIDE.lock().unwrap().clone() {
+        return result;
+    }
     let user = GitHubServerClient::new().fetch_user(access_token).await?;
     Ok(GhUser {
         id: user.id,
@@ -923,6 +1364,44 @@ async fn fetch_github_user(access_token: &str) -> Result<GhUser, String> {
         name: user.name,
         avatar_url: user.avatar_url,
     })
+}
+
+async fn exchange_user_code(
+    client_id: &str,
+    client_secret: &str,
+    code: &str,
+    redirect_uri: &str,
+) -> Result<GithubUserTokens, String> {
+    #[cfg(test)]
+    if let Some(result) = OAUTH_EXCHANGE_RESULT_OVERRIDE.lock().unwrap().clone() {
+        return result;
+    }
+    github_app_user::exchange_code(client_id, client_secret, code, redirect_uri)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn list_user_installations(
+    access_token: &str,
+) -> Result<Vec<djinn_provider::github_app::Installation>, String> {
+    #[cfg(test)]
+    if let Some(result) = USER_INSTALLATIONS_RESULT_OVERRIDE.lock().unwrap().clone() {
+        return result;
+    }
+    djinn_provider::github_app::list_installations_for_user(access_token)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn load_org_config_for_auth(state: &AppState) -> Result<Option<OrgConfig>, String> {
+    #[cfg(test)]
+    if let Some(result) = ORG_CONFIG_RESULT_OVERRIDE.lock().unwrap().clone() {
+        return result;
+    }
+    OrgConfigRepository::new(state.db().clone())
+        .get()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Verify `access_token` belongs to an **active** member of `org_login`.
@@ -946,7 +1425,7 @@ async fn check_org_membership(access_token: &str, org_login: &str) -> Result<boo
 // ─── Cookie + misc helpers ────────────────────────────────────────────────────
 
 pub(super) fn public_url() -> String {
-    std::env::var("DJINN_PUBLIC_URL").unwrap_or_else(|_| DEFAULT_PUBLIC_URL.to_string())
+    djinn_provider::github_app::public_url()
 }
 
 /// Where to send the browser after a completed OAuth/install flow.
@@ -1079,12 +1558,10 @@ pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 // ─── GitHub App install flow ──────────────────────────────────────────────────
 //
-// The legacy in-UI manifest auto-provision wizard is gone — App credentials
-// are provisioned exclusively via the `djinn-github-app` Kubernetes Secret
-// (see `server/docker/README.md`). The only endpoint that survives in this
-// section is `GET /auth/github/app-setup-callback` (further down): GitHub
-// posts the user there after they complete an App install on the target
-// org, and we use that callback to bind `org_config`.
+// GitHub sends the browser here after an App installation has been resolved
+// by the OAuth callback or selected through the existing installation picker.
+// This callback authoritatively resolves the installation with the App JWT
+// and binds the selected account to this deployment.
 
 /// Query parameters for `GET /auth/github/app-setup-callback` — GitHub
 /// appends `?installation_id=<N>&setup_action=install` after the user
@@ -1134,9 +1611,11 @@ async fn app_setup_callback(
     let action = q.setup_action.as_deref().unwrap_or("");
 
     // Validate install-continuation state when a manifest flow just completed.
-    // A pending nonce means this callback must carry the matching continuation
-    // nonce. Non-manifest flows (pre-configured credentials) have no pending
-    // nonce, so they pass through unconditionally.
+    // Creating the initial deployment binding always requires the matching
+    // nonce. A no-nonce callback is accepted only as an idempotent replay for
+    // the exact installation already stored in org_config; otherwise this
+    // public callback would bypass the picker capability and let a drive-by
+    // request win the first-binding race.
     //
     // The nonce can arrive via:
     //   1. The `djinn_continuation` query param — set by `github_callback`
@@ -1149,10 +1628,30 @@ async fn app_setup_callback(
         .continuation_state
         .as_deref()
         .or(continuation_cookie.as_deref());
-    if !state
-        .validate_and_consume_install_continuation(continuation_candidate)
-        .await
+    let continuation_pending = state.has_pending_install_continuation().await;
+    let uncorrelated_idempotent_replay = if !continuation_pending
+        && continuation_candidate.is_none()
     {
+        match OrgConfigRepository::new(state.db().clone()).get().await {
+            Ok(Some(existing)) => existing.installation_id as u64 == installation_id,
+            Ok(None) => false,
+            Err(error) => {
+                tracing::error!(%error, "app_setup_callback: org_config read failed during continuation check");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    } else {
+        false
+    };
+    let continuation_valid = match (continuation_pending, continuation_candidate) {
+        (true, Some(candidate)) => state.validate_pending_install_continuation(candidate).await,
+        (false, None) => uncorrelated_idempotent_replay,
+        // A pending manifest flow always requires the nonce; a nonce with no
+        // pending flow is stale or replayed and must not turn into an
+        // unrestricted non-manifest callback.
+        _ => false,
+    };
+    if !continuation_valid {
         tracing::warn!(
             installation_id,
             "app_setup_callback: install-continuation state mismatch or missing"
@@ -1200,79 +1699,145 @@ async fn app_setup_callback(
         }
     };
 
-    if !installation
-        .account()
-        .account_type
-        .eq_ignore_ascii_case("Organization")
-    {
+    if !installation_account_type_allowed(
+        &installation.account().account_type,
+        allow_user_installations(),
+    ) {
         tracing::warn!(
             installation_id,
             account_type = %installation.account().account_type,
             account_login = %installation.account().login,
-            "app_setup_callback: rejecting non-org installation",
+            "app_setup_callback: rejecting unsupported installation account type",
         );
         return (
             StatusCode::BAD_REQUEST,
             format!(
-                "This deployment requires a GitHub *organization* installation, \
-                 but installation {installation_id} is bound to account '{}' (type={}). \
-                 Reinstall the App on an organization.",
-                installation.account().login,
+                "This deployment does not allow GitHub account type '{}' for installation \
+                 {installation_id}. Organization installations are always supported; User \
+                 installations require DJINN_ALLOW_USER_INSTALLATIONS=true.",
                 installation.account().account_type,
             ),
         )
             .into_response();
     }
 
-    let org_repo = OrgConfigRepository::new(state.db().clone());
-    // Idempotency: if org_config already points at this installation, the
-    // user probably double-clicked or reloaded — don't surface a confusing
-    // 409, just redirect them home.
-    if let Ok(Some(existing)) = org_repo.get().await
-        && existing.installation_id as u64 == installation_id
-        && existing.github_org_id as u64 == installation.account().id
+    if installation
+        .account()
+        .account_type
+        .eq_ignore_ascii_case("User")
     {
         tracing::info!(
             installation_id,
-            action,
-            "app_setup_callback: re-entry for already-bound org, redirecting home",
+            account_login = %installation.account().login,
+            "app_setup_callback: accepting explicitly enabled personal-account installation",
         );
-        let mut resp = redirect_to_web();
-        let mut extra = HeaderMap::new();
-        clear_install_continuation_cookie(&mut extra);
-        merge_set_cookie(&mut resp, &extra);
-        return resp;
     }
 
-    if let Err(e) = org_repo
-        .set(NewOrgConfig {
-            github_org_id: installation.account().id as i64,
-            github_org_login: &installation.account().login,
-            app_id: cfg.app_id as i64,
-            installation_id: installation_id as i64,
-        })
-        .await
-    {
-        tracing::error!(
-            error = %e,
+    // Keep the stored `org_config` shape for compatibility. Personal bindings
+    // are distinguished later by exact account-id/login matching rather than
+    // by pretending GitHub exposes an organization membership roster.
+
+    let org_repo = OrgConfigRepository::new(state.db().clone());
+    let matches_installation = |existing: &OrgConfig| {
+        existing.installation_id as u64 == installation_id
+            && existing.github_org_id as u64 == installation.account().id
+    };
+
+    // Setup callbacks are one-shot. A repeat callback for the exact binding
+    // is idempotent, but a different installation must never replace an
+    // established deployment binding.
+    let already_bound = match org_repo.get().await {
+        Ok(Some(existing)) if matches_installation(&existing) => true,
+        Ok(Some(_)) => {
+            return (
+                StatusCode::CONFLICT,
+                "This deployment is already bound to a different GitHub installation.",
+            )
+                .into_response();
+        }
+        Ok(None) => false,
+        Err(error) => {
+            tracing::error!(error = %error, "app_setup_callback: org_config read failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    if !already_bound {
+        match org_repo
+            .create_if_absent(NewOrgConfig {
+                github_org_id: installation.account().id as i64,
+                github_org_login: &installation.account().login,
+                app_id: cfg.app_id as i64,
+                installation_id: installation_id as i64,
+            })
+            .await
+        {
+            Ok(Some(_)) => {
+                tracing::info!(
+                    installation_id,
+                    account = %installation.account().login,
+                    action,
+                    "app_setup_callback: org_config bound",
+                );
+            }
+            Ok(None) => {
+                // Another callback won the insert race. Treat an identical
+                // winner as an idempotent retry; reject any different binding.
+                match org_repo.get().await {
+                    Ok(Some(existing)) if matches_installation(&existing) => {}
+                    Ok(Some(_)) => {
+                        return (
+                            StatusCode::CONFLICT,
+                            "This deployment was concurrently bound to a different GitHub installation.",
+                        )
+                            .into_response();
+                    }
+                    Ok(None) => {
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                    Err(error) => {
+                        tracing::error!(error = %error, "app_setup_callback: org_config race read failed");
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    installation_id,
+                    account = %installation.account().login,
+                    "app_setup_callback: org_config create failed",
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to persist org binding. Check server logs.",
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    if already_bound {
+        tracing::info!(
             installation_id,
-            account = %installation.account().login,
-            "app_setup_callback: org_config set failed",
+            action,
+            "app_setup_callback: idempotent re-entry for existing binding",
         );
+    }
+    if continuation_pending
+        && !state
+            .consume_pending_install_continuation(
+                continuation_candidate.expect("validated continuation candidate"),
+            )
+            .await
+    {
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to persist org binding. Check server logs.",
+            StatusCode::CONFLICT,
+            "install continuation was already consumed — restart setup",
         )
             .into_response();
     }
-
-    tracing::info!(
-        installation_id,
-        account = %installation.account().login,
-        action,
-        "app_setup_callback: org_config bound",
-    );
-    let mut resp = redirect_to_web();
+    let mut resp = redirect_after_install_binding(continuation_pending);
     let mut extra = HeaderMap::new();
     clear_install_continuation_cookie(&mut extra);
     merge_set_cookie(&mut resp, &extra);
@@ -1290,8 +1855,29 @@ fn redirect_to_web() -> Response {
     (StatusCode::FOUND, resp_headers).into_response()
 }
 
+/// A manifest-origin install callback has only the install-continuation CSRF
+/// proof, not an OAuth `state`. Once the authoritative App-JWT binding is
+/// persisted, start the normal stateful OAuth flow; only that later callback
+/// may create a browser session or bootstrap the first admin.
+fn redirect_after_install_binding(manifest_origin: bool) -> Response {
+    if !manifest_origin {
+        return redirect_to_web();
+    }
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::LOCATION,
+        HeaderValue::from_static("/auth/github/start?redirect=%2F"),
+    );
+    (StatusCode::FOUND, headers).into_response()
+}
+
 /// Fetch an installation's account info via the App JWT.
 async fn fetch_installation_for_setup(installation_id: u64) -> Result<AppInstallation, String> {
+    #[cfg(test)]
+    if let Some(result) = APP_INSTALLATION_RESULT_OVERRIDE.lock().unwrap().clone() {
+        return result;
+    }
     let jwt = mint_app_jwt_anyhow().map_err(|e| e.to_string())?;
     GitHubServerClient::new()
         .fetch_app_installation(&jwt, installation_id)
@@ -1322,27 +1908,93 @@ struct SetupStatusResponse {
     /// The org this deployment is locked to, once known. Sourced
     /// exclusively from the `org_config` DB row written by the picker.
     org_login: Option<String>,
+    credential_source: Option<&'static str>,
+    setup_state: &'static str,
+    setup_error: Option<String>,
+    setup_retryable: bool,
+    credentials_unrecoverable: bool,
 }
 
-async fn setup_status(State(state): State<AppState>) -> Json<SetupStatusResponse> {
-    let app_cfg = state.app_config().await;
+async fn setup_status(
+    State(state): State<AppState>,
+) -> Result<Json<SetupStatusResponse>, (StatusCode, &'static str)> {
+    let credential_state = state.app_credential_state().await;
+    let app_cfg = credential_state.app_config();
+    let status = credential_status_fields(&credential_state);
     let org_cfg = OrgConfigRepository::new(state.db().clone())
         .get()
         .await
-        .ok()
-        .flatten();
+        .map_err(|error| {
+            tracing::error!(%error, "setup status: failed to read installation binding");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read GitHub installation binding",
+            )
+        })?;
     let needs_app_install = app_cfg.is_none() || org_cfg.is_none();
     let app_credentials_configured = app_cfg.is_some();
     let org_login = org_cfg.map(|c| c.github_org_login);
 
-    Json(SetupStatusResponse {
+    Ok(Json(SetupStatusResponse {
         needs_app_install,
         app_credentials_configured,
         org_login,
-    })
+        credential_source: status.credential_source,
+        setup_state: status.setup_state,
+        setup_error: status.setup_error,
+        setup_retryable: status.setup_retryable,
+        credentials_unrecoverable: status.credentials_unrecoverable,
+    }))
 }
 
 // ─── Self-setup create-app + manifest-callback handlers ───────────────────────
+
+/// `POST /auth/github/setup-start` — explicit browser-only entry point for
+/// the local onboarding CTA.
+///
+/// `/auth/config` issues a short-lived HttpOnly, SameSite=Strict capability
+/// only to a same-origin browser fetch. This endpoint requires that cookie,
+/// independently checks the browser's same-origin fetch metadata + Origin,
+/// consumes the capability, and only then establishes the Lax setup session
+/// needed for GitHub's cross-site callback.
+async fn setup_start(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = setup_route_guard(&state).await {
+        return resp;
+    }
+
+    let Some(configured_origin) = configured_loopback_setup_origin(&public_url()) else {
+        // Remote deployments retain the explicit boot-token/operator path,
+        // but never expose the browser-mintable setup authority.
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    // Validate the browser context before looking up or consuming the token.
+    // A cross-site request must not be able to burn the legitimate operator's
+    // one-shot capability as a denial of service.
+    if !same_origin_setup_post(&headers, &configured_origin) {
+        return (
+            StatusCode::FORBIDDEN,
+            "same-origin browser request required",
+        )
+            .into_response();
+    }
+
+    let Some(launch_token) = extract_cookie(&headers, SETUP_LAUNCH_COOKIE) else {
+        return setup_launch_expired_redirect();
+    };
+    if !state.consume_setup_launch_capability(&launch_token).await {
+        return setup_launch_expired_redirect();
+    }
+
+    let existing_setup_cookie = extract_cookie(&headers, SETUP_SESSION_COOKIE);
+    let session_value = state
+        .begin_browser_setup_session(existing_setup_cookie.as_deref())
+        .await;
+    let mut response = render_manifest_form();
+    set_setup_cookie(response.headers_mut(), &session_value);
+    clear_setup_launch_cookie(response.headers_mut());
+    response
+}
 
 /// Query parameters for `GET /auth/github/create-app`.
 ///
@@ -1351,6 +2003,48 @@ async fn setup_status(State(state): State<AppState>) -> Json<SetupStatusResponse
 #[derive(Deserialize)]
 struct CreateAppQuery {
     setup_token: Option<String>,
+}
+
+/// Render the GitHub App manifest form shared by the boot-token fallback and
+/// the browser setup CTA. The form auto-submits on navigation; no Djinn
+/// credential or setup capability is included in the document.
+fn render_manifest_form() -> Response {
+    let public = public_url();
+    // GitHub App names are globally unique. Generate a fresh suffix for every
+    // manifest form so a retry or a second local operator does not collide on
+    // the old deterministic `djinn-localhost` name. This randomness is
+    // independent from the boot/setup token.
+    let manifest = build_manifest_json(&public, &manifest_name_suffix());
+    let manifest_json = manifest.to_string();
+    let csrf = random_token_b64();
+    let manifest_escaped = html_attr_escape(&manifest_json);
+    let csrf_escaped = html_attr_escape(&csrf);
+
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Create Djinn GitHub App</title></head>\
+         <body><p>Redirecting to GitHub to create the Djinn App…</p>\
+         <form id=\"f\" method=\"post\" action=\"https://github.com/settings/apps/new?state={csrf}\">\
+         <input type=\"hidden\" name=\"manifest\" value=\"{manifest}\" />\
+         <noscript><button type=\"submit\">Continue to GitHub</button></noscript>\
+         </form>\
+         <script>document.getElementById('f').submit();</script>\
+         </body></html>",
+        csrf = csrf_escaped,
+        manifest = manifest_escaped,
+    );
+
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    set_cookie(
+        &mut resp_headers,
+        MANIFEST_STATE_COOKIE,
+        &csrf,
+        STATE_COOKIE_TTL_SECS,
+    );
+    (StatusCode::OK, resp_headers, html).into_response()
 }
 
 /// `GET /auth/github/create-app` — the self-setup entry point.
@@ -1411,41 +2105,7 @@ async fn create_app(
             .into_response();
     }
 
-    // Build the manifest and render an auto-submitting HTML form that
-    // navigates to GitHub's App creation page. The CSRF state cookie
-    // protects the manifest-code callback below.
-    let public = public_url();
-    let manifest = build_manifest_json(&public);
-    let manifest_json = manifest.to_string();
-    let csrf = random_token_b64();
-    let manifest_escaped = html_attr_escape(&manifest_json);
-    let csrf_escaped = html_attr_escape(&csrf);
-
-    let html = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Create Djinn GitHub App</title></head>\
-         <body><p>Redirecting to GitHub to create the Djinn App…</p>\
-         <form id=\"f\" method=\"post\" action=\"https://github.com/settings/apps/new?state={csrf}\">\
-         <input type=\"hidden\" name=\"manifest\" value=\"{manifest}\" />\
-         <noscript><button type=\"submit\">Continue to GitHub</button></noscript>\
-         </form>\
-         <script>document.getElementById('f').submit();</script>\
-         </body></html>",
-        csrf = csrf_escaped,
-        manifest = manifest_escaped,
-    );
-
-    let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/html; charset=utf-8"),
-    );
-    set_cookie(
-        &mut resp_headers,
-        MANIFEST_STATE_COOKIE,
-        &csrf,
-        STATE_COOKIE_TTL_SECS,
-    );
-    (StatusCode::OK, resp_headers, html).into_response()
+    render_manifest_form()
 }
 
 /// `GET /auth/github/app-manifest-callback` — handles the callback from
@@ -1592,28 +2252,39 @@ async fn app_manifest_callback(
 /// Pure function so tests can pin its shape. Requirements:
 /// - App name prefix is `djinn-`
 /// - `request_oauth_on_install: true`
-/// - webhook inactive
-/// - permissions exactly `contents: write` and `pull_requests: write`
-pub(crate) fn build_manifest_json(public_url: &str) -> serde_json::Value {
+/// - no webhook configuration (Djinn does not consume GitHub webhooks)
+/// - permissions match the repo, CI-status, and org-membership APIs Djinn uses
+pub(crate) fn build_manifest_json(public_url: &str, name_suffix: &str) -> serde_json::Value {
     // GitHub automatically grants `metadata: read` as a base permission; we
     // only list the permissions we explicitly need.
     let permissions = serde_json::json!({
+        "actions": "read",
+        "checks": "read",
         "contents": "write",
+        "members": "read",
         "pull_requests": "write",
     });
     serde_json::json!({
-        "name": format!("djinn-{}", url_host(public_url).unwrap_or_else(|| "local".to_string())),
+        "name": format!(
+            "djinn-{}-{}",
+            url_host(public_url).unwrap_or_else(|| "local".to_string()),
+            name_suffix
+        ),
         "url": public_url,
-        "hook_attributes": {
-            "url": format!("{}/webhooks/github", public_url),
-            "active": false,
-        },
         "redirect_url": format!("{}/auth/github/app-manifest-callback", public_url),
         "callback_urls": [format!("{}/auth/github/callback", public_url)],
         "request_oauth_on_install": true,
         "public": false,
         "default_permissions": permissions,
     })
+}
+
+fn manifest_name_suffix() -> String {
+    random_token_b64()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(8)
+        .collect()
 }
 
 /// Lightweight URL host parser: strip scheme, take up to first `/` or `:`.
@@ -1669,6 +2340,27 @@ static EXCHANGE_MANIFEST_RESULT_OVERRIDE: std::sync::Mutex<
     Option<Result<ManifestConversion, String>>,
 > = std::sync::Mutex::new(None);
 
+#[cfg(test)]
+static OAUTH_EXCHANGE_RESULT_OVERRIDE: std::sync::Mutex<Option<Result<GithubUserTokens, String>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static GITHUB_USER_RESULT_OVERRIDE: std::sync::Mutex<Option<Result<GhUser, String>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static USER_INSTALLATIONS_RESULT_OVERRIDE: std::sync::Mutex<
+    Option<Result<Vec<djinn_provider::github_app::Installation>, String>>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static APP_INSTALLATION_RESULT_OVERRIDE: std::sync::Mutex<Option<Result<AppInstallation, String>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static ORG_CONFIG_RESULT_OVERRIDE: std::sync::Mutex<Option<Result<Option<OrgConfig>, String>>> =
+    std::sync::Mutex::new(None);
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1696,6 +2388,66 @@ mod tests {
             HeaderValue::from_str(&format!("{SETUP_SESSION_COOKIE}={token}")).unwrap(),
         );
         headers
+    }
+
+    fn same_origin_config_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8372"));
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        headers
+    }
+
+    fn same_origin_setup_headers(launch_token: &str) -> HeaderMap {
+        let mut headers = same_origin_config_headers();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:8372"),
+        );
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SETUP_LAUNCH_COOKIE}={launch_token}")).unwrap(),
+        );
+        headers
+    }
+
+    fn set_cookie_value(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
+        for value in headers.get_all(header::SET_COOKIE) {
+            let raw = value.to_str().ok()?;
+            let pair = raw.split(';').next()?;
+            let (name, value) = pair.split_once('=')?;
+            if name == cookie_name {
+                return Some(value.to_string());
+            }
+        }
+        None
+    }
+
+    fn assert_setup_expired_recovery(response: &Response) {
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/?setup=expired")
+        );
+        assert_eq!(
+            set_cookie_value(response.headers(), SETUP_LAUNCH_COOKIE).as_deref(),
+            Some(""),
+            "recovery must clear the stale launch cookie"
+        );
+        assert!(
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(|cookie| {
+                    cookie.starts_with(&format!("{SETUP_LAUNCH_COOKIE}="))
+                        && cookie.contains("Max-Age=0")
+                }),
+            "recovery must expire the launch cookie"
+        );
     }
 
     #[test]
@@ -1726,6 +2478,399 @@ mod tests {
         assert_eq!(
             urlencode("read:user user:email repo"),
             "read%3Auser%20user%3Aemail%20repo"
+        );
+    }
+
+    #[test]
+    fn personal_installation_policy_is_default_deny_and_user_only() {
+        assert!(!parse_allow_user_installations(None));
+        assert!(!parse_allow_user_installations(Some("false")));
+        assert!(parse_allow_user_installations(Some(" true ")));
+        assert!(parse_allow_user_installations(Some("1")));
+
+        assert!(installation_account_type_allowed("Organization", false));
+        assert!(!installation_account_type_allowed("User", false));
+        assert!(installation_account_type_allowed("User", true));
+        assert!(!installation_account_type_allowed("Bot", true));
+        assert!(!installation_account_type_allowed("Enterprise", true));
+    }
+
+    #[test]
+    fn personal_binding_requires_exact_id_and_login() {
+        let binding = OrgConfig {
+            id: 1,
+            github_org_id: 42,
+            github_org_login: "OctoCat".into(),
+            app_id: 7,
+            installation_id: 9,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        assert!(binding_matches_user(&binding, 42, "octocat"));
+        assert!(!binding_matches_user(&binding, 43, "octocat"));
+        assert!(!binding_matches_user(&binding, 42, "someone-else"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_initiated_code_only_callback_uses_continuation_without_oauth_state_cookie() {
+        use crate::test_helpers;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        let continuation = "manifest-install-continuation";
+        state
+            .set_pending_install_continuation_for_tests(Some(continuation.to_string()))
+            .await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{INSTALL_CONTINUATION_COOKIE}={continuation}"))
+                .unwrap(),
+        );
+        assert!(extract_cookie(&headers, OAUTH_STATE_COOKIE).is_none());
+
+        let query = CallbackQuery {
+            code: Some("install-oauth-code".into()),
+            state: None,
+            installation_id: None,
+            setup_action: None,
+        };
+        let origin = resolve_oauth_callback_origin(&state, &query, &headers)
+            .await
+            .expect("valid install continuation must authenticate a code-only callback");
+        assert_eq!(
+            origin,
+            (
+                "install-oauth-code".to_string(),
+                OAuthCallbackOrigin::InstallInitiated {
+                    continuation: continuation.to_string(),
+                },
+            )
+        );
+        assert!(
+            state
+                .validate_pending_install_continuation(continuation)
+                .await,
+            "classification must not consume the retry nonce before binding/transition"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_initiated_oauth_routes_unique_installation_without_session_or_admin() {
+        use crate::test_helpers;
+        use djinn_provider::github_app::Installation;
+
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        state
+            .set_app_config(Some(Arc::new(djinn_provider::github_app::AppConfig {
+                app_id: 42,
+                slug: "djinn-install-test".into(),
+                client_id: "Iv1.install-test".into(),
+                client_secret: "install-secret".into(),
+                pem: "PEM".into(),
+                webhook_secret: String::new(),
+                public_url: "http://127.0.0.1:8372".into(),
+            })))
+            .await;
+
+        let continuation = "install-oauth-roundtrip";
+        state
+            .set_pending_install_continuation_for_tests(Some(continuation.into()))
+            .await;
+        *OAUTH_EXCHANGE_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(GithubUserTokens {
+            access_token: "ghu_install_user".into(),
+            expires_in: Some(28_800),
+            refresh_token: Some("ghr_install_user".into()),
+            refresh_token_expires_in: Some(15_897_600),
+        }));
+        *USER_INSTALLATIONS_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(vec![Installation {
+            id: 777,
+            account_login: "acme".into(),
+            account_type: "Organization".into(),
+            target_type: "Organization".into(),
+        }]));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{INSTALL_CONTINUATION_COOKIE}={continuation}"))
+                .unwrap(),
+        );
+        let response = github_callback(
+            State(state.clone()),
+            Query(CallbackQuery {
+                code: Some("github-install-code".into()),
+                state: None,
+                installation_id: None,
+                setup_action: None,
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(location.contains("/auth/github/app-setup-callback"));
+        assert!(location.contains("installation_id=777"));
+        assert!(location.contains(&format!("{INSTALL_CONTINUATION_PARAM}={continuation}")));
+        assert!(
+            !response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(|cookie| cookie.starts_with(&format!("{SESSION_COOKIE}="))),
+            "code-only install OAuth must not create a browser session"
+        );
+        assert!(
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .all(|cookie| !cookie.starts_with(&format!("{OAUTH_STATE_COOKIE}="))),
+            "install-triggered callback does not mint normal OAuth state retroactively"
+        );
+        assert!(
+            state
+                .validate_pending_install_continuation(continuation)
+                .await,
+            "nonce remains pending until the authoritative binding callback succeeds"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ambiguous_install_oauth_issues_picker_capability_without_session_or_admin() {
+        use crate::test_helpers;
+        use djinn_provider::github_app::Installation;
+
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        state
+            .set_app_config(Some(Arc::new(djinn_provider::github_app::AppConfig {
+                app_id: 42,
+                slug: "djinn-picker-test".into(),
+                client_id: "Iv1.picker-test".into(),
+                client_secret: "picker-secret".into(),
+                pem: "PEM".into(),
+                webhook_secret: String::new(),
+                public_url: "http://127.0.0.1:8372".into(),
+            })))
+            .await;
+
+        let continuation = "ambiguous-install-continuation";
+        state
+            .set_pending_install_continuation_for_tests(Some(continuation.into()))
+            .await;
+        *OAUTH_EXCHANGE_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(GithubUserTokens {
+            access_token: "ghu_ambiguous_install_user".into(),
+            expires_in: Some(28_800),
+            refresh_token: Some("ghr_ambiguous_install_user".into()),
+            refresh_token_expires_in: Some(15_897_600),
+        }));
+        *USER_INSTALLATIONS_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(vec![
+            Installation {
+                id: 777,
+                account_login: "acme".into(),
+                account_type: "Organization".into(),
+                target_type: "Organization".into(),
+            },
+            Installation {
+                id: 888,
+                account_login: "other-org".into(),
+                account_type: "Organization".into(),
+                target_type: "Organization".into(),
+            },
+        ]));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{INSTALL_CONTINUATION_COOKIE}={continuation}"))
+                .unwrap(),
+        );
+        let response = github_callback(
+            State(state.clone()),
+            Query(CallbackQuery {
+                code: Some("github-ambiguous-install-code".into()),
+                state: None,
+                installation_id: None,
+                setup_action: None,
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "http://127.0.0.1:8372/"
+        );
+        let picker_cookie = extract_set_cookie_value(
+            &response,
+            crate::server::github_install::INSTALL_PICKER_CAPABILITY_COOKIE,
+        )
+        .expect("ambiguous continuation must become a picker capability");
+        assert_eq!(picker_cookie, continuation);
+        assert!(
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(|cookie| {
+                    cookie.starts_with(&format!(
+                        "{}=",
+                        crate::server::github_install::INSTALL_PICKER_CAPABILITY_COOKIE
+                    )) && cookie.contains("Path=/api/github/installations")
+                        && cookie.contains("HttpOnly")
+                        && cookie.contains("SameSite=Lax")
+                }),
+            "picker capability must be HttpOnly, same-site, and path-scoped"
+        );
+        assert!(
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(|cookie| {
+                    cookie.starts_with(&format!("{INSTALL_CONTINUATION_COOKIE}="))
+                        && cookie.contains("Max-Age=0")
+                }),
+            "the broader auth-path continuation cookie must be retired"
+        );
+        assert!(
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .all(|cookie| !cookie.starts_with(&format!("{SESSION_COOKIE}="))),
+            "ambiguous code-only OAuth must not create a Djinn session"
+        );
+        assert_eq!(
+            UserRepository::new(state.db().clone())
+                .admin_count()
+                .await
+                .unwrap(),
+            0,
+            "ambiguous code-only OAuth must not bootstrap an admin"
+        );
+        assert!(
+            state
+                .validate_pending_install_continuation(continuation)
+                .await,
+            "server-held nonce must remain live until the authorized picker binds"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stateful_install_flag_cannot_bootstrap_an_unbound_deployment() {
+        use crate::test_helpers;
+
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        state
+            .set_app_config(Some(Arc::new(djinn_provider::github_app::AppConfig {
+                app_id: 42,
+                slug: "djinn-install-test".into(),
+                client_id: "Iv1.install-test".into(),
+                client_secret: "install-secret".into(),
+                pem: "PEM".into(),
+                webhook_secret: String::new(),
+                public_url: "http://127.0.0.1:8372".into(),
+            })))
+            .await;
+        *OAUTH_EXCHANGE_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(GithubUserTokens {
+            access_token: "ghu_unbound".into(),
+            expires_in: None,
+            refresh_token: None,
+            refresh_token_expires_in: None,
+        }));
+        *GITHUB_USER_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(GhUser {
+            id: 1234,
+            login: "unbound-installer".into(),
+            name: None,
+            avatar_url: None,
+        }));
+        *ORG_CONFIG_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(None));
+
+        let oauth_state = "stateful-install-attempt";
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{OAUTH_STATE_COOKIE}={oauth_state}|i1|/")).unwrap(),
+        );
+        let response = github_callback(
+            State(state.clone()),
+            Query(CallbackQuery {
+                code: Some("stateful-install-code".into()),
+                state: Some(oauth_state.into()),
+                installation_id: None,
+                setup_action: None,
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        assert!(
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .all(|cookie| !cookie.starts_with(&format!("{SESSION_COOKIE}=")))
+        );
+        *OAUTH_EXCHANGE_RESULT_OVERRIDE.lock().unwrap() = None;
+        *GITHUB_USER_RESULT_OVERRIDE.lock().unwrap() = None;
+        *ORG_CONFIG_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn install_oauth_auto_selects_only_one_allowed_installation() {
+        use djinn_provider::github_app::Installation;
+
+        let installation = |id, account_type: &str| Installation {
+            id,
+            account_login: format!("account-{id}"),
+            account_type: account_type.into(),
+            target_type: account_type.into(),
+        };
+
+        assert_eq!(
+            unique_selectable_installation_id(vec![installation(7, "Organization")], false,),
+            Some(7)
+        );
+        assert_eq!(
+            unique_selectable_installation_id(
+                vec![
+                    installation(7, "Organization"),
+                    installation(8, "Organization"),
+                ],
+                false,
+            ),
+            None,
+            "multiple installations must land on the picker"
+        );
+        assert_eq!(
+            unique_selectable_installation_id(vec![installation(9, "User")], false),
+            None,
+            "personal installs stay gated by the explicit opt-in"
+        );
+        assert_eq!(
+            unique_selectable_installation_id(vec![installation(9, "User")], true),
+            Some(9)
         );
     }
 
@@ -1766,7 +2911,7 @@ mod tests {
     async fn setup_status_reports_unconfigured_on_fresh_state() {
         use crate::test_helpers;
         let state = test_helpers::test_app_state_in_memory().await;
-        let resp = setup_status(State(state)).await;
+        let resp = setup_status(State(state)).await.unwrap();
         let body = resp.0;
         assert!(body.needs_app_install);
         assert!(!body.app_credentials_configured);
@@ -1802,7 +2947,7 @@ mod tests {
             .await
             .unwrap();
 
-        let resp = setup_status(State(state)).await;
+        let resp = setup_status(State(state)).await.unwrap();
         assert!(!resp.0.needs_app_install);
         assert!(resp.0.app_credentials_configured);
         assert_eq!(resp.0.org_login.as_deref(), Some("acme"));
@@ -1827,10 +2972,25 @@ mod tests {
         };
         state.set_app_config(Some(Arc::new(cfg))).await;
 
-        let resp = setup_status(State(state)).await;
+        let resp = setup_status(State(state)).await.unwrap();
         assert!(resp.0.needs_app_install);
         assert!(resp.0.app_credentials_configured);
         assert!(resp.0.org_login.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_status_reports_database_failure_instead_of_needs_install() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+        state.db().pool().close().await;
+
+        let error = match setup_status(State(state)).await {
+            Ok(_) => panic!("closed database must not look like an unbound deployment"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.1, "failed to read GitHub installation binding");
     }
 
     // ─── Self-setup gate tests ───────────────────────────────────────────────
@@ -1872,7 +3032,7 @@ mod tests {
         use crate::test_helpers;
         let _lock = with_self_setup_override(Some(false)).await;
         let state = test_helpers::test_app_state_in_memory().await;
-        let resp = config(State(state)).await;
+        let resp = config(State(state), HeaderMap::new()).await;
         let body = resp.0;
         assert!(!body.self_setup_available);
     }
@@ -1884,9 +3044,324 @@ mod tests {
         use crate::test_helpers;
         let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
-        let resp = config(State(state)).await;
+        let resp = config(State(state), HeaderMap::new()).await;
+        assert!(
+            set_cookie_value(&resp.1, SETUP_LAUNCH_COOKIE).is_none(),
+            "non-browser config reads must not mint setup authority"
+        );
         let body = resp.0;
         assert!(body.self_setup_available);
+        assert!(!body.setup_launch_available);
+    }
+
+    #[test]
+    fn setup_launch_accepts_exact_configured_loopback_origin() {
+        let headers = same_origin_config_headers();
+        assert!(local_setup_launch_available(
+            &headers,
+            "http://127.0.0.1:8372"
+        ));
+    }
+
+    #[test]
+    fn setup_launch_rejects_remote_public_url_even_with_matching_browser_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("djinn.example:8443"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://djinn.example:8443"),
+        );
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        assert!(!local_setup_launch_available(
+            &headers,
+            "https://djinn.example:8443"
+        ));
+    }
+
+    #[test]
+    fn setup_launch_rejects_request_host_mismatch() {
+        let mut headers = same_origin_config_headers();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:9999"));
+        assert!(!local_setup_launch_available(
+            &headers,
+            "http://127.0.0.1:8372"
+        ));
+    }
+
+    #[test]
+    fn setup_launch_rejects_localhost_alias_for_127_callback() {
+        let mut headers = same_origin_config_headers();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8372"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://localhost:8372"),
+        );
+        assert!(!local_setup_launch_available(
+            &headers,
+            "http://127.0.0.1:8372"
+        ));
+    }
+
+    #[test]
+    fn setup_launch_loopback_parser_accepts_localhost_ipv4_127_slash_8_and_ipv6() {
+        assert!(configured_loopback_setup_origin("http://localhost:8372").is_some());
+        assert!(configured_loopback_setup_origin("http://127.42.0.9:8372").is_some());
+        assert!(configured_loopback_setup_origin("http://[::1]:8372").is_some());
+        assert!(configured_loopback_setup_origin("http://10.0.0.1:8372").is_none());
+    }
+
+    /// A verified same-origin config fetch receives setup authority only in a
+    /// tightly scoped HttpOnly cookie; the raw capability is absent from JSON.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn same_origin_config_fetch_issues_strict_path_scoped_launch_cookie() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let output = config(State(state), same_origin_config_headers()).await;
+        let launch_token = set_cookie_value(&output.1, SETUP_LAUNCH_COOKIE)
+            .expect("same-origin config fetch should receive launch cookie");
+        assert_eq!(launch_token.len(), 43, "expected a 256-bit URL-safe token");
+
+        let cookie = output
+            .1
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find_map(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .filter(|value| value.starts_with(SETUP_LAUNCH_COOKIE))
+            })
+            .expect("launch Set-Cookie header");
+        assert!(cookie.contains("Path=/auth/github/setup-start"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("Max-Age=120"));
+
+        let json = serde_json::to_string(&output.0).unwrap();
+        assert!(output.0.self_setup_available);
+        assert!(output.0.setup_launch_available);
+        assert!(json.contains("\"setup_launch_available\":true"));
+        assert!(
+            !json.contains(&launch_token),
+            "raw launch authority must never appear in /auth/config JSON"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn config_refuses_to_issue_launch_cookie_to_cross_origin_fetch() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let mut headers = same_origin_config_headers();
+        headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://attacker.example"),
+        );
+        let output = config(State(state.clone()), headers).await;
+        assert!(set_cookie_value(&output.1, SETUP_LAUNCH_COOKIE).is_none());
+        assert!(!output.0.setup_launch_available);
+
+        let mut same_site_wrong_origin = same_origin_config_headers();
+        same_site_wrong_origin.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://localhost:8372"),
+        );
+        let output = config(State(state), same_site_wrong_origin).await;
+        assert!(set_cookie_value(&output.1, SETUP_LAUNCH_COOKIE).is_none());
+        assert!(!output.0.setup_launch_available);
+    }
+
+    /// The CTA exchanges a same-origin launch capability for the existing
+    /// setup session and renders the manifest form exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_start_consumes_launch_and_renders_manifest_form() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let config_output = config(State(state.clone()), same_origin_config_headers()).await;
+        let launch_token = set_cookie_value(&config_output.1, SETUP_LAUNCH_COOKIE).unwrap();
+        let request_headers = same_origin_setup_headers(&launch_token);
+
+        let response = setup_start(State(state.clone()), request_headers.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let setup_session = set_cookie_value(response.headers(), SETUP_SESSION_COOKIE)
+            .expect("setup session cookie");
+        assert!(state.validate_setup_session_token(&setup_session).await);
+        assert!(
+            set_cookie_value(response.headers(), MANIFEST_STATE_COOKIE).is_some(),
+            "manifest CSRF cookie must be minted"
+        );
+        assert_eq!(
+            set_cookie_value(response.headers(), SETUP_LAUNCH_COOKIE).as_deref(),
+            Some(""),
+            "consumed launch cookie must be cleared"
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(html.contains("action=\"https://github.com/settings/apps/new"));
+        assert!(!html.contains(&launch_token));
+        assert!(
+            !html.contains(&setup_session),
+            "setup session authority must remain HttpOnly, never enter markup"
+        );
+
+        let replay = setup_start(State(state), request_headers).await;
+        assert_setup_expired_recovery(&replay);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_start_missing_launch_cookie_redirects_to_spa_recovery() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let mut headers = same_origin_setup_headers("unused");
+        headers.remove(header::COOKIE);
+        let response = setup_start(State(state), headers).await;
+
+        assert_setup_expired_recovery(&response);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_start_expired_launch_cookie_redirects_to_spa_recovery() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let launch_token = state
+            .issue_setup_launch_capability(std::time::Duration::ZERO)
+            .await;
+
+        let response = setup_start(State(state), same_origin_setup_headers(&launch_token)).await;
+
+        assert_setup_expired_recovery(&response);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_start_replayed_launch_cookie_redirects_to_spa_recovery() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let launch_token = state
+            .issue_setup_launch_capability(std::time::Duration::from_secs(120))
+            .await;
+        let headers = same_origin_setup_headers(&launch_token);
+
+        let first = setup_start(State(state.clone()), headers.clone()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let replay = setup_start(State(state), headers).await;
+
+        assert_setup_expired_recovery(&replay);
+    }
+
+    /// Even when a test manually attaches the Strict cookie, cross-site or
+    /// cross-origin browser signals are rejected before token consumption.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_start_rejects_drive_by_without_burning_capability() {
+        use crate::test_helpers;
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let launch_token = state
+            .issue_setup_launch_capability(std::time::Duration::from_secs(120))
+            .await;
+
+        let mut cross_site = same_origin_setup_headers(&launch_token);
+        cross_site.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        cross_site.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://attacker.example"),
+        );
+        let cross_site_response = setup_start(State(state.clone()), cross_site).await;
+        assert_eq!(cross_site_response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            cross_site_response
+                .headers()
+                .get(header::LOCATION)
+                .is_none()
+        );
+
+        let mut wrong_origin = same_origin_setup_headers(&launch_token);
+        wrong_origin.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://localhost:8372"),
+        );
+        let wrong_origin_response = setup_start(State(state.clone()), wrong_origin).await;
+        assert_eq!(wrong_origin_response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            wrong_origin_response
+                .headers()
+                .get(header::LOCATION)
+                .is_none()
+        );
+
+        assert_eq!(
+            setup_start(State(state), same_origin_setup_headers(&launch_token))
+                .await
+                .status(),
+            StatusCode::OK,
+            "rejected drive-by attempts must not consume the real capability"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_launch_capability_expires_server_side() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let launch_token = state
+            .issue_setup_launch_capability(std::time::Duration::ZERO)
+            .await;
+        assert!(!state.consume_setup_launch_capability(&launch_token).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_session_expires_server_side() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let token = "expired-setup-session".to_string();
+        state
+            .set_setup_session_token_with_ttl_for_tests(
+                Some(token.clone()),
+                std::time::Duration::ZERO,
+            )
+            .await;
+
+        assert!(!state.validate_setup_session_token(&token).await);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SETUP_SESSION_COOKIE}={token}")).unwrap(),
+        );
+        assert!(extract_setup_session(&headers, &state).await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn browser_setup_reuses_only_matching_live_setup_cookie() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let existing = "existing-live-setup-session".to_string();
+        state
+            .set_setup_session_token_for_tests(Some(existing.clone()))
+            .await;
+
+        assert_eq!(
+            state.begin_browser_setup_session(Some(&existing)).await,
+            existing
+        );
+
+        let replacement = state
+            .begin_browser_setup_session(Some("wrong-setup-cookie"))
+            .await;
+        assert_ne!(replacement, existing);
+        assert!(!state.validate_setup_session_token(&existing).await);
+        assert!(state.validate_setup_session_token(&replacement).await);
     }
 
     /// `/auth/config` reports `self_setup_available=false` when the gate
@@ -1907,9 +3382,85 @@ mod tests {
         };
         state.set_app_config(Some(Arc::new(cfg))).await;
 
-        let resp = config(State(state)).await;
+        let resp = config(State(state), HeaderMap::new()).await;
         let body = resp.0;
         assert!(!body.self_setup_available);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_secret_is_retained_exposed_and_never_advertises_setup() {
+        use crate::test_helpers;
+        use djinn_provider::github_app::InvalidSecretDetail;
+
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        state
+            .set_app_credential_state_for_tests(CredentialSourceState::InvalidSecret(
+                InvalidSecretDetail {
+                    issues: vec!["GITHUB_APP_CLIENT_SECRET is empty"],
+                },
+            ))
+            .await;
+
+        let config_body = config(State(state.clone()), HeaderMap::new()).await.0;
+        assert!(!config_body.configured);
+        assert!(!config_body.self_setup_available);
+        assert_eq!(config_body.credential_source, None);
+        assert_eq!(config_body.setup_state, "invalid_secret");
+        assert!(
+            config_body
+                .setup_error
+                .as_deref()
+                .is_some_and(|message| message.contains("GITHUB_APP_CLIENT_SECRET"))
+        );
+        assert!(!config_body.setup_retryable);
+        assert!(!config_body.credentials_unrecoverable);
+
+        let setup_body = setup_status(State(state.clone())).await.unwrap().0;
+        assert_eq!(setup_body.setup_state, "invalid_secret");
+        assert!(!setup_body.app_credentials_configured);
+        assert!(!setup_body.credentials_unrecoverable);
+
+        let response = create_app(
+            State(state),
+            Query(CreateAppQuery { setup_token: None }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn undecryptable_persisted_state_is_exposed_and_setup_stays_hidden() {
+        use crate::test_helpers;
+
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        state
+            .set_app_credential_state_for_tests(CredentialSourceState::UndecryptablePersisted)
+            .await;
+
+        let config_body = config(State(state.clone()), HeaderMap::new()).await.0;
+        assert!(!config_body.self_setup_available);
+        assert_eq!(config_body.setup_state, "credentials_unrecoverable");
+        assert!(config_body.credentials_unrecoverable);
+        assert!(config_body.setup_error.is_some());
+
+        let setup_body = setup_status(State(state.clone())).await.unwrap().0;
+        assert_eq!(setup_body.setup_state, "credentials_unrecoverable");
+        assert!(setup_body.credentials_unrecoverable);
+        assert!(!setup_body.setup_retryable);
+
+        let response = app_manifest_callback(
+            State(state),
+            Query(ManifestCallbackQuery {
+                code: None,
+                state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     // ─── Setup route gate tests ──────────────────────────────────────────────
@@ -2266,9 +3817,9 @@ mod tests {
 
     #[test]
     fn manifest_json_has_expected_shape() {
-        let manifest = build_manifest_json("https://djinn.example.com");
+        let manifest = build_manifest_json("https://djinn.example.com", "a1b2c3d4");
         // App name prefix is `djinn-`
-        assert_eq!(manifest["name"], "djinn-djinn.example.com");
+        assert_eq!(manifest["name"], "djinn-djinn.example.com-a1b2c3d4");
         assert_eq!(manifest["url"], "https://djinn.example.com");
         assert_eq!(
             manifest["redirect_url"],
@@ -2278,21 +3829,29 @@ mod tests {
             manifest["callback_urls"][0],
             "https://djinn.example.com/auth/github/callback"
         );
-        assert_eq!(
-            manifest["hook_attributes"]["url"],
-            "https://djinn.example.com/webhooks/github"
+        assert!(
+            manifest.get("hook_attributes").is_none(),
+            "webhooks are disabled, so the manifest must omit hook_attributes entirely"
         );
-        assert_eq!(manifest["hook_attributes"]["active"], false);
         assert_eq!(manifest["request_oauth_on_install"], true);
         assert_eq!(manifest["public"], false);
-        // Permissions: exactly contents:write, pull_requests:write
+        // Permissions match current runtime consumers. `pull_requests:write`
+        // also authorizes PR issue comments, so a separate `issues` grant is
+        // unnecessary.
         // (metadata:read is granted by GitHub automatically, not listed).
+        assert_eq!(manifest["default_permissions"]["actions"], "read");
+        assert_eq!(manifest["default_permissions"]["checks"], "read");
         assert_eq!(manifest["default_permissions"]["contents"], "write");
+        assert_eq!(manifest["default_permissions"]["members"], "read");
         assert_eq!(manifest["default_permissions"]["pull_requests"], "write");
         assert!(manifest["default_permissions"].get("metadata").is_none());
         // No extra permissions beyond the required set.
         let perms = manifest["default_permissions"].as_object().unwrap();
-        assert_eq!(perms.len(), 2, "only contents, pull_requests");
+        assert_eq!(
+            perms.len(),
+            5,
+            "only actions, checks, contents, members, pull_requests"
+        );
         // Round-trips as valid JSON.
         let s = manifest.to_string();
         let _back: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -2300,7 +3859,7 @@ mod tests {
 
     #[test]
     fn manifest_json_name_uses_djinn_prefix() {
-        let manifest = build_manifest_json("https://mycompany.example.com");
+        let manifest = build_manifest_json("https://mycompany.example.com", "retry123");
         let name = manifest["name"].as_str().unwrap();
         assert!(
             name.starts_with("djinn-"),
@@ -2310,11 +3869,32 @@ mod tests {
 
     #[test]
     fn manifest_json_no_extra_events() {
-        let manifest = build_manifest_json("https://djinn.example.com");
+        let manifest = build_manifest_json("https://djinn.example.com", "a1b2c3d4");
         // No default_events field — the design requires only permissions.
         assert!(
             manifest.get("default_events").is_none(),
             "manifest should not include default_events"
+        );
+        assert!(
+            manifest.get("hook_attributes").is_none(),
+            "manifest should not include webhook configuration"
+        );
+    }
+
+    #[test]
+    fn local_manifest_does_not_submit_an_invalid_localhost_webhook_url() {
+        let manifest = build_manifest_json("http://localhost:8372", "local123");
+        let serialized = manifest.to_string();
+
+        assert!(manifest.get("hook_attributes").is_none());
+        assert!(!serialized.contains("/webhooks/github"));
+        assert_eq!(
+            manifest["redirect_url"],
+            "http://localhost:8372/auth/github/app-manifest-callback"
+        );
+        assert_eq!(
+            manifest["callback_urls"][0],
+            "http://localhost:8372/auth/github/callback"
         );
     }
 
@@ -2329,6 +3909,17 @@ mod tests {
             Some("djinn.example.com")
         );
         assert_eq!(url_host("not a url").as_deref(), Some("not a url"));
+    }
+
+    #[test]
+    fn manifest_name_suffix_is_fresh_and_token_independent() {
+        let first = manifest_name_suffix();
+        let second = manifest_name_suffix();
+        assert_eq!(first.len(), 8);
+        assert_eq!(second.len(), 8);
+        assert!(first.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert!(second.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -2598,6 +4189,59 @@ mod tests {
         *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unusable_post_persist_resolution_fails_and_preserves_setup_session() {
+        use crate::test_helpers;
+        use djinn_provider::github_app::InvalidSecretDetail;
+
+        let _lock = with_self_setup_override(Some(true)).await;
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(ManifestConversion {
+            id: 4242,
+            slug: "djinn-runtime".into(),
+            client_id: "Iv1.runtime".into(),
+            client_secret: "runtime-secret".into(),
+            pem: "PEM".into(),
+            webhook_secret: None,
+        }));
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        state
+            .set_test_reload_state_override(Some(CredentialSourceState::InvalidSecret(
+                InvalidSecretDetail {
+                    issues: vec!["GITHUB_APP_ID is empty"],
+                },
+            )))
+            .await;
+        let session = register_valid_session(&state).await;
+        let csrf = "persist-failure-csrf";
+        let mut headers = headers_with_session(&session);
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MANIFEST_STATE_COOKIE}={csrf}")).unwrap(),
+        );
+
+        let response = app_manifest_callback(
+            State(state.clone()),
+            Query(ManifestCallbackQuery {
+                code: Some("valid-code".into()),
+                state: Some(csrf.into()),
+            }),
+            headers,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(state.validate_setup_session_token(&session).await);
+        assert!(matches!(
+            state.app_credential_state().await,
+            CredentialSourceState::InvalidSecret(_)
+        ));
+        assert!(state.app_config().await.is_none());
+
+        state.set_test_reload_state_override(None).await;
+        *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
+    }
+
     // ─── Successful persistence/hot-reload + cookie clearing ──────────────
 
     /// On a successful manifest exchange the callback persists the returned
@@ -2706,6 +4350,14 @@ mod tests {
         assert_eq!(cfg.app_id, 42);
         assert_eq!(cfg.slug, "djinn-test");
         assert_eq!(cfg.client_id, "Iv1.test-client");
+        let runtime_cfg = djinn_provider::github_app::runtime_config()
+            .expect("provider runtime cache must be hot-reloaded with persisted credentials");
+        assert_eq!(runtime_cfg.app_id, 42);
+        assert_eq!(runtime_cfg.slug, "djinn-test");
+        assert_eq!(
+            djinn_provider::github_app::bot_git_identity().0,
+            "djinn-test[bot]"
+        );
 
         assert!(
             !state.validate_setup_session_token(&session).await,
@@ -2793,25 +4445,65 @@ mod tests {
         );
     }
 
-    /// The install-redirect from `/auth/github/callback` does not contain
-    /// any OAuth state, boot tokens, or session tokens.
+    /// The secured code-only install redirect carries only the dedicated
+    /// install-continuation capability; it never reflects the GitHub OAuth
+    /// code, normal OAuth state, boot token, or Djinn session token.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn install_redirect_no_token_leak() {
         use crate::test_helpers;
+        use djinn_provider::github_app::Installation;
+
+        let _lock = with_self_setup_override(Some(true)).await;
         let state = test_helpers::test_app_state_in_memory().await;
+        state
+            .set_app_config(Some(Arc::new(djinn_provider::github_app::AppConfig {
+                app_id: 42,
+                slug: "djinn-no-leak-test".into(),
+                client_id: "Iv1.no-leak-test".into(),
+                client_secret: "no-leak-secret".into(),
+                pem: "PEM".into(),
+                webhook_secret: String::new(),
+                public_url: "http://127.0.0.1:8372".into(),
+            })))
+            .await;
+
+        let continuation = "no-leak-install-continuation";
+        state
+            .set_pending_install_continuation_for_tests(Some(continuation.into()))
+            .await;
+        *OAUTH_EXCHANGE_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(GithubUserTokens {
+            access_token: "ghu_no_leak_install_user".into(),
+            expires_in: Some(28_800),
+            refresh_token: Some("ghr_no_leak_install_user".into()),
+            refresh_token_expires_in: Some(15_897_600),
+        }));
+        *USER_INSTALLATIONS_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(vec![Installation {
+            id: 99,
+            account_login: "acme".into(),
+            account_type: "Organization".into(),
+            target_type: "Organization".into(),
+        }]));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{INSTALL_CONTINUATION_COOKIE}={continuation}"))
+                .unwrap(),
+        );
 
         let resp = github_callback(
             State(state),
             Query(CallbackQuery {
                 code: Some("leaked-code".into()),
-                state: Some("leaked-state".into()),
-                installation_id: Some("99".into()),
-                setup_action: Some("install".into()),
+                state: None,
+                installation_id: None,
+                setup_action: None,
             }),
-            HeaderMap::new(),
+            headers,
         )
         .await;
 
+        assert_eq!(resp.status(), StatusCode::FOUND);
         let location = resp
             .headers()
             .get(header::LOCATION)
@@ -2874,7 +4566,7 @@ mod tests {
         let state = test_helpers::test_app_state_in_memory().await;
 
         // Config must not advertise self-setup.
-        let cfg_resp = config(State(state.clone())).await;
+        let cfg_resp = config(State(state.clone()), HeaderMap::new()).await;
         assert!(
             !cfg_resp.0.self_setup_available,
             "self_setup_available must be false when gate is disabled"
@@ -2923,7 +4615,7 @@ mod tests {
         state.set_app_config(Some(Arc::new(cfg))).await;
 
         // Config must report configured=true and self_setup_available=false.
-        let cfg_resp = config(State(state.clone())).await;
+        let cfg_resp = config(State(state.clone()), HeaderMap::new()).await;
         assert!(cfg_resp.0.configured, "must report configured=true");
         assert!(
             !cfg_resp.0.self_setup_available,
@@ -3105,13 +4797,17 @@ mod tests {
     async fn app_setup_callback_returns_conflict_without_credentials() {
         use crate::test_helpers;
         let state = test_helpers::test_app_state_in_memory().await;
+        let continuation = "missing-credentials-continuation";
+        state
+            .set_pending_install_continuation_for_tests(Some(continuation.into()))
+            .await;
 
         let resp = app_setup_callback(
-            State(state),
+            State(state.clone()),
             Query(AppSetupQuery {
                 installation_id: Some("42".into()),
                 setup_action: Some("install".into()),
-                continuation_state: None,
+                continuation_state: Some(continuation.into()),
             }),
             HeaderMap::new(),
         )
@@ -3120,6 +4816,12 @@ mod tests {
             resp.status(),
             StatusCode::CONFLICT,
             "must return 409 when credentials are missing"
+        );
+        assert!(
+            state
+                .validate_pending_install_continuation(continuation)
+                .await,
+            "credential recovery must preserve the valid continuation for retry"
         );
     }
 
@@ -3174,11 +4876,132 @@ mod tests {
             "valid continuation must not be rejected"
         );
 
-        // The nonce should now be consumed (single-use).
+        // The downstream GitHub call failed, so the nonce must remain valid
+        // for a retry instead of being consumed by validation alone.
         assert!(
-            state.validate_and_consume_install_continuation(None).await,
-            "after consumption, no continuation is pending, so None should pass"
+            state.validate_pending_install_continuation(&nonce).await,
+            "fallible installation lookup must preserve the continuation"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_install_binding_consumes_nonce_then_starts_stateful_oauth() {
+        use crate::test_helpers;
+        use djinn_provider::github_server::InstallationAccount;
+
+        let _lock = with_self_setup_override(Some(true)).await;
+        let state = test_helpers::test_app_state_in_memory().await;
+        state
+            .set_app_config(Some(Arc::new(djinn_provider::github_app::AppConfig {
+                app_id: 42,
+                slug: "djinn-install-test".into(),
+                client_id: "Iv1.install-test".into(),
+                client_secret: "install-secret".into(),
+                pem: "PEM".into(),
+                webhook_secret: String::new(),
+                public_url: "http://127.0.0.1:8372".into(),
+            })))
+            .await;
+        let continuation = "binding-continuation";
+        state
+            .set_pending_install_continuation_for_tests(Some(continuation.into()))
+            .await;
+        *APP_INSTALLATION_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(AppInstallation {
+            id: 777,
+            account: Some(InstallationAccount {
+                id: 9001,
+                login: "acme".into(),
+                account_type: "Organization".into(),
+            }),
+            repository_selection: Some("all".into()),
+            html_url: None,
+        }));
+
+        let response = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: Some("777".into()),
+                setup_action: Some("install".into()),
+                continuation_state: Some(continuation.into()),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "/auth/github/start?redirect=%2F"
+        );
+        assert!(
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(|cookie| {
+                    cookie.starts_with(&format!("{INSTALL_CONTINUATION_COOKIE}="))
+                        && cookie.contains("Max-Age=0")
+                }),
+            "successful binding must clear the continuation cookie"
+        );
+        assert!(!state.has_pending_install_continuation().await);
+        let binding = OrgConfigRepository::new(state.db().clone())
+            .get()
+            .await
+            .unwrap()
+            .expect("binding must be persisted before stateful sign-in");
+        assert_eq!(binding.installation_id, 777);
+        assert_eq!(binding.github_org_login, "acme");
+
+        // A later setup callback for a different installation must not
+        // replace the deployment's established one-org binding.
+        let conflicting_continuation = "conflicting-binding-continuation";
+        state
+            .set_pending_install_continuation_for_tests(Some(conflicting_continuation.into()))
+            .await;
+        *APP_INSTALLATION_RESULT_OVERRIDE.lock().unwrap() = Some(Ok(AppInstallation {
+            id: 888,
+            account: Some(InstallationAccount {
+                id: 9002,
+                login: "other-org".into(),
+                account_type: "Organization".into(),
+            }),
+            repository_selection: Some("all".into()),
+            html_url: None,
+        }));
+
+        let conflict = app_setup_callback(
+            State(state.clone()),
+            Query(AppSetupQuery {
+                installation_id: Some("888".into()),
+                setup_action: Some("install".into()),
+                continuation_state: Some(conflicting_continuation.into()),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let unchanged = OrgConfigRepository::new(state.db().clone())
+            .get()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.installation_id, 777);
+        assert_eq!(unchanged.github_org_login, "acme");
+        assert!(
+            state
+                .validate_pending_install_continuation(conflicting_continuation)
+                .await,
+            "a rejected rebind must not consume the retry/audit nonce"
+        );
+
+        *APP_INSTALLATION_RESULT_OVERRIDE.lock().unwrap() = None;
     }
 
     /// When a pending continuation nonce exists but the callback does NOT
@@ -3265,11 +5088,10 @@ mod tests {
         );
     }
 
-    /// When NO pending continuation nonce exists (non-manifest flow), the
-    /// callback proceeds without requiring a continuation_state. This
-    /// preserves the existing behavior for pre-configured credentials.
+    /// An uncorrelated callback must not create the deployment's first binding,
+    /// even when App credentials were pre-configured.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn app_setup_callback_no_pending_continuation_allows_request() {
+    async fn app_setup_callback_no_pending_continuation_rejects_first_binding() {
         use crate::test_helpers;
         let state = test_helpers::test_app_state_in_memory().await;
 
@@ -3284,9 +5106,6 @@ mod tests {
         };
         state.set_app_config(Some(Arc::new(cfg))).await;
 
-        // No pending continuation — don't set one.
-        // Callback without continuation_state should NOT be rejected with
-        // FORBIDDEN (it may fail at the JWT step, which is fine).
         let resp = app_setup_callback(
             State(state),
             Query(AppSetupQuery {
@@ -3298,11 +5117,50 @@ mod tests {
         )
         .await;
 
-        assert_ne!(
+        assert_eq!(
             resp.status(),
             StatusCode::FORBIDDEN,
-            "no pending continuation must not produce FORBIDDEN"
+            "no pending continuation must not authorize the first binding"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_setup_callback_allows_uncorrelated_exact_idempotent_replay() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+        state
+            .set_app_config(Some(Arc::new(djinn_provider::github_app::AppConfig {
+                app_id: 1,
+                slug: "djinn".into(),
+                client_id: "Iv1.x".into(),
+                client_secret: "y".into(),
+                pem: "PEM".into(),
+                webhook_secret: "w".into(),
+                public_url: "http://127.0.0.1:8372".into(),
+            })))
+            .await;
+        OrgConfigRepository::new(state.db().clone())
+            .set(NewOrgConfig {
+                github_org_id: 7,
+                github_org_login: "acme",
+                app_id: 1,
+                installation_id: 42,
+            })
+            .await
+            .unwrap();
+
+        let resp = app_setup_callback(
+            State(state),
+            Query(AppSetupQuery {
+                installation_id: Some("42".into()),
+                setup_action: Some("install".into()),
+                continuation_state: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_ne!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     /// The continuation nonce is included in the manifest callback's install
@@ -3383,8 +5241,8 @@ mod tests {
             "matching continuation nonce must not be rejected"
         );
 
-        // Replay: the nonce was consumed, so a second call without one
-        // should now pass (no pending continuation).
+        // The authoritative installation lookup failed, so the nonce remains
+        // pending and a retry without it must still be rejected.
         let resp = app_setup_callback(
             State(state),
             Query(AppSetupQuery {
@@ -3395,10 +5253,10 @@ mod tests {
             HeaderMap::new(),
         )
         .await;
-        assert_ne!(
+        assert_eq!(
             resp.status(),
             StatusCode::FORBIDDEN,
-            "after nonce consumed, no continuation required"
+            "failed binding must preserve and continue requiring the nonce"
         );
 
         *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
@@ -3610,10 +5468,11 @@ mod tests {
             StatusCode::FORBIDDEN,
             "valid continuation through the callback bridge must not be rejected"
         );
-        // The nonce is consumed after this.
+        // The fake App key makes the authoritative installation lookup fail;
+        // validation alone must not consume the retry nonce.
         assert!(
-            state.validate_and_consume_install_continuation(None).await,
-            "nonce must be consumed after successful validation"
+            state.has_pending_install_continuation().await,
+            "nonce must remain pending until binding or picker transition succeeds"
         );
 
         *EXCHANGE_MANIFEST_RESULT_OVERRIDE.lock().unwrap() = None;
@@ -4209,7 +6068,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FOUND);
 
         // Now check /auth/config.
-        let cfg_resp = config(State(state)).await;
+        let cfg_resp = config(State(state), HeaderMap::new()).await;
         assert!(
             cfg_resp.0.configured,
             "config must report configured=true after persistence"
