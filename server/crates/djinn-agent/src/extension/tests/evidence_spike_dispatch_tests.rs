@@ -59,6 +59,7 @@ async fn evidence_spike_blocks_write_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -98,6 +99,7 @@ async fn evidence_spike_blocks_edit_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -132,6 +134,7 @@ async fn evidence_spike_blocks_apply_patch_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -166,6 +169,7 @@ async fn evidence_spike_blocks_shell_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -200,6 +204,7 @@ async fn evidence_spike_blocks_task_delete_branch_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -234,6 +239,7 @@ async fn evidence_spike_blocks_task_transition_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -268,6 +274,7 @@ async fn evidence_spike_blocks_request_lead_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -302,6 +309,7 @@ async fn evidence_spike_blocks_request_planner_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -343,6 +351,7 @@ async fn evidence_spike_allows_code_search_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -384,6 +393,7 @@ async fn evidence_spike_allows_skill_read_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -420,6 +430,7 @@ async fn evidence_spike_allows_read_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -458,6 +469,7 @@ async fn evidence_spike_allows_code_graph_in_local_fallback() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -504,6 +516,7 @@ async fn evidence_spike_allows_submit_work_findings_handoff() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -549,6 +562,7 @@ async fn evidence_spike_blocks_dynamic_mcp_registry_tool() {
         None,
         None,
         Some(&mcp_registry),
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -594,6 +608,7 @@ async fn normal_dispatch_no_allowlist_allows_mcp_registry_tool() {
         None,
         None,
         Some(&mcp_registry),
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 
@@ -634,6 +649,7 @@ async fn normal_dispatch_no_allowlist_does_not_block_mutation_tools() {
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await;
 

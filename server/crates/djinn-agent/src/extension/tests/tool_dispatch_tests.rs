@@ -197,6 +197,7 @@ async fn call_tool_dispatches_task_create_with_public_response_shape() {
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("task_create dispatch should succeed");
@@ -281,6 +282,7 @@ async fn call_tool_dispatches_task_update_with_public_response_shape() {
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("task_update dispatch should succeed");
@@ -370,6 +372,7 @@ async fn call_tool_dispatches_comment_and_transition_flows() {
         Some("architect"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("task_comment_add dispatch should succeed");
@@ -416,6 +419,7 @@ async fn call_tool_dispatches_comment_and_transition_flows() {
         Some("lead"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("task_transition dispatch should succeed");
@@ -469,6 +473,7 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
         Some("architect"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("agent_create dispatch should succeed");
@@ -516,6 +521,7 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
         Some("architect"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("agent_metrics dispatch should succeed");

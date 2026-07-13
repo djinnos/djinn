@@ -37,6 +37,7 @@ async fn phase_1_default_model_facing_tools_dispatch_through_agent_fallback() {
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("read should be handled by the agent fallback");
@@ -59,6 +60,7 @@ async fn phase_1_default_model_facing_tools_dispatch_through_agent_fallback() {
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("shell should be handled by the agent fallback");
@@ -85,6 +87,7 @@ async fn phase_1_default_model_facing_tools_dispatch_through_agent_fallback() {
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("write should be handled by the agent fallback");
@@ -110,6 +113,7 @@ async fn phase_1_default_model_facing_tools_dispatch_through_agent_fallback() {
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("re-read before edit");
@@ -127,6 +131,7 @@ async fn phase_1_default_model_facing_tools_dispatch_through_agent_fallback() {
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("edit should be handled by the agent fallback");
@@ -153,6 +158,7 @@ async fn phase_1_default_model_facing_tools_dispatch_through_agent_fallback() {
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("apply_patch should be handled by the agent fallback");

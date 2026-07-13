@@ -127,6 +127,7 @@ pub(super) async fn dispatch_tool_call<T>(
     session_task_id: Option<&str>,
     session_role: Option<&str>,
     mcp_registry: Option<&McpToolRegistry>,
+    cancel: &super::ToolCancellation,
 ) -> Result<serde_json::Value, String>
 where
     T: Serialize,
@@ -226,7 +227,7 @@ where
         // Need concrete AgentContext::working_root_for, sandbox, repo_access.
         "shell" => {
             let root = state.working_root_for(worktree_path);
-            call_shell(state, &call.arguments, &root, session_role).await
+            call_shell(state, &call.arguments, &root, session_role, cancel).await
         }
         "read" => {
             let root = state.working_root_for(worktree_path);
