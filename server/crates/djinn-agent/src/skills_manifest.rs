@@ -48,8 +48,9 @@ use sha2::{Digest, Sha256};
 
 use crate::skills::{
     DEFAULT_TRUST_LEVEL, ResolvedSkill, collect_reference_files, load_skills_with_sources,
-    skill_path,
+    load_skills_with_sources_detailed, manifest_drift_fact, missing_file_fact, skill_path,
 };
+use crate::extension_diagnostics::ExtensionDiagnosticFact;
 
 /// Current manifest schema version. Bumped when fields change shape.
 pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -71,6 +72,43 @@ pub struct SkillsManifest {
     pub generated_by: String,
     /// All skills discovered under the canonical directories, sorted by `id`.
     pub skills: Vec<ManifestSkill>,
+}
+
+fn push_manifest_error_fact(diagnostics: &mut Vec<ExtensionDiagnosticFact>, error: &ManifestError) {
+    match error {
+        ManifestError::SkillMissing(skill)
+        | ManifestError::ReferenceMissing { skill, .. }
+        | ManifestError::SourceUnreadable { skill, .. } => {
+            push_unique_fact(diagnostics, missing_file_fact(skill));
+        }
+        ManifestError::SkillNotInManifest(skill)
+        | ManifestError::MetadataMismatch { skill, .. }
+        | ManifestError::SourceHashMismatch { skill, .. }
+        | ManifestError::ContentHashMismatch { skill, .. }
+        | ManifestError::SummaryHashMismatch { skill, .. } => {
+            push_unique_fact(diagnostics, manifest_drift_fact(skill));
+        }
+    }
+}
+
+fn push_unique_fact(diagnostics: &mut Vec<ExtensionDiagnosticFact>, fact: ExtensionDiagnosticFact) {
+    if !diagnostics.iter().any(|existing| {
+        existing.source_key == fact.source_key
+            && existing.phase == fact.phase
+            && existing.remedy_code == fact.remedy_code
+    }) {
+        diagnostics.push(fact);
+    }
+}
+
+/// Manifest-aware project-skill load result. The detailed path preserves the
+/// legacy fail-closed error separately from safe detector facts so persistence
+/// can be integrated without changing current callers.
+#[derive(Debug)]
+pub(crate) struct DetailedVerifiedSkillsLoad {
+    pub skills: Vec<ResolvedSkill>,
+    pub diagnostics: Vec<ExtensionDiagnosticFact>,
+    pub error: Option<RuntimeSkillManifestError>,
 }
 
 /// Regenerate the manifest and compare it byte-for-byte with the checked file.
@@ -290,24 +328,57 @@ pub fn load_verified_skills(
     project_root: &Path,
     names: &[String],
 ) -> Result<Vec<ResolvedSkill>, RuntimeSkillManifestError> {
-    let loaded = load_verified_skills_with_sources(project_root, names)?;
-    Ok(loaded.into_iter().map(|(_, skill, _)| skill).collect())
+    let detailed = load_verified_skills_detailed(project_root, names);
+    match detailed.error {
+        Some(error) => Err(error),
+        None => Ok(detailed.skills),
+    }
+}
+
+/// Load and verify project skills while retaining bounded observations for
+/// frontmatter, missing files, and manifest failures. The returned `error`
+/// retains `load_verified_skills`' fail-closed behavior when a checked
+/// manifest does not verify.
+pub(crate) fn load_verified_skills_detailed(
+    project_root: &Path,
+    names: &[String],
+) -> DetailedVerifiedSkillsLoad {
+    let detailed = load_skills_with_sources_detailed(project_root, names);
+    let mut diagnostics = detailed.diagnostics;
+    let loaded = detailed.skills;
+
+    let error = match read_manifest_if_present(project_root) {
+        Ok(Some(manifest)) => verify_loaded_skills(project_root, &manifest, names, &loaded)
+            .err()
+            .map(|error| {
+                push_manifest_error_fact(&mut diagnostics, &error);
+                RuntimeSkillManifestError::Verification(error)
+            }),
+        Ok(None) => None,
+        Err(error) => {
+            for requested_name in names {
+                push_unique_fact(&mut diagnostics, manifest_drift_fact(requested_name));
+            }
+            Some(error)
+        }
+    };
+
+    DetailedVerifiedSkillsLoad {
+        skills: if error.is_some() {
+            Vec::new()
+        } else {
+            loaded.into_iter().map(|(_, skill, _)| skill).collect()
+        },
+        diagnostics,
+        error,
+    }
 }
 
 pub(crate) fn load_verified_skills_with_sources(
     project_root: &Path,
     names: &[String],
 ) -> Result<Vec<(String, ResolvedSkill, PathBuf)>, RuntimeSkillManifestError> {
-    let loaded: Vec<(String, ResolvedSkill, PathBuf)> = names
-        .iter()
-        .filter_map(|requested_name| {
-            let (skill, path) =
-                load_skills_with_sources(project_root, std::slice::from_ref(requested_name))
-                    .into_iter()
-                    .next()?;
-            Some((requested_name.clone(), skill, path))
-        })
-        .collect();
+    let loaded = load_skills_with_sources_detailed(project_root, names).skills;
 
     if let Some(manifest) = read_manifest_if_present(project_root)? {
         verify_loaded_skills(project_root, &manifest, names, &loaded)?;
@@ -362,9 +433,29 @@ fn verify_loaded_skills(
             .iter()
             .find(|entry| entry.id == *id)
             .ok_or_else(|| ManifestError::SkillNotInManifest(id.clone()))?;
+        verify_manifest_source_files_exist(project_root, entry)?;
         verify_manifest_entry(project_root, entry, skill, source_path)?;
     }
 
+    Ok(())
+}
+
+/// Check declared contributing files before comparing derived hashes so a
+/// deleted reference is reported as a missing file rather than opaque content
+/// drift.
+fn verify_manifest_source_files_exist(
+    project_root: &Path,
+    entry: &ManifestSkill,
+) -> Result<(), ManifestError> {
+    for source in &entry.source_files {
+        let path = project_root.join(source.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if !path.is_file() {
+            return Err(ManifestError::ReferenceMissing {
+                skill: entry.id.clone(),
+                path: source.path.clone(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -1298,6 +1389,81 @@ mod tests {
             summary_bytes(&skill),
             "name=n\ndescription=d\nrequired=true"
         );
+    }
+
+    #[test]
+    fn detailed_verified_load_reports_missing_declared_skill_and_reference() {
+        let tmp = test_tempdir("djinn-skills-detailed-missing-");
+        let skills_dir = djinn_skills_dir(tmp.path());
+        write_with_references(
+            &skills_dir,
+            "referenced",
+            "---\ndescription: Reference skill\n---\n\nBody.\n",
+            &[("guide.md", "Guide\n")],
+        );
+        write_checked_manifest(tmp.path());
+
+        fs::remove_file(
+            skills_dir
+                .join("referenced")
+                .join("references")
+                .join("guide.md"),
+        )
+        .unwrap();
+        let detailed = load_verified_skills_detailed(tmp.path(), &["referenced".to_string()]);
+        assert!(detailed.error.is_some());
+        assert_eq!(detailed.diagnostics.len(), 1);
+        assert_eq!(detailed.diagnostics[0].source_key, "referenced");
+        assert_eq!(
+            detailed.diagnostics[0].phase,
+            djinn_core::extension_diagnostics::ExtensionLoadPhase::MissingFile
+        );
+        assert_eq!(
+            detailed.diagnostics[0].remedy_code,
+            djinn_core::extension_diagnostics::ExtensionLoadRemedyCode::RestoreSkillFile
+        );
+
+        fs::remove_dir_all(skills_dir.join("referenced")).unwrap();
+        let detailed = load_verified_skills_detailed(tmp.path(), &["referenced".to_string()]);
+        assert!(detailed.error.is_some());
+        assert_eq!(detailed.diagnostics.len(), 1);
+        assert_eq!(
+            detailed.diagnostics[0].phase,
+            djinn_core::extension_diagnostics::ExtensionLoadPhase::MissingFile
+        );
+    }
+
+    #[test]
+    fn detailed_verified_load_reports_manifest_drift_without_payloads() {
+        let tmp = test_tempdir("djinn-skills-detailed-drift-");
+        let skills_dir = djinn_skills_dir(tmp.path());
+        write_flat_skill(
+            &skills_dir,
+            "checked",
+            "---\ndescription: Stable\n---\n\nBody.\n",
+        );
+        write_checked_manifest(tmp.path());
+        write_flat_skill(
+            &skills_dir,
+            "checked",
+            "---\ndescription: Changed\n---\n\nBody.\n",
+        );
+
+        let detailed = load_verified_skills_detailed(tmp.path(), &["checked".to_string()]);
+        assert!(detailed.error.is_some());
+        assert_eq!(detailed.diagnostics.len(), 1);
+        let fact = &detailed.diagnostics[0];
+        assert_eq!(fact.source_key, "checked");
+        assert_eq!(
+            fact.phase,
+            djinn_core::extension_diagnostics::ExtensionLoadPhase::ManifestDrift
+        );
+        assert_eq!(
+            fact.remedy_code,
+            djinn_core::extension_diagnostics::ExtensionLoadRemedyCode::UpdateSkillManifest
+        );
+        assert!(!fact.summary_material.contains(tmp.path().to_str().unwrap()));
+        assert!(!fact.summary_material.contains("Changed"));
     }
 
     #[test]
