@@ -1,4 +1,4 @@
-//! Migration 109 — `extension_load_diagnostics` table (epic wvg5 / proposal 0h1s).
+//! Migration 110 — `extension_load_diagnostics` table (epic wvg5 / proposal 0h1s).
 //!
 //! Verifies the new migration applies cleanly on a fresh database and on top of
 //! the prior schema, and that the resulting schema carries the V1 columns,
@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{Connection, Executor};
 
-const MIGRATION_VERSION: u64 = 109;
-const MIGRATION_FILE: &str = "109_extension_load_diagnostics.sql";
+const MIGRATION_VERSION: u64 = 110;
+const MIGRATION_FILE: &str = "110_extension_load_diagnostics.sql";
 
 fn base_database_url() -> String {
     std::env::var("TEST_POSTGRES_URL")
@@ -115,12 +115,12 @@ async fn apply_prior_migrations(conn: &mut PgConnection) {
     }
 }
 
-async fn apply_migration_109(conn: &mut PgConnection) {
+async fn apply_migration_110(conn: &mut PgConnection) {
     let migration = migrations_dir().join(MIGRATION_FILE);
-    let sql = std::fs::read_to_string(&migration).expect("read migration 109 sql");
+    let sql = std::fs::read_to_string(&migration).expect("read migration 110 sql");
     conn.execute(sql.as_str())
         .await
-        .expect("apply migration 109 after prior migrations");
+        .expect("apply migration 110 after prior migrations");
 }
 
 async fn assert_schema(pool: &sqlx::PgPool) {
@@ -396,7 +396,7 @@ async fn assert_extension_load_diagnostics_schema(db_url: &str) {
 }
 
 #[tokio::test]
-async fn migration_109_applies_on_fresh_database() {
+async fn migration_110_applies_on_fresh_database() {
     with_temp_database("fresh_extension_load", |db_url| async move {
         let pool = PgPoolOptions::new()
             .max_connections(1)
@@ -415,13 +415,13 @@ async fn migration_109_applies_on_fresh_database() {
 }
 
 #[tokio::test]
-async fn migration_109_applies_after_prior_migrations() {
+async fn migration_110_applies_after_prior_migrations() {
     with_temp_database("prior_extension_load", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url)
             .await
             .expect("connect prior migration database");
         apply_prior_migrations(&mut conn).await;
-        apply_migration_109(&mut conn).await;
+        apply_migration_110(&mut conn).await;
         drop(conn);
 
         assert_extension_load_diagnostics_schema(&db_url).await;
@@ -521,13 +521,13 @@ async fn insert_diagnostic(
 }
 
 #[tokio::test]
-async fn migration_109_enforces_project_ownership_and_lifecycle() {
+async fn migration_110_enforces_project_ownership_and_lifecycle() {
     with_temp_database("ownership_extension_load", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url)
             .await
             .expect("connect ownership migration database");
         apply_prior_migrations(&mut conn).await;
-        apply_migration_109(&mut conn).await;
+        apply_migration_110(&mut conn).await;
         drop(conn);
 
         let pool = PgPoolOptions::new()
@@ -582,22 +582,39 @@ async fn migration_109_enforces_project_ownership_and_lifecycle() {
             "expected cross-project task association to be rejected"
         );
 
-        // Doctor-only and matching session-associated rows are accepted.
+        // A mismatched session association is rejected even without a task.
         let diag_id3 = uuid::Uuid::now_v7().to_string();
         let attempt_id3 = uuid::Uuid::now_v7().to_string();
-        insert_diagnostic(&pool, &diag_id3, &project_a, None, None, &attempt_id3)
+        let result = insert_diagnostic(
+            &pool,
+            &diag_id3,
+            &project_a,
+            None,
+            Some(&session_b),
+            &attempt_id3,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected cross-project session association to be rejected"
+        );
+
+        // Doctor-only and matching session-associated rows are accepted.
+        let diag_id4 = uuid::Uuid::now_v7().to_string();
+        let attempt_id4 = uuid::Uuid::now_v7().to_string();
+        insert_diagnostic(&pool, &diag_id4, &project_a, None, None, &attempt_id4)
             .await
             .expect("doctor-only diagnostic should insert");
 
-        let diag_id4 = uuid::Uuid::now_v7().to_string();
-        let attempt_id4 = uuid::Uuid::now_v7().to_string();
+        let diag_id5 = uuid::Uuid::now_v7().to_string();
+        let attempt_id5 = uuid::Uuid::now_v7().to_string();
         insert_diagnostic(
             &pool,
-            &diag_id4,
+            &diag_id5,
             &project_a,
             None,
             Some(&session_a),
-            &attempt_id4,
+            &attempt_id5,
         )
         .await
         .expect("session-associated diagnostic should insert");
@@ -605,15 +622,15 @@ async fn migration_109_enforces_project_ownership_and_lifecycle() {
         // A matching task/session pair is accepted.
         let task_a = uuid::Uuid::now_v7().to_string();
         insert_task(&pool, &task_a, &project_a, "t2").await;
-        let diag_id5 = uuid::Uuid::now_v7().to_string();
-        let attempt_id5 = uuid::Uuid::now_v7().to_string();
+        let diag_id6 = uuid::Uuid::now_v7().to_string();
+        let attempt_id6 = uuid::Uuid::now_v7().to_string();
         insert_diagnostic(
             &pool,
-            &diag_id5,
+            &diag_id6,
             &project_a,
             Some(&task_a),
             Some(&session_a),
-            &attempt_id5,
+            &attempt_id6,
         )
         .await
         .expect("valid task+session diagnostic should insert");
@@ -626,7 +643,7 @@ async fn migration_109_enforces_project_ownership_and_lifecycle() {
             .expect("delete task");
         let task_id_cleared: Option<String> =
             sqlx::query_scalar("SELECT task_id FROM extension_load_diagnostics WHERE id = $1")
-                .bind(&diag_id5)
+                .bind(&diag_id6)
                 .fetch_one(&pool)
                 .await
                 .expect("fetch task_id after task deletion");
@@ -643,7 +660,7 @@ async fn migration_109_enforces_project_ownership_and_lifecycle() {
             .expect("delete session");
         let remaining_session: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM extension_load_diagnostics WHERE id = $1")
-                .bind(&diag_id4)
+                .bind(&diag_id5)
                 .fetch_one(&pool)
                 .await
                 .expect("count session-associated diagnostic");
@@ -653,7 +670,7 @@ async fn migration_109_enforces_project_ownership_and_lifecycle() {
         );
         let remaining_task: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM extension_load_diagnostics WHERE id = $1")
-                .bind(&diag_id5)
+                .bind(&diag_id6)
                 .fetch_one(&pool)
                 .await
                 .expect("count task+session diagnostic");

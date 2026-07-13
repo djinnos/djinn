@@ -1,4 +1,4 @@
--- 109_extension_load_diagnostics.sql
+-- 110_extension_load_diagnostics.sql
 --
 -- V1 durable store for extension-load diagnostics (epic wvg5 / proposal 0h1s).
 --
