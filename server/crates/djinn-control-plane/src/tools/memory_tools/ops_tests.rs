@@ -1363,10 +1363,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_build_context_wildcard_error_records_error() {
         let setup = setup_server().await;
-        sqlx::query("DROP TABLE IF EXISTS notes CASCADE")
-            .execute(setup.server.state.db().pool())
-            .await
-            .expect("drop notes table");
+        // Close the underlying pool so the wildcard list operation fails with a
+        // repository error, without issuing raw SQL outside the djinn-db crate.
+        setup.server.state.db().pool().clone().close().await;
 
         let result = ops::memory_build_context(
             &setup.server,
