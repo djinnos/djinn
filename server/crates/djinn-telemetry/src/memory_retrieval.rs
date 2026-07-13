@@ -84,7 +84,9 @@ impl RetrievalOutcome {
 pub struct RetrievalAggregate {
     pub count: u64,
     pub duration_sum_seconds: f64,
-    pub candidate_sum: u64,
+    /// Sum using the same `f64` observation semantics as the Prometheus
+    /// candidates histogram.
+    pub candidate_sum: f64,
 }
 
 /// Immutable copy of all bounded retrieval aggregates.
@@ -168,6 +170,11 @@ impl MemoryRetrievalMetrics {
         let aggregate = &mut snapshot.aggregates[entry_point.index()][outcome.index()];
         aggregate.count += 1;
         aggregate.duration_sum_seconds += duration.as_secs_f64();
+        // Keep the in-memory aggregate's rounding behavior identical to the
+        // histogram: each public `u64` input is converted before it is added.
+        // Converting only an accumulated integer total would diverge once a
+        // total exceeds the exactly representable `f64` integer range.
+        let candidates = candidates as f64;
         aggregate.candidate_sum += candidates;
 
         metrics::histogram!(
@@ -181,7 +188,7 @@ impl MemoryRetrievalMetrics {
             "entry_point" => entry_point.label(),
             "outcome" => outcome.label(),
         )
-        .record(candidates as f64);
+        .record(candidates);
         Ok(())
     }
 
@@ -253,7 +260,40 @@ mod tests {
         assert_eq!(aggregate.count as f64, sample_value(&rendered, "djinn_memory_retrieval_duration_seconds_count", "dispatch", "success"));
         assert_eq!(aggregate.duration_sum_seconds, sample_value(&rendered, "djinn_memory_retrieval_duration_seconds_sum", "dispatch", "success"));
         assert_eq!(aggregate.count as f64, sample_value(&rendered, "djinn_memory_retrieval_candidates_count", "dispatch", "success"));
-        assert_eq!(aggregate.candidate_sum as f64, sample_value(&rendered, "djinn_memory_retrieval_candidates_sum", "dispatch", "success"));
+        assert_eq!(aggregate.candidate_sum, sample_value(&rendered, "djinn_memory_retrieval_candidates_sum", "dispatch", "success"));
+    }
+
+    #[test]
+    fn candidate_sum_uses_prometheus_observation_rounding() {
+        crate::init().expect("install recorder");
+        let metrics = MemoryRetrievalMetrics::new();
+        for candidates in [9_007_199_254_740_993, 1] {
+            metrics
+                .observe(
+                    RetrievalEntryPoint::JitPitfalls,
+                    RetrievalOutcome::Empty,
+                    Duration::ZERO,
+                    candidates,
+                )
+                .unwrap();
+        }
+
+        let aggregate = metrics
+            .snapshot()
+            .unwrap()
+            .aggregate(RetrievalEntryPoint::JitPitfalls, RetrievalOutcome::Empty);
+        let rendered = crate::render().unwrap();
+        let prometheus_sum = sample_value(
+            &rendered,
+            "djinn_memory_retrieval_candidates_sum",
+            "jit_pitfalls",
+            "empty",
+        );
+
+        // `2^53 + 1` is first rounded to `2^53`, then adding one remains at
+        // `2^53`; this must be the snapshot's exact histogram semantics too.
+        assert_eq!(aggregate.candidate_sum, 9_007_199_254_740_992.0);
+        assert_eq!(aggregate.candidate_sum, prometheus_sum);
     }
 
     #[test]
@@ -313,7 +353,7 @@ mod tests {
                     (aggregate.duration_sum_seconds - aggregate.count as f64 * 0.001).abs()
                         < 1e-12
                 );
-                assert_eq!(aggregate.candidate_sum, aggregate.count * 2);
+                assert_eq!(aggregate.candidate_sum, aggregate.count as f64 * 2.0);
             }
         });
         for handle in handles {
@@ -328,6 +368,6 @@ mod tests {
                 RetrievalOutcome::Success,
             );
         assert_eq!(aggregate.count, (writers * per_writer) as u64);
-        assert_eq!(aggregate.candidate_sum, (writers * per_writer * 2) as u64);
+        assert_eq!(aggregate.candidate_sum, (writers * per_writer * 2) as f64);
     }
 }
