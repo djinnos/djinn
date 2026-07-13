@@ -23,6 +23,36 @@
 --   * NULLS-NOT-DISTINCT unique index on the dedupe tuple so that doctor-only
 --     and session-associated rows with NULL task_id/session_id collide correctly.
 
+-- Enforce that any optional task or session association belongs to the same
+-- project as the diagnostic row. The foreign keys on the nullable task_id and
+-- session_id columns provide referential existence and the desired deletion
+-- actions (task deletion clears task_id, session deletion cascades), but they do
+-- not by themselves guarantee that those associations belong to the row's
+-- project_id. This trigger closes the ownership gap by verifying the referenced
+-- task/session carries the diagnostic's project_id.
+CREATE OR REPLACE FUNCTION trg_extension_load_diagnostics_project_ownership()
+RETURNS trigger AS $$
+BEGIN
+    IF NEW.task_id IS NOT NULL THEN
+        PERFORM 1 FROM tasks
+            WHERE id = NEW.task_id
+              AND project_id = NEW.project_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'extension_load_diagnostics task_id % does not belong to project_id %', NEW.task_id, NEW.project_id;
+        END IF;
+    END IF;
+    IF NEW.session_id IS NOT NULL THEN
+        PERFORM 1 FROM sessions
+            WHERE id = NEW.session_id
+              AND project_id = NEW.project_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'extension_load_diagnostics session_id % does not belong to project_id %', NEW.session_id, NEW.project_id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE TABLE IF NOT EXISTS extension_load_diagnostics (
     id                    VARCHAR(36)   NOT NULL PRIMARY KEY,
     project_id            VARCHAR(36)   NOT NULL,
@@ -63,6 +93,11 @@ CREATE TABLE IF NOT EXISTS extension_load_diagnostics (
     CONSTRAINT fk_extension_load_diagnostics_session
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+
+CREATE TRIGGER trg_extension_load_diagnostics_project_ownership
+    BEFORE INSERT OR UPDATE ON extension_load_diagnostics
+    FOR EACH ROW
+    EXECUTE FUNCTION trg_extension_load_diagnostics_project_ownership();
 
 CREATE INDEX IF NOT EXISTS idx_extension_load_diagnostics_project_id
     ON extension_load_diagnostics (project_id);

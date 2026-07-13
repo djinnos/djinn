@@ -13,8 +13,8 @@ const MIGRATION_VERSION: u64 = 109;
 const MIGRATION_FILE: &str = "109_extension_load_diagnostics.sql";
 
 fn base_database_url() -> String {
-    std::env::var("DJINN_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("TEST_POSTGRES_URL"))
+    std::env::var("TEST_POSTGRES_URL")
+        .or_else(|_| std::env::var("DJINN_TEST_DATABASE_URL"))
         .unwrap_or_else(|_| {
             "postgres://djinn:VipjO1uAdxAGvNSA6EcJdZMdHAquYeJj@djinn-postgres.djinn.svc.cluster.local:5432/djinn"
                 .to_owned()
@@ -218,7 +218,6 @@ async fn assert_schema(pool: &sqlx::PgPool) {
 
     // Constraint bodies contain the expected vocabulary.
     for (conname, expected_values) in [
-        ("chk_extension_load_diagnostics_schema_version", vec!["1"]),
         (
             "chk_extension_load_diagnostics_severity",
             vec!["warning", "error"],
@@ -268,6 +267,20 @@ async fn assert_schema(pool: &sqlx::PgPool) {
             );
         }
     }
+
+    // The schema_version constraint is numeric and is not quoted in the definition.
+    let schema_version_body: Option<String> = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = $1",
+    )
+    .bind("chk_extension_load_diagnostics_schema_version")
+    .fetch_optional(pool)
+    .await
+    .unwrap_or_else(|e| panic!("inspect schema_version constraint: {e}"));
+    let schema_version_body = schema_version_body.unwrap_or_default();
+    assert!(
+        schema_version_body.contains("= 1"),
+        "schema_version should be fixed to 1, got: {schema_version_body}"
+    );
 
     // Foreign keys exist with the lifecycle actions required by the epic:
     // project deletion cascades; task deletion clears the optional task_id;
@@ -354,6 +367,22 @@ async fn assert_schema(pool: &sqlx::PgPool) {
         Some(true),
         "dedupe unique index must treat NULLs as not distinct"
     );
+
+    // Project ownership trigger is installed so that optional task/session
+    // associations cannot reference a task/session belonging to a different project.
+    let trigger_present: Option<bool> = sqlx::query_scalar(
+        "SELECT TRUE FROM pg_trigger \
+         WHERE tgrelid = 'extension_load_diagnostics'::regclass \
+           AND tgname = 'trg_extension_load_diagnostics_project_ownership'",
+    )
+    .fetch_optional(pool)
+    .await
+    .expect("inspect extension_load_diagnostics ownership trigger");
+    assert_eq!(
+        trigger_present,
+        Some(true),
+        "project ownership trigger must be present"
+    );
 }
 
 async fn assert_extension_load_diagnostics_schema(db_url: &str) {
@@ -396,6 +425,262 @@ async fn migration_109_applies_after_prior_migrations() {
         drop(conn);
 
         assert_extension_load_diagnostics_schema(&db_url).await;
+    })
+    .await;
+}
+
+async fn insert_project(
+    pool: &sqlx::PgPool,
+    id: &str,
+    name: &str,
+    github_owner: &str,
+    github_repo: &str,
+) {
+    sqlx::query(
+        "INSERT INTO projects (id, name, github_owner, github_repo) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(github_owner)
+    .bind(github_repo)
+    .execute(pool)
+    .await
+    .expect("insert project");
+}
+
+async fn insert_task(pool: &sqlx::PgPool, id: &str, project_id: &str, short_id: &str) {
+    sqlx::query(
+        "INSERT INTO tasks \
+         (id, project_id, short_id, title, description, design, issue_type, status, priority, owner, labels, acceptance_criteria, memory_refs) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+    )
+    .bind(id)
+    .bind(project_id)
+    .bind(short_id)
+    .bind("title")
+    .bind("description")
+    .bind("design")
+    .bind("task")
+    .bind("open")
+    .bind(1)
+    .bind("")
+    .execute(pool)
+    .await
+    .expect("insert task");
+}
+
+async fn insert_session(pool: &sqlx::PgPool, id: &str, project_id: &str) {
+    sqlx::query(
+        "INSERT INTO sessions (id, project_id, model_id, agent_type, status) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(id)
+    .bind(project_id)
+    .bind("gpt-4")
+    .bind("worker")
+    .bind("active")
+    .execute(pool)
+    .await
+    .expect("insert session");
+}
+
+async fn insert_diagnostic(
+    pool: &sqlx::PgPool,
+    id: &str,
+    project_id: &str,
+    task_id: Option<&str>,
+    session_id: Option<&str>,
+    attempt_id: &str,
+) -> sqlx::Result<sqlx::postgres::PgQueryResult> {
+    sqlx::query(
+        "INSERT INTO extension_load_diagnostics \
+            (id, project_id, task_id, session_id, load_attempt_id, source_kind, source_key, phase, \
+             severity, summary, summary_fingerprint, remedy_code, remedy, occurrence_count, \
+             first_seen_at, last_seen_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+    )
+    .bind(id)
+    .bind(project_id)
+    .bind(task_id)
+    .bind(session_id)
+    .bind(attempt_id)
+    .bind("project_mcp")
+    .bind("mcp://test")
+    .bind("handshake")
+    .bind("error")
+    .bind("summary")
+    .bind("fingerprint")
+    .bind("check_server")
+    .bind("remedy text")
+    .bind(1)
+    .bind("2024-01-01T00:00:00Z")
+    .bind("2024-01-01T00:00:00Z")
+    .execute(pool)
+    .await
+}
+
+#[tokio::test]
+async fn migration_109_enforces_project_ownership_and_lifecycle() {
+    with_temp_database("ownership_extension_load", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url)
+            .await
+            .expect("connect ownership migration database");
+        apply_prior_migrations(&mut conn).await;
+        apply_migration_109(&mut conn).await;
+        drop(conn);
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .expect("connect ownership migration database");
+
+        let project_a = uuid::Uuid::now_v7().to_string();
+        let project_b = uuid::Uuid::now_v7().to_string();
+        insert_project(&pool, &project_a, "project-a", "owner-a", "repo-a").await;
+        insert_project(&pool, &project_b, "project-b", "owner-b", "repo-b").await;
+
+        let task_b = uuid::Uuid::now_v7().to_string();
+        insert_task(&pool, &task_b, &project_b, "t1").await;
+        let session_b = uuid::Uuid::now_v7().to_string();
+        insert_session(&pool, &session_b, &project_b).await;
+        let session_a = uuid::Uuid::now_v7().to_string();
+        insert_session(&pool, &session_a, &project_a).await;
+
+        // Both associations from project B used for a project A diagnostic is rejected.
+        let diag_id = uuid::Uuid::now_v7().to_string();
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let result = insert_diagnostic(
+            &pool,
+            &diag_id,
+            &project_a,
+            Some(&task_b),
+            Some(&session_b),
+            &attempt_id,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected cross-project (task+session) association to be rejected"
+        );
+
+        // A mismatched task association is rejected even when the session belongs to the diagnostic's project.
+        let diag_id2 = uuid::Uuid::now_v7().to_string();
+        let attempt_id2 = uuid::Uuid::now_v7().to_string();
+        let result = insert_diagnostic(
+            &pool,
+            &diag_id2,
+            &project_a,
+            Some(&task_b),
+            Some(&session_a),
+            &attempt_id2,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected cross-project task association to be rejected"
+        );
+
+        // Doctor-only and matching session-associated rows are accepted.
+        let diag_id3 = uuid::Uuid::now_v7().to_string();
+        let attempt_id3 = uuid::Uuid::now_v7().to_string();
+        insert_diagnostic(&pool, &diag_id3, &project_a, None, None, &attempt_id3)
+            .await
+            .expect("doctor-only diagnostic should insert");
+
+        let diag_id4 = uuid::Uuid::now_v7().to_string();
+        let attempt_id4 = uuid::Uuid::now_v7().to_string();
+        insert_diagnostic(
+            &pool,
+            &diag_id4,
+            &project_a,
+            None,
+            Some(&session_a),
+            &attempt_id4,
+        )
+        .await
+        .expect("session-associated diagnostic should insert");
+
+        // A matching task/session pair is accepted.
+        let task_a = uuid::Uuid::now_v7().to_string();
+        insert_task(&pool, &task_a, &project_a, "t2").await;
+        let diag_id5 = uuid::Uuid::now_v7().to_string();
+        let attempt_id5 = uuid::Uuid::now_v7().to_string();
+        insert_diagnostic(
+            &pool,
+            &diag_id5,
+            &project_a,
+            Some(&task_a),
+            Some(&session_a),
+            &attempt_id5,
+        )
+        .await
+        .expect("valid task+session diagnostic should insert");
+
+        // Deleting the task clears task_id without removing the diagnostic.
+        sqlx::query("DELETE FROM tasks WHERE id = $1")
+            .bind(&task_a)
+            .execute(&pool)
+            .await
+            .expect("delete task");
+        let task_id_cleared: Option<String> =
+            sqlx::query_scalar("SELECT task_id FROM extension_load_diagnostics WHERE id = $1")
+                .bind(&diag_id5)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch task_id after task deletion");
+        assert!(
+            task_id_cleared.is_none(),
+            "task_id should be set to NULL when the task is deleted"
+        );
+
+        // Owning session deletion cascades to the session-associated rows.
+        sqlx::query("DELETE FROM sessions WHERE id = $1")
+            .bind(&session_a)
+            .execute(&pool)
+            .await
+            .expect("delete session");
+        let remaining_session: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM extension_load_diagnostics WHERE id = $1")
+                .bind(&diag_id4)
+                .fetch_one(&pool)
+                .await
+                .expect("count session-associated diagnostic");
+        assert_eq!(
+            remaining_session, 0,
+            "session-associated diagnostic should be deleted"
+        );
+        let remaining_task: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM extension_load_diagnostics WHERE id = $1")
+                .bind(&diag_id5)
+                .fetch_one(&pool)
+                .await
+                .expect("count task+session diagnostic");
+        assert_eq!(
+            remaining_task, 0,
+            "task+session diagnostic should be deleted when session is deleted"
+        );
+
+        // Project deletion cascades to the remaining diagnostic rows.
+        sqlx::query("DELETE FROM projects WHERE id = $1")
+            .bind(&project_a)
+            .execute(&pool)
+            .await
+            .expect("delete project");
+        let remaining_project_a: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM extension_load_diagnostics WHERE project_id = $1",
+        )
+        .bind(&project_a)
+        .fetch_one(&pool)
+        .await
+        .expect("count project diagnostics");
+        assert_eq!(
+            remaining_project_a, 0,
+            "project diagnostics should be deleted"
+        );
+
+        pool.close().await;
     })
     .await;
 }
