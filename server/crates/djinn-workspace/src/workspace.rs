@@ -386,7 +386,36 @@ impl Workspace {
     /// Explicit teardown. Equivalent to `drop(self)` — the `TempDir` cleans
     /// itself up on drop. Callers may prefer the explicit form to document
     /// lifecycle points in supervisor code.
+    #[deprecated(note = "use teardown_owned for cleanup telemetry")]
     pub fn teardown(self) {}
+
+    /// Explicit teardown of an owned ephemeral workspace, returning whether the
+    /// underlying `TempDir::close()` succeeded.
+    ///
+    /// For `Owned` workspaces this consumes `self` and calls `TempDir::close()`,
+    /// which removes the directory AND prevents the subsequent `Drop` from
+    /// deleting it again (idempotent). The returned `Result` exposes cleanup
+    /// success/error so callers can time the operation and record a bounded
+    /// `outcome=ok|error` telemetry sample.
+    ///
+    /// For `Attached` workspaces this is a no-op that returns `Ok(())` — the
+    /// directory is externally owned (e.g. a bind-mounted `/workspace`) and must
+    /// never be deleted by this process. No telemetry should be emitted for
+    /// attached teardowns because there is nothing to observe.
+    pub fn teardown_owned(self) -> std::io::Result<()> {
+        match self.root {
+            WorkspaceRoot::Owned(dir) => dir.close(),
+            // Attached directories are externally owned; do not delete.
+            WorkspaceRoot::Attached(_) => Ok(()),
+        }
+    }
+
+    /// Returns `true` when this workspace owns its directory (the `TempDir`
+    /// variant). Attached workspaces are externally owned and their teardown is
+    /// a no-op that must not be observed.
+    pub fn is_owned(&self) -> bool {
+        matches!(self.root, WorkspaceRoot::Owned(_))
+    }
 
     /// Ensure the named branch exists and is checked out.
     ///
@@ -1389,6 +1418,36 @@ mod tests {
             EphemeralWorkspaceError::Git(msg) => assert!(msg.contains("not a directory")),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    // ---- teardown_owned / is_owned --------------------------------------
+
+    #[test]
+    fn teardown_owned_removes_directory_and_prevents_double_drop() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        let ws = Workspace::new(dir, "main".to_string());
+        assert!(ws.is_owned(), "new workspace must be owned");
+        // teardown_owned consumes self and closes the TempDir.
+        ws.teardown_owned().expect("teardown_owned must succeed");
+        assert!(
+            !path.exists(),
+            "teardown_owned must remove the owned directory"
+        );
+    }
+
+    #[test]
+    fn teardown_owned_on_attached_is_noop_and_does_not_delete() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().to_path_buf();
+        let ws = Workspace::attach_existing(&path, "main").expect("attach");
+        assert!(!ws.is_owned(), "attached workspace must not be owned");
+        // teardown_owned returns Ok and does NOT delete the externally owned dir.
+        ws.teardown_owned().expect("attached teardown must be Ok");
+        assert!(
+            path.exists(),
+            "teardown_owned must NOT delete attached directory"
+        );
     }
 
     // ---- normalize_mtimes -------------------------------------------------

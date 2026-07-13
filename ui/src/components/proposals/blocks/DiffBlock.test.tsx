@@ -80,34 +80,47 @@ describe("DiffBlock", () => {
     expect(screen.getByText("No changes")).toBeInTheDocument();
   });
 
-  it("syntax-highlights the code with Prism tokens while keeping the +/- tint", async () => {
-    const { container } = render(
-      <DiffBlock id="d4" attributes={{ filename: "src/loop.rs", lang: "rust" }}>
-        {RUST_DIFF}
-      </DiffBlock>,
-    );
+  it(
+    "syntax-highlights the code with Prism tokens while keeping the +/- tint",
+    { timeout: 20_000 },
+    async () => {
+      const { container } = render(
+        <DiffBlock
+          id="d4"
+          attributes={{ filename: "src/loop.rs", lang: "rust" }}
+        >
+          {RUST_DIFF}
+        </DiffBlock>,
+      );
 
-    // The Prism surface lazy-loads; once it does, code lines tokenize into
-    // coloured `.token` spans (RSH inlines the oneDark colour onto each token).
-    const tokens = await waitFor(() => {
-      const found = container.querySelectorAll("span.token");
-      expect(found.length).toBeGreaterThan(0);
-      return found;
-    });
-    // A `let` keyword token carries an inline colour — proof of highlighting.
-    const keyword = Array.from(tokens).find((t) => t.textContent === "let");
-    expect(keyword).toBeTruthy();
-    expect((keyword as HTMLElement).style.color).not.toBe("");
+      // The Prism surface lazy-loads; once it does, code lines tokenize into
+      // coloured `.token` spans (RSH inlines the oneDark colour onto each
+      // token). The chunk (refractor + every grammar) is heavy, so give it a
+      // generous window — under a fully loaded suite the import alone can
+      // exceed the default 1s waitFor budget.
+      const tokens = await waitFor(
+        () => {
+          const found = container.querySelectorAll("span.token");
+          expect(found.length).toBeGreaterThan(0);
+          return found;
+        },
+        { timeout: 15_000 },
+      );
+      // A `let` keyword token carries an inline colour — proof of highlighting.
+      const keyword = Array.from(tokens).find((t) => t.textContent === "let");
+      expect(keyword).toBeTruthy();
+      expect((keyword as HTMLElement).style.color).not.toBe("");
 
-    // The +/- tint still rides underneath: the added/removed rows keep their
-    // low-alpha emerald/rose backgrounds (token colours show through them).
-    expect(container.querySelector(".bg-emerald-500\\/10")).not.toBeNull();
-    expect(container.querySelector(".bg-red-500\\/10")).not.toBeNull();
+      // The +/- tint still rides underneath: the added/removed rows keep their
+      // low-alpha emerald/rose backgrounds (token colours show through them).
+      expect(container.querySelector(".bg-emerald-500\\/10")).not.toBeNull();
+      expect(container.querySelector(".bg-red-500\\/10")).not.toBeNull();
 
-    // Stats still computed correctly (+1 / −1).
-    expect(screen.getByText("+1")).toBeInTheDocument();
-    expect(screen.getByText("−1")).toBeInTheDocument();
-  });
+      // Stats still computed correctly (+1 / −1).
+      expect(screen.getByText("+1")).toBeInTheDocument();
+      expect(screen.getByText("−1")).toBeInTheDocument();
+    },
+  );
 
   it("keeps the collapsible unchanged run and toggle working under highlighting", () => {
     render(
@@ -124,35 +137,46 @@ describe("DiffBlock", () => {
     ).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("highlights both columns in split view (and the toggle persists)", async () => {
-    const { container } = render(
-      <DiffBlock id="d6" attributes={{ filename: "src/loop.rs", lang: "rust" }}>
-        {RUST_DIFF}
-      </DiffBlock>,
-    );
-    // Switch to split view.
-    fireEvent.click(screen.getByRole("button", { name: "Split" }));
-    expect(screen.getByRole("button", { name: "Split" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    // The choice is persisted to localStorage.
-    expect(window.localStorage.getItem("djinn:proposal-diff-view-mode")).toBe(
-      "split",
-    );
-    // Both side-by-side columns highlight (tokens present in each half).
-    await waitFor(() => {
-      const columns = container.querySelectorAll(".flex-1");
-      expect(columns.length).toBeGreaterThanOrEqual(2);
-      for (const col of [columns[0], columns[1]]) {
-        expect(
-          within(col as HTMLElement).getAllByText(
-            (_, el) => el?.classList.contains("token") ?? false,
-          ).length,
-        ).toBeGreaterThan(0);
-      }
-    });
-  });
+  it(
+    "highlights both columns in split view (and the toggle persists)",
+    { timeout: 20_000 },
+    async () => {
+      const { container } = render(
+        <DiffBlock
+          id="d6"
+          attributes={{ filename: "src/loop.rs", lang: "rust" }}
+        >
+          {RUST_DIFF}
+        </DiffBlock>,
+      );
+      // Switch to split view.
+      fireEvent.click(screen.getByRole("button", { name: "Split" }));
+      expect(screen.getByRole("button", { name: "Split" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      // The choice is persisted to localStorage.
+      expect(window.localStorage.getItem("djinn:proposal-diff-view-mode")).toBe(
+        "split",
+      );
+      // Both side-by-side columns highlight (tokens present in each half).
+      // Same generous window as the unified test — the Prism chunk lazy-loads.
+      await waitFor(
+        () => {
+          const columns = container.querySelectorAll(".flex-1");
+          expect(columns.length).toBeGreaterThanOrEqual(2);
+          for (const col of [columns[0], columns[1]]) {
+            expect(
+              within(col as HTMLElement).getAllByText(
+                (_, el) => el?.classList.contains("token") ?? false,
+              ).length,
+            ).toBeGreaterThan(0);
+          }
+        },
+        { timeout: 15_000 },
+      );
+    },
+  );
 
   it("falls back to plain (uncoloured) code when the language is unknown", async () => {
     const { container } = render(

@@ -2609,6 +2609,41 @@
             "null"
           ]
         },
+        "proposal_id": {
+          "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_short_id": {
+          "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_title": {
+          "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_status": {
+          "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_build_owner_user_id": {
+          "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "error": {
           "type": [
             "string",
@@ -2870,6 +2905,41 @@
             "null"
           ]
         },
+        "proposal_id": {
+          "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_short_id": {
+          "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_title": {
+          "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_status": {
+          "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_build_owner_user_id": {
+          "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "error": {
           "type": [
             "string",
@@ -3048,6 +3118,41 @@
             },
             "created_by_user_id": {
               "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_id": {
+              "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_short_id": {
+              "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_title": {
+              "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_status": {
+              "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_build_owner_user_id": {
+              "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
               "type": [
                 "string",
                 "null"
@@ -3309,6 +3414,41 @@
             "null"
           ]
         },
+        "proposal_id": {
+          "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_short_id": {
+          "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_title": {
+          "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_status": {
+          "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_build_owner_user_id": {
+          "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "error": {
           "type": [
             "string",
@@ -3403,6 +3543,41 @@
         },
         "created_by_user_id": {
           "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_id": {
+          "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_short_id": {
+          "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_title": {
+          "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_status": {
+          "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_build_owner_user_id": {
+          "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
           "type": [
             "string",
             "null"
@@ -3828,6 +4003,41 @@
         },
         "created_by_user_id": {
           "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_id": {
+          "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_short_id": {
+          "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_title": {
+          "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_status": {
+          "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_build_owner_user_id": {
+          "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
           "type": [
             "string",
             "null"
