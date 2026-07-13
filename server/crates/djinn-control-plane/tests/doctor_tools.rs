@@ -952,3 +952,402 @@ async fn closed_parent_open_children_db_dry_run_is_read_only() {
     assert_eq!(tasks_before, tasks_after);
     assert_eq!(activity_before, activity_after);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
+    use djinn_agent::doctor::{
+        CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, TaskRepositoryClosedParentOpenChildrenSource,
+        register_closed_parent_open_children_check_with_repair,
+    };
+    use djinn_core::events::DjinnEventEnvelope;
+    use djinn_db::{EpicRepository, ProposalCreateInput, ProposalRepository, TaskRepository};
+    let harness = doctor_test_harness().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epics = EpicRepository::new(harness.db().clone(), common::test_events());
+    let tasks = TaskRepository::new(harness.db().clone(), common::test_events());
+    let proposals = ProposalRepository::new(harness.db().clone(), common::test_events());
+
+    // Ready orphan closes; in-flight parks retaining session; PR-review parks retaining PR.
+    let ready_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let ready = common::create_test_task(harness.db(), &project.id, &ready_epic.id).await;
+    epics
+        .set_status_raw(&ready_epic.id, "closed")
+        .await
+        .unwrap();
+
+    let flight_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let flight = common::create_test_task(harness.db(), &project.id, &flight_epic.id).await;
+    tasks.set_status(&flight.id, "in_progress").await.unwrap();
+    let flight_session = common::create_test_session(harness.db(), &project.id, &flight.id).await;
+    epics
+        .set_status_raw(&flight_epic.id, "closed")
+        .await
+        .unwrap();
+
+    let pr_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let pr = common::create_test_task(harness.db(), &project.id, &pr_epic.id).await;
+    tasks.set_status(&pr.id, "pr_review").await.unwrap();
+    tasks
+        .set_pr_url(&pr.id, "https://github.com/djinnos/djinn/pull/999999")
+        .await
+        .unwrap();
+    epics.set_status_raw(&pr_epic.id, "closed").await.unwrap();
+
+    // Guarded by another open proposal parent.
+    let guard_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let guard = common::create_test_task(harness.db(), &project.id, &guard_epic.id).await;
+    epics
+        .set_status_raw(&guard_epic.id, "closed")
+        .await
+        .unwrap();
+    let live_proposal = proposals
+        .create(ProposalCreateInput {
+            title: "live parent",
+            body: "",
+            acceptance_criteria: None,
+            status: Some("building"),
+            body_format: None,
+        })
+        .await
+        .unwrap();
+    proposals
+        .link_epic(&live_proposal.id, &guard_epic.id, &project.id)
+        .await
+        .unwrap();
+
+    let (tx, _) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let source = Arc::new(TaskRepositoryClosedParentOpenChildrenSource::new(
+        harness.db().clone(),
+        tx,
+    ));
+    source.refresh().await;
+    register_closed_parent_open_children_check_with_repair(
+        registry(),
+        source.clone(),
+        source.clone(),
+    );
+
+    let run = harness
+        .call_tool(
+            "doctor_run",
+            json!({"check_names":[CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(run["ok"], true);
+    let findings = run["results"][0]["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 4);
+    let repo = DoctorFindingRepository::new(harness.db().clone());
+
+    let mut by_task: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for result in findings {
+        let fid = result["finding_id"].as_str().unwrap().to_owned();
+        let finding = repo.get(&fid).await.unwrap().unwrap();
+        let owner = finding.entity_ids["task_id"].as_str().unwrap().to_owned();
+        by_task.insert(owner, fid);
+    }
+
+    // Apply repair to each persisted finding.
+    for fid in by_task.values() {
+        let fix = harness
+            .call_tool(
+                "doctor_fix",
+                json!({
+                    "check_name": CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME,
+                    "finding_id": fid,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fix["ok"], true);
+    }
+
+    // Assert outcomes.
+    let ready_row = tasks.get(&ready.id).await.unwrap().unwrap();
+    assert_eq!(ready_row.status, "closed");
+    assert_eq!(ready_row.close_reason.as_deref(), Some("parent_closed"));
+
+    let flight_row = tasks.get(&flight.id).await.unwrap().unwrap();
+    assert_eq!(flight_row.status, "needs_lead_intervention");
+    let flight_activity = tasks.list_activity(&flight.id).await.unwrap();
+    let flight_repair = flight_activity
+        .iter()
+        .find(|e| e.event_type == "doctor_fix_repair")
+        .expect("flight task must have doctor_fix_repair activity");
+    let flight_payload: serde_json::Value = serde_json::from_str(&flight_repair.payload).unwrap();
+    assert_eq!(
+        flight_payload["park_reason"].as_str(),
+        Some("historical_parent_closed_in_flight")
+    );
+    assert_eq!(
+        flight_payload["preserved_session_id"].as_str(),
+        Some(flight_session.id.as_str())
+    );
+
+    let pr_row = tasks.get(&pr.id).await.unwrap().unwrap();
+    assert_eq!(pr_row.status, "needs_lead_intervention");
+    assert_eq!(
+        pr_row.pr_url.as_deref(),
+        Some("https://github.com/djinnos/djinn/pull/999999")
+    );
+    let pr_activity = tasks.list_activity(&pr.id).await.unwrap();
+    let pr_repair = pr_activity
+        .iter()
+        .find(|e| e.event_type == "doctor_fix_repair")
+        .expect("pr task must have doctor_fix_repair activity");
+    let pr_payload: serde_json::Value = serde_json::from_str(&pr_repair.payload).unwrap();
+    assert_eq!(
+        pr_payload["park_reason"].as_str(),
+        Some("historical_parent_closed_pr_active")
+    );
+    assert_eq!(
+        pr_payload["preserved_pr_url"].as_str(),
+        Some("https://github.com/djinnos/djinn/pull/999999")
+    );
+
+    let guard_row = tasks.get(&guard.id).await.unwrap().unwrap();
+    assert_eq!(guard_row.status, "open");
+    let guard_activity = tasks.list_activity(&guard.id).await.unwrap();
+    let guard_repair = guard_activity
+        .iter()
+        .find(|e| e.event_type == "doctor_fix_repair");
+    assert!(
+        guard_repair.is_none(),
+        "guarded orphan must not emit doctor_fix_repair activity"
+    );
+
+    // Audit: each repaired task emits a doctor_fix_repair activity.
+    for id in [&ready.id, &flight.id, &pr.id] {
+        let activity = tasks.list_activity(id).await.unwrap();
+        let has_repair = activity.iter().any(|e| e.event_type == "doctor_fix_repair");
+        assert!(
+            has_repair,
+            "task {} should have doctor_fix_repair activity",
+            id
+        );
+    }
+
+    // Idempotency: a second repair run reports no actionable findings.
+    let run2 = harness
+        .call_tool(
+            "doctor_run",
+            json!({"check_names":[CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME]}),
+        )
+        .await
+        .unwrap();
+    let findings2 = run2["results"][0]["findings"].as_array().unwrap();
+    assert_eq!(findings2.len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closed_parent_open_children_repair_skips_external_open_dependent() {
+    use djinn_agent::doctor::{
+        CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, TaskRepositoryClosedParentOpenChildrenSource,
+        register_closed_parent_open_children_check_with_repair,
+    };
+    use djinn_core::events::DjinnEventEnvelope;
+    use djinn_db::{EpicRepository, TaskRepository};
+    let harness = doctor_test_harness().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epics = EpicRepository::new(harness.db().clone(), common::test_events());
+    let tasks = TaskRepository::new(harness.db().clone(), common::test_events());
+
+    let orphan_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let orphan = common::create_test_task(harness.db(), &project.id, &orphan_epic.id).await;
+    epics
+        .set_status_raw(&orphan_epic.id, "closed")
+        .await
+        .unwrap();
+
+    // Open dependent in a different epic; orphan blocks it.
+    let other_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let dependent = common::create_test_task(harness.db(), &project.id, &other_epic.id).await;
+    tasks.add_blocker(&dependent.id, &orphan.id).await.unwrap();
+
+    let (tx, _) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let source = std::sync::Arc::new(TaskRepositoryClosedParentOpenChildrenSource::new(
+        harness.db().clone(),
+        tx,
+    ));
+    source.refresh().await;
+    register_closed_parent_open_children_check_with_repair(
+        registry(),
+        source.clone(),
+        source.clone(),
+    );
+
+    let run = harness
+        .call_tool(
+            "doctor_run",
+            json!({"check_names":[CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME]}),
+        )
+        .await
+        .unwrap();
+    let findings = run["results"][0]["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0]["recommended_action"], "retain");
+    assert_eq!(findings[0]["recommended_reason"], "external_open_dependent");
+
+    let fid = findings[0]["finding_id"].as_str().unwrap().to_owned();
+    let fix = harness
+        .call_tool(
+            "doctor_fix",
+            json!({
+                "check_name": CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME,
+                "finding_id": fid,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fix["ok"], true);
+
+    let orphan_row = tasks.get(&orphan.id).await.unwrap().unwrap();
+    assert_eq!(orphan_row.status, "open");
+    let dependent_row = tasks.get(&dependent.id).await.unwrap().unwrap();
+    assert_eq!(dependent_row.status, "open");
+
+    let activity = tasks.list_activity(&orphan.id).await.unwrap();
+    assert!(
+        !activity.iter().any(|e| e.event_type == "doctor_fix_repair"),
+        "external-dependent orphan must not be repaired"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closed_parent_open_children_repair_cascades_internal_blocker() {
+    use djinn_agent::doctor::{
+        CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, TaskRepositoryClosedParentOpenChildrenSource,
+        register_closed_parent_open_children_check_with_repair,
+    };
+    use djinn_core::events::DjinnEventEnvelope;
+    use djinn_db::{EpicRepository, TaskRepository};
+    let harness = doctor_test_harness().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epics = EpicRepository::new(harness.db().clone(), common::test_events());
+    let tasks = TaskRepository::new(harness.db().clone(), common::test_events());
+
+    let parent_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let blocker = common::create_test_task(harness.db(), &project.id, &parent_epic.id).await;
+    let dependent = common::create_test_task(harness.db(), &project.id, &parent_epic.id).await;
+    tasks.add_blocker(&dependent.id, &blocker.id).await.unwrap();
+    epics
+        .set_status_raw(&parent_epic.id, "closed")
+        .await
+        .unwrap();
+
+    let (tx, _) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let source = std::sync::Arc::new(TaskRepositoryClosedParentOpenChildrenSource::new(
+        harness.db().clone(),
+        tx,
+    ));
+    source.refresh().await;
+    register_closed_parent_open_children_check_with_repair(
+        registry(),
+        source.clone(),
+        source.clone(),
+    );
+
+    let run = harness
+        .call_tool(
+            "doctor_run",
+            json!({"check_names":[CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME]}),
+        )
+        .await
+        .unwrap();
+    let findings = run["results"][0]["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 2);
+    for finding in findings {
+        assert_eq!(finding["recommended_action"], "close");
+        assert_eq!(finding["recommended_reason"], "parent_closed");
+    }
+
+    let repo = DoctorFindingRepository::new(harness.db().clone());
+    for result in findings {
+        let fid = result["finding_id"].as_str().unwrap().to_owned();
+        let finding = repo.get(&fid).await.unwrap().unwrap();
+        let fix = harness
+            .call_tool(
+                "doctor_fix",
+                json!({
+                    "check_name": CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME,
+                    "finding_id": fid,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fix["ok"], true);
+
+        let task_id = finding.entity_ids["task_id"].as_str().unwrap();
+        let row = tasks.get(task_id).await.unwrap().unwrap();
+        assert_eq!(row.status, "closed");
+        assert_eq!(row.close_reason.as_deref(), Some("parent_closed"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closed_parent_open_children_repair_skips_stale_snapshot() {
+    use djinn_agent::doctor::{
+        CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, TaskRepositoryClosedParentOpenChildrenSource,
+        register_closed_parent_open_children_check_with_repair,
+    };
+    use djinn_core::events::DjinnEventEnvelope;
+    use djinn_db::{EpicRepository, TaskRepository};
+    let harness = doctor_test_harness().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epics = EpicRepository::new(harness.db().clone(), common::test_events());
+    let tasks = TaskRepository::new(harness.db().clone(), common::test_events());
+
+    let ready_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let ready = common::create_test_task(harness.db(), &project.id, &ready_epic.id).await;
+    epics
+        .set_status_raw(&ready_epic.id, "closed")
+        .await
+        .unwrap();
+
+    let (tx, _) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let source = std::sync::Arc::new(TaskRepositoryClosedParentOpenChildrenSource::new(
+        harness.db().clone(),
+        tx,
+    ));
+    source.refresh().await;
+    register_closed_parent_open_children_check_with_repair(
+        registry(),
+        source.clone(),
+        source.clone(),
+    );
+
+    let run = harness
+        .call_tool(
+            "doctor_run",
+            json!({"check_names":[CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME]}),
+        )
+        .await
+        .unwrap();
+    let findings = run["results"][0]["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
+    let fid = findings[0]["finding_id"].as_str().unwrap().to_owned();
+
+    // Simulate status drift before repair: the task is now already closed by an
+    // unrelated path, so the snapshot is stale.
+    tasks.set_status(&ready.id, "closed").await.unwrap();
+
+    let fix = harness
+        .call_tool(
+            "doctor_fix",
+            json!({
+                "check_name": CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME,
+                "finding_id": fid,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fix["ok"], true);
+
+    let row = tasks.get(&ready.id).await.unwrap().unwrap();
+    assert_eq!(row.status, "closed");
+    let activity = tasks.list_activity(&ready.id).await.unwrap();
+    assert!(
+        !activity.iter().any(|e| e.event_type == "doctor_fix_repair"),
+        "stale snapshot must not be repaired"
+    );
+}
