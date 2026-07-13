@@ -273,6 +273,8 @@
             state.event_bus(),
             state.catalog().clone(),
             state.health_tracker().clone(),
+            state.retrieval_config(),
+            state.retrieval_metrics(),
             Some(Arc::new(RejectingCoordinator) as Arc<dyn CoordinatorOps>),
             None,
             None,

@@ -104,6 +104,8 @@ impl AppState {
             self.event_bus(),
             self.catalog().clone(),
             self.health_tracker().clone(),
+            self.retrieval_config(),
+            self.retrieval_metrics(),
             coordinator,
             pool,
             Some(Arc::new(self.embedding_service().clone())),

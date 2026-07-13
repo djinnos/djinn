@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use tokio::signal;
@@ -10,9 +11,11 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use djinn_agent::runtime_bridge::{RuntimeKind, runtime_kind};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
+use djinn_core::doctor::RetrievalHealthConfig;
 use djinn_server::db::runtime::{DatabaseRuntimeConfig, DatabaseRuntimeManager};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
+use djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics;
 
 #[derive(Parser)]
 #[command(name = "djinn-server", about = "Djinn MCP server", version)]
@@ -150,7 +153,21 @@ async fn async_main() {
         std::process::exit(1);
     }
 
-    let state = AppState::new_with_runtime(db, db_runtime, cancel.clone());
+    // ── Retrieval health config ───────────────────────────────────────
+    // Parse once at process startup; invalid values prevent serving.
+    let retrieval_config = RetrievalHealthConfig::from_env().unwrap_or_else(|e| {
+        tracing::error!(error = %e, "invalid retrieval health configuration");
+        std::process::exit(1);
+    });
+    let retrieval_metrics = Arc::new(MemoryRetrievalMetrics::new());
+
+    let state = AppState::new_with_runtime(
+        db,
+        db_runtime,
+        cancel.clone(),
+        retrieval_config,
+        retrieval_metrics,
+    );
 
     // NOTE: the periodic housekeeping + mirror-fetch loops, the coordinator,
     // and the worker RPC listener no longer start here unconditionally — they

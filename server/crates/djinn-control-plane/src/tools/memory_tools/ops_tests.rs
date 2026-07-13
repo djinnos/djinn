@@ -6,6 +6,9 @@ mod tests {
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
+    use djinn_telemetry::memory_retrieval::{
+        RetrievalEntryPoint, RetrievalOutcome, RetrievalStage,
+    };
     use tokio::sync::broadcast;
 
     use crate::bridge::{RuntimeOps, SemanticQueryEmbedding};
@@ -1053,5 +1056,72 @@ mod tests {
         assert!(bad_project.isolated_count.is_none());
         assert!(bad_project.isolated_pct.is_none());
         assert!(bad_project.machine_connected_orphan_count.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_search_records_telemetry_once() {
+        let setup = setup_server().await;
+
+        let params = SearchParams {
+            project: setup.project.clone(),
+            query: "Seed architecture context".to_string(),
+            folder: None,
+            note_type: None,
+            limit: Some(10),
+            entity_types: None,
+            edge_kinds: None,
+        };
+        let result = ops::memory_search(&setup.server, params, None).await;
+        assert!(
+            result.error.is_none(),
+            "unexpected error: {:?}",
+            result.error
+        );
+
+        let metrics = setup.server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let aggregate =
+            snapshot.aggregate(RetrievalEntryPoint::Dispatch, RetrievalOutcome::Success);
+        assert_eq!(
+            aggregate.count, 1,
+            "memory_search should record exactly one success observation"
+        );
+        assert!(aggregate.duration_sum_seconds > 0.0);
+        assert!(aggregate.candidate_sum >= 1.0);
+
+        let lexical =
+            snapshot.stage_aggregate(RetrievalEntryPoint::Dispatch, RetrievalStage::Lexical);
+        assert_eq!(lexical.count, 1);
+        assert!(lexical.duration_sum_seconds >= 0.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_search_empty_records_empty_outcome() {
+        let setup = setup_server().await;
+
+        let params = SearchParams {
+            project: setup.project.clone(),
+            query: "this query will not match anything in the seed notes".to_string(),
+            folder: None,
+            note_type: None,
+            limit: Some(10),
+            entity_types: None,
+            edge_kinds: None,
+        };
+        let result = ops::memory_search(&setup.server, params, None).await;
+        assert!(
+            result.error.is_none(),
+            "unexpected error: {:?}",
+            result.error
+        );
+        assert!(result.results.is_empty());
+
+        let metrics = setup.server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let empty = snapshot.aggregate(RetrievalEntryPoint::Dispatch, RetrievalOutcome::Empty);
+        assert_eq!(
+            empty.count, 1,
+            "memory_search with no matches should record exactly one empty observation"
+        );
     }
 }
