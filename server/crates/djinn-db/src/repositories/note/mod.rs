@@ -26,8 +26,10 @@ mod housekeeping;
 mod indexing;
 mod lexical_search;
 pub(crate) mod lifecycle;
+mod mutation;
 mod note_quality;
 pub mod replay_validation;
+mod revisions;
 pub mod rrf;
 mod scoring;
 mod search;
@@ -72,6 +74,11 @@ pub use replay_validation::{
     ReplayNote, ReplayQuery, ReplayReport, anchor_embedding_replay_fixture,
     generate_anchor_embedding_replay_report, render_anchor_embedding_replay_report_markdown,
 };
+pub use revisions::{
+    NoteRevisionActorKind, NoteRevisionEventInput, NoteRevisionEventKind, NoteRevisionEventRow,
+    NoteRevisionReason, NoteRevisionSnapshot, NoteRevisionValidationError,
+    TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance,
+};
 pub use rrf::rrf_fuse;
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
@@ -92,6 +99,10 @@ pub use housekeeping::{
     LlmAnchorProposer, ProposedBackfillAnchor, propose_anchor_deterministic,
 };
 pub use lifecycle::NoteStatus;
+pub use mutation::{
+    NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionMutation,
+    NoteRevisionMutationResult,
+};
 
 /// Compact scope-overlap candidate row returned by
 /// [`NoteRepository::query_by_scope_overlap_trace_candidates`].
@@ -225,6 +236,7 @@ pub struct NoteRepository {
     embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
     embedding_branch: String,
     vector_store: Arc<dyn NoteVectorStore>,
+    revision_event_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NoteRepository {
@@ -235,6 +247,7 @@ impl NoteRepository {
             embedding_provider: None,
             embedding_branch: "main".to_string(),
             vector_store: Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>,
+            revision_event_failure: mutation::revision_failure_flag(),
         }
     }
 
