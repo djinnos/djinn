@@ -866,8 +866,8 @@ mod tests {
         let Json(first) = server
             .memory_write(Parameters(WriteParams {
                 project: project.slug(),
-                title: "Error Handling Pattern".to_string(),
-                content: "Use Result types and ? for error handling in Rust.".to_string(),
+                title: "Telemetry Reuse Pattern".to_string(),
+                content: "apple banana cherry date elderberry".to_string(),
                 note_type: "pattern".to_string(),
                 status: None,
                 tags: None,
@@ -878,27 +878,19 @@ mod tests {
         assert!(first.error.is_none());
         let note_id = first.id.unwrap();
 
-        sleep(Duration::from_millis(100)).await;
-
-        let decider = StaticDecider {
-            decision: MemoryWriteDedupDecision::ReuseExisting {
-                candidate_id: note_id.clone(),
-            },
-        };
+        // Exact content match triggers the deterministic hash-reuse path and
+        // records a single Success observation.
         let Json(second) = server
-            .memory_write_with_decider(
-                Parameters(WriteParams {
-                    project: project.slug(),
-                    title: "Error Handling Pattern".to_string(),
-                    content: "Use Result types and ? for error handling in Rust. (v2)".to_string(),
-                    note_type: "pattern".to_string(),
-                    status: None,
-                    tags: None,
-                    scope_paths: None,
-                    retrieval_anchor: None,
-                }),
-                &decider,
-            )
+            .memory_write(Parameters(WriteParams {
+                project: project.slug(),
+                title: "Telemetry Reuse Pattern".to_string(),
+                content: "apple banana cherry date elderberry".to_string(),
+                note_type: "pattern".to_string(),
+                status: None,
+                tags: None,
+                scope_paths: None,
+                retrieval_anchor: None,
+            }))
             .await;
         assert!(
             second.error.is_none(),
@@ -960,8 +952,8 @@ mod tests {
         let Json(first) = server
             .memory_write(Parameters(WriteParams {
                 project: project.slug(),
-                title: "Error Handling Pattern".to_string(),
-                content: "Use Result types and ? for error handling in Rust.".to_string(),
+                title: "Telemetry Error Pattern".to_string(),
+                content: "apple banana cherry date elderberry".to_string(),
                 note_type: "pattern".to_string(),
                 status: None,
                 tags: None,
@@ -978,12 +970,15 @@ mod tests {
                 candidate_id: "nonexistent-candidate-id".to_string(),
             },
         };
+        // The second note uses a strict subset of the first note's content terms
+        // so the lexical dedup search deterministically finds the first note, the
+        // decider is invoked, and the missing candidate produces an error outcome.
         let Json(second) = server
             .memory_write_with_decider(
                 Parameters(WriteParams {
                     project: project.slug(),
-                    title: "Error Handling Pattern".to_string(),
-                    content: "Use Result types and ? for error handling in Rust. (v2)".to_string(),
+                    title: "Telemetry Error Pattern".to_string(),
+                    content: "apple banana cherry date".to_string(),
                     note_type: "pattern".to_string(),
                     status: None,
                     tags: None,
