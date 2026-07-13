@@ -4,8 +4,6 @@ import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
 import { useProjects } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
-import { useMergedColumnStore } from "@/stores/useMergedColumnStore";
-import { loadMoreClosedTasks } from "@/api/server";
 import type { Epic, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
@@ -21,18 +19,21 @@ import {
   Progress02Icon,
   type UnavailableIcon,
 } from "@hugeicons/core-free-icons";
+import { useQuery } from "@tanstack/react-query";
+import { usersQueryOptions } from "@/api/queryOptions";
+import { UserAvatar } from "@/components/UserAvatar";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/lib/utils";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   epicMatchesOwnerFilter,
-  getEpicEmoji,
   matchesStructuredFilters,
   useBoardFilters,
 } from "@/components/board/boardFilters";
 import { useBoardServerSearch } from "@/components/board/useBoardServerSearch";
 
 type ColumnKey = "open" | "in_progress" | "pr_ready" | "done";
+
+const NO_PROPOSAL_KEY = "no-proposal";
 
 const STATUS_COLUMNS: Array<{
   key: ColumnKey;
@@ -71,6 +72,11 @@ const STATUS_COLUMNS: Array<{
   },
 ];
 
+// Shared column grid: the sticky status header and every swimlane use the same
+// template so cards stay aligned under their column while scrolling lanes.
+const COLUMN_GRID_CLASS =
+  "grid grid-cols-[repeat(4,minmax(280px,1fr))] gap-x-5";
+
 function taskToColumnKey(task: Task): ColumnKey | null {
   if (task.status === "closed") {
     // A task lands in "Merged" when we have the landed merge-commit SHA. Tasks
@@ -101,44 +107,52 @@ function taskToColumnKey(task: Task): ColumnKey | null {
   return "open";
 }
 
-function getEpicTitle(
-  epic: Epic | undefined,
-  epicId: string | undefined,
-): string {
-  if (!epicId) return "No Epic";
-  return epic?.title ?? "Unknown Epic";
+/**
+ * One full-width swimlane. Lanes are building proposals (Linear's "project"
+ * rows), labelled with the build owner's avatar; everything without a
+ * building-proposal linkage (standalone epics, un-epiced tasks) folds into a
+ * single catch-all lane at the bottom. The epic renders on each card, not on
+ * the lane.
+ */
+type Lane = {
+  key: string;
+  kind: "proposal" | "other";
+  title: string;
+  proposalId?: string;
+  buildOwnerUserId?: string | null;
+  columns: Map<ColumnKey, Task[]>;
+  total: number;
+  mergedCount: number;
+};
+
+/** Whether an epic belongs to a proposal that is actively building. */
+function isBuildingProposalEpic(epic: Epic | undefined): boolean {
+  return !!epic?.proposal_id && epic.proposal_status === "building";
 }
 
 type KanbanBoardProps = {
   tasks?: Task[];
   epics?: Map<string, Epic>;
-  initialCollapsedEpics?: string[];
+  /** Lane keys (`proposal:<id>`, `epic:<id>`, or `no-epic`) that start collapsed. */
+  initialCollapsedLanes?: string[];
 };
 
 export function KanbanBoard({
   tasks: tasksProp,
   epics: epicsProp,
-  initialCollapsedEpics,
+  initialCollapsedLanes,
 }: KanbanBoardProps = {}) {
   const navigate = useNavigate();
   const storeTasks = useTaskStore((state) => Array.from(state.tasks.values()));
   const storeEpics = useEpicStore((state) => state.epics);
   const projects = useProjects();
 
-  // Merged-column pagination: the board loads active tasks first, then the
-  // merged tasks page-by-page. `hasMoreClosed` drives the "Load more"
-  // affordance; `mergedTotal` is the EXACT merged count summed across projects
-  // (the backend `status=merged` filter counts only actually-merged rows, so no
-  // "+" estimate is needed). When the board is rendered in controlled mode
-  // (`tasksProp`) the store is empty, so the affordance is hidden and the header
-  // falls back to the loaded count.
-  const hasMoreClosed = useMergedColumnStore((state) => state.hasMore());
-  const loadingMoreClosed = useMergedColumnStore((state) => state.loadingMore);
-  const mergedTotal = useMergedColumnStore((state) => state.totalMerged());
-  const hasMergedTotals = useMergedColumnStore((state) => state.hasTotals());
-  const handleLoadMoreClosed = () => {
-    void loadMoreClosedTasks();
-  };
+  // Org roster, for the build-owner avatar on proposal swimlanes.
+  const { data: orgUsers = [] } = useQuery(usersQueryOptions());
+  const usersById = useMemo(
+    () => new Map(orgUsers.map((u) => [u.id, u])),
+    [orgUsers],
+  );
 
   // Filter values come from the shared header via the URL search params.
   const { projectFilters, epicFilters, ownerFilters, issueTypeFilters, search } =
@@ -151,10 +165,10 @@ export function KanbanBoard({
 
   const tasks = tasksProp ?? storeTasks;
   const epics = epicsProp ?? storeEpics;
-  const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>(
+  const [collapsedLanes, setCollapsedLanes] = useState<Record<string, boolean>>(
     () => {
       const next: Record<string, boolean> = {};
-      for (const key of initialCollapsedEpics ?? []) next[key] = true;
+      for (const key of initialCollapsedLanes ?? []) next[key] = true;
       return next;
     },
   );
@@ -248,57 +262,117 @@ export function KanbanBoard({
     search,
   ]);
 
-  const groupedByStatusThenEpic = useMemo(() => {
-    const byColumn = new Map<ColumnKey, Map<string, Task[]>>();
+  // Group tasks into swimlanes: one lane per building proposal (Linear
+  // "project" rows), plus a single catch-all lane for everything without a
+  // building-proposal linkage. Merged tasks whose proposal is no longer
+  // building are dropped — retired proposals age off the board — while their
+  // *active* stragglers stay visible in the catch-all so live work never
+  // disappears.
+  const lanes = useMemo<Lane[]>(() => {
+    const byLane = new Map<string, Lane>();
 
-    for (const column of STATUS_COLUMNS) {
-      byColumn.set(column.key, new Map());
-    }
+    const proposalLane = (epic: Epic): Lane => {
+      const key = `proposal:${epic.proposal_id}`;
+      let lane = byLane.get(key);
+      if (!lane) {
+        lane = {
+          key,
+          kind: "proposal",
+          title:
+            epic.proposal_title ??
+            (epic.proposal_short_id
+              ? `Proposal ${epic.proposal_short_id}`
+              : "Proposal"),
+          proposalId: epic.proposal_id!,
+          buildOwnerUserId: epic.proposal_build_owner_user_id,
+          columns: new Map(),
+          total: 0,
+          mergedCount: 0,
+        };
+        byLane.set(key, lane);
+      }
+      return lane;
+    };
+
+    const otherLane = (): Lane => {
+      let lane = byLane.get(NO_PROPOSAL_KEY);
+      if (!lane) {
+        lane = {
+          key: NO_PROPOSAL_KEY,
+          kind: "other",
+          title: "No proposal",
+          columns: new Map(),
+          total: 0,
+          mergedCount: 0,
+        };
+        byLane.set(NO_PROPOSAL_KEY, lane);
+      }
+      return lane;
+    };
 
     for (const task of filteredTasks) {
-      const epicKey = task.epic_id ?? "no-epic";
       const columnKey = taskToColumnKey(task);
       if (columnKey === null) continue;
-      const columnMap = byColumn.get(columnKey);
-      if (!columnMap) continue;
+      const epic = task.epic_id ? epics.get(task.epic_id) : undefined;
 
-      const existing = columnMap.get(epicKey) ?? [];
+      let lane: Lane;
+      if (epic && isBuildingProposalEpic(epic)) {
+        lane = proposalLane(epic);
+      } else {
+        // Merged work of a retired (non-building) proposal ages off the board.
+        if (epic?.proposal_id && columnKey === "done") continue;
+        lane = otherLane();
+      }
+
+      const existing = lane.columns.get(columnKey) ?? [];
       existing.push(task);
-      columnMap.set(epicKey, existing);
+      lane.columns.set(columnKey, existing);
+      lane.total += 1;
+      if (columnKey === "done") lane.mergedCount += 1;
     }
 
-    // Seed empty open epics into the Open column so they are visible on the board
-    const epicIdsWithTasks = new Set<string>();
-    for (const columnMap of byColumn.values()) {
-      for (const epicKey of columnMap.keys()) {
-        epicIdsWithTasks.add(epicKey);
-      }
-    }
-    const openColumn = byColumn.get("open");
-    if (openColumn) {
-      const visibleEpicIds =
-        epicFilters.length > 0 ? new Set(epicFilters) : null;
-      for (const [epicId, epic] of epics) {
-        if (epic.status !== "open") continue;
-        if (epicIdsWithTasks.has(epicId)) continue;
-        if (visibleEpicIds && !visibleEpicIds.has(epicId)) continue;
-        // Scope empty epic shells to the owner filter the same way tasks are:
-        // an epic is "owned" by its `created_by_user_id` (which its tasks
-        // inherit), so a shell only shows when its owner is selected.
-        if (!epicMatchesOwnerFilter(epic, ownerFilters)) continue;
-        openColumn.set(epicId, []);
-      }
+    // Seed lanes for building proposals whose epics have no tasks yet, so a
+    // freshly kicked-off build is visible before its breakdown lands.
+    const visibleEpicIds = epicFilters.length > 0 ? new Set(epicFilters) : null;
+    for (const [epicId, epic] of epics) {
+      if (epic.status !== "open") continue;
+      if (!isBuildingProposalEpic(epic)) continue;
+      if (visibleEpicIds && !visibleEpicIds.has(epicId)) continue;
+      // Scope empty epic shells to the owner filter the same way tasks are:
+      // an epic is "owned" by its `created_by_user_id` (which its tasks
+      // inherit), so a shell only shows when its owner is selected.
+      if (!epicMatchesOwnerFilter(epic, ownerFilters)) continue;
+      proposalLane(epic);
     }
 
-    return byColumn;
+    return Array.from(byLane.values()).sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === "proposal" ? -1 : 1;
+      return a.title.localeCompare(b.title);
+    });
   }, [filteredTasks, epics, epicFilters, ownerFilters]);
 
-  const toggleEpic = (columnKey: ColumnKey, epicKey: string) => {
-    const collapseKey = `${columnKey}:${epicKey}`;
-    setCollapsedEpics((prev) => ({
+  const columnCounts = useMemo(() => {
+    const counts = new Map<ColumnKey, number>();
+    for (const column of STATUS_COLUMNS) counts.set(column.key, 0);
+    for (const lane of lanes) {
+      for (const [columnKey, columnTasks] of lane.columns) {
+        counts.set(columnKey, (counts.get(columnKey) ?? 0) + columnTasks.length);
+      }
+    }
+    return counts;
+  }, [lanes]);
+
+  const toggleLane = (laneKey: string) => {
+    setCollapsedLanes((prev) => ({
       ...prev,
-      [collapseKey]: !prev[collapseKey],
+      [laneKey]: !prev[laneKey],
     }));
+  };
+
+  const handleLaneNameClick = (lane: Lane) => {
+    if (lane.kind === "proposal" && lane.proposalId) {
+      navigate(`/proposals/${lane.proposalId}`);
+    }
   };
 
   return (
@@ -307,26 +381,20 @@ export function KanbanBoard({
 
       <GitHubAppBanner projectSlugs={bannerSlugs} />
 
-      <div className="flex min-h-0 flex-1 overflow-x-auto pb-1">
-        {STATUS_COLUMNS.map((column, colIdx) => {
-          const statusMap =
-            groupedByStatusThenEpic.get(column.key) ??
-            new Map<string, Task[]>();
-          const epicGroups = Array.from(statusMap.entries());
-          const taskCount = epicGroups.reduce(
-            (total, [, epicTasks]) => total + epicTasks.length,
-            0,
-          );
-          const hasContent = epicGroups.length > 0;
-
-          return (
-            <div key={column.key} className="flex min-h-0 min-w-[360px] flex-1">
-              {colIdx > 0 && (
-                <div className="w-px shrink-0 self-stretch bg-white/[0.03]" />
-              )}
-              <Card className="relative min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out">
-                <div className="flex flex-col">
-                  <div className="relative px-4 pb-2.5 pt-3.5 text-sm font-semibold">
+      <div className="min-h-0 flex-1 overflow-auto pb-1">
+        <div className="min-w-fit">
+          {/* Status column header — sticky above the swimlanes. */}
+          <div
+            className={cn(
+              COLUMN_GRID_CLASS,
+              "sticky top-0 z-20 bg-background/95 px-1 backdrop-blur-sm",
+            )}
+          >
+            {STATUS_COLUMNS.map((column) => {
+              const taskCount = columnCounts.get(column.key) ?? 0;
+              return (
+                <div key={column.key} className="flex flex-col">
+                  <div className="relative pb-2.5 pt-1.5 text-sm font-semibold">
                     <div className="flex items-center gap-2.5">
                       {column.key === "in_progress" ? (
                         <HugeiconsIcon
@@ -348,137 +416,138 @@ export function KanbanBoard({
                       )}
                       <span className="leading-none">{column.label}</span>
                       <span className="text-xs leading-none text-muted-foreground">
-                        {column.key === "done" && hasMergedTotals
-                          ? mergedTotal
-                          : taskCount}
+                        {taskCount}
                       </span>
                     </div>
                   </div>
-                  <div className="px-4">
-                    <div
-                      className={cn(
-                        "h-0.5 w-10 rounded-full",
-                        column.colorClass,
-                        column.glowClass,
-                      )}
-                    />
-                  </div>
+                  <div
+                    className={cn(
+                      "h-0.5 w-10 rounded-full",
+                      column.colorClass,
+                      column.glowClass,
+                    )}
+                  />
                 </div>
+              );
+            })}
+          </div>
 
-                <CardContent className="relative z-10 flex-1 overflow-y-auto px-3 pt-4">
-                  {!hasContent &&
-                  !(column.key === "done" && hasMoreClosed) ? (
-                    <p className="px-1 text-xs text-muted-foreground/50">
-                      No tasks
-                    </p>
-                  ) : (
-                    <div className="flex flex-col gap-3.5">
-                      {epicGroups.map(([epicKey, epicTasks]) => {
-                        const firstTaskEpicId =
-                          epicTasks[0]?.epic_id ??
-                          (epicKey !== "no-epic" ? epicKey : undefined);
-                        const epic = firstTaskEpicId
-                          ? epics.get(firstTaskEpicId)
-                          : undefined;
-                        const collapseKey = `${column.key}:${epicKey}`;
-                        const isCollapsed = !!collapsedEpics[collapseKey];
+          {lanes.length === 0 ? (
+            <p className="px-1 pt-4 text-xs text-muted-foreground/50">
+              No tasks
+            </p>
+          ) : (
+            <div className="flex flex-col pt-3">
+              {lanes.map((lane) => {
+                const isCollapsed = !!collapsedLanes[lane.key];
+                const isClickableName = lane.kind === "proposal";
 
-                        return (
-                          <Card
-                            key={epicKey}
-                            size="sm"
-                            className={cn(
-                              "gap-0 cursor-pointer py-3 bg-zinc-900 ring-white/[0.04]",
-                            )}
-                            onClick={() => toggleEpic(column.key, epicKey)}
-                          >
-                            <CardContent>
-                              <div className="flex w-full items-center justify-between gap-2 px-1 py-1.5 text-sm font-medium">
-                                <span className="flex items-center gap-2 truncate">
-                                  <span className="shrink-0 text-xs leading-none">
-                                    {getEpicEmoji(epic)}
-                                  </span>
-                                  <span className="truncate">
-                                    {getEpicTitle(epic, firstTaskEpicId)}
-                                  </span>
-                                </span>
-                                <HugeiconsIcon
-                                  icon={
-                                    isCollapsed
-                                      ? ArrowRight01Icon
-                                      : ArrowDown01Icon
-                                  }
-                                  className="size-4 shrink-0 text-muted-foreground"
-                                />
-                              </div>
+                return (
+                  <section key={lane.key} className="pb-2">
+                    {/* Swimlane header: full-width row spanning all columns. */}
+                    <div
+                      className="flex cursor-pointer items-center gap-2 rounded-md bg-zinc-900 px-2.5 py-2 ring-1 ring-white/[0.04] transition-colors hover:bg-zinc-800/80"
+                      onClick={() => toggleLane(lane.key)}
+                      data-testid={`lane-header-${lane.key}`}
+                    >
+                      <HugeiconsIcon
+                        icon={isCollapsed ? ArrowRight01Icon : ArrowDown01Icon}
+                        className="size-4 shrink-0 text-muted-foreground"
+                      />
+                      {lane.kind === "proposal" && (
+                        <UserAvatar
+                          user={usersById.get(lane.buildOwnerUserId ?? "")}
+                          className="size-4"
+                        />
+                      )}
+                      {isClickableName ? (
+                        <button
+                          type="button"
+                          className="truncate text-sm font-medium hover:underline"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleLaneNameClick(lane);
+                          }}
+                          title={lane.title}
+                        >
+                          {lane.title}
+                        </button>
+                      ) : (
+                        <span className="truncate text-sm font-medium">
+                          {lane.title}
+                        </span>
+                      )}
+                      <span className="text-xs text-muted-foreground">
+                        {lane.total}
+                      </span>
+                      <div className="flex-1" />
+                      {lane.mergedCount > 0 && (
+                        <span className="shrink-0 text-[11px] text-muted-foreground">
+                          {lane.mergedCount}/{lane.total} merged
+                        </span>
+                      )}
+                    </div>
 
-                              {!isCollapsed && epicTasks.length === 0 && (
-                                <p className="px-1 pt-1.5 text-xs text-muted-foreground/50">
-                                  No tasks yet
-                                </p>
-                              )}
-
-                              {!isCollapsed &&
-                                epicTasks.length > 0 &&
-                                (column.key === "done" ? (
-                                  <ul
-                                    className="flex flex-col pt-1.5"
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    {epicTasks.map((task) => (
-                                      <li key={task.id}>
-                                        <DoneTaskRow
-                                          task={task}
-                                          onClick={() => handleTaskClick(task)}
-                                        />
-                                      </li>
-                                    ))}
-                                  </ul>
-                                ) : (
-                                  <ul
-                                    className="flex flex-col gap-3 pt-2.5"
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    {epicTasks.map((task) => (
-                                      <li key={task.id}>
-                                        <TaskCard
-                                          task={task}
-                                          epic={
-                                            task.epic_id
-                                              ? epics.get(task.epic_id)
-                                              : undefined
-                                          }
-                                          moving={!!movingTaskIds[task.id]}
-                                          onClick={() => handleTaskClick(task)}
-                                        />
-                                      </li>
-                                    ))}
-                                  </ul>
+                    {/* Lane body: cards aligned under their status column. */}
+                    {!isCollapsed &&
+                      (lane.total === 0 ? (
+                        <p className="px-2 pt-2.5 pb-1 text-xs text-muted-foreground/50">
+                          No tasks yet
+                        </p>
+                      ) : (
+                        <div className={cn(COLUMN_GRID_CLASS, "px-1 pt-3 pb-2")}>
+                          {STATUS_COLUMNS.map((column) => {
+                            const columnTasks =
+                              lane.columns.get(column.key) ?? [];
+                            if (columnTasks.length === 0) {
+                              return <div key={column.key} />;
+                            }
+                            return column.key === "done" ? (
+                              <ul
+                                key={column.key}
+                                data-testid={`lane-${lane.key}-${column.key}`}
+                                className="flex flex-col self-start"
+                              >
+                                {columnTasks.map((task) => (
+                                  <li key={task.id}>
+                                    <DoneTaskRow
+                                      task={task}
+                                      onClick={() => handleTaskClick(task)}
+                                    />
+                                  </li>
                                 ))}
-                            </CardContent>
-                          </Card>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {column.key === "done" && hasMoreClosed && (
-                    <div className="px-1 pt-3">
-                      <button
-                        type="button"
-                        onClick={handleLoadMoreClosed}
-                        disabled={loadingMoreClosed}
-                        className="w-full rounded-md border border-white/[0.06] bg-zinc-900/60 px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {loadingMoreClosed ? "Loading…" : "Load more"}
-                      </button>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
+                              </ul>
+                            ) : (
+                              <ul
+                                key={column.key}
+                                data-testid={`lane-${lane.key}-${column.key}`}
+                                className="flex flex-col gap-3 self-start"
+                              >
+                                {columnTasks.map((task) => (
+                                  <li key={task.id}>
+                                    <TaskCard
+                                      task={task}
+                                      epic={
+                                        task.epic_id
+                                          ? epics.get(task.epic_id)
+                                          : undefined
+                                      }
+                                      moving={!!movingTaskIds[task.id]}
+                                      onClick={() => handleTaskClick(task)}
+                                    />
+                                  </li>
+                                ))}
+                              </ul>
+                            );
+                          })}
+                        </div>
+                      ))}
+                  </section>
+                );
+              })}
             </div>
-          );
-        })}
+          )}
+        </div>
       </div>
 
       <TaskDetailPanel

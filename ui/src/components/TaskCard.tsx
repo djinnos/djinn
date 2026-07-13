@@ -24,6 +24,8 @@ import { projectStore } from "@/stores/projectStore";
 
 type TaskCardProps = {
   task: Task;
+  /** When provided, the card names its epic (emoji + title) at the bottom —
+   * lanes group by proposal, so the epic context lives on the card. */
   epic?: Epic;
   moving?: boolean;
   onClick?: () => void;
@@ -197,7 +199,7 @@ function ProjectBadge({ projectId }: { projectId?: string }) {
   );
 }
 
-export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
+export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps) {
   const [now, setNow] = useState(() => Date.now());
 
   const startedAt = task.active_session?.started_at;
@@ -378,16 +380,19 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           {task.title}
         </h4>
 
-        {task.labels?.length > 0 && (
-          <div className="flex flex-wrap gap-1">
-            {task.labels.map((label: string) => (
-              <span
-                key={label}
-                className="rounded bg-zinc-700/60 px-1.5 py-0.5 text-[10px] text-zinc-200"
-              >
-                {label}
-              </span>
-            ))}
+        {/* Epic breadcrumb — lanes group by proposal, so each card names its
+            epic at the bottom (Linear's sub-issue parent pattern). */}
+        {epic && (
+          <div
+            className={cn(
+              "flex items-center gap-1 overflow-hidden text-[10px] text-muted-foreground",
+              task.active_session && "pr-12",
+            )}
+            title={epic.title}
+            data-testid="taskcard-epic-chip"
+          >
+            <span className="shrink-0 leading-none">{epic.emoji}</span>
+            <span className="truncate">{epic.title}</span>
           </div>
         )}
 

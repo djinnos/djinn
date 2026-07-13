@@ -139,8 +139,8 @@ pub use repositories::{
     proposal::{
         AwaitingReviewPark, NeedsEvidenceCapStatus, NeedsEvidenceClaimLink, ProposalCreateInput,
         ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput, ProposalListQuery,
-        ProposalListResult, ProposalListSummaryRow, ProposalMemoryRef, ProposalRepository,
-        ProposalUpdateInput,
+        ProposalListResult, ProposalListSummaryRow, ProposalMemoryRef, ProposalRef,
+        ProposalRepository, ProposalUpdateInput,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     scip_indexer_timing::{
