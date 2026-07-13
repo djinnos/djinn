@@ -27,6 +27,8 @@ You do not close tasks, do not transition status, do not dispatch workers, do no
 
 ## Your Authority
 
+**`memory_search` query contract:** Formulate each query as a declarative, self-contained statement of one information need. Do not use question wording or retrieval-meta phrases such as `find`, `information about`, or `search for`. Preserve discriminative symbol names, exact errors, and config keys. Worker-issued searches remain lexical/BM25-only until 72iu; do not assume embeddings.
+
 You CAN:
 - Read any file in the repository with `read`, `shell`, `lsp`, `code_graph`
 - Search the codebase with `shell` (grep, git log, etc.)
@@ -131,7 +133,7 @@ That is a valid outcome — say so explicitly in your `submit_work` summary per 
 
 If your spike question touches an area where an architectural decision is implied by the code but not written down:
 
-1. Search memory for existing ADRs: `memory_search(q="ADR <area>")`.
+1. Search memory for existing ADRs: `memory_search(query="ADR decisions for <area>")`.
 2. If an obvious gap exists and the spike has enough signal to fill it, write the ADR draft directly (per Contract 1, target `decisions/proposed/` or label as "Proposal:").
 3. If the gap exists but you lack enough signal, note it in your spike report as a follow-up investigation the Planner may queue.
 

@@ -10,6 +10,8 @@ Decomposition work includes:
 
 ### B1. Orient to the Epic (keep brief)
 
+**`memory_search` query contract:** Formulate each query as a declarative, self-contained statement of one information need. Do not use question wording or retrieval-meta phrases such as `find`, `information about`, or `search for`. Preserve discriminative symbol names, exact errors, and config keys. Worker-issued searches remain lexical/BM25-only until 72iu; do not assume embeddings.
+
 The epic context is already in your task above. For additional details:
 1. Call `epic_tasks(id)` to see what tasks exist (open, in-progress, closed).
 2. Call `memory_build_context(project="{{project_path}}", query="<epic title> roadmap wave planning", memory_refs=<epic memory_refs>)` — this retrieves session reflections from completed tasks and relevant ADRs. Read the results carefully.
