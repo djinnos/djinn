@@ -1011,7 +1011,7 @@ impl FreeSpaceGuard for StatvfsFreeSpaceGuard {
             return Err(std::io::Error::last_os_error().to_string());
         }
         let stat = unsafe { stat.assume_init() };
-        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+        Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
     }
 }
 
@@ -1026,8 +1026,8 @@ impl FilesystemCapacity for StatvfsFilesystemCapacity {
             return Err(std::io::Error::last_os_error().to_string());
         }
         let stat = unsafe { stat.assume_init() };
-        let total_bytes = stat.f_blocks.saturating_mul(stat.f_frsize);
-        let available_bytes = stat.f_bavail.saturating_mul(stat.f_frsize);
+        let total_bytes = (stat.f_blocks as u64).saturating_mul(stat.f_frsize as u64);
+        let available_bytes = (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
         Ok(CapacitySnapshot {
             total_bytes,
             available_bytes,

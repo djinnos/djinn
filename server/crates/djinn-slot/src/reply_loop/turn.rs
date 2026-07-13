@@ -1187,30 +1187,31 @@ pub async fn run_reply_loop(
                 )
                 .await
                 {
-                    NoProgressGuardResult::FirstBounceCorrective(corrective_text)
+                    NoProgressGuardResult::FirstBounceCorrective(corrective_text) => {
                         if let Some(tool_use_id) =
-                            find_tool_use_id(&turn_tool_calls, primary_finalize) =>
-                    {
-                        no_progress_guard_triggered = true;
-                        let corrective_result = ContentBlock::ToolResult {
-                            tool_use_id: tool_use_id.to_string(),
-                            content: vec![ContentBlock::Text {
-                                text: corrective_text,
-                            }],
-                            is_error: true,
-                        };
-                        let result_msg = Message {
-                            role: Role::User,
-                            content: vec![corrective_result],
-                            metadata: None,
-                        };
-                        persist_session_message(&msg_repo, session_id, task_id, &result_msg)
-                            .await;
-                        conversation.push(result_msg);
-                        // Skip finalize and tool dispatch for this turn; the
-                        // loop will continue and the worker will see the
-                        // corrective message.
-                        continue;
+                            find_tool_use_id(&turn_tool_calls, primary_finalize)
+                        {
+                            no_progress_guard_triggered = true;
+                            let corrective_result = ContentBlock::ToolResult {
+                                tool_use_id: tool_use_id.to_string(),
+                                content: vec![ContentBlock::Text {
+                                    text: corrective_text,
+                                }],
+                                is_error: true,
+                            };
+                            let result_msg = Message {
+                                role: Role::User,
+                                content: vec![corrective_result],
+                                metadata: None,
+                            };
+                            persist_session_message(&msg_repo, session_id, task_id, &result_msg)
+                                .await;
+                            conversation.push(result_msg);
+                            // Skip finalize and tool dispatch for this turn;
+                            // the loop will continue and the worker will see
+                            // the corrective message.
+                            continue;
+                        }
                     }
                     NoProgressGuardResult::SecondStrikeSettle => {
                         // Second consecutive identical no-progress submit.
