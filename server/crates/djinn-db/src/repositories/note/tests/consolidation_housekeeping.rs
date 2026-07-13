@@ -249,6 +249,7 @@ async fn consolidation_create_canonical_note_persists_db_note_confidence_and_pro
             abstract_: Some("short abstract"),
             overview: Some("overview summary"),
             confidence: 1.2,
+            reason: NoteRevisionReason::new("consolidation:test canonical create").unwrap(),
             source_session_ids: &[&session_a, &session_b],
             scope_paths: "[]",
             source_note_ids: &[],
@@ -273,6 +274,20 @@ async fn consolidation_create_canonical_note_persists_db_note_confidence_and_pro
     assert_eq!(fetched.abstract_.as_deref(), Some("short abstract"));
     assert_eq!(fetched.overview.as_deref(), Some("overview summary"));
 
+    let revision: (String, String, String, Option<String>, Option<String>, Option<f64>, Option<f64>, String) = sqlx::query_as("SELECT actor_kind, subsystem, event_kind, content_before, content_after, confidence_before, confidence_after, reason FROM note_revision_events WHERE note_id = $1")
+        .bind(&created.note.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(revision.0, "system");
+    assert_eq!(revision.1, "consolidation");
+    assert_eq!(revision.2, "created");
+    assert_eq!(revision.3, None);
+    assert_eq!(revision.4.as_deref(), Some("synthesized canonical content"));
+    assert_eq!(revision.5, None);
+    assert_eq!(revision.6, Some(CONFIDENCE_CEILING));
+    assert_eq!(revision.7, "consolidation:test canonical create");
+
     let provenance = consolidation_repo
         .list_provenance(&created.note.id)
         .await
@@ -280,6 +295,57 @@ async fn consolidation_create_canonical_note_persists_db_note_confidence_and_pro
     assert_eq!(provenance.len(), 2);
     assert_eq!(provenance[0].session_id, session_a);
     assert_eq!(provenance[1].session_id, session_b);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn consolidation_canonical_create_rolls_back_when_revision_insert_fails() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let consolidation_repo = NoteConsolidationRepository::with_note_repository_for_test(
+        db.clone(),
+        note_repo.clone(),
+    );
+
+    note_repo.set_revision_event_insertion_failure_for_test(true);
+    assert!(
+        consolidation_repo
+            .create_canonical_consolidated_note(CreateCanonicalConsolidatedNote {
+                project_id: &project.id,
+                note_type: "pattern",
+                title: "Failed Canonical Pattern",
+                content: "must not survive a failed revision insert",
+                tags: "[]",
+                abstract_: None,
+                overview: None,
+                confidence: 0.7,
+                reason: NoteRevisionReason::new("consolidation:test rollback create").unwrap(),
+                source_session_ids: &[],
+                scope_paths: "[]",
+                source_note_ids: &[],
+            })
+            .await
+            .is_err()
+    );
+    note_repo.set_revision_event_insertion_failure_for_test(false);
+
+    let notes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = $1 AND title = $2")
+            .bind(&project.id)
+            .bind("Failed Canonical Pattern")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    let revisions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM note_revision_events WHERE project_id = $1")
+            .bind(&project.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(notes, 0);
+    assert_eq!(revisions, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -904,6 +970,7 @@ async fn create_canonical_with_source_note_ids_records_supersedes_edges() {
             abstract_: Some("abstract"),
             overview: Some("overview"),
             confidence: 0.8,
+            reason: NoteRevisionReason::new("consolidation:test supersedes create").unwrap(),
             source_session_ids: &[],
             scope_paths: "[]",
             source_note_ids: &source_note_ids,
@@ -945,6 +1012,7 @@ async fn create_canonical_without_source_note_ids_preserves_legacy_behavior() {
             abstract_: None,
             overview: None,
             confidence: 0.5,
+            reason: NoteRevisionReason::new("consolidation:test no-edge create").unwrap(),
             source_session_ids: &[],
             scope_paths: "[]",
             source_note_ids: &[],
