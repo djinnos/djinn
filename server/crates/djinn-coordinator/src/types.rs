@@ -6,6 +6,7 @@ use super::consolidation::ConsolidationRunner;
 use crate::roles::RoleRegistry;
 use djinn_control_plane::bridge::RuntimeOps;
 use djinn_core::events::DjinnEventEnvelope;
+use djinn_core::models::ModelLane;
 use djinn_db::Database;
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
@@ -15,6 +16,19 @@ use djinn_supervisor::ConnectionRegistry;
 use djinn_workspace::MirrorManager;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+
+/// A dispatch admitted to the slot pool but not yet represented by a running
+/// session row.
+///
+/// The lane is recorded alongside creator/model so both concurrency budgets
+/// can reserve capacity during the worker-pod boot window. Durable rehydration
+/// reconstructs it from `dispatch_state.last_dispatched_role`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct InflightDispatch {
+    pub(super) creator: Option<String>,
+    pub(super) model: String,
+    pub(super) lane: ModelLane,
+}
 
 // ─── Re-exports from djinn-orchestration-types ─────────────────────────────
 // Types that are pure DTOs and shared between slot and coordinator sides.

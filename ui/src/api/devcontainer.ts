@@ -21,6 +21,27 @@ export interface StackManifestSignals {
   has_turbo_json?: boolean;
 }
 
+/** Runtime versions detected at repository scope by `djinn_stack`. */
+export interface StackRuntimes {
+  node?: string | null;
+  rust?: string | null;
+  python?: string | null;
+  go?: string | null;
+}
+
+/**
+ * One manifest-backed workspace detected by `djinn_stack`.
+ *
+ * Java and Ruby do not currently have top-level entries in `StackRuntimes`,
+ * but their Maven/Gradle/Gemfile workspaces are still emitted here.
+ */
+export interface StackWorkspace {
+  root: string;
+  language: string;
+  toolchain?: string | null;
+  package_manager?: string | null;
+}
+
 export interface Stack {
   detected_at?: string;
   primary_language?: string | null;
@@ -31,6 +52,8 @@ export interface Stack {
   test_runners?: string[];
   frameworks?: string[];
   manifest_signals?: StackManifestSignals;
+  runtimes?: StackRuntimes;
+  workspaces?: StackWorkspace[];
   [key: string]: unknown;
 }
 

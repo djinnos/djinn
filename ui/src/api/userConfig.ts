@@ -1,5 +1,10 @@
 import { callMcpTool } from "@/api/mcpClient";
-import { type ModelLanes, parseLanes } from "@/api/userSettings";
+import {
+  type LaneMaxSessions,
+  type ModelLanes,
+  parseLaneMaxSessions,
+  parseLanes,
+} from "@/api/userSettings";
 import type {
   ProviderModelsConnectedOutputSchema,
   ProviderConnectedOutputSchema,
@@ -77,6 +82,8 @@ export interface UserModelSelection {
   lanes: ModelLanes;
   /** Per-model concurrency caps keyed by full `"provider/model"` id. */
   maxSessions: Record<string, number>;
+  /** Per-lane concurrency ceilings; absent for legacy/unbounded users. */
+  laneMaxSessions?: LaneMaxSessions;
   /**
    * Cross-model ("Thorough") review toggle. When true (the default), the
    * reviewer prefers a model id different from the implementer's.
@@ -88,6 +95,8 @@ export interface UserModelSelection {
    * task model. Falls back to same-model when alternatives are unavailable.
    */
   diverseRefinement: boolean;
+  /** True when org AI policy owns the lanes and user edits are forbidden. */
+  laneLocked?: boolean;
 }
 
 function parseMaxSessions(raw: unknown): Record<string, number> {
@@ -105,30 +114,43 @@ export async function fetchUserModelSelection(
   return {
     lanes: parseLanes(response.lanes),
     maxSessions: parseMaxSessions(response.max_sessions),
+    laneMaxSessions: parseLaneMaxSessions(response.lane_max_sessions),
     diverseReview: response.diverse_review !== false,
     diverseRefinement: response.diverse_refinement !== false,
+    laneLocked: response.lane_locked === true,
   };
 }
 
 /**
- * Persist the target user's per-role model lanes, per-model caps, and the
- * cross-model review/refinement toggles. `diverseReview` and
- * `diverseRefinement` are optional — omit to leave the server value untouched
- * (e.g. a lanes-only save).
+ * Persist the target user's per-role model lanes and per-model caps. Optional
+ * lane ceilings and cross-model review/refinement toggles are passed in the
+ * options object; omitted fields remain untouched on the server.
  */
+export interface SaveUserModelSelectionOptions {
+  diverseReview?: boolean;
+  diverseRefinement?: boolean;
+  laneMaxSessions?: LaneMaxSessions;
+}
+
 export async function saveUserModelSelection(
   targetUserId: string,
   lanes: ModelLanes,
   maxSessions: Record<string, number>,
-  diverseReview?: boolean,
-  diverseRefinement?: boolean,
+  options: SaveUserModelSelectionOptions = {},
 ): Promise<UserModelSelection> {
   const response = await callMcpTool("user_settings_set", {
     ...targetArgs(targetUserId),
     lanes,
     max_sessions: maxSessions,
-    ...(diverseReview === undefined ? {} : { diverse_review: diverseReview }),
-    ...(diverseRefinement === undefined ? {} : { diverse_refinement: diverseRefinement }),
+    ...(options.laneMaxSessions === undefined
+      ? {}
+      : { lane_max_sessions: options.laneMaxSessions }),
+    ...(options.diverseReview === undefined
+      ? {}
+      : { diverse_review: options.diverseReview }),
+    ...(options.diverseRefinement === undefined
+      ? {}
+      : { diverse_refinement: options.diverseRefinement }),
   });
   if (!response.ok) {
     throw new Error(response.error ?? "Failed to save user models");
@@ -136,8 +158,11 @@ export async function saveUserModelSelection(
   return {
     lanes: parseLanes(response.lanes),
     maxSessions: parseMaxSessions(response.max_sessions),
+    laneMaxSessions: parseLaneMaxSessions(response.lane_max_sessions),
     diverseReview: response.diverse_review !== false,
     diverseRefinement: response.diverse_refinement !== false,
+    // A successful user save is only possible when org policy is unlocked.
+    laneLocked: false,
   };
 }
 
