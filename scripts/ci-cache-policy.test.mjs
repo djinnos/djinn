@@ -80,6 +80,106 @@ function isFalse(value) {
   return value !== undefined && /^false$/i.test(value);
 }
 
+function workflowEvents(parsed) {
+  const trigger = parsed.lines.slice(0, parsed.lines.findIndex((line) => /^jobs:/.test(line)));
+  return trigger
+    .map((line) => line.match(/^ {2}([A-Za-z_][A-Za-z0-9_]*):\s*(?:null)?\s*(?:#.*)?$/)?.[1])
+    .filter((event) => event && event !== 'workflow_call');
+}
+
+/**
+ * Evaluate the event-name portion of a job condition structurally. Unknown
+ * predicates (such as preflight outputs) are treated as satisfiable, while
+ * boolean literals and mutually-exclusive event tests are evaluated. This
+ * catches `if: false` and contradictory event routes without pretending to
+ * execute GitHub expressions.
+ */
+function conditionAllowsEvent(condition, event) {
+  if (!condition) return true;
+  const expression = condition
+    .replace(/^\s*\$\{\{\s*|\s*\}\}\s*$/g, '')
+    .replace(/github\.event_name\s*(==|!=)\s*(['"])([^'"]+)\2/g,
+      (_, operator, _quote, candidate) => String(operator === '==' ? event === candidate : event !== candidate));
+  const tokens = [];
+  let atom = '';
+  const pushAtom = () => {
+    if (atom.trim()) tokens.push({ type: 'atom', value: atom.trim() });
+    atom = '';
+  };
+  for (let index = 0; index < expression.length; index += 1) {
+    const character = expression[index];
+    if (character === '&' && expression[index + 1] === '&') {
+      pushAtom(); tokens.push({ type: 'and' }); index += 1;
+    } else if (character === '|' && expression[index + 1] === '|') {
+      pushAtom(); tokens.push({ type: 'or' }); index += 1;
+    } else if (character === '!' && expression[index + 1] !== '=') {
+      pushAtom(); tokens.push({ type: 'not' });
+    } else if (character === '(' || character === ')') {
+      pushAtom(); tokens.push({ type: character });
+    } else {
+      atom += character;
+    }
+  }
+  pushAtom();
+
+  let cursor = 0;
+  const primary = () => {
+    const token = tokens[cursor++];
+    if (!token) fail(`cannot parse owner condition ${condition}`);
+    if (token.type === 'not') return !primary();
+    if (token.type === '(') {
+      const value = disjunction();
+      if (tokens[cursor++]?.type !== ')') fail(`cannot parse owner condition ${condition}`);
+      return value;
+    }
+    if (token.type !== 'atom') fail(`cannot parse owner condition ${condition}`);
+    return !/^false$/i.test(token.value);
+  };
+  const conjunction = () => {
+    let value = primary();
+    while (tokens[cursor]?.type === 'and') { cursor += 1; value = primary() && value; }
+    return value;
+  };
+  const disjunction = () => {
+    let value = conjunction();
+    while (tokens[cursor]?.type === 'or') { cursor += 1; value = conjunction() || value; }
+    return value;
+  };
+  const allowed = disjunction();
+  if (cursor !== tokens.length) fail(`cannot parse owner condition ${condition}`);
+  return allowed;
+}
+
+function jobNeeds(job) {
+  const scalarNeed = job.lines.find(({ text }) => /^ {4}needs:\s*\S/.test(text));
+  if (scalarNeed) return [scalar(scalarNeed.text.replace(/^ {4}needs:\s*/, ''))];
+  const needsAt = job.lines.findIndex(({ text }) => /^ {4}needs:\s*(?:#.*)?$/.test(text));
+  if (needsAt < 0) return [];
+  const needs = [];
+  for (const { text } of job.lines.slice(needsAt + 1)) {
+    const match = text.match(/^ {6}-\s+([A-Za-z0-9_-]+)\s*(?:#.*)?$/);
+    if (match) needs.push(match[1]);
+    else if (/^ {4}\S/.test(text)) break;
+  }
+  return needs;
+}
+
+function jobCanRun(parsed, job, event, visiting = new Set()) {
+  if (!job || visiting.has(job.id)) return false;
+  const condition = job.lines.find(({ text }) => /^ {4}if:\s*/.test(text))?.text.replace(/^ {4}if:\s*/, '');
+  if (!conditionAllowsEvent(condition, event)) return false;
+  const nextVisiting = new Set(visiting).add(job.id);
+  return jobNeeds(job).every((dependency) => jobCanRun(parsed, parsed.jobs.get(dependency), event, nextVisiting));
+}
+
+function assertOwnerReachable(parsed, family, owner) {
+  const job = parsed.jobs.get(owner);
+  assert.ok(job, `declared owner ${owner} for ${family} is missing`);
+  const reachableEvents = workflowEvents(parsed).filter((event) => jobCanRun(parsed, job, event));
+  assert.ok(reachableEvents.length > 0,
+    `declared owner ${owner} for ${family} is unreachable from every workflow trigger`);
+}
+
 function assertMainAndDispatchReachable(parsed, job) {
   const trigger = parsed.lines.slice(0, parsed.lines.findIndex((line) => /^jobs:/.test(line))).join('\n');
   assert.match(trigger, /^ {2}push:\s*\n(?:.*\n)*?^ {4}branches:\s*\n(?:.*\n)*?^ {6}- main\s*$/m,
@@ -119,7 +219,7 @@ test('quality-gate has one saving owner and restore-only consumers per cache fam
   }
 
   for (const [family, owner] of CACHE_OWNERS) {
-    assert.ok(parsed.jobs.has(owner), `declared owner ${owner} for ${family} is missing`);
+    assertOwnerReachable(parsed, family, owner);
     assert.deepEqual(saves.get(family), [owner], `${family} must have exactly one saving owner: ${owner}`);
   }
 
