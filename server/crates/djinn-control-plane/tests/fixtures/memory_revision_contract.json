@@ -1,0 +1,319 @@
+{
+  "contract_version": 1,
+  "description": "Deterministic repository contract for the immutable memory revision ledger. Repository rows are intentionally independent from MCP response contracts.",
+  "ids": {
+    "tenant_id": "00000000-0000-4000-8000-000000000001",
+    "project_id": "00000000-0000-4000-8000-000000000002",
+    "notes": {
+      "primary": "00000000-0000-4000-8000-000000000100",
+      "already_known": "00000000-0000-4000-8000-000000000101",
+      "merge_target": "00000000-0000-4000-8000-000000000102"
+    },
+    "actors": {
+      "human": "00000000-0000-4000-8000-000000000010",
+      "agent": "00000000-0000-4000-8000-000000000011",
+      "system": "00000000-0000-4000-8000-000000000012"
+    },
+    "session_id": "00000000-0000-4000-8000-000000000020",
+    "task_id": "00000000-0000-4000-8000-000000000030",
+    "task_run_id": "00000000-0000-4000-8000-000000000040"
+  },
+  "canonical_contents": {
+    "primary_initial": "# Memory revision ledger\n\nThe repository appends immutable events.",
+    "primary_updated": "# Memory revision ledger\n\nThe repository appends immutable events in one transaction.",
+    "already_known": "# Known fact\n\nThis fact already exists.",
+    "merge_target_before": "# Durable guidance\n\nKeep the original guidance.",
+    "merge_target_after": "# Durable guidance\n\nKeep the original guidance and the merged detail."
+  },
+  "allowed_event_kinds": [
+    "create",
+    "update",
+    "delete",
+    "confidence_bump",
+    "extraction_skipped"
+  ],
+  "allowed_actor_kinds": ["human", "agent", "system"],
+  "registered_subsystems": ["mcp", "dedup", "consolidation", "enrichment", "extraction"],
+  "repository_expected_rows": [
+    {
+      "id": "00000000-0000-4000-8000-000000000200",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": "00000000-0000-4000-8000-000000000002",
+      "note_id": "00000000-0000-4000-8000-000000000100",
+      "sequence": 1,
+      "event_kind": "create",
+      "before_snapshot": null,
+      "after_snapshot": {
+        "title": "Memory revision ledger",
+        "permalink": "reference/memory-revision-ledger",
+        "content": "# Memory revision ledger\n\nThe repository appends immutable events.",
+        "note_type": "reference"
+      },
+      "confidence_before": null,
+      "confidence_after": 0.5,
+      "actor_kind": "human",
+      "actor_id": "00000000-0000-4000-8000-000000000010",
+      "subsystem": "mcp",
+      "session_id": "00000000-0000-4000-8000-000000000020",
+      "task_id": "00000000-0000-4000-8000-000000000030",
+      "task_run_id": "00000000-0000-4000-8000-000000000040",
+      "reason_input": "  Create the audited ledger note.  ",
+      "reason": "Create the audited ledger note.",
+      "created_at": "2026-01-02T03:04:05.000000Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000201",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": "00000000-0000-4000-8000-000000000002",
+      "note_id": "00000000-0000-4000-8000-000000000100",
+      "sequence": 2,
+      "event_kind": "update",
+      "before_snapshot": {
+        "title": "Memory revision ledger",
+        "permalink": "reference/memory-revision-ledger",
+        "content": "# Memory revision ledger\n\nThe repository appends immutable events.",
+        "note_type": "reference"
+      },
+      "after_snapshot": {
+        "title": "Memory revision ledger",
+        "permalink": "reference/memory-revision-ledger",
+        "content": "# Memory revision ledger\n\nThe repository appends immutable events in one transaction.",
+        "note_type": "reference"
+      },
+      "confidence_before": 0.5,
+      "confidence_after": 0.5,
+      "actor_kind": "agent",
+      "actor_id": "00000000-0000-4000-8000-000000000011",
+      "subsystem": "enrichment",
+      "session_id": "00000000-0000-4000-8000-000000000020",
+      "task_id": "00000000-0000-4000-8000-000000000030",
+      "task_run_id": "00000000-0000-4000-8000-000000000040",
+      "reason_input": "  Enrich the statement with its transaction guarantee.\n",
+      "reason": "Enrich the statement with its transaction guarantee.",
+      "created_at": "2026-01-02T03:04:06.000000Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000202",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": "00000000-0000-4000-8000-000000000002",
+      "note_id": "00000000-0000-4000-8000-000000000100",
+      "sequence": 3,
+      "event_kind": "confidence_bump",
+      "before_snapshot": null,
+      "after_snapshot": null,
+      "confidence_before": 0.5,
+      "confidence_after": 0.75,
+      "actor_kind": "system",
+      "actor_id": "00000000-0000-4000-8000-000000000012",
+      "subsystem": "enrichment",
+      "session_id": "00000000-0000-4000-8000-000000000020",
+      "task_id": "00000000-0000-4000-8000-000000000030",
+      "task_run_id": "00000000-0000-4000-8000-000000000040",
+      "reason_input": "  Evidence corroborated the existing note.  ",
+      "reason": "Evidence corroborated the existing note.",
+      "created_at": "2026-01-02T03:04:07.000000Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000203",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": "00000000-0000-4000-8000-000000000002",
+      "note_id": "00000000-0000-4000-8000-000000000101",
+      "sequence": 1,
+      "event_kind": "create",
+      "before_snapshot": null,
+      "after_snapshot": {
+        "title": "Known fact",
+        "permalink": "reference/known-fact",
+        "content": "# Known fact\n\nThis fact already exists.",
+        "note_type": "reference"
+      },
+      "confidence_before": null,
+      "confidence_after": 0.6,
+      "actor_kind": "agent",
+      "actor_id": "00000000-0000-4000-8000-000000000011",
+      "subsystem": "dedup",
+      "session_id": "00000000-0000-4000-8000-000000000020",
+      "task_id": "00000000-0000-4000-8000-000000000030",
+      "task_run_id": "00000000-0000-4000-8000-000000000040",
+      "reason_input": "  Seed the known-fact candidate.  ",
+      "reason": "Seed the known-fact candidate.",
+      "created_at": "2026-01-02T03:04:08.000000Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000204",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": "00000000-0000-4000-8000-000000000002",
+      "note_id": "00000000-0000-4000-8000-000000000101",
+      "sequence": 2,
+      "event_kind": "confidence_bump",
+      "before_snapshot": null,
+      "after_snapshot": null,
+      "confidence_before": 0.6,
+      "confidence_after": 0.9,
+      "actor_kind": "agent",
+      "actor_id": "00000000-0000-4000-8000-000000000011",
+      "subsystem": "dedup",
+      "decision": "AlreadyKnown",
+      "session_id": "00000000-0000-4000-8000-000000000020",
+      "task_id": "00000000-0000-4000-8000-000000000030",
+      "task_run_id": "00000000-0000-4000-8000-000000000040",
+      "reason_input": "  Candidate was AlreadyKnown; raise confidence only.  ",
+      "reason": "Candidate was AlreadyKnown; raise confidence only.",
+      "created_at": "2026-01-02T03:04:09.000000Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000205",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": "00000000-0000-4000-8000-000000000002",
+      "note_id": "00000000-0000-4000-8000-000000000102",
+      "sequence": 1,
+      "event_kind": "create",
+      "before_snapshot": null,
+      "after_snapshot": {
+        "title": "Durable guidance",
+        "permalink": "reference/durable-guidance",
+        "content": "# Durable guidance\n\nKeep the original guidance.",
+        "note_type": "reference"
+      },
+      "confidence_before": null,
+      "confidence_after": 0.7,
+      "actor_kind": "system",
+      "actor_id": "00000000-0000-4000-8000-000000000012",
+      "subsystem": "consolidation",
+      "session_id": "00000000-0000-4000-8000-000000000020",
+      "task_id": "00000000-0000-4000-8000-000000000030",
+      "task_run_id": "00000000-0000-4000-8000-000000000040",
+      "reason_input": "  Seed the consolidation target.  ",
+      "reason": "Seed the consolidation target.",
+      "created_at": "2026-01-02T03:04:10.000000Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000206",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": "00000000-0000-4000-8000-000000000002",
+      "note_id": "00000000-0000-4000-8000-000000000102",
+      "sequence": 2,
+      "event_kind": "update",
+      "before_snapshot": {
+        "title": "Durable guidance",
+        "permalink": "reference/durable-guidance",
+        "content": "# Durable guidance\n\nKeep the original guidance.",
+        "note_type": "reference"
+      },
+      "after_snapshot": {
+        "title": "Durable guidance",
+        "permalink": "reference/durable-guidance",
+        "content": "# Durable guidance\n\nKeep the original guidance and the merged detail.",
+        "note_type": "reference"
+      },
+      "confidence_before": 0.7,
+      "confidence_after": 0.95,
+      "actor_kind": "system",
+      "actor_id": "00000000-0000-4000-8000-000000000012",
+      "subsystem": "consolidation",
+      "decision": "MergeIntoExisting",
+      "session_id": "00000000-0000-4000-8000-000000000020",
+      "task_id": "00000000-0000-4000-8000-000000000030",
+      "task_run_id": "00000000-0000-4000-8000-000000000040",
+      "reason_input": "  MergeIntoExisting preserved the target and raised confidence.  ",
+      "reason": "MergeIntoExisting preserved the target and raised confidence.",
+      "created_at": "2026-01-02T03:04:11.000000Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000207",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": "00000000-0000-4000-8000-000000000002",
+      "note_id": "00000000-0000-4000-8000-000000000100",
+      "sequence": 4,
+      "event_kind": "delete",
+      "before_snapshot": {
+        "title": "Memory revision ledger",
+        "permalink": "reference/memory-revision-ledger",
+        "content": "# Memory revision ledger\n\nThe repository appends immutable events in one transaction.",
+        "note_type": "reference"
+      },
+      "after_snapshot": null,
+      "confidence_before": 0.75,
+      "confidence_after": null,
+      "actor_kind": "human",
+      "actor_id": "00000000-0000-4000-8000-000000000010",
+      "subsystem": "mcp",
+      "session_id": "00000000-0000-4000-8000-000000000020",
+      "task_id": "00000000-0000-4000-8000-000000000030",
+      "task_run_id": "00000000-0000-4000-8000-000000000040",
+      "reason_input": "  Remove the superseded ledger note.  ",
+      "reason": "Remove the superseded ledger note.",
+      "created_at": "2026-01-02T03:04:12.000000Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000208",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": "00000000-0000-4000-8000-000000000002",
+      "note_id": null,
+      "sequence": null,
+      "event_kind": "extraction_skipped",
+      "before_snapshot": null,
+      "after_snapshot": null,
+      "confidence_before": null,
+      "confidence_after": null,
+      "actor_kind": "system",
+      "actor_id": "00000000-0000-4000-8000-000000000012",
+      "subsystem": "extraction",
+      "session_id": "00000000-0000-4000-8000-000000000020",
+      "task_id": "00000000-0000-4000-8000-000000000030",
+      "task_run_id": "00000000-0000-4000-8000-000000000040",
+      "reason_input": "  Extraction produced no durable memory.  ",
+      "reason": "Extraction produced no durable memory.",
+      "created_at": "2026-01-02T03:04:13.000000Z"
+    }
+  ],
+  "semantic_no_event_cases": [
+    {
+      "name": "unchanged_content",
+      "note_id": "00000000-0000-4000-8000-000000000100",
+      "requested_content": "# Memory revision ledger\n\nThe repository appends immutable events in one transaction.",
+      "requested_confidence": 0.75,
+      "expected_event_count": 0
+    },
+    {
+      "name": "unchanged_confidence",
+      "note_id": "00000000-0000-4000-8000-000000000101",
+      "requested_confidence": 0.9,
+      "expected_event_count": 0
+    }
+  ],
+  "retained_deleted_note_history": {
+    "note_id": "00000000-0000-4000-8000-000000000100",
+    "note_row_exists_after_delete": false,
+    "expected_revision_ids": [
+      "00000000-0000-4000-8000-000000000200",
+      "00000000-0000-4000-8000-000000000201",
+      "00000000-0000-4000-8000-000000000202",
+      "00000000-0000-4000-8000-000000000207"
+    ]
+  },
+  "migration_cutover": {
+    "pre_migration_note_id": "00000000-0000-4000-8000-000000000199",
+    "expected_repository_history": [],
+    "synthetic_revisions_permitted": false
+  },
+  "cursor_order": {
+    "sort": ["created_at ASC", "id ASC"],
+    "expected_revision_ids": [
+      "00000000-0000-4000-8000-000000000200",
+      "00000000-0000-4000-8000-000000000201",
+      "00000000-0000-4000-8000-000000000202",
+      "00000000-0000-4000-8000-000000000203",
+      "00000000-0000-4000-8000-000000000204",
+      "00000000-0000-4000-8000-000000000205",
+      "00000000-0000-4000-8000-000000000206",
+      "00000000-0000-4000-8000-000000000207",
+      "00000000-0000-4000-8000-000000000208"
+    ]
+  },
+  "mcp_response_expectations": {
+    "intentionally_separate_from_repository_rows": true,
+    "reserved_for_later_handler_reader_epics": true,
+    "expected_rows": []
+  }
+}
