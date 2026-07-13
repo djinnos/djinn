@@ -53,6 +53,16 @@ function isMigration(path) {
   return /^server\/crates\/[^/]+\/migrations_postgres\//.test(path);
 }
 
+// Server-side files that are INPUTS to ui/ codegen (see
+// ui/scripts/generate-mcp-types.ts and ui/scripts/generate-usage-types.ts).
+// Changing one without regenerating the checked-in ui golden stales main for
+// the next UI-touching run (mcp:types:check / usage:types:check fail), so
+// these must select the ui lane even though they live under server/.
+const UI_CODEGEN_INPUTS = new Set([
+  'server/src/server/tests/snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap',
+  'server/schemas/usage-analytics.schema.json',
+]);
+
 function isUnclassifiedNonDocumentation(path) {
   // Documentation is deliberately the sole narrow lane. Every other path must
   // belong to a known product or workflow lane, including nested executable and
@@ -80,7 +90,7 @@ export function classifyChangedScope(files) {
     unknown: false,
   };
   for (const path of normalizedFiles) {
-    if (matches(path, 'ui')) lanes.ui = true;
+    if (matches(path, 'ui') || UI_CODEGEN_INPUTS.has(path)) lanes.ui = true;
     if (matches(path, 'server')) lanes.rustCore = true;
     if (isMigration(path)) lanes.migrations = true;
     if (matches(path, 'server/.sqlx')) lanes.sqlx = true;

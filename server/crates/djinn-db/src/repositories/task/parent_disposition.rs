@@ -29,6 +29,7 @@
 //! entry-point-neutral.
 
 use super::*;
+use serde::Serialize;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -740,7 +741,8 @@ pub async fn apply_parent_disposition_tx(
 // ── Doctor repair (historical closed-parent orphan) ──────────────────────────
 
 /// Outcome of a single-task doctor repair attempt.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum DoctorRepairOutcome {
     /// The task was closed with `close_reason = parent_closed`.
     Closed {
@@ -1779,6 +1781,37 @@ mod tests {
             .unwrap();
         assert_eq!(s1.0, "open");
         assert_eq!(s2.0, "in_progress");
+    }
+
+    #[test]
+    fn doctor_repair_outcomes_serialize_with_stable_tags() {
+        let close = serde_json::to_value(DoctorRepairOutcome::Closed {
+            task_id: "task-1".to_owned(),
+            from_status: "open".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            close,
+            serde_json::json!({"outcome":"closed","task_id":"task-1","from_status":"open"})
+        );
+
+        let park = serde_json::to_value(DoctorRepairOutcome::Parked {
+            task_id: "task-2".to_owned(),
+            from_status: "in_progress".to_owned(),
+            reason: "historical_parent_closed_in_flight",
+        })
+        .unwrap();
+        assert_eq!(park["outcome"], "parked");
+        assert_eq!(park["reason"], "historical_parent_closed_in_flight");
+
+        let skipped = serde_json::to_value(DoctorRepairOutcome::SkippedStatusDrift {
+            task_id: "task-3".to_owned(),
+            snapshot_status: "open".to_owned(),
+            current_status: "in_progress".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(skipped["outcome"], "skipped_status_drift");
+        assert_eq!(skipped["current_status"], "in_progress");
     }
 
     // ── Doctor repair tests ───────────────────────────────────────────────

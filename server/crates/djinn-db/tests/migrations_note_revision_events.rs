@@ -105,6 +105,13 @@ async fn migration_109_enforces_ledger_shape_indexes_and_retention() {
         .execute(&pool)
         .await;
         assert!(invalid_skip.is_err());
+        let task_only_skip = sqlx::query(
+            "INSERT INTO note_revision_events (id, project_id, event_kind, actor_kind, subsystem, task_id, reason) \
+             VALUES ('45454545-4545-4545-4545-454545454545', 'revision-project', 'extraction_skipped', 'system', 'extraction', 'task-only', 'no output')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(task_only_skip.is_err(), "task-only extraction provenance is invalid");
         let invalid_reason = sqlx::query(
             "INSERT INTO note_revision_events (id, project_id, event_kind, actor_kind, subsystem, session_id, reason) \
              VALUES ('55555555-5555-5555-5555-555555555555', 'revision-project', 'extraction_skipped', 'system', 'extractor', 'session-1', ' ') ",

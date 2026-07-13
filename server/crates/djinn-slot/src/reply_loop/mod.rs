@@ -14,12 +14,14 @@ pub mod compaction_guard;
 pub mod error_handling;
 pub mod loop_guard;
 mod persistence;
+pub mod phase;
 mod streaming;
 mod tool_dispatch;
 mod turn;
 mod turn_budget;
 
 pub use compaction_guard::CompactionCriticalSection;
+pub use phase::{SessionPhase, SessionPhaseRole, SessionPhaseTracker};
 pub use turn::{ReplyLoopContext, run_reply_loop};
 
 // Soft-budget tests hold `SESSION_BUDGET_ENV_LOCK` across `.await` on
