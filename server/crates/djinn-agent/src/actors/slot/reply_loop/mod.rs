@@ -108,6 +108,10 @@ struct AgentToolDispatcher {
     /// read-only/fail-closed access at dispatch time (defense-in-depth
     /// beyond the stage-time schema restriction).
     allowed_schemas: Option<Vec<serde_json::Value>>,
+    /// Agent-private cancellation pair (session + global) retained on the
+    /// concrete dispatcher so cancellation can flow to the shell runner
+    /// without changing the shared `SlotToolDispatcher` trait.
+    cancel: crate::extension::ToolCancellation,
 }
 
 impl AgentToolDispatcher {
@@ -116,6 +120,8 @@ impl AgentToolDispatcher {
         services: &dyn djinn_supervisor::SupervisorServices,
         mcp_registry: Option<&crate::mcp_client::McpToolRegistry>,
         allowed_schemas: Option<Vec<serde_json::Value>>,
+        cancel: tokio_util::sync::CancellationToken,
+        global_cancel: tokio_util::sync::CancellationToken,
     ) -> Self {
         // SAFETY: the dispatcher is created immediately before calling the
         // canonical reply loop and dropped when that call returns. The canonical
@@ -139,6 +145,7 @@ impl AgentToolDispatcher {
             mcp_registry: registry_static,
             output_stash: Mutex::new(OutputStash::new()),
             allowed_schemas,
+            cancel: crate::extension::ToolCancellation::new(cancel, global_cancel),
         }
     }
 }
@@ -197,6 +204,7 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
             Some(role_name),
             self.mcp_registry,
             self.allowed_schemas.as_deref(),
+            &self.cancel,
         ))
     }
     fn is_mcp_tool(&self, tool_name: &str) -> bool {
@@ -330,6 +338,8 @@ pub(crate) async fn run_reply_loop(
         services,
         mcp_registry,
         allowed_for_dispatch,
+        cancel.clone(),
+        global_cancel.clone(),
     )));
     let (result, output, tokens_in, tokens_out, cache_read, cache_write) =
         djinn_slot::reply_loop::run_reply_loop(

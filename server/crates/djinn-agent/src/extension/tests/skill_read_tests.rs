@@ -47,6 +47,7 @@ async fn skill_read_returns_content_for_known_skill_and_errors_for_unknown() {
         Some("worker"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("skill_read should succeed for a known skill");
@@ -78,6 +79,7 @@ async fn skill_read_returns_content_for_known_skill_and_errors_for_unknown() {
         Some("worker"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("skill_read should error for an unknown skill");
@@ -97,6 +99,7 @@ async fn skill_read_returns_content_for_known_skill_and_errors_for_unknown() {
         Some("worker"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("skill_read should error when `name` is absent");
@@ -140,6 +143,7 @@ async fn skill_read_rejects_tampered_skill_when_manifest_exists() {
         Some("worker"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("skill_read must reject a stale/tampered manifested body");
@@ -188,6 +192,7 @@ async fn skill_read_serves_directory_skill_references_and_rejects_reference_tamp
         Some("worker"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("skill_read should serve a verified directory skill");
@@ -218,6 +223,7 @@ async fn skill_read_serves_directory_skill_references_and_rejects_reference_tamp
         Some("worker"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("skill_read must reject a stale/tampered reference file");
@@ -303,6 +309,7 @@ async fn skill_read_serves_native_visual_spec_for_authoring_planner_session() {
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("skill_read should succeed for visual-spec in an authoring planner session");
@@ -372,6 +379,7 @@ async fn skill_read_rejects_visual_spec_in_non_authoring_planner_session() {
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("skill_read should reject visual-spec in a non-authoring planner session");
@@ -428,6 +436,7 @@ async fn skill_read_serves_native_visual_spec_for_advocate_refinement_session() 
         Some("advocate"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("skill_read should succeed for visual-spec in an advocate refinement session");
@@ -483,6 +492,7 @@ async fn skill_read_rejects_visual_spec_for_non_planner_role() {
         Some("worker"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("skill_read should reject visual-spec for a worker role");
@@ -545,6 +555,7 @@ async fn skill_read_native_body_not_from_worktree() {
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("skill_read should succeed for visual-spec in an authoring session");
