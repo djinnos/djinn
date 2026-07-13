@@ -5,6 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -173,6 +174,16 @@ fn missing_github_app_env_vars() -> Vec<&'static str> {
     missing
 }
 
+/// Keep provider-level GitHub App consumers (JWT minting, installation-token
+/// exchange, background OAuth refresh) aligned with AppState's retained
+/// credential-source snapshot.
+fn sync_provider_runtime_config(state: &CredentialSourceState) {
+    match state.app_config() {
+        Some(config) => djinn_provider::github_app::install_runtime_config(config.clone()),
+        None => djinn_provider::github_app::clear_runtime_config(),
+    }
+}
+
 fn canonical_view_resolution(
     active_task_count: usize,
     fallback: Option<crate::server::MemoryMountViewFallback>,
@@ -208,6 +219,30 @@ fn canonical_view_resolution(
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<Inner>,
+}
+
+/// Server-side half of the browser-only setup-launch capability.
+///
+/// The matching random token is carried in an HttpOnly, SameSite=Strict
+/// cookie. Keeping the expiry here (rather than trusting the browser's
+/// `Max-Age`) makes a copied or manually replayed cookie expire as well.
+struct SetupLaunchCapability {
+    digest: Vec<u8>,
+    expires_at: Instant,
+}
+
+const MAX_SETUP_LAUNCH_CAPABILITIES: usize = 8;
+const SETUP_SESSION_TTL: Duration = Duration::from_secs(60 * 15);
+
+struct SetupSession {
+    digest: Vec<u8>,
+    expires_at: Instant,
+}
+
+fn setup_authority_digest(raw: &str) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(raw.as_bytes()).to_vec()
 }
 
 struct Inner {
@@ -265,25 +300,28 @@ struct Inner {
     /// The entry is removed by the spawned task in its completion branch.
     pub canonical_warm_inflight: Arc<std::sync::Mutex<HashSet<String>>>,
     pub memory_mount: Mutex<Option<MountedMemoryFilesystem>>,
-    /// Active GitHub App configuration resolved by the credential-source
-    /// state machine (Secret/env → persisted → unconfigured). Populated
-    /// by `init_app_config` at startup; hot-swapped by
-    /// `persist_and_reload_app_config` after a manifest exchange so
-    /// subsequent requests pick up new credentials without a process
-    /// restart. See [`CredentialSourceState`] for the typed resolution
-    /// states.
-    pub app_config: tokio::sync::RwLock<Option<Arc<GitHubAppConfig>>>,
+    /// Retained GitHub App credential-source state. This is the single source
+    /// of truth for both the active configuration and operator-facing recovery
+    /// state: `app_config()` derives its value from this enum instead of
+    /// discarding the distinction between unconfigured, invalid Secret, and
+    /// undecryptable persisted credentials.
+    pub app_credential_state: tokio::sync::RwLock<CredentialSourceState>,
     /// One-time boot token for the self-setup flow. Generated at startup
     /// when `DJINN_ENABLE_SELF_SETUP=true` and no usable credentials exist.
     /// `None` when the gate is disabled, credentials are present, or the
     /// token was already consumed.
     pub boot_token: tokio::sync::RwLock<Option<crate::server::auth::boot_token::BootToken>>,
-    /// Valid setup session token from the most recent boot-token exchange.
-    /// Populated by [`AppState::exchange_boot_token`]; validated by
-    /// `extract_setup_session` so an arbitrary cookie value is rejected.
-    /// `None` means no exchange has occurred or the session was cleared after
-    /// credential persistence.
-    pub(crate) setup_session_token: tokio::sync::RwLock<Option<String>>,
+    /// Valid setup session from the most recent boot-token exchange or local
+    /// browser launch. The server enforces the same 15-minute lifetime as the
+    /// cookie so manually replaying an expired cookie cannot revive setup.
+    /// `None` means no exchange occurred, the session expired, or it was
+    /// cleared after credential persistence.
+    setup_session: tokio::sync::RwLock<Option<SetupSession>>,
+    /// Short-lived, single-use capability issued only to a same-origin
+    /// browser that fetched `/auth/config`. It authorizes the explicit
+    /// `POST /auth/github/setup-start` UI action without exposing the boot
+    /// token in JSON or markup.
+    setup_launch_capabilities: tokio::sync::RwLock<Vec<SetupLaunchCapability>>,
     /// Pending install-continuation nonce generated after manifest credential
     /// persistence. When present, `/auth/github/app-setup-callback` requires
     /// the caller to include a matching `continuation_state` query parameter.
@@ -298,6 +336,9 @@ struct Inner {
     /// database.
     #[cfg(test)]
     test_bypass_persist: tokio::sync::RwLock<bool>,
+    /// Test-only credential-resolution result injected after real persistence.
+    #[cfg(test)]
+    test_reload_state_override: tokio::sync::RwLock<Option<CredentialSourceState>>,
     /// Per-project bare git mirrors on disk. Single shared instance so
     /// fetches serialize correctly and clones hit the same hardlink pool.
     /// Path resolution mirrors the vault key: `$DJINN_HOME/mirrors` or
@@ -413,12 +454,15 @@ impl AppState {
                 workspace_store,
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 memory_mount: Mutex::new(None),
-                app_config: tokio::sync::RwLock::new(None),
+                app_credential_state: tokio::sync::RwLock::new(CredentialSourceState::Unconfigured),
                 boot_token: tokio::sync::RwLock::new(None),
-                setup_session_token: tokio::sync::RwLock::new(None),
+                setup_session: tokio::sync::RwLock::new(None),
+                setup_launch_capabilities: tokio::sync::RwLock::new(Vec::new()),
                 pending_install_continuation: tokio::sync::RwLock::new(None),
                 #[cfg(test)]
                 test_bypass_persist: tokio::sync::RwLock::new(false),
+                #[cfg(test)]
+                test_reload_state_override: tokio::sync::RwLock::new(None),
                 mirror,
                 rpc_server: tokio::sync::Mutex::new(None),
                 rpc_registry: Arc::new(ConnectionRegistry::new()),
@@ -708,14 +752,36 @@ impl AppState {
 
     /// Read-only snapshot of the active GitHub App configuration, if any.
     pub async fn app_config(&self) -> Option<Arc<GitHubAppConfig>> {
-        self.inner.app_config.read().await.clone()
+        self.inner
+            .app_credential_state
+            .read()
+            .await
+            .app_config()
+            .cloned()
     }
 
-    /// Hot-swap the in-memory GitHub App configuration. Used by tests that
-    /// seed in-memory state and by [`Self::persist_and_reload_app_config`]
-    /// after a manifest exchange persists new credentials.
+    /// Read-only snapshot of the retained GitHub App credential-source state.
+    pub async fn app_credential_state(&self) -> CredentialSourceState {
+        self.inner.app_credential_state.read().await.clone()
+    }
+
+    /// Hot-swap the in-memory GitHub App configuration. Tests use this helper
+    /// to seed a usable Secret-shaped state without reaching into the retained
+    /// credential-state lock directly.
     pub async fn set_app_config(&self, cfg: Option<Arc<GitHubAppConfig>>) {
-        *self.inner.app_config.write().await = cfg;
+        let state = match cfg {
+            Some(cfg) => CredentialSourceState::ValidSecret(cfg),
+            None => CredentialSourceState::Unconfigured,
+        };
+        *self.inner.app_credential_state.write().await = state;
+    }
+
+    /// Inject a specific credential-source state for focused auth/recovery
+    /// tests. Production code updates this only through initialization and
+    /// manifest persistence/reload.
+    #[cfg(test)]
+    pub(crate) async fn set_app_credential_state_for_tests(&self, state: CredentialSourceState) {
+        *self.inner.app_credential_state.write().await = state;
     }
 
     /// Inject a boot token for testing. Not used in production code.
@@ -730,7 +796,97 @@ impl AppState {
     /// Inject a known setup session token for testing.
     #[cfg(test)]
     pub(crate) async fn set_setup_session_token_for_tests(&self, token: Option<String>) {
-        *self.inner.setup_session_token.write().await = token;
+        self.set_setup_session_token_with_ttl_for_tests(token, SETUP_SESSION_TTL)
+            .await;
+    }
+
+    /// Inject a setup session with a deterministic lifetime for expiry tests.
+    #[cfg(test)]
+    pub(crate) async fn set_setup_session_token_with_ttl_for_tests(
+        &self,
+        token: Option<String>,
+        ttl: Duration,
+    ) {
+        *self.inner.setup_session.write().await = token.map(|token| SetupSession {
+            digest: setup_authority_digest(&token),
+            expires_at: SystemClockTrait::new().now_instant() + ttl,
+        });
+    }
+
+    /// Issue a short-lived browser setup-launch capability.
+    ///
+    /// Only its SHA-256 digest is retained. A small bounded set prevents
+    /// concurrent `/auth/config` responses or multiple local tabs from
+    /// invalidating one another when their Set-Cookie headers arrive out of
+    /// order; each individual capability is still single-use.
+    pub(crate) async fn issue_setup_launch_capability(&self, ttl: Duration) -> String {
+        let now = SystemClockTrait::new().now_instant();
+        let token = crate::server::auth::random_token_b64();
+        let digest = setup_authority_digest(&token);
+        let mut guard = self.inner.setup_launch_capabilities.write().await;
+        guard.retain(|capability| capability.expires_at > now);
+        if guard.len() >= MAX_SETUP_LAUNCH_CAPABILITIES {
+            guard.remove(0);
+        }
+        guard.push(SetupLaunchCapability {
+            digest,
+            expires_at: now + ttl,
+        });
+        token
+    }
+
+    /// Atomically validate and consume a setup-launch capability.
+    ///
+    /// Invalid guesses do not burn a legitimate browser's token. Expired
+    /// capabilities are cleared server-side even if a client manually keeps
+    /// sending the cookie after its `Max-Age` elapsed.
+    pub(crate) async fn consume_setup_launch_capability(&self, candidate: &str) -> bool {
+        let candidate_digest = setup_authority_digest(candidate);
+        let now = SystemClockTrait::new().now_instant();
+        let mut guard = self.inner.setup_launch_capabilities.write().await;
+        guard.retain(|capability| capability.expires_at > now);
+        let Some(index) = guard.iter().position(|capability| {
+            crate::server::auth::constant_time_eq(&candidate_digest, &capability.digest)
+        }) else {
+            return false;
+        };
+        guard.remove(index);
+        true
+    }
+
+    /// Establish (or recover) the setup session used across the GitHub
+    /// manifest round-trip and retire the boot-token fallback once the UI
+    /// path has actually started.
+    ///
+    /// Reusing an existing session keeps a config refetch or second local tab
+    /// from invalidating the first tab's callback cookie.
+    pub(crate) async fn begin_browser_setup_session(
+        &self,
+        existing_cookie: Option<&str>,
+    ) -> String {
+        // Match `exchange_boot_token`'s lock order (boot token, then setup
+        // session) so the two one-time entry paths cannot deadlock or race.
+        let mut boot_token = self.inner.boot_token.write().await;
+        *boot_token = None;
+
+        let now = SystemClockTrait::new().now_instant();
+        let mut setup_session = self.inner.setup_session.write().await;
+        if let Some(session) = setup_session.as_ref()
+            && session.expires_at > now
+            && let Some(candidate) = existing_cookie
+            && crate::server::auth::constant_time_eq(
+                &setup_authority_digest(candidate),
+                &session.digest,
+            )
+        {
+            return candidate.to_string();
+        }
+        let token = crate::server::auth::random_token_b64();
+        *setup_session = Some(SetupSession {
+            digest: setup_authority_digest(&token),
+            expires_at: now + SETUP_SESSION_TTL,
+        });
+        token
     }
 
     /// Enable or disable the test bypass for persistence. When enabled,
@@ -741,19 +897,30 @@ impl AppState {
         *self.inner.test_bypass_persist.write().await = bypass;
     }
 
+    /// Override post-persistence credential resolution for failure-path tests.
+    #[cfg(test)]
+    pub(crate) async fn set_test_reload_state_override(
+        &self,
+        state: Option<CredentialSourceState>,
+    ) {
+        *self.inner.test_reload_state_override.write().await = state;
+    }
+
     /// Validate a candidate setup session token against the stored token.
     ///
     /// Returns `true` when a stored token exists and `candidate` matches it
     /// (constant-time comparison). Returns `false` when no token is stored
     /// or the values don't match.
     pub(crate) async fn validate_setup_session_token(&self, candidate: &str) -> bool {
-        let stored = self.inner.setup_session_token.read().await;
-        match stored.as_ref() {
-            Some(expected) => {
-                crate::server::auth::constant_time_eq(candidate.as_bytes(), expected.as_bytes())
-            }
-            None => false,
+        let mut stored = self.inner.setup_session.write().await;
+        let Some(session) = stored.as_ref() else {
+            return false;
+        };
+        if session.expires_at <= SystemClockTrait::new().now_instant() {
+            *stored = None;
+            return false;
         }
+        crate::server::auth::constant_time_eq(&setup_authority_digest(candidate), &session.digest)
     }
 
     /// Invalidate the currently stored setup session token.
@@ -762,7 +929,8 @@ impl AppState {
     /// the one-time setup session cannot be replayed in this process after the
     /// terminal setup step completes.
     pub(crate) async fn clear_setup_session_token(&self) {
-        *self.inner.setup_session_token.write().await = None;
+        *self.inner.setup_session.write().await = None;
+        self.inner.setup_launch_capabilities.write().await.clear();
     }
 
     /// Store a pending install-continuation nonce after manifest credential
@@ -772,32 +940,41 @@ impl AppState {
         *self.inner.pending_install_continuation.write().await = Some(nonce);
     }
 
-    /// Validate and consume a pending install-continuation nonce.
-    ///
-    /// Returns `true` when no continuation is pending (non-manifest flow) or
-    /// when the candidate matches the pending nonce. Returns `false` when a
-    /// continuation is pending but the candidate is missing or mismatched.
-    /// On a successful match the pending nonce is cleared (single-use).
-    pub(crate) async fn validate_and_consume_install_continuation(
-        &self,
-        candidate: Option<&str>,
-    ) -> bool {
-        let guard = self.inner.pending_install_continuation.read().await;
-        match guard.as_ref() {
-            None => true, // No continuation pending — non-manifest flow, allow.
-            Some(expected) => {
-                let Some(cand) = candidate else {
-                    return false; // Continuation required but not provided.
-                };
-                if !crate::server::auth::constant_time_eq(cand.as_bytes(), expected.as_bytes()) {
-                    return false; // Mismatch.
-                }
-                // Match — consume the nonce so it cannot be replayed.
-                drop(guard);
-                *self.inner.pending_install_continuation.write().await = None;
-                true
-            }
+    /// Whether a manifest-install continuation is waiting to be completed.
+    pub(crate) async fn has_pending_install_continuation(&self) -> bool {
+        self.inner
+            .pending_install_continuation
+            .read()
+            .await
+            .is_some()
+    }
+
+    /// Validate a continuation candidate without consuming it. Callers use
+    /// this before fallible GitHub API and database work so a transient error
+    /// does not destroy the operator's retry path.
+    pub(crate) async fn validate_pending_install_continuation(&self, candidate: &str) -> bool {
+        self.inner
+            .pending_install_continuation
+            .read()
+            .await
+            .as_deref()
+            .is_some_and(|expected| {
+                crate::server::auth::constant_time_eq(candidate.as_bytes(), expected.as_bytes())
+            })
+    }
+
+    /// Atomically validate and consume a continuation after binding succeeds
+    /// or the flow safely transitions to the installation picker.
+    pub(crate) async fn consume_pending_install_continuation(&self, candidate: &str) -> bool {
+        let mut guard = self.inner.pending_install_continuation.write().await;
+        let Some(expected) = guard.as_deref() else {
+            return false;
+        };
+        if !crate::server::auth::constant_time_eq(candidate.as_bytes(), expected.as_bytes()) {
+            return false;
         }
+        *guard = None;
+        true
     }
 
     /// Inject a pending install-continuation nonce for testing.
@@ -827,7 +1004,10 @@ impl AppState {
 
         let session_token = crate::server::auth::random_token_b64();
         // Store so `extract_setup_session` can validate the cookie against it.
-        *self.inner.setup_session_token.write().await = Some(session_token.clone());
+        *self.inner.setup_session.write().await = Some(SetupSession {
+            digest: setup_authority_digest(&session_token),
+            expires_at: SystemClockTrait::new().now_instant() + SETUP_SESSION_TTL,
+        });
         BootTokenExchangeResult::Ok(session_token)
     }
 
@@ -842,6 +1022,16 @@ impl AppState {
     /// Called during server bootstrap.
     pub async fn init_app_config(&self) {
         let credential_repo = CredentialRepository::new(self.db().clone(), self.event_bus());
+        #[cfg(test)]
+        let override_state = self.inner.test_reload_state_override.read().await.clone();
+        #[cfg(test)]
+        let state = match override_state {
+            Some(state) => state,
+            None => {
+                djinn_provider::github_app::resolve_credential_source(Some(&credential_repo)).await
+            }
+        };
+        #[cfg(not(test))]
         let state =
             djinn_provider::github_app::resolve_credential_source(Some(&credential_repo)).await;
 
@@ -884,12 +1074,22 @@ impl AppState {
             }
         }
 
-        *self.inner.app_config.write().await = state.app_config().cloned();
+        *self.inner.app_credential_state.write().await = state.clone();
+        sync_provider_runtime_config(&state);
+
+        // Re-initialization must not leave a token from an earlier
+        // unconfigured snapshot alive after credentials become invalid or
+        // configured.
+        *self.inner.boot_token.write().await = None;
+        self.inner.setup_launch_capabilities.write().await.clear();
 
         // Generate a one-time boot token when self-setup is enabled and no
-        // usable credentials exist. The raw token is logged once; only the
-        // digest is stored in memory.
-        if crate::server::auth::self_setup_enabled() && !state.is_usable() {
+        // credentials exist at all. Invalid Secret and undecryptable persisted
+        // states require explicit operator recovery and must never silently
+        // fall through to self-setup.
+        if crate::server::auth::self_setup_enabled()
+            && matches!(state, CredentialSourceState::Unconfigured)
+        {
             let (raw, bt) = crate::server::auth::boot_token::BootToken::generate();
             let public_url = crate::server::auth::public_url();
             let setup_url = format!("{public_url}/auth/github/create-app?setup_token={raw}");
@@ -915,21 +1115,55 @@ impl AppState {
         #[cfg(test)]
         if *self.inner.test_bypass_persist.read().await {
             let cfg = Arc::new(config.clone());
-            *self.inner.app_config.write().await = Some(cfg);
+            let state = CredentialSourceState::ValidPersisted(cfg);
+            *self.inner.app_credential_state.write().await = state.clone();
+            sync_provider_runtime_config(&state);
             tracing::info!(
                 app_id = config.app_id,
                 "github_app: (test) simulated persistence and hot-reload"
             );
-            return Ok(CredentialSourceState::ValidSecret(Arc::new(config.clone())));
+            return Ok(state);
         }
 
         let credential_repo = CredentialRepository::new(self.db().clone(), self.event_bus());
         djinn_provider::github_app::persist_app_config(&credential_repo, config).await?;
 
         // Hot-reload: re-resolve to pick up the persisted credentials.
+        #[cfg(test)]
+        let override_state = self.inner.test_reload_state_override.read().await.clone();
+        #[cfg(test)]
+        let state = match override_state {
+            Some(state) => state,
+            None => {
+                djinn_provider::github_app::resolve_credential_source(Some(&credential_repo)).await
+            }
+        };
+        #[cfg(not(test))]
         let state =
             djinn_provider::github_app::resolve_credential_source(Some(&credential_repo)).await;
-        *self.inner.app_config.write().await = state.app_config().cloned();
+        *self.inner.app_credential_state.write().await = state.clone();
+        sync_provider_runtime_config(&state);
+
+        if !state.is_usable() {
+            let detail = match &state {
+                CredentialSourceState::InvalidSecret(detail) => format!(
+                    "invalid Secret/env credentials: {}",
+                    detail.issues.join(", ")
+                ),
+                CredentialSourceState::UndecryptablePersisted => {
+                    "persisted credentials are undecryptable".to_string()
+                }
+                CredentialSourceState::Unconfigured => {
+                    "no usable credential source after persistence".to_string()
+                }
+                CredentialSourceState::ValidSecret(_)
+                | CredentialSourceState::ValidPersisted(_) => unreachable!(),
+            };
+            return Err(format!(
+                "GitHub App credentials were persisted but hot-reload failed: {detail}"
+            ));
+        }
+
         tracing::info!(
             source = ?state.source(),
             app_id = config.app_id,

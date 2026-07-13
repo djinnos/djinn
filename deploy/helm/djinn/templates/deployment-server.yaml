@@ -1,3 +1,4 @@
+{{- $githubAppConfigAttempted := include "djinn.githubAppConfigAttempted" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -320,6 +321,7 @@ spec:
             {{- end }}
             - name: DJINN_VAULT_KEY_PATH
               value: /var/run/secrets/djinn/vault.key
+            {{- if $githubAppConfigAttempted }}
             - name: GITHUB_APP_PRIVATE_KEY_PATH
               value: /var/run/secrets/djinn/github-app/private-key.pem
             - name: GITHUB_APP_ID
@@ -340,6 +342,7 @@ spec:
                   name: {{ include "djinn.secretName.githubApp" . }}
                   key: client-secret
                   optional: true
+            {{- end }}
             # Provider API keys — read by djinn-provider::bootstrap at startup.
             # Every entry is optional: the Secret is rendered with empty
             # strings for unset keys, and `optional: true` means the pod
@@ -415,9 +418,11 @@ spec:
               mountPath: /var/run/secrets/djinn/vault.key
               subPath: vault.key
               readOnly: true
+            {{- if $githubAppConfigAttempted }}
             - name: github-app
               mountPath: /var/run/secrets/djinn/github-app
               readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.resources.server | nindent 12 }}
           lifecycle:
@@ -464,6 +469,7 @@ spec:
             # mounted into this Pod, so "world-readable" inside the
             # container is fine.
             defaultMode: 0444
+        {{- if $githubAppConfigAttempted }}
         - name: github-app
           secret:
             secretName: {{ include "djinn.secretName.githubApp" . }}
@@ -473,3 +479,4 @@ spec:
             # mounted into this Pod, so "world-readable" inside the
             # container is fine.
             defaultMode: 0444
+        {{- end }}

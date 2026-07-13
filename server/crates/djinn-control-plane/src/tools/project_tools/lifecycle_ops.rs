@@ -406,30 +406,21 @@ impl DjinnMcpServer {
             }
         }
 
-        // 5b. Configure git user.name/user.email so any commits created by
-        //     the server/agents are attributed to the App's bot identity
-        //     (`djinn-bot[bot]`). The `<app-id>+djinn-bot[bot]@users.noreply.github.com`
-        //     form is GitHub's canonical no-reply email for apps.
-        if let Ok(app_id) = djinn_provider::github_app::app_id() {
-            let email = format!("{app_id}+djinn-bot[bot]@users.noreply.github.com");
-            for (key, value) in [
-                ("user.name", "djinn-bot[bot]"),
-                ("user.email", email.as_str()),
-            ] {
-                if let Err(e) = crate::tools::git_ops::git_config_set(&clone_path, key, value).await
-                {
-                    tracing::warn!(
-                        path = %clone_path, key, error = %e,
-                        "project_add_from_github: failed to set git config"
-                    );
-                }
+        // 5b. Configure git user.name/user.email so commits created by the
+        //     server/agents use the active App's bot login. Manifest-created
+        //     Apps have unique slugs, so a hard-coded `djinn-bot[bot]` would
+        //     misattribute them.
+        let (bot_name, bot_email) = djinn_provider::github_app::bot_git_identity();
+        for (key, value) in [
+            ("user.name", bot_name.as_str()),
+            ("user.email", bot_email.as_str()),
+        ] {
+            if let Err(e) = crate::tools::git_ops::git_config_set(&clone_path, key, value).await {
+                tracing::warn!(
+                    path = %clone_path, key, error = %e,
+                    "project_add_from_github: failed to set git config"
+                );
             }
-        } else {
-            tracing::warn!(
-                "project_add_from_github: GITHUB_APP_ID unset — skipping \
-                 djinn-bot[bot] identity config on {}",
-                clone_path
-            );
         }
 
         // 6. Seed .djinn/ conveniences and defense-in-depth ignores.

@@ -30,7 +30,11 @@ pub mod jwt;
 pub mod manifest;
 
 pub use client::{GitHubAppClient, InstallationRepo, find_installation_for_repo, install_url};
-pub use config::{AppConfig, DEFAULT_PUBLIC_URL, ENV_PUBLIC_URL, ENV_WEBHOOK_SECRET};
+pub use config::{
+    AppConfig, DEFAULT_PUBLIC_URL, ENV_PUBLIC_URL, ENV_WEBHOOK_SECRET, app_slug, bot_git_identity,
+    clear_runtime_config, install_runtime_config, oauth_client_credentials, public_url,
+    runtime_config,
+};
 pub use credential_state::{
     CRED_KEY_NAME, CRED_PROVIDER_ID, ConfigSource, CredentialSourceState, InvalidSecretDetail,
     clear_persisted_app_config, persist_app_config, resolve_credential_source,

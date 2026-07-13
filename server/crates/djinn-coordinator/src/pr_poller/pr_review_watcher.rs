@@ -644,7 +644,7 @@ impl CoordinatorActor {
                 // If creds aren't available we degrade to the legacy
                 // non-refreshable client; a 401 will then hard-evict the
                 // session row and the next UI hit bounces to login.
-                let user_client = match github_app_user::client_credentials_from_env() {
+                let user_client = match github_app_user::client_credentials() {
                     Some((cid, secret)) => GitHubApiClient::for_user_session(
                         session.github_access_token.clone(),
                         DbBackedRefresher::new(self.db.clone(), session.token.clone(), cid, secret)
