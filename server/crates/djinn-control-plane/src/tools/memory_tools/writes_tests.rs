@@ -13,7 +13,10 @@ mod tests {
 
     use std::time::Duration;
 
-    use djinn_core::events::EventBus;
+    use djinn_core::{
+        auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
+        events::EventBus,
+    };
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use rmcp::{Json, handler::server::wrapper::Parameters};
     use tokio::time::sleep;
@@ -27,6 +30,29 @@ mod tests {
         },
     };
     use djinn_telemetry::memory_retrieval::{RetrievalEntryPoint, RetrievalOutcome};
+
+    struct TestMcpServer(DjinnMcpServer);
+
+    impl std::ops::Deref for TestMcpServer {
+        type Target = DjinnMcpServer;
+        fn deref(&self) -> &Self::Target { &self.0 }
+    }
+
+    impl TestMcpServer {
+        async fn memory_write(&self, params: Parameters<WriteParams>) -> Json<super::super::MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT.scope(test_revision_caller(), self.0.memory_write(params)).await
+        }
+        async fn memory_edit(&self, params: Parameters<EditParams>) -> Json<super::super::MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT.scope(test_revision_caller(), self.0.memory_edit(params)).await
+        }
+        async fn memory_write_with_decider(&self, params: Parameters<WriteParams>, decider: &dyn MemoryWriteDedupDecider) -> Json<super::super::MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT.scope(test_revision_caller(), self.0.memory_write_with_decider(params, decider)).await
+        }
+    }
+
+    fn test_revision_caller() -> Option<TrustedRevisionCallerContext> {
+        TrustedRevisionCallerContext::authenticated_agent("memory-tools-test")
+    }
 
     async fn create_project(db: &Database, _root: &std::path::Path) -> djinn_core::models::Project {
         // Unique owner/repo per test — `memory_write` derives canonical
@@ -47,7 +73,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
 
         // Create first note
         let Json(created1) = server
@@ -98,7 +124,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         // Create first pattern note
@@ -108,6 +134,7 @@ mod tests {
                 title: "Async Pattern".to_string(),
                 content: "Use tokio::spawn for concurrent task execution in Rust async code."
                     .to_string(),
+                reason: "test mutation".to_string(),
                 note_type: "pattern".to_string(),
                 status: None,
                 tags: None,
@@ -146,7 +173,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         // Create a pattern note
@@ -227,7 +254,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
 
         // Create a pattern note with unique content
         let Json(created) = server
@@ -237,6 +264,7 @@ mod tests {
                 content:
                     "This content is completely unique and should not match anything. XYZ123ABC"
                         .to_string(),
+                reason: "test mutation".to_string(),
                 note_type: "pattern".to_string(),
                 status: None,
                 tags: None,
@@ -256,7 +284,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
@@ -352,7 +380,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         // Shared high-overlap content to ensure FTS BM25 score > 5.0
@@ -420,7 +448,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         repo.create(&project.id, "ADR-008 Example", "body", "adr", "[]")
@@ -562,7 +590,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let title = "ADR-054 Roadmap Memory Extraction Quality Gates and Note Taxonomy";
@@ -636,7 +664,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         repo.create(
@@ -678,7 +706,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
@@ -713,7 +741,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
@@ -746,7 +774,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
@@ -801,7 +829,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
@@ -881,7 +909,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
 
         let Json(first) = server
             .memory_write(Parameters(WriteParams {
@@ -937,7 +965,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
@@ -970,7 +998,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
 
         let Json(first) = server
             .memory_write(Parameters(WriteParams {

@@ -7,6 +7,7 @@ use crate::tools::json_object::AnyJson;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 pub struct WriteParams {
     /// Absolute path to the project directory.
     pub project: String,
@@ -114,6 +115,7 @@ pub struct MemoryConfirmParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 pub struct EditParams {
     pub project: String,
     /// Note permalink or title.
@@ -175,6 +177,7 @@ pub struct ListParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 pub struct DeleteParams {
     pub project: String,
     pub identifier: String,

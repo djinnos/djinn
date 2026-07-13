@@ -7182,6 +7182,7 @@
     "description": "Delete a note. Removes the row from Dolt.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "required": [
         "project",
         "identifier",
@@ -7280,6 +7281,7 @@
     "description": "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section). Use append to build large notes incrementally after memory_write creates the initial note. When type is provided and differs from current type, the note is automatically moved to the correct folder for the new type.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "required": [
         "project",
         "identifier",
@@ -9753,6 +9755,7 @@
     "description": "Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, persona->design/personas, journey->design/journeys, design_spec->design/specs, session->research/sessions, competitive->research/competitive, tech_spike->research/technical). Singleton types (brief, roadmap) write a fixed file at docs root — one per project, title is ignored. Use [[wikilinks]] in content to connect notes — any [[Note Title]] creates a link in the knowledge graph. Add a '## Relations' section at the bottom with '- [[Related Note]]' entries to make connections explicit. For large documents (>150 lines): create with initial content, then use memory_edit with operation=\"append\" to add remaining sections.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "required": [
         "project",
         "title",

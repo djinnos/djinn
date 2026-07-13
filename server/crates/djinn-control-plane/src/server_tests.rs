@@ -3,7 +3,10 @@
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use djinn_core::events::{DjinnEventEnvelope, EventBus};
+    use djinn_core::{
+        auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
+        events::{DjinnEventEnvelope, EventBus},
+    };
     use djinn_core::models::DispatchPause;
     use djinn_db::repositories::dispatch_pause::{DispatchPauseRepository, DispatchPauseTarget};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
@@ -16,6 +19,26 @@ mod tests {
         state::stubs::test_mcp_state,
         tools::memory_tools::{EditParams, ReadParams, WriteParams},
     };
+
+    struct TestMcpServer(DjinnMcpServer);
+
+    impl std::ops::Deref for TestMcpServer {
+        type Target = DjinnMcpServer;
+        fn deref(&self) -> &Self::Target { &self.0 }
+    }
+
+    impl TestMcpServer {
+        async fn memory_write(&self, params: Parameters<WriteParams>) -> Json<crate::tools::memory_tools::MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT.scope(test_revision_caller(), self.0.memory_write(params)).await
+        }
+        async fn memory_edit(&self, params: Parameters<EditParams>) -> Json<crate::tools::memory_tools::MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT.scope(test_revision_caller(), self.0.memory_edit(params)).await
+        }
+    }
+
+    fn test_revision_caller() -> Option<TrustedRevisionCallerContext> {
+        TrustedRevisionCallerContext::authenticated_agent("server-test")
+    }
 
     fn workspace_tempdir() -> tempfile::TempDir {
         let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -95,7 +118,7 @@ mod tests {
         let project = create_project(&db, std::path::Path::new("")).await;
         let canonical = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
         let _guard = PathCleanupGuard::new(canonical);
-        let server = DjinnMcpServer::new(state);
+        let server = TestMcpServer(DjinnMcpServer::new(state));
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server

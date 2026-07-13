@@ -260,6 +260,7 @@ pub struct MemoryBuildContextParams {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryWriteParams {
     pub title: String,
     pub content: String,
@@ -282,6 +283,7 @@ pub struct MemoryMoveParams {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryEditParams {
     pub identifier: String,
     pub operation: String,
