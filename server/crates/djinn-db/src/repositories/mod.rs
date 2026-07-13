@@ -39,6 +39,8 @@ pub mod task_attempt_tests;
 pub mod task_run;
 pub mod test_support;
 pub mod tool_call_evaluator;
+#[cfg(test)]
+pub mod tool_call_evaluator_tests;
 pub mod tool_call_export;
 pub mod tool_call_metrics;
 pub mod usage_analytics;
