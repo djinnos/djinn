@@ -940,7 +940,7 @@ async fn largest_first_selection_externalizes_the_biggest_candidate() {
     };
     assert!(
         big_text.starts_with("[djinn-output-stash"),
-        "largest not externalized",
+        "largest not externalized: {}",
         &big_text[..big_text.len().min(80)]
     );
     assert!(big_text.contains("reason=\"turn_budget\""));
