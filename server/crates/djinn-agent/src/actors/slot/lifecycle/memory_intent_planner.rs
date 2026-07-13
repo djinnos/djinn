@@ -178,10 +178,10 @@ pub fn validate_query(query: &str) -> Result<(), &'static str> {
     }
 
     // Rules 1 & 4: declarative statement, omit retrieval-meta wording.
-    // The Phase 1 contract calls its examples "such as", rather than defining a
-    // closed vocabulary. Request-form verbs are consequently invalid even when
-    // they are not one of the three quoted examples: "Explain migration timeout
-    // policy" asks for retrieval; "Migration timeout policy" is declarative.
+    // This is an intentionally bounded lexical guard, not a natural-language
+    // classifier. It catches common leading request forms (including comparison
+    // requests) while the prompt remains responsible for semantic completeness.
+    // The objective canonical examples are checked separately below.
     const REQUEST_FORM_PREFIXES: &[&str] = &[
         "explain ",
         "describe ",
@@ -194,6 +194,7 @@ pub fn validate_query(query: &str) -> Result<(), &'static str> {
         "clarify ",
         "demonstrate ",
         "enumerate ",
+        "compare ",
         "recommend ",
         "suggest ",
     ];
@@ -449,6 +450,19 @@ mod tests {
     }
 
     #[test]
+    fn parser_rejects_imperative_compare() {
+        let raw = payload_with_first_query("Compare migration timeout policy variants");
+        let err = parse_planned_queries(&raw).unwrap_err();
+        assert!(matches!(
+            err,
+            PlannerError::InvalidQuery {
+                index: 0,
+                reason: "query contains retrieval-meta wording"
+            }
+        ));
+    }
+
+    #[test]
     fn parser_rejects_unknown_note_type() {
         let raw = r#"{"queries":[{"type":"unknown","query":"Valid statement"},{"type":"case","query":"Another valid statement"}]}"#;
         assert!(parse_planned_queries(raw).is_err());
@@ -644,6 +658,7 @@ mod tests {
             for request in [
                 "Tell me about migration timeout policy",
                 "Explain migration timeout policy",
+                "Compare migration timeout policy variants",
             ] {
                 assert!(
                     validate_query(request).is_err(),
