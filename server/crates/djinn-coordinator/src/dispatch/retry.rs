@@ -1,6 +1,7 @@
 // djinn:allow-oversize — park telemetry + quality-strike guard logic pushed file past the byte threshold; split when touched substantively.
 use super::super::*;
 use super::DispatchOutcome;
+use super::admission::lane_under_user_cap;
 use super::model_under_user_cap;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::task_attempt::{TaskAttemptLedgerRow, TaskAttemptOutcome};
@@ -2483,18 +2484,33 @@ impl CoordinatorActor {
                 // fresh DB + inflight-ledger snapshot so a just-recorded admission in
                 // this same tick is visible.
                 let model_ids: Vec<String> = if let Some(creator) = source_creator.as_deref() {
-                    let running = self.effective_running_by_user_model().await;
-                    let caps = djinn_db::UserSettingsRepository::new(self.db.clone())
+                    let (running_by_model, running_by_lane) = self.effective_running_counts().await;
+                    let settings = djinn_db::UserSettingsRepository::new(self.db.clone())
                         .get(creator)
                         .await
                         .ok()
-                        .flatten()
-                        .and_then(|s| s.max_sessions)
+                        .flatten();
+                    let caps = settings
+                        .as_ref()
+                        .and_then(|s| s.max_sessions.clone())
                         .unwrap_or_default();
+                    let lane = djinn_core::models::ModelLane::Plan;
+                    let lane_cap = settings
+                        .and_then(|s| s.lane_max_sessions)
+                        .map(|limits| limits.lane(lane));
+                    if !lane_under_user_cap(&running_by_lane, creator, lane, lane_cap) {
+                        tracing::debug!(
+                            source_task_id = %source_task_id,
+                            creator,
+                            lane_cap,
+                            "CoordinatorActor: planner escalation deferred — creator at plan-lane concurrency cap"
+                        );
+                        return;
+                    }
                     let mut filtered: Vec<String> = Vec::new();
                     for m in &model_ids {
                         let cap = caps.get(m).copied().unwrap_or(1);
-                        if model_under_user_cap(&running, creator, m, cap) {
+                        if model_under_user_cap(&running_by_model, creator, m, cap) {
                             filtered.push(m.clone());
                         }
                     }
@@ -2761,6 +2777,7 @@ impl CoordinatorActor {
                         Some(&review_task.short_id),
                         review_task.created_by_user_id.as_deref(),
                         &model,
+                        "planner",
                     )
                     .await;
                 }

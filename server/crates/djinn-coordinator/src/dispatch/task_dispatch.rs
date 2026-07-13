@@ -7,7 +7,10 @@ use super::admission::{DispatchCapObservation, DispatchCapObservationStage};
 use super::admission::{
     clear_dispatch_cap_observations, observe_dispatch_cap_count, take_dispatch_cap_observations,
 };
-use super::admission::{model_under_user_cap, overlay_inflight_ledger};
+use super::admission::{
+    lane_under_user_cap, model_under_user_cap, overlay_inflight_lane_ledger,
+    overlay_inflight_ledger,
+};
 use super::post_intervention_lane;
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
@@ -141,8 +144,21 @@ fn dispatch_wall_clock_now() -> Option<String> {
     format_dispatch_wall_clock(::time::OffsetDateTime::now_utc())
 }
 
+/// Decide whether an in-flight reservation still represents booting work.
+///
+/// `active_task_ids` is deliberately an earlier snapshot than the DB count
+/// queries. `live_task_ids = None` means the pool could not be queried, so only
+/// a session already present in that earlier snapshot may clear a reservation.
+fn retain_inflight_reservation(
+    task_id: &str,
+    active_task_ids: &HashSet<String>,
+    live_task_ids: Option<&HashSet<String>>,
+) -> bool {
+    !active_task_ids.contains(task_id) && live_task_ids.is_none_or(|live| live.contains(task_id))
+}
+
 impl CoordinatorActor {
-    async fn reconcile_inflight_dispatch_ledger(&mut self) {
+    async fn reconcile_inflight_dispatch_ledger(&mut self, active_task_ids: &HashSet<String>) {
         match self.pool.get_status().await {
             Ok(status) => {
                 let live: std::collections::HashSet<String> = status
@@ -153,11 +169,14 @@ impl CoordinatorActor {
                 let stale_inflight_task_ids: Vec<String> = self
                     .inflight_dispatches
                     .keys()
-                    .filter(|task_id| !live.contains(*task_id))
+                    .filter(|task_id| {
+                        !retain_inflight_reservation(task_id, active_task_ids, Some(&live))
+                    })
                     .cloned()
                     .collect();
-                self.inflight_dispatches
-                    .retain(|task_id, _| live.contains(task_id));
+                self.inflight_dispatches.retain(|task_id, _| {
+                    retain_inflight_reservation(task_id, active_task_ids, Some(&live))
+                });
                 for task_id in stale_inflight_task_ids {
                     self.persist_durable_dispatch_state_update(
                         &task_id,
@@ -171,52 +190,101 @@ impl CoordinatorActor {
                     .await;
                 }
             }
-            // On a pool query error, keep the ledger as-is rather than dropping
-            // it — a stale-but-present ledger is conservative (may briefly defer
-            // a task), whereas dropping it would re-open the overshoot window.
+            // On a pool query error, only clear entries now represented by a
+            // running DB session. Keep every other ledger entry: a stale but
+            // present reservation is conservative, whereas dropping it would
+            // reopen the overshoot window.
             Err(e) => {
                 tracing::warn!(error = %e, "CoordinatorActor: pool get_status failed during cap seed; keeping in-flight ledger as-is");
+                let started_task_ids: Vec<String> = self
+                    .inflight_dispatches
+                    .keys()
+                    .filter(|task_id| !retain_inflight_reservation(task_id, active_task_ids, None))
+                    .cloned()
+                    .collect();
+                self.inflight_dispatches.retain(|task_id, _| {
+                    retain_inflight_reservation(task_id, active_task_ids, None)
+                });
+                for task_id in started_task_ids {
+                    self.persist_durable_dispatch_state_update(
+                        &task_id,
+                        None,
+                        "inflight_ledger_session_started_clear",
+                        DurableDispatchStateUpdate {
+                            inflight: Some(None),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                }
             }
         }
     }
 
-    /// Load the current effective per-`(creator, model)` running counts — DB seed
-    /// overlaid with the in-flight ledger via `max` — as a fresh snapshot.
+    /// Load effective running counts for both admission dimensions.
     ///
-    /// This is the shared source of truth for the per-user, per-model concurrency
-    /// cap. Both `dispatch_ready_tasks` (worker/reviewer/lead/architect wave) and
-    /// `dispatch_planner_escalation` (planner intervention dispatch) must use it so
-    /// no dispatch path can admit a session that overshoots the cap.
-    ///
-    /// Unlike `dispatch_ready_tasks` which seeds once per pass and bumps locally,
-    /// this method re-reads the DB + ledger each call. That's acceptable for the
-    /// planner escalation path (called at most a handful of times per tick), and
-    /// guarantees it never sees a stale snapshot after a just-recorded admission.
-    pub(crate) async fn effective_running_by_user_model(
+    /// DB rows represent sessions that have started; the reconciled in-flight
+    /// ledger represents work that was still booting at the earlier active-id
+    /// snapshot. Overlays are additive. A row that lands between snapshots may
+    /// be counted twice for one pass, which is deliberately conservative.
+    pub(crate) async fn effective_running_counts(
         &mut self,
-    ) -> HashMap<(String, String), u32> {
-        let mut running: HashMap<(String, String), u32> = match SessionRepository::new(
+    ) -> (
+        HashMap<(String, String), u32>,
+        HashMap<(String, djinn_core::models::ModelLane), u32>,
+    ) {
+        let repo = SessionRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
-        )
-        .count_active_by_user_and_model()
-        .await
-        {
+        );
+        // Snapshot active task ids FIRST. If a booting session becomes visible
+        // between this read and the count reads below, its ledger reservation
+        // is conservatively retained and added to the DB count for one pass.
+        // Reading these concurrently used to permit the inverse ordering:
+        // counts could miss the row while a later active-id view cleared its
+        // reservation, briefly admitting above the configured cap.
+        let active_task_ids: HashSet<String> = match repo.list_active().await {
+            Ok(sessions) => sessions.into_iter().filter_map(|s| s.task_id).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: active-session lookup failed during admission; retaining all in-flight reservations");
+                HashSet::new()
+            }
+        };
+        let (model_rows, lane_rows) = tokio::join!(
+            repo.count_active_by_user_and_model(),
+            repo.count_active_by_user_and_lane(),
+        );
+
+        let mut by_model = match model_rows {
             Ok(rows) => rows
                 .into_iter()
-                .filter_map(|(creator, model, cnt)| {
-                    creator.map(|c| ((c, model), u32::try_from(cnt).unwrap_or(0)))
+                .filter_map(|(creator, model, count)| {
+                    creator.map(|c| ((c, model), u32::try_from(count).unwrap_or(0)))
                 })
                 .collect(),
             Err(e) => {
-                tracing::warn!(error = %e, "CoordinatorActor: per-user concurrency counts failed; proceeding without caps");
+                tracing::warn!(error = %e, "CoordinatorActor: per-user model concurrency counts failed; using in-flight reservations only");
                 HashMap::new()
             }
         };
-        self.reconcile_inflight_dispatch_ledger().await;
-        overlay_inflight_ledger(&mut running, &self.inflight_dispatches);
-        self.overlay_provisional_admissions(&mut running);
-        running
+        let mut by_lane = match lane_rows {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|(creator, lane, count)| {
+                    creator.map(|c| ((c, lane), u32::try_from(count).unwrap_or(0)))
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: per-user lane concurrency counts failed; using in-flight reservations only");
+                HashMap::new()
+            }
+        };
+        self.reconcile_inflight_dispatch_ledger(&active_task_ids)
+            .await;
+        overlay_inflight_ledger(&mut by_model, &self.inflight_dispatches);
+        overlay_inflight_lane_ledger(&mut by_lane, &self.inflight_dispatches);
+        self.overlay_provisional_admissions(&mut by_model, &mut by_lane);
+        (by_model, by_lane)
     }
 
     /// Re-overlay the in-flight ledger onto the local per-pass
@@ -232,8 +300,11 @@ impl CoordinatorActor {
     async fn bump_local_cap_for_last_planner_admission(
         &mut self,
         running_by_user_model: &mut HashMap<(String, String), u32>,
+        running_by_user_lane: &mut HashMap<(String, djinn_core::models::ModelLane), u32>,
     ) {
-        overlay_inflight_ledger(running_by_user_model, &self.inflight_dispatches);
+        let (fresh_by_model, fresh_by_lane) = self.effective_running_counts().await;
+        *running_by_user_model = fresh_by_model;
+        *running_by_user_lane = fresh_by_lane;
     }
 
     /// Record a successful dispatch admission of ANY role into the in-flight
@@ -250,11 +321,16 @@ impl CoordinatorActor {
         task_short_id: Option<&str>,
         creator: Option<&str>,
         model: &str,
+        role: &str,
     ) {
         if let Some(c) = creator {
             self.inflight_dispatches.insert(
                 task_id.to_string(),
-                (Some(c.to_string()), model.to_string()),
+                InflightDispatch {
+                    creator: Some(c.to_string()),
+                    model: model.to_string(),
+                    lane: djinn_core::models::ModelLane::for_role(role),
+                },
             );
             record_dispatch_live_state(
                 self.dispatch_cooldowns.len(),
@@ -571,7 +647,7 @@ impl CoordinatorActor {
         })
     }
 
-    // ─── Shared per-(user, model) admission surface ────────────────────────
+    // ─── Shared per-user admission surface ────────────────────────────────
     //
     // The methods below compose the pure primitives in [`super::admission`]
     // with the actor's own DB, in-flight ledger, and durable dispatch-state.
@@ -585,30 +661,11 @@ impl CoordinatorActor {
     // dispatch_next_refinement_phase`, so refinement tribunal dispatch and
     // normal task dispatch go through the exact same cap/ledger code path.
 
-    /// Resolve the configured `max_sessions` cap map for `creator`.
-    ///
-    /// Returns `model_id → max concurrent sessions`. When the user has no
-    /// settings row or `max_sessions` is unset, an empty map is returned —
-    /// callers then apply a per-model default (conventionally 1) via
-    /// [`model_under_user_cap`].
-    pub(crate) async fn resolve_model_caps_for_user(
-        &self,
-        creator: &str,
-    ) -> std::collections::HashMap<String, u32> {
-        djinn_db::UserSettingsRepository::new(self.db.clone())
-            .get(creator)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| s.max_sessions)
-            .unwrap_or_default()
-    }
-
-    /// Check whether a single `(user, model)` is admissible under the
-    /// configured per-user concurrency cap.
+    /// Check whether a single `(user, model, lane)` dispatch is admissible
+    /// under both configured concurrency ceilings.
     ///
     /// This re-reads the DB active-session counts plus the in-flight ledger
-    /// overlay on each call (via [`effective_running_by_user_model`]), so it
+    /// overlay on each call (via [`effective_running_counts`]), so it
     /// always reflects the latest state — including a just-recorded admission
     /// in the same tick. Returns `true` when the user has room for one more
     /// session on `model`.
@@ -622,10 +679,14 @@ impl CoordinatorActor {
         &mut self,
         user: &str,
         model: &str,
-        cap: u32,
+        model_cap: u32,
+        role: &str,
+        lane_cap: Option<u32>,
     ) -> bool {
-        let running = self.effective_running_by_user_model().await;
-        model_under_user_cap(&running, user, model, cap)
+        let (running_by_model, running_by_lane) = self.effective_running_counts().await;
+        let lane = djinn_core::models::ModelLane::for_role(role);
+        model_under_user_cap(&running_by_model, user, model, model_cap)
+            && lane_under_user_cap(&running_by_lane, user, lane, lane_cap)
     }
 
     /// Clear an in-flight dispatch reservation from the ledger.
@@ -660,19 +721,22 @@ impl CoordinatorActor {
     }
 
     /// Overlay provisional refinement admissions onto the per-`(user, model)`
-    /// running counts. Called from [`effective_running_by_user_model`] so that
+    /// running counts. Called from [`effective_running_counts`] so that
     /// `check_user_model_admission` accounts for reservations that have not yet
     /// been re-keyed to a real task id.
     fn overlay_provisional_admissions(
         &self,
         running_by_user_model: &mut HashMap<(String, String), u32>,
+        running_by_user_lane: &mut HashMap<(String, djinn_core::models::ModelLane), u32>,
     ) {
-        for (creator, model) in self.provisional_admissions.values() {
-            if let Some(c) = creator {
-                let entry = running_by_user_model
-                    .entry((c.clone(), model.clone()))
-                    .or_insert(0);
-                *entry = (*entry).max(1);
+        for dispatch in self.provisional_admissions.values() {
+            if let Some(creator) = dispatch.creator.as_ref() {
+                *running_by_user_model
+                    .entry((creator.clone(), dispatch.model.clone()))
+                    .or_insert(0) += 1;
+                *running_by_user_lane
+                    .entry((creator.clone(), dispatch.lane))
+                    .or_insert(0) += 1;
             }
         }
     }
@@ -690,10 +754,11 @@ impl CoordinatorActor {
         real_task_id: &str,
         creator: &str,
         model: &str,
+        role: &str,
     ) {
         self.provisional_admissions.remove(provisional_key);
         self.inflight_dispatches.remove(provisional_key);
-        self.record_inflight_dispatch(real_task_id, None, Some(creator), model)
+        self.record_inflight_dispatch(real_task_id, None, Some(creator), model, role)
             .await;
     }
 
@@ -1458,41 +1523,55 @@ impl CoordinatorActor {
         // Without this the coordinator tick re-dispatches the same task every
         // minute while a worker pod is still doing real work, racking up
         // duplicate K8s Jobs and burning tokens.
-        let active_task_ids: HashSet<String> = match SessionRepository::new(
+        let session_repo = SessionRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
-        )
-        .list_active()
-        .await
-        {
+        );
+        // Keep the same handoff ordering as `effective_running_counts`: active
+        // ids are captured before either count query. A session that appears
+        // between these reads is double-counted for at most this pass (safe),
+        // never missed while its ledger reservation is cleared (unsafe).
+        let active_task_ids: HashSet<String> = match session_repo.list_active().await {
             Ok(sessions) => sessions.into_iter().filter_map(|s| s.task_id).collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "CoordinatorActor: failed to load active sessions for dispatch guard; proceeding without it");
                 HashSet::new()
             }
         };
+        let (model_rows, lane_rows) = tokio::join!(
+            session_repo.count_active_by_user_and_model(),
+            session_repo.count_active_by_user_and_lane(),
+        );
 
         // Per-user, per-model concurrency: current running counts keyed by
         // (creator, model), seeded from the DB and bumped locally on each
         // dispatch this pass. A task only dispatches while its creator is under
-        // their own cap for the chosen model — the sole admission control, since
-        // the slot pool is elastic (spawns on demand, no global ceiling).
-        let mut running_by_user_model: HashMap<(String, String), u32> =
-            match SessionRepository::new(
-                self.db.clone(),
-                crate::events::event_bus_for(&self.events_tx),
-            )
-            .count_active_by_user_and_model()
-            .await
-            {
+        // their own cap for the chosen model and, when configured, under the
+        // matching lane cap. The slot pool itself remains elastic (spawns on
+        // demand, with no global ceiling).
+        let mut running_by_user_model: HashMap<(String, String), u32> = match model_rows {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|(creator, model, cnt)| {
+                    creator.map(|c| ((c, model), u32::try_from(cnt).unwrap_or(0)))
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: per-user concurrency counts failed; proceeding without caps");
+                HashMap::new()
+            }
+        };
+
+        let mut running_by_user_lane: HashMap<(String, djinn_core::models::ModelLane), u32> =
+            match lane_rows {
                 Ok(rows) => rows
                     .into_iter()
-                    .filter_map(|(creator, model, cnt)| {
-                        creator.map(|c| ((c, model), u32::try_from(cnt).unwrap_or(0)))
+                    .filter_map(|(creator, lane, count)| {
+                        creator.map(|c| ((c, lane), u32::try_from(count).unwrap_or(0)))
                     })
                     .collect(),
                 Err(e) => {
-                    tracing::warn!(error = %e, "CoordinatorActor: per-user concurrency counts failed; proceeding without caps");
+                    tracing::warn!(error = %e, "CoordinatorActor: per-user lane concurrency counts failed; using in-flight reservations only");
                     HashMap::new()
                 }
             };
@@ -1503,15 +1582,17 @@ impl CoordinatorActor {
         // to the seed. Dispatch passes that re-fire in that window would re-seed
         // from the stale-low count and overshoot the per-user cap (observed: 8
         // workers dispatched in one ~167ms burst for a cap of 4, because every
-        // session row only landed ~20-60s later). Fix: reconcile the ledger
-        // against the live slot pool (drop entries whose task the pool no longer
-        // runs — completed/freed/evicted), then overlay `max(db, ledger)` so an
-        // in-flight dispatch counts against the cap the instant it lands. `max`
-        // (not sum) avoids double-counting a task present in both, and keeps the
-        // DB as a durable floor that survives a server restart (the in-memory
-        // ledger resets, but old `running` rows still gate until reaped).
-        self.reconcile_inflight_dispatch_ledger().await;
+        // session row only landed ~20-60s later). Fix: capture active task ids
+        // first, reconcile against that snapshot and pool liveness, then add the
+        // retained booting reservations to DB counts. A session row that lands
+        // between the active-id and count reads is conservatively double-counted
+        // for one pass; it is never missed during the handoff. DB rows remain
+        // the durable floor across server restarts.
+        self.reconcile_inflight_dispatch_ledger(&active_task_ids)
+            .await;
         overlay_inflight_ledger(&mut running_by_user_model, &self.inflight_dispatches);
+        overlay_inflight_lane_ledger(&mut running_by_user_lane, &self.inflight_dispatches);
+        self.overlay_provisional_admissions(&mut running_by_user_model, &mut running_by_user_lane);
         record_dispatch_live_state(
             self.dispatch_cooldowns.len(),
             self.inflight_dispatches.len(),
@@ -1519,6 +1600,8 @@ impl CoordinatorActor {
 
         // Memoized per-creator cap maps (model_id → max concurrent) for this pass.
         let mut creator_caps: HashMap<String, std::collections::HashMap<String, u32>> =
+            HashMap::new();
+        let mut creator_lane_caps: HashMap<String, Option<djinn_core::models::LaneMaxSessions>> =
             HashMap::new();
 
         // Cache readiness per project across this dispatch pass so we don't
@@ -1796,8 +1879,11 @@ impl CoordinatorActor {
                 // reduced capacity — the inflight ledger is already updated
                 // inside dispatch_planner_escalation, but the local
                 // running_by_user_model was seeded before this admission.
-                self.bump_local_cap_for_last_planner_admission(&mut running_by_user_model)
-                    .await;
+                self.bump_local_cap_for_last_planner_admission(
+                    &mut running_by_user_model,
+                    &mut running_by_user_lane,
+                )
+                .await;
                 continue;
             }
             // A task that is dispatch-ready again (no active session — guarded
@@ -1899,6 +1985,7 @@ impl CoordinatorActor {
                                 // B and the stuck-task path).
                                 self.bump_local_cap_for_last_planner_admission(
                                     &mut running_by_user_model,
+                                    &mut running_by_user_lane,
                                 )
                                 .await;
                                 continue;
@@ -1937,6 +2024,7 @@ impl CoordinatorActor {
                                 // intervention just dispatched (same as Trigger A).
                                 self.bump_local_cap_for_last_planner_admission(
                                     &mut running_by_user_model,
+                                    &mut running_by_user_lane,
                                 )
                                 .await;
                                 continue;
@@ -2335,14 +2423,45 @@ impl CoordinatorActor {
             // free). Tasks with no creator (legacy NULL) are ungated.
             if let Some(c) = creator.as_deref() {
                 if !creator_caps.contains_key(c) {
-                    let caps = djinn_db::UserSettingsRepository::new(self.db.clone())
+                    let settings = djinn_db::UserSettingsRepository::new(self.db.clone())
                         .get(c)
                         .await
                         .ok()
-                        .flatten()
-                        .and_then(|s| s.max_sessions)
-                        .unwrap_or_default();
-                    creator_caps.insert(c.to_string(), caps);
+                        .flatten();
+                    creator_caps.insert(
+                        c.to_string(),
+                        settings
+                            .as_ref()
+                            .and_then(|s| s.max_sessions.clone())
+                            .unwrap_or_default(),
+                    );
+                    creator_lane_caps
+                        .insert(c.to_string(), settings.and_then(|s| s.lane_max_sessions));
+                }
+
+                let lane = djinn_core::models::ModelLane::for_role(role);
+                let lane_cap = creator_lane_caps[c]
+                    .as_ref()
+                    .map(|limits| limits.lane(lane));
+                if !lane_under_user_cap(&running_by_user_lane, c, lane, lane_cap) {
+                    record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_CAP);
+                    tracing::debug!(
+                        outcome = "cap",
+                        task_id = %task.short_id,
+                        role,
+                        lane = ?lane,
+                        lane_cap,
+                        "CoordinatorActor: task owner at per-lane concurrency cap — deferring"
+                    );
+                    super::respawn_guard::record_guard_deferred_attempt(
+                        &self.db,
+                        &task.id,
+                        role,
+                        djinn_core::models::task_attempt::GuardReason::Capacity,
+                        Some("capacity: user at per-lane concurrency cap"),
+                    )
+                    .await;
+                    continue;
                 }
                 let caps = &creator_caps[c];
                 model_ids.retain(|m| {
@@ -2536,6 +2655,9 @@ impl CoordinatorActor {
                         *running_by_user_model
                             .entry((c.to_string(), used.clone()))
                             .or_insert(0) += 1;
+                        *running_by_user_lane
+                            .entry((c.to_string(), djinn_core::models::ModelLane::for_role(role)))
+                            .or_insert(0) += 1;
                         #[cfg(test)]
                         observe_dispatch_cap_count(
                             DispatchCapObservationStage::InflightIncremented,
@@ -2558,6 +2680,7 @@ impl CoordinatorActor {
                             Some(&task.short_id),
                             Some(c),
                             used,
+                            role,
                         )
                         .await;
                     }
@@ -2807,6 +2930,18 @@ mod inflight_ledger_tests {
 
     fn key(creator: &str, model: &str) -> (String, String) {
         (creator.to_string(), model.to_string())
+    }
+
+    fn inflight_entry(
+        creator: Option<&str>,
+        model: &str,
+        lane: djinn_core::models::ModelLane,
+    ) -> InflightDispatch {
+        InflightDispatch {
+            creator: creator.map(str::to_owned),
+            model: model.to_owned(),
+            lane,
+        }
     }
 
     const WND1_READY_TASK_COUNT: usize = 10;
@@ -3180,7 +3315,9 @@ mod inflight_ledger_tests {
         actor: &mut CoordinatorActor,
         fixture: &Wnd1DispatchFixture,
     ) {
-        actor.reconcile_inflight_dispatch_ledger().await;
+        actor
+            .reconcile_inflight_dispatch_ledger(&HashSet::new())
+            .await;
 
         assert!(
             actor.inflight_dispatches.is_empty(),
@@ -3566,11 +3703,15 @@ mod inflight_ledger_tests {
     fn ledger_overlay_counts_inflight_dispatches_when_db_seed_is_cold() {
         clear_dispatch_cap_observations();
         let mut running: HashMap<(String, String), u32> = HashMap::new(); // cold DB seed
-        let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
+        let mut inflight: HashMap<String, InflightDispatch> = HashMap::new();
         for i in 0..4 {
             inflight.insert(
                 format!("task-{i}"),
-                (Some("user-a".into()), "openai/gpt-5.5".into()),
+                inflight_entry(
+                    Some("user-a"),
+                    "openai/gpt-5.5",
+                    djinn_core::models::ModelLane::Implement,
+                ),
             );
         }
 
@@ -3593,47 +3734,162 @@ mod inflight_ledger_tests {
         );
     }
 
-    /// `max`, not sum: a task counted in BOTH the running rows and the ledger
-    /// (its session row landed but the ledger entry hasn't been reconciled away
-    /// yet) must count once. Also: a larger DB count wins over a smaller ledger.
+    /// Reconciliation makes DB-running and booting ledger reservations
+    /// disjoint, so one existing running task plus one booting task must count
+    /// as two. This is the case `max(DB, ledger)` previously undercounted.
     #[test]
-    fn ledger_overlay_takes_max_never_double_counts() {
+    fn ledger_overlay_adds_disjoint_booting_reservations() {
         clear_dispatch_cap_observations();
-        let mut running: HashMap<(String, String), u32> = HashMap::new();
-        running.insert(key("user-a", "m"), 3); // 3 already running in DB
-        running.insert(key("user-b", "m"), 5); // 5 running, ledger will be lower
-        let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
-        // user-a: 3 in-flight that overlap the 3 running rows → must stay 3, not 6.
-        for i in 0..3 {
-            inflight.insert(format!("a{i}"), (Some("user-a".into()), "m".into()));
-        }
-        // user-b: 2 in-flight, fewer than the 5 running → DB count wins.
-        for i in 0..2 {
-            inflight.insert(format!("b{i}"), (Some("user-b".into()), "m".into()));
-        }
+        let mut running = HashMap::from([(key("user-a", "m"), 1)]);
+        let inflight = HashMap::from([(
+            "booting-task".to_owned(),
+            inflight_entry(
+                Some("user-a"),
+                "m",
+                djinn_core::models::ModelLane::Implement,
+            ),
+        )]);
 
         overlay_inflight_ledger(&mut running, &inflight);
 
-        assert_eq!(running.get(&key("user-a", "m")).copied(), Some(3));
-        assert_eq!(running.get(&key("user-b", "m")).copied(), Some(5));
+        assert_eq!(running.get(&key("user-a", "m")).copied(), Some(2));
         assert_eq!(
             take_dispatch_cap_observations(),
-            vec![
-                DispatchCapObservation {
-                    creator_user_id: "user-a".to_owned(),
-                    model: "m".to_owned(),
-                    effective_count: 3,
-                    stage: DispatchCapObservationStage::LedgerOverlay,
-                },
-                DispatchCapObservation {
-                    creator_user_id: "user-b".to_owned(),
-                    model: "m".to_owned(),
-                    effective_count: 5,
-                    stage: DispatchCapObservationStage::LedgerOverlay,
-                },
-            ],
-            "observer must see max(db, ledger), never db + ledger"
+            vec![DispatchCapObservation {
+                creator_user_id: "user-a".to_owned(),
+                model: "m".to_owned(),
+                effective_count: 2,
+                stage: DispatchCapObservationStage::LedgerOverlay,
+            }],
+            "observer must see DB-running plus the disjoint booting reservation"
         );
+    }
+
+    #[test]
+    fn active_first_handoff_snapshot_retains_reservation_before_later_count() {
+        use djinn_core::models::ModelLane;
+
+        // T1: active-id snapshot is taken while the worker is still booting.
+        let active_task_ids = HashSet::new();
+        let live_task_ids = HashSet::from(["handoff-task".to_owned()]);
+        assert!(retain_inflight_reservation(
+            "handoff-task",
+            &active_task_ids,
+            Some(&live_task_ids),
+        ));
+
+        // T2: the session row lands before the two count queries. The earlier
+        // active-id snapshot must still retain the ledger entry, making this a
+        // conservative count of 2 for one pass rather than the unsafe 1→0
+        // handoff that would admit another dispatch.
+        let ledger = HashMap::from([(
+            "handoff-task".to_owned(),
+            inflight_entry(Some("user-a"), "shared/model", ModelLane::Implement),
+        )]);
+        let mut by_model = HashMap::from([(key("user-a", "shared/model"), 1)]);
+        let mut by_lane = HashMap::from([(("user-a".to_owned(), ModelLane::Implement), 1)]);
+        overlay_inflight_ledger(&mut by_model, &ledger);
+        overlay_inflight_lane_ledger(&mut by_lane, &ledger);
+
+        assert_eq!(by_model.get(&key("user-a", "shared/model")), Some(&2));
+        assert_eq!(
+            by_lane.get(&("user-a".to_owned(), ModelLane::Implement)),
+            Some(&2)
+        );
+        assert!(!model_under_user_cap(
+            &by_model,
+            "user-a",
+            "shared/model",
+            2,
+        ));
+        assert!(!lane_under_user_cap(
+            &by_lane,
+            "user-a",
+            ModelLane::Implement,
+            Some(2),
+        ));
+    }
+
+    #[test]
+    fn lane_cap_counts_running_plus_booting_across_models() {
+        use djinn_core::models::ModelLane;
+
+        let mut running_by_lane = HashMap::from([(("user-a".to_owned(), ModelLane::Plan), 1)]);
+        let inflight = HashMap::from([(
+            "booting-planner".to_owned(),
+            inflight_entry(Some("user-a"), "other/model", ModelLane::Plan),
+        )]);
+        overlay_inflight_lane_ledger(&mut running_by_lane, &inflight);
+
+        assert_eq!(
+            running_by_lane
+                .get(&("user-a".to_owned(), ModelLane::Plan))
+                .copied(),
+            Some(2)
+        );
+        assert!(!lane_under_user_cap(
+            &running_by_lane,
+            "user-a",
+            ModelLane::Plan,
+            Some(2),
+        ));
+        assert!(lane_under_user_cap(
+            &running_by_lane,
+            "user-a",
+            ModelLane::Implement,
+            Some(1),
+        ));
+    }
+
+    #[test]
+    fn missing_lane_cap_is_unbounded() {
+        let running_by_lane = HashMap::from([(
+            (
+                "legacy-user".to_owned(),
+                djinn_core::models::ModelLane::Implement,
+            ),
+            99,
+        )]);
+        assert!(lane_under_user_cap(
+            &running_by_lane,
+            "legacy-user",
+            djinn_core::models::ModelLane::Implement,
+            None,
+        ));
+    }
+
+    #[test]
+    fn lane_caps_are_independent_when_all_roles_share_one_model() {
+        use djinn_core::models::ModelLane;
+
+        // All three lanes use the same model. The legacy per-model ceiling has
+        // room, so the lane gates alone decide which role can dispatch.
+        let by_model = HashMap::from([(key("user-a", "shared/model"), 3)]);
+        assert!(model_under_user_cap(&by_model, "user-a", "shared/model", 4,));
+
+        let by_lane = HashMap::from([
+            (("user-a".to_owned(), ModelLane::Plan), 1),
+            (("user-a".to_owned(), ModelLane::Implement), 1),
+            (("user-a".to_owned(), ModelLane::Review), 1),
+        ]);
+        assert!(!lane_under_user_cap(
+            &by_lane,
+            "user-a",
+            ModelLane::Plan,
+            Some(1),
+        ));
+        assert!(lane_under_user_cap(
+            &by_lane,
+            "user-a",
+            ModelLane::Implement,
+            Some(2),
+        ));
+        assert!(!lane_under_user_cap(
+            &by_lane,
+            "user-a",
+            ModelLane::Review,
+            Some(1),
+        ));
     }
 
     #[test]
@@ -3666,9 +3922,11 @@ mod inflight_ledger_tests {
         let user = "cap-path-user";
         let model = "cap-path-model";
         let mut running = HashMap::from([((user.to_owned(), model.to_owned()), 1)]);
-        let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
-        inflight.insert("task-a".into(), (Some(user.into()), model.into()));
-        inflight.insert("task-b".into(), (Some(user.into()), model.into()));
+        let mut inflight: HashMap<String, InflightDispatch> = HashMap::new();
+        inflight.insert(
+            "task-a".into(),
+            inflight_entry(Some(user), model, djinn_core::models::ModelLane::Implement),
+        );
         overlay_inflight_ledger(&mut running, &inflight);
 
         assert!(model_under_user_cap(&running, user, model, 4));
@@ -3769,8 +4027,11 @@ mod inflight_ledger_tests {
     fn ledger_overlay_ignores_creatorless_entries() {
         clear_dispatch_cap_observations();
         let mut running: HashMap<(String, String), u32> = HashMap::new();
-        let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
-        inflight.insert("sys".into(), (None, "m".into()));
+        let mut inflight: HashMap<String, InflightDispatch> = HashMap::new();
+        inflight.insert(
+            "sys".into(),
+            inflight_entry(None, "m", djinn_core::models::ModelLane::Plan),
+        );
         overlay_inflight_ledger(&mut running, &inflight);
         assert!(running.is_empty());
         assert!(take_dispatch_cap_observations().is_empty());
