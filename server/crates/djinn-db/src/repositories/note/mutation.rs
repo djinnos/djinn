@@ -248,10 +248,6 @@ impl NoteRepository {
         let note_id = command.note_id.as_deref().expect("validated note identity");
         let before = locked_note(tx, note_id, &command.project_id).await?;
         let seq = next_sequence(tx, &command.project_id, note_id).await?;
-        sqlx::query("DELETE FROM notes WHERE id = $1")
-            .bind(note_id)
-            .execute(&mut **tx)
-            .await?;
         let revision_id = self
             .insert_revision(
                 tx,
@@ -263,6 +259,11 @@ impl NoteRepository {
                 Some(before.confidence),
                 None,
             )
+            .await?;
+        sqlx::query("DELETE FROM notes WHERE id = $1 AND project_id = $2")
+            .bind(note_id)
+            .bind(&command.project_id)
+            .execute(&mut **tx)
             .await?;
         Ok(NoteRevisionMutationResult {
             changed: true,
@@ -367,10 +368,11 @@ fn validate_command(command: &NoteRevisionMutation) -> Result<()> {
         ));
     }
     if command.event_kind == NoteRevisionEventKind::ExtractionSkipped
-        && command.provenance.is_empty()
+        && command.provenance.session_id().is_none()
+        && command.provenance.task_run_id().is_none()
     {
         return Err(Error::InvalidData(
-            "extraction_skipped requires trusted provenance".to_owned(),
+            "extraction_skipped requires trusted session or task-run provenance".to_owned(),
         ));
     }
     Ok(())
