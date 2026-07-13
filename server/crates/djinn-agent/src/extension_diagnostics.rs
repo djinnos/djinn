@@ -40,11 +40,11 @@ static SECRET_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid secret detector expression")
 });
 static UNIX_ABSOLUTE_PATH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?m)(^|[\s(="'`])/(?:[^\s\])}"'`,;]+)"#)
+    Regex::new(r#"(?m)(^|[\s(="'`:])/(?:[^\s\])}"'`,;]+)"#)
         .expect("valid Unix absolute path expression")
 });
 static WINDOWS_ABSOLUTE_PATH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?im)(^|[\s(="'`])(?:[a-z]:\|\\)[^\s\])}"'`,;]+"#)
+    Regex::new(r#"(?im)(^|[\s(="'`:])(?:[a-z]:\x5c|\x5c\x5c)[^\s\])}"'`,;]+"#)
         .expect("valid Windows absolute path expression")
 });
 /// Minimum detector-owned fact accepted at the untrusted boundary.
@@ -261,6 +261,50 @@ mod tests {
         assert!(!normalized.summary.contains('\r'));
         assert!(!normalized.summary.contains('\u{1b}'));
         assert!(normalized.summary.contains("\\{evil\\}"));
+    }
+
+    #[test]
+    fn punctuation_adjacent_absolute_paths_are_redacted() {
+        assert_eq!(
+            normalize_untrusted_text("load failed:/home/alice/.config/token"),
+            r"load failed:\[path redacted\]"
+        );
+        assert_eq!(
+            normalize_untrusted_text(r"load failed:C:\Users\Alice\token"),
+            r"load failed:\[path redacted\]"
+        );
+    }
+
+    #[test]
+    fn malicious_fixture_is_redacted_at_the_repository_input_boundary() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/extension_diagnostics/malicious_and_oversized.json"
+        ))
+        .unwrap();
+        let insert = build_insert_extension_diagnostic(
+            ExtensionDiagnosticAssociations {
+                project_id: "project".to_owned(),
+                task_id: Some("task".to_owned()),
+                session_id: Some("session".to_owned()),
+                load_attempt_id: "attempt".to_owned(),
+            },
+            &fact(fixture["summary_material"].as_str().unwrap()),
+        );
+
+        for leaked in [
+            "supersecret",
+            "AKIA1234567890ABCDEF",
+            "ghp_abcdefghijklmnopqrstuvwxyz1234567890AB",
+            "/home/alice",
+            "C:\\Users\\Alice",
+        ] {
+            assert!(!insert.summary.contains(leaked), "persisted {leaked}");
+            assert!(!insert.summary_fingerprint.contains(leaked));
+        }
+        assert_eq!(
+            insert.summary_fingerprint,
+            summary_fingerprint(&insert.summary)
+        );
     }
 
     #[test]
