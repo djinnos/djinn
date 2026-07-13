@@ -1734,7 +1734,9 @@ async fn load_and_install_from_db<C: WarmContext>(
     // current and matches this project — serve it without a second blob load.
     {
         let cache = GRAPH_CACHE.read().await;
-        if let Some(cached) = cache.as_ref().filter(|c| c.project_path == *index_tree_path)
+        if let Some(cached) = cache
+            .as_ref()
+            .filter(|c| c.project_path == *index_tree_path)
             && !revalidation_due().await
         {
             cache_telemetry::incr(&cache_telemetry::CONCURRENT_LOAD_WAITS);
