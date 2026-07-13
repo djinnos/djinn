@@ -3,18 +3,16 @@
 //! Fixture values drive writer attribution, provenance, content, reasons, and
 //! cursor order. Positive ledger writes use only `mutate_with_revision`.
 
-#[path = "common/mod.rs"]
-mod common;
-
-use djinn_db::{
-    Database, NoteRepository, NoteRevisionCreateState, NoteRevisionDesiredState,
-    NoteRevisionEventKind, NoteRevisionMutation, NoteRevisionReason, NoteRevisionSubsystem,
-    ProjectRepository, TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance,
-};
+use super::*;
+use crate::ProjectRepository;
+use djinn_core::events::EventBus;
 use futures::future::join_all;
 use serde_json::Value;
 
-const CONTRACT: &str = include_str!("fixtures/memory_revision_contract.json");
+// This repository-level PostgreSQL contract lives in djinn-db because catalog
+// and deliberate negative SQL must not cross the raw-SQL repository boundary.
+const CONTRACT: &str =
+    include_str!("../../../../djinn-control-plane/tests/fixtures/memory_revision_contract.json");
 
 #[derive(sqlx::FromRow)]
 struct PersistedRow {
@@ -67,11 +65,11 @@ fn attribution(row: &Value) -> TrustedNoteRevisionAttribution {
         value => panic!("unknown fixture actor: {value}"),
     }
 }
-fn provenance(ids: &Value) -> TrustedNoteRevisionProvenance {
+fn provenance(row: &Value) -> TrustedNoteRevisionProvenance {
     TrustedNoteRevisionProvenance::new(
-        Some(ids["session_id"].as_str().unwrap().into()),
-        Some(ids["task_id"].as_str().unwrap().into()),
-        Some(ids["task_run_id"].as_str().unwrap().into()),
+        row["session_id"].as_str().map(str::to_owned),
+        row["task_id"].as_str().map(str::to_owned),
+        row["task_run_id"].as_str().map(str::to_owned),
     )
     .unwrap()
 }
@@ -130,26 +128,22 @@ fn update(
         reason: reason(why),
     }
 }
-async fn setup() -> (Database, NoteRepository, String) {
+async fn setup(project_id: &str) -> (Database, NoteRepository) {
     let db = Database::ephemeral()
         .await
         .expect("isolated PostgreSQL database");
-    let project = ProjectRepository::new(db.clone(), common::test_events())
-        .create("revision-contract", "test", "revision-contract")
+    ProjectRepository::new(db.clone(), EventBus::noop())
+        .create_with_id(project_id, "revision-contract", "test", "revision-contract")
         .await
         .expect("project");
-    (
-        db.clone(),
-        NoteRepository::new(db, common::test_events()),
-        project.id,
-    )
+    (db.clone(), NoteRepository::new(db, EventBus::noop()))
 }
-fn assert_fixture_row(actual: &PersistedRow, expected: &Value, project: &str) {
+fn assert_fixture_row(actual: &PersistedRow, expected: &Value) {
     assert!(
         uuid::Uuid::parse_str(&actual.id).is_ok(),
         "repository-generated ID is UUID"
     );
-    assert_eq!(actual.project_id, project); // Fixture project ID is mapped to isolated runtime tenant/project.
+    assert_eq!(actual.project_id, expected["project_id"].as_str().unwrap());
     assert_eq!(actual.note_id.as_deref(), expected["note_id"].as_str());
     assert_eq!(actual.note_seq, expected["sequence"].as_i64());
     assert_eq!(
@@ -210,7 +204,8 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
     let ids = &f["ids"];
     let content = &f["canonical_contents"];
     let rows = f["repository_expected_rows"].as_array().unwrap();
-    let (db, repo, project) = setup().await;
+    let project = ids["project_id"].as_str().unwrap().to_owned();
+    let (db, repo) = setup(&project).await;
     let primary = ids["notes"]["primary"].as_str().unwrap();
     let known = ids["notes"]["already_known"].as_str().unwrap();
     let target = ids["notes"]["merge_target"].as_str().unwrap();
@@ -222,7 +217,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
         content["primary_initial"].as_str().unwrap(),
         0.5,
         attribution(&rows[0]),
-        provenance(ids),
+        provenance(&rows[0]),
         rows[0]["reason_input"].as_str().unwrap(),
     ))
     .await
@@ -234,7 +229,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
         content["primary_updated"].as_str().unwrap(),
         0.5,
         attribution(&rows[1]),
-        provenance(ids),
+        provenance(&rows[1]),
         rows[1]["reason_input"].as_str().unwrap(),
     ))
     .await
@@ -246,7 +241,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
         content["primary_updated"].as_str().unwrap(),
         0.75,
         attribution(&rows[2]),
-        provenance(ids),
+        provenance(&rows[2]),
         rows[2]["reason_input"].as_str().unwrap(),
     ))
     .await
@@ -259,7 +254,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
         content["already_known"].as_str().unwrap(),
         0.6,
         attribution(&rows[3]),
-        provenance(ids),
+        provenance(&rows[3]),
         rows[3]["reason_input"].as_str().unwrap(),
     ))
     .await
@@ -271,7 +266,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
         content["already_known"].as_str().unwrap(),
         0.9,
         attribution(&rows[4]),
-        provenance(ids),
+        provenance(&rows[4]),
         rows[4]["reason_input"].as_str().unwrap(),
     ))
     .await
@@ -284,7 +279,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
         content["merge_target_before"].as_str().unwrap(),
         0.7,
         attribution(&rows[5]),
-        provenance(ids),
+        provenance(&rows[5]),
         rows[5]["reason_input"].as_str().unwrap(),
     ))
     .await
@@ -296,7 +291,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
         content["merge_target_after"].as_str().unwrap(),
         0.95,
         attribution(&rows[6]),
-        provenance(ids),
+        provenance(&rows[6]),
         rows[6]["reason_input"].as_str().unwrap(),
     ))
     .await
@@ -307,7 +302,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
         event_kind: NoteRevisionEventKind::Deleted,
         desired: NoteRevisionDesiredState::Delete,
         attribution: attribution(&rows[7]),
-        provenance: provenance(ids),
+        provenance: provenance(&rows[7]),
         reason: reason(rows[7]["reason_input"].as_str().unwrap()),
     })
     .await
@@ -318,7 +313,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
         event_kind: NoteRevisionEventKind::ExtractionSkipped,
         desired: NoteRevisionDesiredState::ExtractionSkipped,
         attribution: attribution(&rows[8]),
-        provenance: provenance(ids),
+        provenance: provenance(&rows[8]),
         reason: reason(rows[8]["reason_input"].as_str().unwrap()),
     })
     .await
@@ -330,7 +325,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
         .unwrap();
     for ((actual, expected), cursor_id) in persisted.iter().zip(rows).zip(expected_cursor_ids) {
         assert_eq!(expected["id"].as_str(), cursor_id.as_str());
-        assert_fixture_row(actual, expected, &project);
+        assert_fixture_row(actual, expected);
     }
     assert!(
         rows.windows(2)
@@ -358,7 +353,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
                 content["already_known"].as_str().unwrap(),
                 0.9,
                 attribution(&rows[4]),
-                provenance(ids),
+                provenance(&rows[4]),
                 " unchanged "
             ))
             .await
@@ -393,7 +388,8 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
 
 #[tokio::test]
 async fn catalog_concurrency_rollback_immutability_and_project_erasure_hold() {
-    let (db, repo, project) = setup().await;
+    let project = uuid::Uuid::now_v7().to_string();
+    let (db, repo) = setup(&project).await;
     let note = uuid::Uuid::now_v7().to_string();
     repo.mutate_with_revision(create(
         &project,
@@ -552,7 +548,7 @@ async fn catalog_concurrency_rollback_immutability_and_project_erasure_hold() {
             .await
             .is_err()
     );
-    ProjectRepository::new(db.clone(), common::test_events())
+    ProjectRepository::new(db.clone(), EventBus::noop())
         .delete(&project)
         .await
         .unwrap();
