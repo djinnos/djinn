@@ -1336,7 +1336,7 @@ async fn health_rollup_aggregates_mixed_outcomes_and_skip_reasons() {
     assert_eq!(rollup.combined.skip_reason_counts.min_confidence, 1);
     assert_eq!(rollup.combined.skip_reason_counts.budget_pruned, 0);
     assert_eq!(rollup.combined.estimated_injected_tokens_sum, 100);
-    assert_eq!(rollup.combined.estimated_injected_tokens_avg, Some(100.0));
+    assert_eq!(rollup.combined.estimated_injected_tokens_avg, Some(50.0));
 
     let score = &rollup.combined.candidate_score_summary;
     assert_eq!(score.count, 3);

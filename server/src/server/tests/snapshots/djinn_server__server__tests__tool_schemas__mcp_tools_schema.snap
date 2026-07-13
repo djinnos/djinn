@@ -7846,6 +7846,113 @@ expression: signatures
           ],
           "type": "object"
         },
+        "RetrievalEntryPointHealthSummary": {
+          "properties": {
+            "candidate_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "entry_point": {
+              "type": "string"
+            },
+            "error_queries": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "injected_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "skipped_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "total_queries": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "zero_result_queries": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "entry_point",
+            "total_queries",
+            "zero_result_queries",
+            "error_queries",
+            "candidate_count",
+            "injected_count",
+            "skipped_count"
+          ],
+          "type": "object"
+        },
+        "RetrievalHealthResponse": {
+          "properties": {
+            "config_window_hours": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "persisted": {
+              "$ref": "#/$defs/RetrievalHealthScope"
+            },
+            "process": {
+              "$ref": "#/$defs/RetrievalHealthScope"
+            }
+          },
+          "required": [
+            "config_window_hours",
+            "persisted",
+            "process"
+          ],
+          "type": "object"
+        },
+        "RetrievalHealthScope": {
+          "description": "A retrieval source remains present when it is unavailable. Stable error\ncodes are `project_required`, `project_unresolved`, `rollup_unavailable`,\nand `process_snapshot_unavailable`.",
+          "properties": {
+            "error_code": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "started_at": {
+              "description": "Process construction time; only applicable to the process scope.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "type": "string"
+            },
+            "summaries": {
+              "description": "Fixed, bounded entry-point evidence (four workload entry points).",
+              "items": {
+                "$ref": "#/$defs/RetrievalEntryPointHealthSummary"
+              },
+              "type": "array"
+            },
+            "window_end": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "window_start": {
+              "description": "Inclusive start and exclusive end of the persisted half-open window.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "summaries"
+          ],
+          "type": "object"
+        },
         "StaleFolder": {
           "description": "Stale-note count for one folder.",
           "properties": {
@@ -7945,6 +8052,10 @@ expression: signatures
             }
           ]
         },
+        "retrieval": {
+          "$ref": "#/$defs/RetrievalHealthResponse",
+          "description": "Required even when the top-level note-health operation returns an error."
+        },
         "stale_note_count": {
           "format": "int64",
           "type": [
@@ -7969,6 +8080,9 @@ expression: signatures
           ]
         }
       },
+      "required": [
+        "retrieval"
+      ],
       "type": "object"
     }
   },
