@@ -50,6 +50,7 @@ async fn shell_worker_soft_gate_first_deny_second_allow() {
         &shell_args("rm scratch.txt"),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("first soft-gated shell call must be denied");
@@ -81,6 +82,7 @@ async fn shell_worker_soft_gate_first_deny_second_allow() {
         &shell_args("rm scratch.txt"),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("second soft-gated shell call must succeed");
@@ -116,6 +118,7 @@ async fn shell_hard_deny_git_reset_hard_never_marks_bash_soft_forced() {
         &shell_args("git reset --hard HEAD"),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("git reset --hard must be hard-denied");
@@ -150,6 +153,7 @@ async fn shell_hard_deny_git_clean_never_marks_bash_soft_forced() {
         &shell_args("git clean -fd"),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("git clean must be hard-denied");
@@ -179,6 +183,7 @@ async fn shell_hard_deny_git_stash_never_marks_bash_soft_forced() {
         &shell_args("git stash"),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("git stash must be hard-denied");
@@ -208,6 +213,7 @@ async fn shell_hard_deny_db_drop_table_never_marks_bash_soft_forced() {
         &shell_args("psql -c \"DROP TABLE foo\""),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("DROP TABLE must be hard-denied");
@@ -237,6 +243,7 @@ async fn shell_hard_deny_db_delete_from_never_marks_bash_soft_forced() {
         &shell_args("psql -c \"DELETE FROM users WHERE id = 1\""),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("DELETE FROM must be hard-denied");
@@ -273,6 +280,7 @@ async fn shell_reviewer_bypasses_gate_guard_no_bash_soft_forced() {
         &shell_args("rm tmp.txt"),
         worktree.path(),
         Some("reviewer"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("reviewer shell call must succeed (no GateGuard)");
@@ -304,6 +312,7 @@ async fn shell_planner_bypasses_gate_guard_no_bash_soft_forced() {
         &shell_args("rm planner-tmp.txt"),
         worktree.path(),
         Some("planner"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("planner shell call must succeed");
@@ -333,6 +342,7 @@ async fn shell_architect_bypasses_gate_guard_no_bash_soft_forced() {
         &shell_args("rm arch-tmp.txt"),
         worktree.path(),
         Some("architect"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("architect shell call must succeed");
@@ -362,6 +372,7 @@ async fn shell_missing_role_bypasses_gate_guard_no_bash_soft_forced() {
         &shell_args("rm no-role-tmp.txt"),
         worktree.path(),
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("missing-role shell call must succeed");
@@ -391,6 +402,7 @@ async fn shell_path_scope_git_is_hard_denied() {
         &shell_args("rm .git/objects/pack"),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("rm targeting .git must be hard-denied");
@@ -420,6 +432,7 @@ async fn shell_path_scope_parent_dir_is_hard_denied() {
         &shell_args("rm ../outside-file"),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("rm targeting .. must be hard-denied");
@@ -449,6 +462,7 @@ async fn shell_path_scope_djinn_read_sources_is_hard_denied() {
         &shell_args("rm .djinn/read-sources/some-project/file.txt"),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("rm targeting .djinn/read-sources must be hard-denied");
@@ -478,6 +492,7 @@ async fn shell_path_scope_durable_data_cargo_toml_is_hard_denied() {
         &shell_args("rm Cargo.toml"),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("rm targeting Cargo.toml must be hard-denied");
@@ -507,6 +522,7 @@ async fn shell_path_scope_durable_data_package_json_is_hard_denied() {
         &shell_args("rm package.json"),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("rm targeting package.json must be hard-denied");
@@ -536,6 +552,7 @@ async fn shell_path_scope_durable_data_gitignore_is_hard_denied() {
         &shell_args("rm .gitignore"),
         worktree.path(),
         Some("worker"),
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("rm targeting .gitignore must be hard-denied");

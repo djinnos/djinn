@@ -45,6 +45,7 @@ async fn call_tool_dispatches_proposal_update_revises_body() {
         Some("advocate"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("proposal_update dispatch should succeed (was 'unknown djinn frontend tool')");
@@ -107,6 +108,7 @@ async fn call_tool_dispatches_proposal_block_patch_in_pod() {
         Some("advocate"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("proposal_block_patch dispatch should succeed (was 'unknown djinn frontend tool')");
@@ -144,6 +146,7 @@ async fn call_tool_dispatches_get_block_catalog_in_pod() {
         Some("advocate"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("get_block_catalog dispatch should succeed (was 'unknown djinn frontend tool')");

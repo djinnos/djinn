@@ -53,6 +53,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         Some("architect"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_search dispatch should succeed");
@@ -87,6 +88,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         Some("architect"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_read dispatch should succeed");
@@ -122,6 +124,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         Some("architect"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_list dispatch should succeed");
@@ -158,6 +161,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         Some("architect"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_build_context dispatch should succeed");
@@ -219,6 +223,7 @@ async fn call_tool_architect_dispatches_memory_move_for_proposed_adr_recovery() 
         Some("architect"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_move dispatch should succeed");
@@ -277,6 +282,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_broken_links dispatch should succeed");
@@ -302,6 +308,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_broken_links empty-folder dispatch should succeed");
@@ -327,6 +334,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_orphans dispatch should succeed");
@@ -352,6 +360,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_orphans empty-folder dispatch should succeed");
@@ -396,6 +405,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_write dispatch should succeed");
@@ -425,6 +435,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_edit dispatch should succeed");
@@ -495,6 +506,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_write dispatch should succeed");
@@ -524,6 +536,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_edit dispatch should succeed");
@@ -598,6 +611,7 @@ async fn call_tool_dispatches_registered_mcp_tool_success() {
         Some("worker"),
         Some(&registry),
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("registered MCP tool should dispatch");
@@ -660,6 +674,7 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
         Some("planner"),
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect("memory_edit dispatch should succeed");
@@ -733,6 +748,7 @@ async fn call_tool_dispatches_registered_mcp_tool_error() {
         Some("worker"),
         Some(&registry),
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
     .expect_err("MCP errors should flow through the normal tool error path");

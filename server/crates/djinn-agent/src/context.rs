@@ -35,6 +35,44 @@ use djinn_slot::reply_loop::CompactionCriticalSection;
 /// Used by stall detection to kill sessions that stop producing tokens.
 pub type ActivityTracker = Arc<std::sync::Mutex<HashMap<String, Arc<AtomicU64>>>>;
 
+/// Configuration injected into the optional session-start memory intent planner.
+///
+/// This is deliberately not environment-backed: callers and tests inject an
+/// explicit value, keeping the default hot path disabled before prompt rendering
+/// or any planner invocation. Provider wiring consumes this configuration in a
+/// later lifecycle integration step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryIntentPlannerConfig {
+    /// Enables the planner. The safe default is disabled.
+    pub enabled: bool,
+    /// Upper bound for a single planner call.
+    pub timeout: Duration,
+    /// Upper bound for provider completion output. The provider adapter selects
+    /// its concrete unit while this boundary carries the requested limit.
+    pub max_output: usize,
+    /// Explicit cheap-model override; `None` delegates model choice to the
+    /// future provider integration.
+    pub model: Option<String>,
+}
+
+impl Default for MemoryIntentPlannerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout: Duration::from_secs(5),
+            max_output: 2_048,
+            model: None,
+        }
+    }
+}
+
+impl MemoryIntentPlannerConfig {
+    /// Gate to evaluate before rendering the prompt or invoking a planner.
+    pub const fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
 /// Configuration for the periodic reconciliation sweep that reaps stale PRs,
 /// branches, and orphan worker sessions.
 ///

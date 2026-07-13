@@ -23,6 +23,7 @@ async fn lsp_tool(
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
 }
