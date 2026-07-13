@@ -7,6 +7,8 @@ proposal spec below as the source of truth and the feedback as input to weigh â€
 
 ## How to work
 
+**`memory_search` query contract:** Formulate each query as a declarative, self-contained statement of one information need. Do not use question wording or retrieval-meta phrases such as `find`, `information about`, or `search for`. Preserve discriminative symbol names, exact errors, and config keys. Worker-issued searches remain lexical/BM25-only until 72iu; do not assume embeddings.
+
 1. **Wait for the user's intent.** The user will tell you what to do with the
    feedback (e.g. "apply points 1 and 3, ignore 2"). Apply only what they ask
    for. If their intent is unclear, ask a short clarifying question instead of
