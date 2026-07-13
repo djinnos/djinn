@@ -1011,36 +1011,12 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
         .unwrap();
     epics.set_status_raw(&pr_epic.id, "closed").await.unwrap();
 
-    // Guarded by another open proposal parent.
+    // This row is actionable in the snapshot, then gains another open proposal
+    // parent before repair. That exercises the lock-time other-parent guard.
     let guard_epic = common::create_test_epic(harness.db(), &project.id).await;
     let guard = common::create_test_task(harness.db(), &project.id, &guard_epic.id).await;
     epics
         .set_status_raw(&guard_epic.id, "closed")
-        .await
-        .unwrap();
-    let live_proposal = proposals
-        .create(ProposalCreateInput {
-            title: "live parent",
-            body: "",
-            acceptance_criteria: None,
-            status: Some("building"),
-            body_format: None,
-        })
-        .await
-        .unwrap();
-    proposals
-        .link_epic(&live_proposal.id, &guard_epic.id, &project.id)
-        .await
-        .unwrap();
-
-    // This row is actionable in the snapshot, then gains another open parent
-    // before repair. It exercises the lock-time other-parent guard distinctly
-    // from the snapshot-level retain row above.
-    let other_parent_epic = common::create_test_epic(harness.db(), &project.id).await;
-    let other_parent =
-        common::create_test_task(harness.db(), &project.id, &other_parent_epic.id).await;
-    epics
-        .set_status_raw(&other_parent_epic.id, "closed")
         .await
         .unwrap();
 
@@ -1050,6 +1026,7 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
         tx,
     ));
     source.refresh().await;
+
     register_closed_parent_open_children_check_with_repair(
         registry(),
         source.clone(),
@@ -1075,6 +1052,24 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
         let owner = finding.entity_ids["task_id"].as_str().unwrap().to_owned();
         by_task.insert(owner, fid);
     }
+
+    // Add the open parent only after doctor_run persists the actionable finding.
+    // Linking it to `guard_epic` changes the task's live disposition without
+    // introducing an unrelated closed-parent/open-child finding.
+    let live_proposal = proposals
+        .create(ProposalCreateInput {
+            title: "live parent",
+            body: "",
+            acceptance_criteria: None,
+            status: Some("building"),
+            body_format: None,
+        })
+        .await
+        .unwrap();
+    proposals
+        .link_epic(&live_proposal.id, &guard_epic.id, &project.id)
+        .await
+        .unwrap();
 
     // Apply repair to each persisted finding. `result` is the additive MCP
     // contract: retain every response so this test locks the applied and
@@ -1122,7 +1117,7 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
     );
     assert_eq!(
         results[&guard.id],
-        json!({ "outcome": "skipped_retain", "task_id": guard.id })
+        json!({ "outcome": "skipped_other_open_parent", "task_id": guard.id })
     );
 
     // Assert outcomes.
@@ -1176,7 +1171,7 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
         .find(|e| e.event_type == "doctor_fix_repair");
     assert!(
         guard_repair.is_none(),
-        "guarded orphan must not emit doctor_fix_repair activity"
+        "other-open-parent skip must not emit doctor_fix_repair activity"
     );
 
     // Every mutation emits both the normal lifecycle activity and an audit
