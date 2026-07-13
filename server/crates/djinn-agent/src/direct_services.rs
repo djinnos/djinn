@@ -3017,7 +3017,7 @@ mod tests {
     #[tokio::test]
     async fn planner_host_invalid_payload_finalizes_retained_usage() {
         let bad = ContentBlock::Text {
-            text: r#"{"queries":[{"type":"unknown","query":"Find information"}]}"#.into(),
+            text: r#"{"queries":[{"type":"pattern","query":"Find information about retry configuration"},{"type":"reference","query":"Retry configuration controls exponential backoff limits"}]}"#.into(),
         };
         let (r, l) = run(
             vec![
