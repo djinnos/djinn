@@ -484,19 +484,177 @@ jobs:
         run: |
           gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
             || echo "::warning::Fail-fast cancel failed; letting the run finish."
+  nextest-plan:
+    name: Plan Server Test Shards
+    needs: preflight
+    if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      coldStart: ${{ steps.plan.outputs.coldStart }}
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+        working-directory: server
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: false
+      - uses: taiki-e/install-action@nextest
+      - name: Discover current nextest tests and plan exact-once shards
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request) profile=pull-request ;;
+            merge_group) profile=merge-group ;;
+            *) profile=full-validation ;;
+          esac
+          # Discover first so each candidate can be checked by the planner against
+          # the authoritative current test set before that candidate is selected.
+          mkdir -p nextest-plan
+          (
+            cd server
+            cargo nextest list --workspace --all-targets --features qdrant --message-format json
+          ) > nextest-plan/discovery.json
+          # Restore the latest successful timing artifact. This can fail because of
+          # missing artifacts, stale/incompatible data, or GitHub API rate limits;
+          # in every failure case the planner cold-starts safely from current discovery.
+          # We paginate a bounded number of pages newest-first. For each successful
+          # workflow candidate we independently attempt download, extraction, and
+          # structural validation. Any candidate-specific failure causes us to continue
+          # to the next older successful candidate; we only cold-start once the bounded
+          # search is exhausted or the API cannot be queried.
+          MAX_PAGES=5
+          mkdir -p nextest-timing
+          restored=0
+          for page in $(seq 1 "$MAX_PAGES"); do
+            page_response="$(mktemp)"
+            page_candidates="$(mktemp)"
+            set +e
+            gh api "repos/${{ github.repository }}/actions/artifacts?name=nextest-timing&per_page=10&page=$page" \
+              > "$page_response" 2> nextest-timing/restore.log
+            api_status=$?
+            set -e
+            if [ "$api_status" -ne 0 ]; then
+              echo "::notice::GitHub API query for timing artifacts failed; using cold-start balancing."
+              rm -f "$page_response" "$page_candidates"
+              break
+            fi
+            jq -r '.artifacts[] | select(.workflow_run.conclusion == "success") | .id' "$page_response" > "$page_candidates"
+            artifact_count="$(jq '.artifacts | length' "$page_response")"
+            rm -f "$page_response"
+            if [ "$artifact_count" -eq 0 ]; then
+              rm -f "$page_candidates"
+              break
+            fi
+            while IFS= read -r artifact_id && [ -n "$artifact_id" ]; do
+              rm -f nextest-timing/timing.zip nextest-timing/timing.json
+              set +e
+              gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > nextest-timing/timing.zip 2>> nextest-timing/restore.log
+              dl_status=$?
+              set -e
+              if [ "$dl_status" -ne 0 ] || [ ! -s nextest-timing/timing.zip ]; then
+                echo "::notice::Could not download timing artifact $artifact_id; trying next older candidate."
+                continue
+              fi
+              set +e
+              unzip -p nextest-timing/timing.zip timing.json > nextest-timing/timing.json 2>> nextest-timing/restore.log
+              unzip_status=$?
+              set -e
+              if [ "$unzip_status" -ne 0 ] || [ ! -s nextest-timing/timing.json ]; then
+                echo "::notice::Could not extract timing artifact $artifact_id; trying next older candidate."
+                continue
+              fi
+              # Apply the planner's seven-day freshness policy before acceptance.
+              if ! jq -e '
+                .version == "ci-nextest-timing/v1" and
+                (.tests | type) == "object" and
+                (.generated_at | type) == "string" and
+                ((.generated_at | fromdateiso8601) as $generated |
+                  $generated <= now and (now - $generated) <= (7 * 24 * 60 * 60))
+              ' nextest-timing/timing.json > /dev/null 2>&1; then
+                echo "::notice::Timing artifact $artifact_id is malformed or incompatible; trying next older candidate."
+                rm -f nextest-timing/timing.json
+                continue
+              fi
+              # Apply the planner's own compatibility parser to this candidate. An
+              # obsolete artifact with no samples for current discovery cannot improve
+              # balancing, so continue to the next older successful candidate.
+              if ! node --input-type=module - \
+                nextest-plan/discovery.json nextest-timing/timing.json <<'NODE'
+          import { readFile } from 'node:fs/promises';
+          import { loadTiming, parseDiscovery } from './scripts/ci-nextest-plan.mjs';
+ 
+          const [discoveryPath, timingPath] = process.argv.slice(2);
+          const tests = parseDiscovery(await readFile(discoveryPath, 'utf8'));
+          const timing = loadTiming(await readFile(timingPath, 'utf8'), {
+            discoveredIds: new Set(tests.map(({ id }) => id)),
+          });
+          if (!timing.valid || timing.timings.size === 0) {
+            console.error(timing.reason ?? 'Timing artifact has no samples for current discovery');
+            process.exit(1);
+          }
+          NODE
+              then
+                echo "::notice::Timing artifact $artifact_id is not planner-compatible; trying next older candidate."
+                rm -f nextest-timing/timing.json
+                continue
+              fi
+              echo "::notice::Restored compatible timing artifact $artifact_id for shard balancing."
+              restored=1
+              break 2
+            done < "$page_candidates"
+            rm -f "$page_candidates"
+          done
+          if [ "$restored" -ne 1 ]; then
+            echo "::notice::No compatible prior timing artifact found; using cold-start balancing."
+          fi
+          args=(
+            --discovery nextest-plan/discovery.json
+            --profile "$profile"
+            --event "$EVENT_NAME"
+            --output nextest-plan/plan.json
+            --matrix nextest-plan/matrix.json
+            --proof nextest-plan/proof.json
+          )
+          if [ -f nextest-timing/timing.json ]; then
+            args+=(--timing nextest-timing/timing.json)
+          fi
+          node scripts/ci-nextest-plan.mjs "${args[@]}"
+          jq -e '.exactOnce == true and .discoveredCount == .assignedCount and .assignedCount == .uniqueAssignedCount' nextest-plan/proof.json
+          echo '::group::Nextest exact-once proof'
+          cat nextest-plan/proof.json
+          echo '::endgroup::'
+          echo "coldStart=$(jq -r '.coldStart' nextest-plan/proof.json)" >> "$GITHUB_OUTPUT"
+          # Compact shard/index matrix only; full plan travels via artifact because a large
+          # GITHUB_OUTPUT value can cause the planning job to be skipped silently.
+          echo "matrix=$(jq -c '{include: [.shards[] | {shard, shardIndex}]}' nextest-plan/matrix.json)" >> "$GITHUB_OUTPUT"
+      - name: Upload discovery, plan, matrix, and exact-once proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-plan-${{ github.run_id }}
+          path: nextest-plan/
+          if-no-files-found: error
+          retention-days: 30
   server-test:
     name: Server Test
-    needs: preflight
+    needs:
+      - preflight
+      - nextest-plan
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        shard:
-          - 1
-          - 2
-          - 3
-          - 4
+      matrix: ${{ fromJSON(needs.nextest-plan.outputs.matrix) }}
     defaults:
       run:
         working-directory: server
@@ -556,9 +714,207 @@ jobs:
         run: |
           git config --global user.email "ci@test.local"
           git config --global user.name "CI Test"
-      - name: Tests
-        # Bound concurrent template-database clones so the runner does not exhaust disk.
-        run: cargo nextest run --workspace --all-targets --features qdrant --profile ci --test-threads 4 --partition count:${{ matrix.shard }}/4
+      - name: Download full shard plan
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-plan-${{ github.run_id }}
+          path: server/nextest-plan
+      - name: Resolve and validate shard filter and test IDs
+        env:
+          SHARD_INDEX: ${{ matrix.shardIndex }}
+        run: |
+          set -euo pipefail
+          jq -e --argjson idx "$SHARD_INDEX" '
+            ([.shards[] | select(.shardIndex == $idx)]) as $matches
+            | ($matches | length == 1)
+            and ($matches[0] as $row
+              | ($row.count == ($row.testIds | length))
+              and (all($row.testIds[]; type == "string" and length > 0))
+              and ($row.testIds | unique | length == ($row.testIds | length))
+              and ($row.filter | type == "string" and length > 0))
+          ' nextest-plan/matrix.json
+          jq -er --argjson idx "$SHARD_INDEX" '
+            ([.shards[] | select(.shardIndex == $idx)]) as $matches
+            | if ($matches | length) != 1 then error("expected exactly one shard row for shardIndex \($idx)") else $matches[0].filter end
+          ' nextest-plan/matrix.json > nextest-plan/shard-filter.txt
+          jq -ec --argjson idx "$SHARD_INDEX" '
+            ([.shards[] | select(.shardIndex == $idx)]) as $matches
+            | if ($matches | length) != 1 then error("expected exactly one shard row for shardIndex \($idx)") else $matches[0].testIds end
+          ' nextest-plan/matrix.json > nextest-plan/shard-test-ids.json
+      - name: Generate nextest config with file-backed shard filter
+        env:
+          NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
+        run: |
+          set -euo pipefail
+          PLANNER="$GITHUB_WORKSPACE/scripts/ci-nextest-plan.mjs" node --input-type=module - \
+            .config/nextest.toml \
+            nextest-plan/shard-filter.txt \
+            "$NEXTEST_PROFILE" \
+            nextest-plan/shard-nextest.toml <<'NODE'
+          import { readFile, writeFile } from 'node:fs/promises';
+          const { injectDefaultFilter } = await import(process.env.PLANNER);
+ 
+          const [basePath, filterPath, profile, outputPath] = process.argv.slice(2);
+          const base = await readFile(basePath, 'utf8');
+          const filter = await readFile(filterPath, 'utf8');
+          const rendered = injectDefaultFilter(base, profile, filter);
+          await writeFile(outputPath, rendered);
+          NODE
+          echo "::notice::Generated nextest config for profile $NEXTEST_PROFILE with file-backed default-filter."
+      - name: Run planner-selected shard tests
+        env:
+          NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
+        run: |
+          set -uo pipefail
+          started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          started_seconds=$(date +%s)
+          set +e
+          cargo nextest run --workspace --all-targets --features qdrant --profile "$NEXTEST_PROFILE" --config-file nextest-plan/shard-nextest.toml --test-threads 4
+          status=$?
+          set -e
+          elapsed_seconds=$(( $(date +%s) - started_seconds ))
+          mkdir -p nextest-timing
+          jq -s --arg generated_at "$started_at" --argjson elapsed "$elapsed_seconds" '
+            (.[0]) as $ids |
+            ($ids | length) as $count |
+            {
+              version: "ci-nextest-timing/v1",
+              generated_at: $generated_at,
+              tests: (reduce $ids[] as $id ({}; .[$id] = (if $count > 0 then ($elapsed / $count) else 0 end)))
+            }
+          ' nextest-plan/shard-test-ids.json > "nextest-timing/timing-${{ matrix.shardIndex }}.json"
+          exit "$status"
+      - name: Upload retained shard timing data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-timing-${{ github.run_id }}-${{ matrix.shard }}
+          path: server/nextest-timing/timing-${{ matrix.shardIndex }}.json
+          if-no-files-found: warn
+          retention-days: 30
+  nextest-timing-publish:
+    name: Publish Nextest Timing
+    needs:
+      - preflight
+      - nextest-plan
+      - server-test
+    if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push' && needs.nextest-plan.result == 'success' && needs.server-test.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download current plan and exact-once proof
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-plan-${{ github.run_id }}
+          path: nextest-plan
+      - name: Download current shard timing data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nextest-timing-${{ github.run_id }}-*
+          path: nextest-timing-shards
+          merge-multiple: true
+      - name: Merge current successful shard timings
+        run: |
+          node --input-type=module - <<'NODE'
+          import { readFileSync, readdirSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+          import { join } from 'node:path';
+
+          const PROOF_VERSION = 'ci-nextest-plan/v1';
+          const TIMING_VERSION = 'ci-nextest-timing/v1';
+
+          function fail(message) {
+            console.error(`::error::${message}`);
+            process.exit(1);
+          }
+
+          function assert(condition, message) {
+            if (!condition) fail(message);
+          }
+
+          const proof = JSON.parse(readFileSync('nextest-plan/proof.json', 'utf8'));
+          assert(typeof proof === 'object' && !Array.isArray(proof), 'proof.json must be a single object');
+          assert(proof.version === PROOF_VERSION, `proof version mismatch: expected ${PROOF_VERSION}, got ${proof.version}`);
+          assert(proof.exactOnce === true, 'proof exactOnce must be true');
+          assert(typeof proof.shardCount === 'number' && proof.shardCount > 0, 'proof.shardCount must be a positive number');
+          assert(typeof proof.discoveredCount === 'number' && proof.discoveredCount >= 0, 'proof.discoveredCount invalid');
+          assert(proof.assignedCount === proof.discoveredCount, 'proof.assignedCount must equal discoveredCount');
+          assert(proof.uniqueAssignedCount === proof.assignedCount, 'proof.uniqueAssignedCount must equal assignedCount');
+          assert(Array.isArray(proof.assignedIds), 'proof.assignedIds must be an array');
+          assert(proof.assignedIds.length === proof.assignedCount, 'proof.assignedIds length mismatch');
+          assert(new Set(proof.assignedIds).size === proof.assignedCount, 'proof.assignedIds must be unique');
+          assert(proof.assignedIds.every(id => typeof id === 'string' && id.length > 0), 'proof.assignedIds must be non-empty strings');
+
+          const matrix = JSON.parse(readFileSync('nextest-plan/matrix.json', 'utf8'));
+          assert(matrix.version === proof.version, 'matrix version mismatch');
+          assert(matrix.shardCount === proof.shardCount, 'matrix.shardCount mismatch');
+          assert(Array.isArray(matrix.shards) && matrix.shards.length === proof.shardCount, 'matrix.shards length mismatch');
+          const sortedShards = matrix.shards.slice().sort((a, b) => a.shardIndex - b.shardIndex);
+          assert(sortedShards.every((row, i) => row.shardIndex === i), 'matrix shard indices must be 0..shardCount-1');
+          for (const row of sortedShards) {
+            assert(typeof row.count === 'number' && row.count > 0, `row ${row.shardIndex} count must be positive`);
+            assert(Array.isArray(row.testIds) && row.testIds.length === row.count, `row ${row.shardIndex} testIds length mismatch`);
+            assert(new Set(row.testIds).size === row.testIds.length, `row ${row.shardIndex} testIds must be unique`);
+            assert(row.testIds.every(id => typeof id === 'string' && id.length > 0), `row ${row.shardIndex} testIds must be non-empty strings`);
+            assert(typeof row.filter === 'string' && row.filter.length > 0, `row ${row.shardIndex} filter must be non-empty string`);
+          }
+
+          const shardDir = 'nextest-timing-shards';
+          const actualFiles = readdirSync(shardDir)
+            .filter(f => f.endsWith('.json'))
+            .map(f => join(shardDir, f));
+          const expectedFiles = Array.from({ length: proof.shardCount }, (_, i) => join(shardDir, `timing-${i}.json`));
+          const expectedSet = new Set(expectedFiles);
+          assert(actualFiles.length > 0, 'no shard timing artifacts were produced');
+          assert(actualFiles.length === expectedFiles.length, `expected ${expectedFiles.length} timing files, found ${actualFiles.length}`);
+          for (const f of actualFiles) {
+            assert(expectedSet.has(f), `unexpected timing file ${f}`);
+            let stats;
+            try { stats = statSync(f); } catch { fail(`timing file ${f} is missing`); }
+            assert(stats.isFile() && stats.size > 0, `timing file ${f} is empty or not a file`);
+          }
+
+          const timings = [];
+          for (let i = 0; i < proof.shardCount; i++) {
+            const file = expectedFiles[i];
+            const timing = JSON.parse(readFileSync(file, 'utf8'));
+            assert(timing.version === TIMING_VERSION, `timing version mismatch in ${file}`);
+            assert(typeof timing.tests === 'object' && !Array.isArray(timing.tests), `timing.tests must be an object in ${file}`);
+            const ids = Object.keys(timing.tests);
+            assert(ids.every(id => typeof id === 'string' && id.length > 0), `timing IDs must be non-empty strings in ${file}`);
+            assert(Object.values(timing.tests).every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0), `timing durations must be non-negative finite numbers in ${file}`);
+            timings.push(timing);
+          }
+
+          for (let i = 0; i < proof.shardCount; i++) {
+            const row = sortedShards[i];
+            const timing = timings[i];
+            const timingIds = Object.keys(timing.tests).sort();
+            const expectedIds = [...row.testIds].sort();
+            assert(JSON.stringify(timingIds) === JSON.stringify(expectedIds), `timing IDs for shard ${i} do not match matrix row`);
+          }
+
+          const allTimingIds = timings.flatMap(t => Object.keys(t.tests));
+          assert(allTimingIds.length === proof.assignedCount, 'total timing ID count mismatch');
+          assert(new Set(allTimingIds).size === allTimingIds.length, 'timing IDs must be unique across all shards');
+          const sortedTimingIds = [...allTimingIds].sort();
+          const sortedAssignedIds = [...proof.assignedIds].sort();
+          assert(JSON.stringify(sortedTimingIds) === JSON.stringify(sortedAssignedIds), 'timing IDs do not match proof.assignedIds');
+
+          const merged = {
+            version: TIMING_VERSION,
+            generated_at: new Date().toISOString(),
+            tests: Object.assign({}, ...timings.map(t => t.tests)),
+          };
+          mkdirSync('nextest-timing', { recursive: true });
+          writeFileSync('nextest-timing/timing.json', JSON.stringify(merged, null, 2));
+          console.log('::notice::Merged shard timings and verified exact-once coverage.');
+          NODE
+      - name: Upload latest compatible timing candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-timing
+          path: nextest-timing/timing.json
+          if-no-files-found: error
+          retention-days: 30
   server-sqlx-freshness:
     name: Server sqlx Freshness
     needs: preflight
@@ -758,7 +1114,9 @@ jobs:
       - server-raw-sql-boundary
       - server-capability-boundaries
       - server-boundaries
+      - nextest-plan
       - server-test
+      - nextest-timing-publish
       - server-sqlx-freshness
       - memory-eval
       - ui-frontend
@@ -774,7 +1132,9 @@ jobs:
           RAW_SQL: ${{ needs.preflight.outputs.rawSql }}:${{ needs.server-raw-sql-boundary.result }}
           CAPABILITY: ${{ needs.preflight.outputs.capability }}:${{ needs.server-capability-boundaries.result }}
           BOUNDARIES: ${{ needs.preflight.outputs.boundaries }}:${{ needs.server-boundaries.result }}
-          SERVER_TEST: ${{ needs.preflight.outputs.serverTest }}:${{ needs.server-test.result }}
+          SERVER_TEST_PLAN: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-plan.result }}
+          SERVER_TEST_SHARDS: ${{ needs.preflight.outputs.serverTest }}:${{ needs.server-test.result }}
+          SERVER_TEST_TIMING: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-timing-publish.result }}
           SQLX: ${{ needs.preflight.outputs.sqlxFreshness }}:${{ needs.server-sqlx-freshness.result }}
           MEMORY: ${{ needs.preflight.outputs.memoryEval }}:${{ needs.memory-eval.result }}
           UI: ${{ needs.preflight.outputs.ui }}:${{ needs.ui-frontend.result }}
@@ -789,5 +1149,6 @@ jobs:
           }
           check cargo-deny "$CARGO_DENY"; check clippy "$CLIPPY"; check aarch64 "$AARCH64"
           check size "$SIZE"; check migrations "$MIGRATIONS"; check raw-sql "$RAW_SQL"
-          check capability "$CAPABILITY"; check boundaries "$BOUNDARIES"; check server-test "$SERVER_TEST"
+          check capability "$CAPABILITY"; check boundaries "$BOUNDARIES"
+          check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"; check server-test-timing "$SERVER_TEST_TIMING"
           check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"; check ui "$UI"
