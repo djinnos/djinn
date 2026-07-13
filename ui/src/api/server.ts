@@ -251,13 +251,24 @@ export async function getGithubInstallUrl(): Promise<string> {
  * `/var/lib/djinn/projects` under the Helm chart, bind-mounted to
  * `~/.djinn/projects` under docker-compose) and returns the project record.
  */
-export async function addProjectFromGithub(args: {
+export interface AddProjectFromGithubArgs {
   owner: string;
   repo: string;
   name?: string;
   ref?: string;
   installation_id?: number;
-}): Promise<Project> {
+}
+
+export function githubRepoToProjectArgs(entry: GithubRepoEntry): AddProjectFromGithubArgs {
+  return {
+    owner: entry.owner,
+    repo: entry.repo,
+    ref: entry.default_branch || undefined,
+    installation_id: entry.installation_id,
+  };
+}
+
+export async function addProjectFromGithub(args: AddProjectFromGithubArgs): Promise<Project> {
   const response = await callMcpTool("project_add_from_github", {
     owner: args.owner,
     repo: args.repo,

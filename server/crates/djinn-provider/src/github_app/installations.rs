@@ -118,6 +118,15 @@ pub fn invalidate_cache(installation_id: u64) {
     }
 }
 
+/// Clear every cached installation token after the active GitHub App
+/// credential snapshot changes. Installation ids are not sufficient cache
+/// isolation across different App identities.
+pub(crate) fn invalidate_all_cache() {
+    if let Ok(mut guard) = cache().lock() {
+        guard.clear();
+    }
+}
+
 // ─── API calls ────────────────────────────────────────────────────────────────
 
 /// List all GitHub App installations the user can see via their user token.

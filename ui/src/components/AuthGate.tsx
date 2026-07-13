@@ -1,4 +1,11 @@
-import { createContext, useContext, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { GithubIcon } from "@hugeicons/core-free-icons";
@@ -19,6 +26,163 @@ import {
 const SETUP_DOC_URL = "https://www.djinnai.io/docs/setup";
 
 const AuthUserContext = createContext<User | null>(null);
+
+function SetupLaunchPanel() {
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  const refreshInFlight = useRef(false);
+  const setupExpired =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("setup") === "expired";
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (refreshInFlight.current) return;
+
+    const form = event.currentTarget;
+    refreshInFlight.current = true;
+    setIsRefreshing(true);
+    setLaunchError(null);
+
+    try {
+      // Refresh immediately before the POST so the short-lived, HttpOnly
+      // launch cookie cannot expire while the operator reads this screen.
+      const refreshedConfig = await fetchAuthConfig();
+      if (
+        !refreshedConfig.selfSetupAvailable ||
+        !refreshedConfig.setupLaunchAvailable
+      ) {
+        setLaunchError(
+          "Secure setup is no longer available from this browser address. Use the one-time setup URL under Having trouble?",
+        );
+        return;
+      }
+
+      // Native submission preserves the server redirect/manifest flow. There
+      // are deliberately no token-bearing fields in this form.
+      form.submit();
+    } catch {
+      setLaunchError(
+        "Could not refresh secure setup access. Check the server connection and try again.",
+      );
+    } finally {
+      refreshInFlight.current = false;
+      setIsRefreshing(false);
+    }
+  };
+
+  return (
+    <div className="w-full space-y-5 text-left">
+      <div className="space-y-2 text-center">
+        <h2 className="text-lg font-semibold">Connect GitHub</h2>
+        <p className="text-sm text-muted-foreground">
+          Connect Djinn only to the repositories you choose. GitHub shows the
+          requested permissions before the App is installed.
+        </p>
+      </div>
+
+      {setupExpired ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="rounded-lg border border-primary/30 bg-primary/10 px-4 py-3 text-sm text-foreground"
+        >
+          Your setup access expired. Secure access has been refreshed; continue
+          when you are ready.
+        </div>
+      ) : null}
+
+      <form
+        action="/auth/github/setup-start"
+        method="post"
+        aria-label="Start GitHub App setup"
+        aria-busy={isRefreshing}
+        onSubmit={handleSubmit}
+      >
+        <Button
+          type="submit"
+          size="lg"
+          className="h-11 w-full gap-2 px-6 text-base"
+          disabled={isRefreshing}
+          aria-describedby={launchError ? "github-setup-launch-error" : undefined}
+        >
+          <HugeiconsIcon icon={GithubIcon} size={20} />
+          {isRefreshing ? "Refreshing secure access…" : "Continue with GitHub"}
+        </Button>
+      </form>
+
+      {launchError ? (
+        <p
+          id="github-setup-launch-error"
+          role="alert"
+          className="text-center text-sm text-destructive"
+        >
+          {launchError}
+        </p>
+      ) : null}
+
+      <div
+        className="rounded-lg border border-border/60 bg-card/50 p-4"
+        aria-labelledby="github-setup-steps"
+      >
+        <p
+          id="github-setup-steps"
+          className="mb-3 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+        >
+          What happens next
+        </p>
+        <ol className="space-y-3 text-sm">
+          {[
+            ["Review permissions", "Confirm what Djinn can access."],
+            ["Choose repositories", "Select only the repositories you want."],
+            ["Return to Djinn", "Setup finishes here automatically."],
+          ].map(([title, description], index) => (
+            <li key={title} className="flex gap-3">
+              <span
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-xs font-semibold text-primary"
+                aria-hidden="true"
+              >
+                {index + 1}
+              </span>
+              <span>
+                <span className="font-medium text-foreground">{title}</span>
+                <span className="block text-xs text-muted-foreground">
+                  {description}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ol>
+      </div>
+
+      <p className="text-center text-xs text-muted-foreground">
+        No tokens or private keys to copy into Djinn.
+      </p>
+
+      <details className="group rounded-lg border border-border/60 px-4 py-3 text-sm text-muted-foreground">
+        <summary className="cursor-pointer select-none font-medium text-foreground outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring/50">
+          Having trouble?
+        </summary>
+        <div className="mt-3 space-y-3 border-t border-border/60 pt-3 text-xs leading-relaxed">
+          <p>
+            If setup has not started, use the one-time setup URL from the server
+            boot logs. If it already started or the link expired, restart the
+            local server to generate a new URL. Never paste that URL or its
+            token into this page.
+          </p>
+          <a
+            href={SETUP_DOC_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-block underline underline-offset-4 hover:text-foreground"
+          >
+            Read the full setup guide
+          </a>
+        </div>
+      </details>
+    </div>
+  );
+}
 
 /**
  * Read the authenticated user from the nearest AuthGate.
@@ -65,9 +229,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
     staleTime: 0,
   });
 
-  // Auth config carries `selfSetupAvailable`, which only matters when
-  // credentials are missing. If this endpoint errors (e.g. an older server
-  // without it), we default to `null` and treat self-setup as unavailable —
+  // Auth config carries both whether self-setup is enabled and whether this
+  // browser response received the origin-bound launch capability. If this
+  // endpoint errors, we default to `null` and treat self-setup as unavailable,
   // preserving existing production behavior. We DO wait for it during the
   // initial loading phase so the gate doesn't flash the wrong screen.
   const {
@@ -106,6 +270,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   const needsAppInstall = !setupStatus || setupStatus.needsAppInstall;
   const needsSignin = !needsAppInstall && !user;
+  const authStateUnavailable = setupIsError || userIsError;
 
   if (needsAppInstall || needsSignin) {
     return (
@@ -124,7 +289,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
           </div>
 
           <AuthBody
-            setupStatus={setupStatus ?? null}
+            setupStatus={authStateUnavailable ? null : setupStatus ?? null}
             authConfig={authConfig ?? null}
             reachError={reachError}
           />
@@ -327,29 +492,67 @@ function AuthBody({
     );
   }
 
-  // Self-setup enabled but credentials not yet configured — show setup
-  // guidance that points to the one-time setup URL emitted in server boot
-  // logs. We never display or request the raw setup token here; the operator
-  // simply opens the URL the server already printed.
+  // Self-setup enabled but credentials not yet configured — start the secure
+  // same-origin setup flow directly. The server owns the short-lived launch
+  // capability; the UI never receives or renders a setup token.
+  if (
+    authConfig?.selfSetupAvailable &&
+    authConfig.setupLaunchAvailable
+  ) {
+    return <SetupLaunchPanel />;
+  }
+
+  // Self-setup is enabled, but this response did not establish the
+  // origin-bound launch capability. This can happen on an older server or
+  // when the UI was opened from a non-canonical address. Keep the secure
+  // one-time URL as the real path forward and do not render a dead CTA.
   if (authConfig?.selfSetupAvailable) {
     return (
       <div className="w-full space-y-4 text-left">
         <div className="space-y-2 text-center">
-          <h2 className="text-lg font-semibold">Set up GitHub access</h2>
+          <h2 className="text-lg font-semibold">
+            Open the GitHub setup link
+          </h2>
           <p className="text-sm text-muted-foreground">
-            This deployment supports one-click GitHub App setup. Find the setup
-            URL printed in the server boot logs and open it in your browser to
-            create and install the App. You never need to paste secrets or
-            tokens here.
+            Direct setup is not available from this browser address. Use the
+            current one-time setup URL, or restart the local server if setup
+            already started.
           </p>
         </div>
 
         <div className="rounded-lg border border-border/60 bg-card/50 p-4 text-sm text-muted-foreground">
-          <p>
-            Check the server logs for a line containing the one-time setup URL,
-            then open that URL in your browser to authorize the GitHub App.
-          </p>
+          <ol className="space-y-3">
+            <li className="flex gap-3">
+              <span
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-xs font-semibold text-primary"
+                aria-hidden="true"
+              >
+                1
+              </span>
+              <span>
+                If setup has not started, find the one-time URL in the server
+                boot logs.
+              </span>
+            </li>
+            <li className="flex gap-3">
+              <span
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-xs font-semibold text-primary"
+                aria-hidden="true"
+              >
+                2
+              </span>
+              <span>
+                If it already started, restart the local server to generate a
+                new URL, then open it in this browser.
+              </span>
+            </li>
+          </ol>
         </div>
+
+        <p className="text-center text-xs text-muted-foreground">
+          Treat the one-time URL like a password. Do not paste it into this
+          page or share it.
+        </p>
 
         <div className="text-center">
           <a

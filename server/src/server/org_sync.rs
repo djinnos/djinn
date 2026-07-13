@@ -46,9 +46,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::server::auth::{allow_user_installations, binding_matches_user};
 use crate::server::{AppState, authenticate};
 use djinn_db::repositories::user::User;
-use djinn_db::{OrgConfigRepository, SessionAuthRepository, UserRepository};
+use djinn_db::{OrgConfig, OrgConfigRepository, SessionAuthRepository, UserRepository};
 use djinn_provider::github_app::get_installation_token;
 use djinn_provider::github_server::GitHubServerClient;
 
@@ -134,10 +135,10 @@ pub fn start_org_member_sync(state: AppState) {
 pub async fn sync_once(state: &AppState) -> SyncReport {
     // 1. Resolve the org binding from the singleton `org_config` row written
     //    by the in-UI installation picker.
-    let (org_login, installation_id) = {
+    let binding = {
         let org_repo = OrgConfigRepository::new(state.db().clone());
         match org_repo.get().await {
-            Ok(Some(cfg)) => (cfg.github_org_login, cfg.installation_id as u64),
+            Ok(Some(cfg)) => cfg,
             Ok(None) => {
                 return SyncReport::skipped("deployment is not bound to a GitHub org yet");
             }
@@ -147,6 +148,23 @@ pub async fn sync_once(state: &AppState) -> SyncReport {
             }
         }
     };
+
+    // Personal-account bindings deliberately have no org roster. When the
+    // opt-in is enabled and the binding matches the exact persisted user
+    // identity, skip reconciliation rather than calling `/orgs/{login}/members`
+    // and deactivating the owner after GitHub returns 404/empty data.
+    match binding_is_personal_account(state, &binding, allow_user_installations()).await {
+        Ok(true) => {
+            return SyncReport::skipped(
+                "deployment is bound to a personal GitHub account; org membership sync does not apply",
+            );
+        }
+        Ok(false) => {}
+        Err(error) => return SyncReport::error(error),
+    }
+
+    let org_login = binding.github_org_login;
+    let installation_id = binding.installation_id as u64;
 
     // 2. Mint an installation token for the App's installation.
     let token = match get_installation_token(installation_id).await {
@@ -229,6 +247,21 @@ pub async fn sync_once(state: &AppState) -> SyncReport {
     }
 
     report
+}
+
+async fn binding_is_personal_account(
+    state: &AppState,
+    binding: &OrgConfig,
+    allow_users: bool,
+) -> Result<bool, String> {
+    if !allow_users {
+        return Ok(false);
+    }
+    let user = UserRepository::new(state.db().clone())
+        .get_by_github_id(binding.github_org_id)
+        .await
+        .map_err(|error| format!("personal binding lookup failed: {error}"))?;
+    Ok(user.is_some_and(|user| binding_matches_user(binding, user.github_id, &user.github_login)))
 }
 
 // ─── Internals ────────────────────────────────────────────────────────────────
@@ -417,6 +450,46 @@ mod tests {
         assert!(diff.to_activate.is_empty());
         assert!(diff.to_deactivate.is_empty());
         assert_eq!(diff.present_members_to_touch.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn personal_binding_is_detected_only_with_opt_in_and_exact_identity() {
+        use crate::test_helpers;
+
+        let state = test_helpers::test_app_state_in_memory().await;
+        UserRepository::new(state.db().clone())
+            .upsert_from_github(42, "OctoCat", None, None)
+            .await
+            .unwrap();
+        let binding = OrgConfig {
+            id: 1,
+            github_org_id: 42,
+            github_org_login: "octocat".into(),
+            app_id: 7,
+            installation_id: 9,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+
+        assert!(
+            binding_is_personal_account(&state, &binding, true)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !binding_is_personal_account(&state, &binding, false)
+                .await
+                .unwrap()
+        );
+
+        let mismatched = OrgConfig {
+            github_org_login: "someone-else".into(),
+            ..binding
+        };
+        assert!(
+            !binding_is_personal_account(&state, &mismatched, true)
+                .await
+                .unwrap()
+        );
     }
 
     /// End-to-end happy path against a real in-memory DB: seed local users,

@@ -75,9 +75,72 @@ For local/Tilt, `values.local.yaml` already sets `env.enableSelfSetup: true`:
 env:
   enableSelfSetup: true
   publicUrl: "http://localhost:3000"
+  allowUserInstallations: true
+```
+
+With no `.tilt/github-app/` files, the chart deliberately omits the GitHub App
+Secret, `GITHUB_APP_*` env variables, private-key path, and volume. That is an
+*absent* Secret source, so persisted credentials from the manifest flow can
+hot-load. If any inline credential file/value is present — or
+`secrets.githubApp.existingSecret` is set — the chart renders the whole
+Secret/env surface. A partial or malformed attempted configuration is therefore
+still fatal and never silently falls through to self-setup.
+
+`allowUserInstallations` is a local/solo-development opt-in. Production values
+default it to `false`, preserving organization-only deployment binding.
+
+### Isolated Tilt validation instance
+
+To validate onboarding without touching an existing `kind-djinn` cluster,
+default `.tilt/` state, local registry, or host forwards, use a distinct cluster,
+registry, state directory, and ports. Bootstrap first so Tilt's production-
+context guard sees the new kind context:
+
+```bash
+CLUSTER_NAME=djinn-validation \
+REG_NAME=kind-registry-validation \
+REG_PORT=15001 \
+  bash scripts/kind/setup-kind.sh
+
+TILT_ARGS=(
+  --cluster-name djinn-validation
+  --registry-name kind-registry-validation
+  --registry-port 15001
+  --state-dir /var/tmp/djinn-tilt-validation
+  --api-port 13000
+  --rpc-port 18443
+  --postgres-port 15432
+  --qdrant-http-port 16333
+  --qdrant-grpc-port 16334
+  --langfuse-port 15000
+  --minio-port 19091
+)
+
+tilt up --context kind-djinn-validation --port 11350 -- "${TILT_ARGS[@]}"
+```
+
+The generated GitHub callback and web URLs use `http://localhost:13000`, and
+Langfuse uses `http://localhost:15000`. Teardown must use the same Tiltfile
+arguments; omitting them selects the historical defaults instead:
+
+```bash
+tilt down --context kind-djinn-validation -- "${TILT_ARGS[@]}"
+kind delete cluster --name djinn-validation
+docker rm -f kind-registry-validation
+rm -rf /var/tmp/djinn-tilt-validation
 ```
 
 ### Steps
+
+The current self-setup manifest is a **personal-account local-development
+flow**. It posts to GitHub's personal App-registration endpoint and creates a
+private App, so GitHub permits installation only on the owning personal
+account. Organization-owned self-setup needs an organization-specific manifest
+endpoint and is not implemented yet; pre-create the organization App and use
+the Secret-based configuration path for that deployment shape. The initial
+`org_config` binding must also be provisioned through an operator-controlled
+migration; an uncorrelated public setup callback is deliberately not allowed to
+create the deployment's first binding.
 
 1. **Start the server.** On first boot with self-setup enabled and no usable
    credentials, the server generates a **one-time setup token** and prints a
@@ -85,7 +148,7 @@ env:
 
    ```
    GitHub App not configured. Complete setup at:
-     http://localhost:3000/auth/github/create-app?token=<setup-token>
+     http://localhost:3000/auth/github/create-app?setup_token=<setup-token>
    ```
 
    > **Setup token handling:**
@@ -98,9 +161,10 @@ env:
 
 2. **Open the setup URL in your browser.** The server redirects you to
    GitHub's "Create GitHub App" manifest page with every field pre-filled:
-   app name, callback URL, permissions, webhook target, and events.
+   app name, callback URLs, permissions, visibility, and OAuth-on-install.
+   Webhooks remain disabled and the manifest does not submit a webhook URL.
 
-3. **Click "Create GitHub App for \<account\>".** GitHub creates the App and
+3. **Click "Create GitHub App for \<personal-account\>".** GitHub creates the App and
    redirects back to Djinn's `/auth/github/app-manifest-callback` carrying a
    one-time `code`.
 
@@ -116,8 +180,9 @@ env:
 
 6. **OAuth callback.** GitHub redirects back to Djinn's
    `/auth/github/app-setup-callback`, which completes the install
-   continuation, creates the bootstrap admin user, and lands you on the
-   task board.
+   continuation and creates the bootstrap admin user. A fresh deployment then
+   continues through provider/model setup and repository setup before showing
+   the task board.
 
 The setup-session cookie (`djinn_setup_session`) is invalidated after
 successful credential persistence. If the manifest exchange fails before
@@ -297,7 +362,7 @@ server generates a one-time setup token at boot.
 | **Rotation** | Restart the server to generate a fresh token |
 | **Leak response** | If the token is leaked before use, restart the server to invalidate it |
 
-The token is passed as a query parameter (`?token=<setup-token>`) in the
+The token is passed as a query parameter (`?setup_token=<setup-token>`) in the
 boot-log setup URL. It gates access to `/auth/github/create-app` so that
 only the operator who can read the server logs can initiate the manifest
 flow.
@@ -310,22 +375,30 @@ The manifest flow pre-configures these permissions on the GitHub App:
 
 | Permission | Access level | Rationale |
 |------------|-------------|-----------|
+| **Actions** | Read-only | Read workflow runs, jobs, and logs for CI diagnostics |
+| **Checks** | Read-only | Read check runs, suites, and annotations |
 | **Contents** | Read & write | Clone repos, push branches, create commits |
+| **Members** | Read-only | Verify organization membership and reconcile access |
 | **Metadata** | Read-only | Required by GitHub; always granted automatically |
 | **Pull requests** | Read & write | Open PRs, enable auto-merge, request reviews |
 
-**Account permissions:** Leave all at "No access". The App operates on
-repositories, not account-level settings.
+**Organization permissions:** Members read-only is the sole organization-level
+grant. Djinn uses it to enforce organization membership and reconcile access;
+it is not requested for personal-account installations. No account-level write
+permissions are required.
 
-**Who can install:** "Any account" unless you want to restrict to your own
-organization.
+**Who can install:** The manifest creates a private personal-account App, so
+GitHub restricts installation to the owning account. Organization deployments
+must currently use the manual/Secret path described above.
 
 ### Webhook status
 
-The webhook is configured as **inactive** (the "Active" checkbox is
-unticked). Djinn does not consume webhook events today — the server polls
-or uses on-demand API calls for status updates. Leaving the webhook inactive
-avoids unnecessary event delivery and the need to expose a webhook endpoint.
+The manifest omits `hook_attributes` entirely, so GitHub leaves the webhook
+disabled. Djinn does not consume webhook events today — the server polls or
+uses on-demand API calls for status updates. GitHub validates every webhook URL
+that is included in a manifest even when `active` is false, so submitting a
+`localhost` target breaks local onboarding. [GitHub's webhook guidance](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/using-webhooks-with-github-apps)
+confirms that an App with webhooks turned off does not need a webhook URL.
 
 If you configure the App manually (not via the manifest flow), also leave
 the webhook inactive.
@@ -341,15 +414,17 @@ Complete this checklist after a fresh `tilt up` with no
 
 - [ ] `values.local.yaml` has `env.enableSelfSetup: true`
 - [ ] Server boot log contains a line with the setup URL:
-      `http://localhost:3000/auth/github/create-app?token=<token>`
+      `http://localhost:3000/auth/github/create-app?setup_token=<token>`
 - [ ] Opening the setup URL in a browser redirects to GitHub's
       "Create GitHub App" manifest page
 - [ ] Clicking "Create GitHub App" redirects back to Djinn's
       `/auth/github/app-manifest-callback`
 - [ ] Djinn persists the returned credentials and redirects to the
       GitHub App install/authorize page
-- [ ] After granting repo access, the OAuth callback completes and
-      the user lands on the task board (bootstrap admin created)
+- [ ] After granting repo access, the OAuth callback completes and creates the
+      bootstrap admin
+- [ ] Provider/model setup and first-repository setup complete before the user
+      lands on the task board
 - [ ] Subsequent sign-ins work without re-running setup
 - [ ] `/setup/status` reports `appCredentialsConfigured: true`
 
