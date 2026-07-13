@@ -14,6 +14,7 @@ use crate::helpers::extract_worker_context;
 use crate::output_parser::ParsedAgentOutput;
 use crate::test_helpers;
 use crate::test_helpers::{extract_stash_content, test_session_settlement_for_stage_outcome};
+use djinn_core::clock::TestClock;
 use djinn_core::message::Role;
 use djinn_core::models::SessionStatus;
 use djinn_db::repositories::session::CreateSessionParams;
@@ -25,10 +26,12 @@ use djinn_provider::message::{ContentBlock, Conversation, Message};
 use djinn_provider::provider::ToolChoice;
 use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage};
 use djinn_supervisor::{ParkReason, StageOutcome};
+use djinn_telemetry::render;
 use futures::stream;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
 mod anthropic_replay;
@@ -5042,4 +5045,208 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
              closing backtick/paren, got: {trimmed:?}"
         );
     }
+}
+
+// The phase tracker is intentionally exercised only through the canonical reply
+// loop below. The scripts advance SlotContext's monotonic clock at provider
+// boundaries, making the exported counter delta deterministic without sleeps.
+static PHASE_METRIC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct PhaseEvent {
+    advance: Duration,
+    event: anyhow::Result<StreamEvent>,
+}
+
+enum PhaseTurn {
+    InitError {
+        advance: Duration,
+    },
+    Stream {
+        init_advance: Duration,
+        events: Vec<PhaseEvent>,
+    },
+}
+
+struct PhaseScriptedProvider {
+    clock: Arc<TestClock>,
+    turns: Mutex<VecDeque<PhaseTurn>>,
+}
+
+impl PhaseScriptedProvider {
+    fn new(clock: Arc<TestClock>, turns: Vec<PhaseTurn>) -> Self {
+        Self {
+            clock,
+            turns: Mutex::new(turns.into()),
+        }
+    }
+}
+
+impl LlmProvider for PhaseScriptedProvider {
+    fn name(&self) -> &str {
+        "phase-script"
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _conversation: &'a Conversation,
+        _tools: &'a [serde_json::Value],
+        _tool_choice: Option<ToolChoice>,
+    ) -> Pin<
+        Box<
+            dyn futures::Future<
+                    Output = anyhow::Result<
+                        Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let turn = self
+            .turns
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("scripted provider turn");
+        let clock = Arc::clone(&self.clock);
+        Box::pin(async move {
+            match turn {
+                PhaseTurn::InitError { advance } => {
+                    clock.advance_mono(advance);
+                    Err(anyhow::anyhow!("scripted provider initialization failure"))
+                }
+                PhaseTurn::Stream {
+                    init_advance,
+                    events,
+                } => {
+                    clock.advance_mono(init_advance);
+                    let stream = async_stream::stream! {
+                        for event in events {
+                            clock.advance_mono(event.advance);
+                            yield event.event;
+                        }
+                    };
+                    Ok(Box::pin(stream)
+                        as Pin<
+                            Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                        >)
+                }
+            }
+        })
+    }
+}
+
+fn phase_counter(rendered: &str, phase: &str) -> u64 {
+    rendered
+        .lines()
+        .find_map(|line| {
+            (line.starts_with("djinn_agent_session_phase_seconds_total")
+                && line.contains(&format!("phase=\"{phase}\""))
+                && line.contains("role=\"worker\""))
+            .then(|| {
+                line.rsplit_once(' ')
+                    .and_then(|(_, value)| value.parse().ok())
+            })
+            .flatten()
+        })
+        .unwrap_or_else(|| panic!("missing worker {phase} phase sample:\n{rendered}"))
+}
+
+fn phase_delta(before: &str, after: &str, phase: &str) -> u64 {
+    phase_counter(after, phase) - phase_counter(before, phase)
+}
+
+fn final_turn(init: u64, delta: u64) -> PhaseTurn {
+    PhaseTurn::Stream {
+        init_advance: Duration::from_secs(init),
+        events: vec![
+            PhaseEvent {
+                advance: Duration::from_secs(delta),
+                event: Ok(StreamEvent::Delta(ContentBlock::ToolUse {
+                    id: "finish".into(),
+                    name: "submit_work".into(),
+                    input: serde_json::json!({"task_id":"t1"}),
+                })),
+            },
+            PhaseEvent {
+                advance: Duration::ZERO,
+                event: Ok(StreamEvent::Done),
+            },
+        ],
+    }
+}
+
+async fn run_phase_script(turns: Vec<PhaseTurn>) -> anyhow::Result<()> {
+    let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    let provider = PhaseScriptedProvider::new(Arc::clone(&clock), turns);
+    let mut harness = ReplyLoopHarness::new().await;
+    harness.slot_ctx.clock = clock;
+    let tools = vec![dummy_tool_schema("submit_work")];
+    harness.run(&provider, &tools).await.0
+}
+
+#[tokio::test]
+async fn provider_phase_script_counts_stream_init_consumption_and_errors() {
+    let _lock = PHASE_METRIC_LOCK.lock().unwrap();
+    djinn_telemetry::init().expect("telemetry init");
+
+    let before = render().expect("render phase metrics");
+    let result = run_phase_script(vec![final_turn(2, 3)]).await;
+    assert!(result.is_ok(), "successful scripted turn: {result:?}");
+    let after = render().expect("render phase metrics");
+    assert_eq!(phase_delta(&before, &after, "provider_wait"), 5);
+    assert_eq!(phase_delta(&before, &after, "tool_execution"), 0);
+
+    let before = after;
+    let result = run_phase_script(vec![PhaseTurn::InitError {
+        advance: Duration::from_secs(7),
+    }])
+    .await;
+    assert!(
+        result.is_err(),
+        "initialization error must escape reply loop"
+    );
+    let after = render().expect("render phase metrics");
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait"),
+        7,
+        "drop backstop flushes init failure once"
+    );
+
+    let before = after;
+    let result = run_phase_script(vec![PhaseTurn::Stream {
+        init_advance: Duration::from_secs(2),
+        events: vec![PhaseEvent {
+            advance: Duration::from_secs(4),
+            event: Err(anyhow::anyhow!("scripted stream failure")),
+        }],
+    }])
+    .await;
+    assert!(result.is_err(), "stream error must escape reply loop");
+    let after = render().expect("render phase metrics");
+    assert_eq!(phase_delta(&before, &after, "provider_wait"), 6);
+}
+
+#[tokio::test(start_paused = true)]
+async fn provider_phase_script_keeps_empty_retry_backoff_and_local_time_owned_by_provider() {
+    let _lock = PHASE_METRIC_LOCK.lock().unwrap();
+    djinn_telemetry::init().expect("telemetry init");
+    let before = render().expect("render phase metrics");
+    // The second init hook advances fake monotonic time across the reply-loop's
+    // virtual-time backoff plus request setup. No wall-clock sleep is involved.
+    let result = run_phase_script(vec![
+        PhaseTurn::Stream {
+            init_advance: Duration::from_secs(2),
+            events: vec![],
+        },
+        final_turn(9, 4),
+    ])
+    .await;
+    assert!(result.is_ok(), "empty stream should retry: {result:?}");
+    let after = render().expect("render phase metrics");
+    assert_eq!(phase_delta(&before, &after, "provider_wait"), 15);
+    assert_eq!(
+        phase_delta(&before, &after, "tool_execution"),
+        0,
+        "unrelated local work has no phase owner"
+    );
 }
