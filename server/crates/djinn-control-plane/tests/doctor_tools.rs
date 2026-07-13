@@ -916,13 +916,31 @@ async fn closed_parent_open_children_db_dry_run_is_read_only() {
             finding.resolver_snapshot.as_ref().unwrap()["inputs"]["board_health_finding"]["id"],
             owner
         );
+        let health_finding = health_findings
+            .iter()
+            .find(|health| health["id"].as_str() == Some(owner))
+            .unwrap();
         assert_eq!(
-            finding.evidence["board_health_finding"],
-            *health_findings
-                .iter()
-                .find(|health| health["id"].as_str() == Some(owner))
-                .unwrap(),
+            finding.evidence["board_health_finding"], *health_finding,
             "persisted evidence must preserve the complete board-health child snapshot"
+        );
+        let snapshot = finding.resolver_snapshot.as_ref().unwrap();
+        assert_eq!(snapshot["resolver"], "resolve_closed_parent_open_children");
+        assert_eq!(
+            snapshot["inputs"],
+            json!({ "board_health_finding": health_finding }),
+            "dry-run resolver inputs must retain the complete health finding"
+        );
+        assert_eq!(
+            snapshot["outputs"],
+            json!({
+                "selected_disposition": health_finding["recommended_disposition"],
+                "would_mutate": matches!(
+                    health_finding["recommended_action"].as_str(),
+                    Some("close" | "park")
+                ),
+            }),
+            "dry-run resolver output must expose the selected matrix row and mutation decision"
         );
         actual.insert(
             owner.to_owned(),
@@ -1015,6 +1033,17 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
         .await
         .unwrap();
 
+    // This row is actionable in the snapshot, then gains another open parent
+    // before repair. It exercises the lock-time other-parent guard distinctly
+    // from the snapshot-level retain row above.
+    let other_parent_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let other_parent =
+        common::create_test_task(harness.db(), &project.id, &other_parent_epic.id).await;
+    epics
+        .set_status_raw(&other_parent_epic.id, "closed")
+        .await
+        .unwrap();
+
     let (tx, _) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
     let source = Arc::new(TaskRepositoryClosedParentOpenChildrenSource::new(
         harness.db().clone(),
@@ -1047,8 +1076,11 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
         by_task.insert(owner, fid);
     }
 
-    // Apply repair to each persisted finding.
-    for fid in by_task.values() {
+    // Apply repair to each persisted finding. `result` is the additive MCP
+    // contract: retain every response so this test locks the applied and
+    // guarded outcome tags, not merely the top-level success envelope.
+    let mut results = std::collections::BTreeMap::new();
+    for (task_id, fid) in &by_task {
         let fix = harness
             .call_tool(
                 "doctor_fix",
@@ -1060,7 +1092,38 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
             .await
             .unwrap();
         assert_eq!(fix["ok"], true);
+        assert_eq!(fix["check_name"], CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME);
+        assert_eq!(fix["finding_id"], *fid);
+        assert_eq!(fix["error"], serde_json::Value::Null);
+        results.insert(task_id.clone(), fix["result"].clone());
     }
+
+    assert_eq!(
+        results[&ready.id],
+        json!({ "outcome": "closed", "task_id": ready.id, "from_status": "open" })
+    );
+    assert_eq!(
+        results[&flight.id],
+        json!({
+            "outcome": "parked",
+            "task_id": flight.id,
+            "from_status": "in_progress",
+            "reason": "historical_parent_closed_in_flight",
+        })
+    );
+    assert_eq!(
+        results[&pr.id],
+        json!({
+            "outcome": "parked",
+            "task_id": pr.id,
+            "from_status": "pr_review",
+            "reason": "historical_parent_closed_pr_active",
+        })
+    );
+    assert_eq!(
+        results[&guard.id],
+        json!({ "outcome": "skipped_retain", "task_id": guard.id })
+    );
 
     // Assert outcomes.
     let ready_row = tasks.get(&ready.id).await.unwrap().unwrap();
@@ -1116,16 +1179,84 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
         "guarded orphan must not emit doctor_fix_repair activity"
     );
 
-    // Audit: each repaired task emits a doctor_fix_repair activity.
-    for id in [&ready.id, &flight.id, &pr.id] {
+    // Every mutation emits both the normal lifecycle activity and an audit
+    // activity whose provenance and original terminal parent are exact.
+    for (id, from_status, to_status, reason, session, pr_url, parent_id) in [
+        (
+            &ready.id,
+            "open",
+            "closed",
+            "parent_closed",
+            None,
+            None,
+            &ready_epic.id,
+        ),
+        (
+            &flight.id,
+            "in_progress",
+            "needs_lead_intervention",
+            "historical_parent_closed_in_flight",
+            Some(flight_session.id.as_str()),
+            None,
+            &flight_epic.id,
+        ),
+        (
+            &pr.id,
+            "pr_review",
+            "needs_lead_intervention",
+            "historical_parent_closed_pr_active",
+            None,
+            Some("https://github.com/djinnos/djinn/pull/999999"),
+            &pr_epic.id,
+        ),
+    ] {
         let activity = tasks.list_activity(id).await.unwrap();
-        let has_repair = activity.iter().any(|e| e.event_type == "doctor_fix_repair");
-        assert!(
-            has_repair,
-            "task {} should have doctor_fix_repair activity",
-            id
+        let repair = activity
+            .iter()
+            .find(|event| event.event_type == "doctor_fix_repair")
+            .unwrap_or_else(|| panic!("task {id} should have doctor_fix_repair activity"));
+        let repair: serde_json::Value = serde_json::from_str(&repair.payload).unwrap();
+        assert_eq!(repair["source"], "doctor_fix");
+        assert_eq!(repair["check"], "closed_parent_open_children");
+        assert_eq!(repair["original_parent_ids"], json!([parent_id]));
+        assert_eq!(repair["from_status"], from_status);
+        assert_eq!(repair["to_status"], to_status);
+        assert_eq!(repair["reason"], reason);
+        assert_eq!(repair["preserved_session_id"].as_str(), session);
+        assert_eq!(repair["preserved_pr_url"].as_str(), pr_url);
+
+        let status = activity
+            .iter()
+            .find(|event| event.event_type == "status_changed")
+            .unwrap_or_else(|| panic!("task {id} should have status_changed activity"));
+        let status: serde_json::Value = serde_json::from_str(&status.payload).unwrap();
+        assert_eq!(
+            status,
+            json!({
+                "from_status": from_status,
+                "to_status": to_status,
+                "reason": reason,
+            })
         );
     }
+
+    // Repeating the exact same persisted finding is safe and reports the
+    // guard that prevented a second mutation.
+    let repeated_ready = harness
+        .call_tool(
+            "doctor_fix",
+            json!({
+                "check_name": CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME,
+                "finding_id": by_task[&ready.id],
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeated_ready["ok"], true);
+    assert_eq!(
+        repeated_ready["result"],
+        json!({ "outcome": "skipped_already_closed", "task_id": ready.id })
+    );
 
     // Idempotency: a second repair run reports no actionable findings.
     let run2 = harness
@@ -1136,7 +1267,7 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
         .await
         .unwrap();
     let findings2 = run2["results"][0]["findings"].as_array().unwrap();
-    assert_eq!(findings2.len(), 3);
+    assert_eq!(findings2.len(), 4);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1200,6 +1331,12 @@ async fn closed_parent_open_children_repair_skips_external_open_dependent() {
         .await
         .unwrap();
     assert_eq!(fix["ok"], true);
+    assert_eq!(fix["check_name"], CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME);
+    assert_eq!(fix["finding_id"], fid);
+    assert_eq!(
+        fix["result"],
+        json!({ "outcome": "skipped_retain", "task_id": orphan.id })
+    );
 
     let orphan_row = tasks.get(&orphan.id).await.unwrap().unwrap();
     assert_eq!(orphan_row.status, "open");
@@ -1327,9 +1464,9 @@ async fn closed_parent_open_children_repair_skips_stale_snapshot() {
     assert_eq!(findings.len(), 1);
     let fid = findings[0]["finding_id"].as_str().unwrap().to_owned();
 
-    // Simulate status drift before repair: the task is now already closed by an
-    // unrelated path, so the snapshot is stale.
-    tasks.set_status(&ready.id, "closed").await.unwrap();
+    // Simulate a non-terminal status transition before repair. The finding's
+    // `open` snapshot is stale and must not be allowed to park or close it.
+    tasks.set_status(&ready.id, "in_progress").await.unwrap();
 
     let fix = harness
         .call_tool(
@@ -1342,9 +1479,20 @@ async fn closed_parent_open_children_repair_skips_stale_snapshot() {
         .await
         .unwrap();
     assert_eq!(fix["ok"], true);
+    assert_eq!(fix["check_name"], CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME);
+    assert_eq!(fix["finding_id"], fid);
+    assert_eq!(
+        fix["result"],
+        json!({
+            "outcome": "skipped_status_drift",
+            "task_id": ready.id,
+            "snapshot_status": "open",
+            "current_status": "in_progress",
+        })
+    );
 
     let row = tasks.get(&ready.id).await.unwrap().unwrap();
-    assert_eq!(row.status, "closed");
+    assert_eq!(row.status, "in_progress");
     let activity = tasks.list_activity(&ready.id).await.unwrap();
     assert!(
         !activity.iter().any(|e| e.event_type == "doctor_fix_repair"),
