@@ -965,8 +965,6 @@ impl SupervisorServices for DirectServices {
     ) -> Result<PlannerAttemptResult, String> {
         use djinn_provider::completion::resolve_memory_provider_config_for_user_db;
         use djinn_provider::provider::create_provider;
-        use std::time::Duration;
-        use tokio::time::timeout;
         use uuid::Uuid;
 
         let ctx = &self.callbacks.agent_context;
@@ -1038,54 +1036,22 @@ impl SupervisorServices for DirectServices {
         // Build the provider from the resolved config.
         let provider = create_provider(provider_config);
 
-        let timeout_dur = Duration::from_millis(request.timeout_ms.max(1));
-        let mut response = LlmResponse {
-            content: Vec::new(),
-            thinking: String::new(),
-            usage: TokenUsage::default(),
+        let collected = collect_planner_stream(
+            provider.as_ref(),
+            &conversation,
+            &tools,
+            request.tool_choice,
+            request.timeout_ms,
+        )
+        .await;
+        let response = collected.response;
+        let mut outcome = match collected.outcome {
+            PlannerOutcome::Success => LlmCallOutcome::Success,
+            PlannerOutcome::Timeout => LlmCallOutcome::Timeout,
+            PlannerOutcome::InvalidPayload => LlmCallOutcome::InvalidPayload,
+            PlannerOutcome::ProviderError => LlmCallOutcome::ProviderError,
         };
-        let mut outcome = LlmCallOutcome::ProviderError;
-        let mut diagnostic: Option<String> = None;
-
-        // The timeout encloses both provider initialization and *all* stream
-        // collection. `response` is updated as usage events arrive, so a
-        // timeout after a usage event still finalizes the attempt with that
-        // latest observed usage.
-        let collect_stream = async {
-            let mut stream = provider
-                .stream(&conversation, &tools, request.tool_choice)
-                .await
-                .map_err(|e| format!("provider stream init failed: {e}"))?;
-            while let Some(ev) = stream.next().await {
-                match ev {
-                    Ok(StreamEvent::Delta(block)) => response.content.push(block),
-                    Ok(StreamEvent::Thinking(s)) => response.thinking.push_str(&s),
-                    Ok(StreamEvent::Usage(u)) => response.usage = u,
-                    Ok(StreamEvent::Done) => break,
-                    Err(e) => return Err(format!("provider stream error: {e}")),
-                }
-            }
-            Ok::<(), String>(())
-        };
-        let stream_result = match timeout(timeout_dur, collect_stream).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => {
-                diagnostic = Some(e);
-                Err(())
-            }
-            Err(_) => {
-                diagnostic = Some(format!(
-                    "planner call timed out after {}ms",
-                    request.timeout_ms
-                ));
-                outcome = LlmCallOutcome::Timeout;
-                Err(())
-            }
-        };
-
-        if stream_result.is_err() && outcome != LlmCallOutcome::Timeout {
-            outcome = LlmCallOutcome::ProviderError;
-        }
+        let mut diagnostic = collected.diagnostic;
 
         let content_text = response
             .content
@@ -1093,7 +1059,7 @@ impl SupervisorServices for DirectServices {
             .map(|b| b.as_text().unwrap_or(""))
             .collect::<String>();
 
-        if stream_result.is_ok() {
+        if collected.completed {
             // Validate the complete typed planner contract before terminal
             // success persistence. This includes JSON shape, the closed note
             // type set, query count, and the Phase-1 query style rules.
@@ -2162,6 +2128,75 @@ impl SupervisorServices for DirectServices {
     }
 }
 
+/// Result of collecting one attributed planner provider stream.  Keeping this
+/// boundary separate makes the host timeout contract testable without a live
+/// credential or network provider.
+struct CollectedPlannerStream {
+    response: LlmResponse,
+    outcome: PlannerOutcome,
+    diagnostic: Option<String>,
+    completed: bool,
+}
+
+/// Collect the entire provider stream under one deadline.  Usage is stored in
+/// the response as each event arrives, deliberately before awaiting the next
+/// event, so late errors and collection timeouts retain attempted usage.
+async fn collect_planner_stream(
+    provider: &dyn LlmProvider,
+    conversation: &Conversation,
+    tools: &[serde_json::Value],
+    tool_choice: Option<ToolChoice>,
+    timeout_ms: u64,
+) -> CollectedPlannerStream {
+    let mut response = LlmResponse {
+        content: Vec::new(),
+        thinking: String::new(),
+        usage: TokenUsage::default(),
+    };
+    let collection = async {
+        let mut stream = provider
+            .stream(conversation, tools, tool_choice)
+            .await
+            .map_err(|e| format!("provider stream init failed: {e}"))?;
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(StreamEvent::Delta(block)) => response.content.push(block),
+                Ok(StreamEvent::Thinking(thinking)) => response.thinking.push_str(&thinking),
+                Ok(StreamEvent::Usage(usage)) => response.usage = usage,
+                Ok(StreamEvent::Done) => break,
+                Err(error) => return Err(format!("provider stream error: {error}")),
+            }
+        }
+        Ok::<(), String>(())
+    };
+
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms.max(1)),
+        collection,
+    )
+    .await
+    {
+        Ok(Ok(())) => CollectedPlannerStream {
+            response,
+            outcome: PlannerOutcome::Success,
+            diagnostic: None,
+            completed: true,
+        },
+        Ok(Err(error)) => CollectedPlannerStream {
+            response,
+            outcome: PlannerOutcome::ProviderError,
+            diagnostic: Some(error),
+            completed: false,
+        },
+        Err(_) => CollectedPlannerStream {
+            response,
+            outcome: PlannerOutcome::Timeout,
+            diagnostic: Some(format!("planner call timed out after {timeout_ms}ms")),
+            completed: false,
+        },
+    }
+}
+
 /// Intern the wire form's `(entity_type, action)` back into the static-str
 /// shape `DjinnEventEnvelope` expects.
 ///
@@ -2264,8 +2299,15 @@ pub(crate) fn determine_cost_basis(
 
 #[cfg(test)]
 mod tests {
-    use super::{CostBasisHint, SerializableDjinnEvent, determine_cost_basis, intern_envelope};
+    use super::{
+        CostBasisHint, SerializableDjinnEvent, collect_planner_stream, determine_cost_basis,
+        intern_envelope,
+    };
     use djinn_core::models::Pricing;
+    use djinn_provider::message::{ContentBlock, Conversation};
+    use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage, ToolChoice};
+    use futures::StreamExt;
+    use std::pin::Pin;
 
     /// Helper: a non-zero pricing snapshot (used to represent a priced model).
     fn priced() -> Pricing {
@@ -2625,5 +2667,149 @@ mod tests {
             assert_eq!(err_et, et, "drift error entity_type must match input");
             assert_eq!(err_ac, ac, "drift error action must match input");
         }
+    }
+
+    struct PlannerStreamProvider {
+        events: Vec<Result<StreamEvent, String>>,
+        hang_after: bool,
+    }
+
+    impl LlmProvider for PlannerStreamProvider {
+        fn name(&self) -> &str {
+            "planner-stream-test"
+        }
+        fn stream<'a>(
+            &'a self,
+            _: &'a Conversation,
+            _: &'a [serde_json::Value],
+            _: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            Pin<
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let events = self
+                .events
+                .clone()
+                .into_iter()
+                .map(|event| event.map_err(anyhow::Error::msg))
+                .collect::<Vec<_>>();
+            let hang_after = self.hang_after;
+            Box::pin(async move {
+                let stream: Pin<
+                    Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                > = if hang_after {
+                    Box::pin(futures::stream::iter(events).chain(futures::stream::pending()))
+                } else {
+                    Box::pin(futures::stream::iter(events))
+                };
+                Ok(stream)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_memory_intents_timeout_bounds_collection_and_retains_usage() {
+        let provider = PlannerStreamProvider {
+            events: vec![Ok(StreamEvent::Usage(TokenUsage {
+                input: 19,
+                output: 5,
+                ..Default::default()
+            }))],
+            hang_after: true,
+        };
+        let collected =
+            collect_planner_stream(&provider, &Conversation::default(), &[], None, 5).await;
+        assert_eq!(
+            collected.outcome,
+            djinn_supervisor::services::wire::PlannerOutcome::Timeout
+        );
+        assert!(!collected.completed);
+        assert_eq!(collected.response.usage.input, 19);
+    }
+
+    #[tokio::test]
+    async fn plan_memory_intents_retains_usage_across_late_provider_error() {
+        let provider = PlannerStreamProvider {
+            events: vec![
+                Ok(StreamEvent::Usage(TokenUsage {
+                    input: 11,
+                    output: 7,
+                    cache_read: 3,
+                    cache_write: 2,
+                    ..Default::default()
+                })),
+                Err("late provider failure".into()),
+            ],
+            hang_after: false,
+        };
+        let collected =
+            collect_planner_stream(&provider, &Conversation::default(), &[], None, 100).await;
+        assert_eq!(
+            collected.outcome,
+            djinn_supervisor::services::wire::PlannerOutcome::ProviderError
+        );
+        assert_eq!(collected.response.usage.cache_write, 2);
+    }
+
+    #[tokio::test]
+    async fn plan_memory_intents_successful_completed_payload_is_injectable_after_validation() {
+        let provider = PlannerStreamProvider { events: vec![
+            Ok(StreamEvent::Delta(ContentBlock::Text { text: r#"{"queries":[{"type":"pattern","query":"Retry backoff configuration prevents request storms"},{"type":"pitfall","query":"Session ownership errors leave attributed calls unfinalized"}]}"#.into() })),
+            Ok(StreamEvent::Done),
+        ], hang_after: false };
+        let collected =
+            collect_planner_stream(&provider, &Conversation::default(), &[], None, 100).await;
+        let raw = collected
+            .response
+            .content
+            .iter()
+            .map(|b| b.as_text().unwrap_or(""))
+            .collect::<String>();
+        assert!(collected.completed);
+        assert!(
+            crate::actors::slot::lifecycle::memory_intent_planner::parse_planned_queries(&raw)
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_memory_intents_style_invalid_completed_payload_is_not_success() {
+        let provider = PlannerStreamProvider {
+            events: vec![
+                Ok(StreamEvent::Delta(ContentBlock::Text {
+                    text: r#"{"queries":[{"type":"unknown","query":"Find information about X"}]}"#
+                        .into(),
+                })),
+                Ok(StreamEvent::Usage(TokenUsage {
+                    input: 4,
+                    output: 9,
+                    ..Default::default()
+                })),
+                Ok(StreamEvent::Done),
+            ],
+            hang_after: false,
+        };
+        let collected =
+            collect_planner_stream(&provider, &Conversation::default(), &[], None, 100).await;
+        let raw = collected
+            .response
+            .content
+            .iter()
+            .map(|b| b.as_text().unwrap_or(""))
+            .collect::<String>();
+        assert!(collected.completed);
+        assert!(
+            crate::actors::slot::lifecycle::memory_intent_planner::parse_planned_queries(&raw)
+                .is_err()
+        );
+        assert_eq!(collected.response.usage.output, 9);
     }
 }

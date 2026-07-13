@@ -1503,6 +1503,25 @@ mod tests {
         ) -> Result<bool, String> {
             unimplemented!("not exercised in server tests")
         }
+
+        async fn plan_memory_intents(
+            &self,
+            request: super::super::wire::AttributedPlannerRequest,
+        ) -> Result<super::super::wire::PlannerAttemptResult, String> {
+            Ok(super::super::wire::PlannerAttemptResult {
+                outcome: super::super::wire::PlannerOutcome::Success,
+                content: Some(format!(
+                    "{}:{}:{}",
+                    request.project_id, request.task_run_id, request.session_id
+                )),
+                tokens_in: 13,
+                tokens_out: 8,
+                cache_read_tokens: 2,
+                cache_write_tokens: 1,
+                cost_usd: Some(0.000042),
+                diagnostic: None,
+            })
+        }
     }
 
     fn fixture_task() -> Task {
@@ -1974,6 +1993,57 @@ mod tests {
             "slot should be free after explicit deregister"
         );
 
+        handle.cancel();
+        let _ = handle.join.await;
+    }
+
+    #[tokio::test]
+    async fn server_routes_attributed_memory_planner_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("planner.sock");
+        let services: Arc<dyn SupervisorServices> = Arc::new(FakeServices {
+            cancel: CancellationToken::new(),
+            canned_task_id: "unused".into(),
+        });
+        let handle = serve_on_unix_socket(&sock, services)
+            .await
+            .expect("bind server");
+        let client_cancel = CancellationToken::new();
+        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(&sock, client_cancel.clone())
+            .await
+            .expect("connect rpc");
+        let result = rpc
+            .plan_memory_intents(super::super::wire::AttributedPlannerRequest {
+                project_id: "project-1".into(),
+                task_id: "task-1".into(),
+                task_run_id: "run-1".into(),
+                session_id: "session-1".into(),
+                created_by_user_id: "creator-1".into(),
+                operation: "memory_intent_planner".into(),
+                prompt_id: "memory-intent-planner-v1".into(),
+                conversation: "{\"messages\":[]}".into(),
+                tools: "[]".into(),
+                tool_choice: None,
+                max_tokens: 100,
+                timeout_ms: 50,
+            })
+            .await
+            .expect("planner RPC round trip");
+        assert_eq!(result.outcome, super::super::wire::PlannerOutcome::Success);
+        assert_eq!(result.content.as_deref(), Some("project-1:run-1:session-1"));
+        assert_eq!(
+            (
+                result.tokens_in,
+                result.tokens_out,
+                result.cache_read_tokens,
+                result.cache_write_tokens
+            ),
+            (13, 8, 2, 1)
+        );
+        drop(rpc);
+        let _ = bg.writer.await;
+        client_cancel.cancel();
+        let _ = bg.reader.await;
         handle.cancel();
         let _ = handle.join.await;
     }
