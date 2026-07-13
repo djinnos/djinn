@@ -341,7 +341,11 @@ impl InterventionChaosHarness {
 
         self.actor.inflight_dispatches.insert(
             self.task_id.clone(),
-            (Some(capacity_user_id.clone()), DEFAULT_MODEL_ID.to_owned()),
+            InflightDispatch {
+                creator: Some(capacity_user_id.clone()),
+                model: DEFAULT_MODEL_ID.to_owned(),
+                lane: djinn_core::models::ModelLane::Implement,
+            },
         );
 
         let existing = self.durable_dispatch_state().await;
@@ -391,10 +395,11 @@ impl InterventionChaosHarness {
         );
         assert_eq!(
             self.actor.inflight_dispatches.get(&self.task_id),
-            Some(&(
-                Some(self.capacity_user_id.clone()),
-                DEFAULT_MODEL_ID.to_owned()
-            )),
+            Some(&InflightDispatch {
+                creator: Some(self.capacity_user_id.clone()),
+                model: DEFAULT_MODEL_ID.to_owned(),
+                lane: djinn_core::models::ModelLane::Implement,
+            }),
             "in-memory in-flight capacity ledger should be seeded"
         );
         let durable = self

@@ -5,9 +5,10 @@ import { HugeiconsIcon } from '@hugeicons/react';
 import logoSvg from '@/assets/logo.svg';
 import { Button } from '@/components/ui/button';
 import { AddProjectFromGithubDialog } from '@/components/AddProjectFromGithubDialog';
-import { fetchProjects } from '@/api/server';
+import { fetchProjects, type Project } from '@/api/server';
 import { projectStore } from '@/stores/projectStore';
 import { useProjectGateStore } from '@/stores/projectGateStore';
+import { OnboardingProgress } from '@/components/onboarding/OnboardingProgress';
 
 /**
  * Onboarding gate rendered when no repository has been added to the
@@ -15,12 +16,18 @@ import { useProjectGateStore } from '@/stores/projectGateStore';
  * logo + a single primary action that opens the GitHub repo picker.
  */
 export function RepositoryOnboarding() {
-  const { refresh } = useProjectGateStore();
+  const { markPendingProject, refresh } = useProjectGateStore();
   const [dialogOpen, setDialogOpen] = useState(false);
 
-  const handleAdded = async () => {
-    // Populate the project list store so the app lands in a ready state
-    // once the gate closes, then flip the gate.
+  const handleAdded = async (project: Project) => {
+    // Mark synchronously from the mutation response. This makes the transition
+    // deterministic even when the subsequent project-list refresh is slow or
+    // fails, and persists the exact project across a browser reload.
+    markPendingProject(project);
+    // Populate the project list store, then refresh the composite project
+    // setup gate. A newly-added repository advances to image onboarding until
+    // a catalog image is assigned; it no longer falls straight into the app in
+    // the undispatchable "Needs image" state.
     try {
       const projects = await fetchProjects();
       projectStore.getState().setProjects(projects);
@@ -45,6 +52,8 @@ export function RepositoryOnboarding() {
             className="relative h-20 w-auto drop-shadow-[0_0_40px_rgba(168,139,250,0.35)]"
           />
         </div>
+
+        <OnboardingProgress current="repository" />
 
         <div className="text-center space-y-2">
           <h2 className="text-2xl font-semibold">Add a repository</h2>
@@ -84,7 +93,7 @@ export function RepositoryOnboarding() {
       <AddProjectFromGithubDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
-        onAdded={() => void handleAdded()}
+        onAdded={(project) => void handleAdded(project)}
       />
     </main>
   );

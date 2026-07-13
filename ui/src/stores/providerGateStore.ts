@@ -15,8 +15,10 @@ export const useProviderGateStore = create<ProviderGateState>((set) => ({
       const credentials = await fetchCredentialList();
       set({ hasProvider: credentials.some((c) => c.valid) });
     } catch {
-      // On error leave the gate open so we don't block the user indefinitely
-      set({ hasProvider: true });
+      // Provider connectivity is required for first-run setup. Fail closed so
+      // the onboarding surface can show its own retryable API error instead of
+      // silently opening an unusable app.
+      set({ hasProvider: false });
     }
   },
 }));
