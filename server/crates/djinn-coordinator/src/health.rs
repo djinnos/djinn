@@ -3113,9 +3113,43 @@ async fn sweep_cargo_warm_base_guard(
     }
     let clock = SystemClock::new();
     let locks = gc::FlockBaseLock;
+    let activity = gc::DbActivityGuard::new(db.clone());
+
+    // Take the side-effect-free fingerprint snapshot before either whole-base
+    // eviction phase. Delete mode can remove an idle or pressure candidate,
+    // whereas dry-run preserves it; collecting first keeps the report-only
+    // unit count and projected bytes mode-parity independent. The sweep still
+    // uses the same activity, warm-job, and per-base lock guards as eviction.
+    let fingerprint_inventory = match gc::inventory_under(Path::new(gc::CARGO_WARM_BASE_ROOT)) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            tracing::warn!(
+                component = metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
+                mode = config.mode.as_metric_label(),
+                error = %error,
+                "fingerprint report-only sweep inventory failed; skipping"
+            );
+            metrics::increment_cleanup_total(
+                metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
+                metrics::OUTCOME_ERROR,
+                config.mode.as_metric_label(),
+            );
+            return;
+        }
+    };
+    let fingerprint_locks = gc::BaseLockPlanningAdapter::new(gc::FlockBaseLock);
+    gc::report_only_fingerprint_sweep(
+        fingerprint_inventory,
+        &activity,
+        guard.as_ref(),
+        &fingerprint_locks,
+        config.mode,
+    )
+    .await;
+
     let result = gc::evict_idle_warm_bases(
         inventory,
-        &gc::DbActivityGuard::new(db.clone()),
+        &activity,
         guard.as_ref(),
         &locks,
         config,
@@ -3162,7 +3196,6 @@ async fn sweep_cargo_warm_base_guard(
             return;
         }
     };
-    let activity = gc::DbActivityGuard::new(db.clone());
     let planning_locks = gc::BaseLockPlanningAdapter::new(gc::FlockBaseLock);
     let dry_run_planning_locks = gc::NoopLockGuard;
     // Flock creates a lock file, so a dry-run must use the non-mutating
@@ -3202,34 +3235,4 @@ async fn sweep_cargo_warm_base_guard(
     )
     .await;
     gc::log_pressure_eviction_completion(&pressure, config.mode);
-
-    // Report-only fingerprint-unit inventory after the destructive phases so
-    // the report reflects the current warm-base state. The sweep reuses the
-    // same activity, warm-job, and lock guards; it never deletes artifacts.
-    let fingerprint_inventory = match gc::inventory_under(Path::new(gc::CARGO_WARM_BASE_ROOT)) {
-        Ok(inventory) => inventory,
-        Err(error) => {
-            tracing::warn!(
-                component = metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
-                mode = config.mode.as_metric_label(),
-                error = %error,
-                "fingerprint report-only sweep inventory failed; skipping"
-            );
-            metrics::increment_cleanup_total(
-                metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
-                metrics::OUTCOME_ERROR,
-                config.mode.as_metric_label(),
-            );
-            return;
-        }
-    };
-    let fingerprint_locks = gc::BaseLockPlanningAdapter::new(gc::FlockBaseLock);
-    gc::report_only_fingerprint_sweep(
-        fingerprint_inventory,
-        &activity,
-        guard.as_ref(),
-        &fingerprint_locks,
-        config.mode,
-    )
-    .await;
 }
