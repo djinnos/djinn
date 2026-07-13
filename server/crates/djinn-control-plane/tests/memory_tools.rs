@@ -555,6 +555,10 @@ async fn mcp_memory_health_orphans_and_broken_links_shapes() {
     assert!(health.get("broken_link_count").is_some());
     assert!(health.get("low_confidence_note_count").is_some());
     assert!(health.get("stale_note_count").is_some());
+    assert!(
+        health.get("retrieval").is_some(),
+        "retrieval is required on errors too"
+    );
 
     let orphans = harness
         .call_tool("memory_orphans", json!({"project": project}))

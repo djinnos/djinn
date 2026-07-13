@@ -1,5 +1,8 @@
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_db::NoteSearchParams;
+use djinn_db::repositories::retrieval_trace::{
+    RetrievalTraceEntryPoint, RetrievalTraceHealthRollup, RetrievalTraceRepository,
+};
 use djinn_db::{
     NoteRepository, ProjectRepository, normalize_virtual_note_path,
     permalink_from_virtual_note_path, resolve_short_ids,
@@ -9,6 +12,7 @@ use djinn_telemetry::memory_retrieval::{
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::server::DjinnMcpServer;
 
@@ -18,7 +22,8 @@ use super::{
     MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse, MemoryOrphansResponse,
     MemoryProposalOverview, MemoryRecallTraceResponse, MemorySearchResponse,
     MemorySearchResultItem, OrphansParams, ReadParams, RecallTraceParams, ResolvedMention,
-    SearchParams, note_to_view, parse_proposal_ref_item, parse_task_ref_item,
+    RetrievalEntryPointHealthSummary, RetrievalHealthResponse, RetrievalHealthScope, SearchParams,
+    note_to_view, parse_proposal_ref_item, parse_task_ref_item,
 };
 
 pub async fn memory_recall_trace(
@@ -597,46 +602,181 @@ pub async fn memory_build_context(
     }
 }
 
+fn health_timestamp(value: OffsetDateTime) -> String {
+    value
+        .format(&Rfc3339)
+        .expect("UTC timestamps format as RFC3339")
+}
+
+fn unavailable_retrieval_scope(
+    error_code: &str,
+    window_start: String,
+    window_end: String,
+    started_at: Option<String>,
+) -> RetrievalHealthScope {
+    RetrievalHealthScope {
+        status: "unavailable".to_string(),
+        error_code: Some(error_code.to_string()),
+        window_start: Some(window_start),
+        window_end: Some(window_end),
+        started_at,
+        summaries: vec![],
+    }
+}
+
+fn process_retrieval_scope(server: &DjinnMcpServer, until: OffsetDateTime) -> RetrievalHealthScope {
+    let metrics = server.state.retrieval_metrics();
+    let started_at = health_timestamp(OffsetDateTime::from(metrics.started_at()));
+    let until = health_timestamp(until);
+    match metrics.snapshot() {
+        Ok(snapshot) => RetrievalHealthScope {
+            status: "available".to_string(),
+            error_code: None,
+            window_start: Some(started_at.clone()),
+            window_end: Some(until),
+            started_at: Some(started_at),
+            summaries: RetrievalEntryPoint::ALL
+                .iter()
+                .map(|entry_point| {
+                    let success = snapshot.aggregate(*entry_point, RetrievalOutcome::Success);
+                    let empty = snapshot.aggregate(*entry_point, RetrievalOutcome::Empty);
+                    let error = snapshot.aggregate(*entry_point, RetrievalOutcome::Error);
+                    RetrievalEntryPointHealthSummary {
+                        entry_point: match entry_point {
+                            RetrievalEntryPoint::Dispatch => "dispatch",
+                            RetrievalEntryPoint::JitPitfalls => "jit_pitfalls",
+                            RetrievalEntryPoint::LoadKnowledgeContext => "load_knowledge_context",
+                            RetrievalEntryPoint::FormatKnowledgeNotes => "format_knowledge_notes",
+                        }
+                        .to_string(),
+                        total_queries: (success.count + empty.count + error.count) as i64,
+                        zero_result_queries: empty.count as i64,
+                        error_queries: error.count as i64,
+                        candidate_count: (success.candidate_sum
+                            + empty.candidate_sum
+                            + error.candidate_sum) as i64,
+                        injected_count: 0,
+                        skipped_count: 0,
+                    }
+                })
+                .collect(),
+        },
+        Err(_) => unavailable_retrieval_scope(
+            "process_snapshot_unavailable",
+            started_at.clone(),
+            until,
+            Some(started_at),
+        ),
+    }
+}
+
+fn persisted_retrieval_summaries(
+    rollup: &RetrievalTraceHealthRollup,
+) -> Vec<RetrievalEntryPointHealthSummary> {
+    [
+        (RetrievalTraceEntryPoint::Dispatch, "dispatch"),
+        (RetrievalTraceEntryPoint::JitPitfalls, "jit_pitfalls"),
+        (
+            RetrievalTraceEntryPoint::LoadKnowledgeContext,
+            "load_knowledge_context",
+        ),
+        (
+            RetrievalTraceEntryPoint::FormatKnowledgeNotes,
+            "format_knowledge_notes",
+        ),
+    ]
+    .into_iter()
+    .map(|(entry_point, name)| {
+        let evidence = rollup.per_entry_point.get(&entry_point);
+        RetrievalEntryPointHealthSummary {
+            entry_point: name.to_string(),
+            total_queries: evidence.map_or(0, |value| value.trace_count),
+            zero_result_queries: evidence
+                .map_or(0, |value| (value.trace_count - value.injected_count).max(0)),
+            error_queries: 0,
+            candidate_count: evidence.map_or(0, |value| value.candidate_count),
+            injected_count: evidence.map_or(0, |value| value.injected_count),
+            skipped_count: evidence.map_or(0, |value| value.skipped_count),
+        }
+    })
+    .collect()
+}
+
+fn empty_memory_health(retrieval: RetrievalHealthResponse, error: String) -> MemoryHealthResponse {
+    MemoryHealthResponse {
+        total_notes: None,
+        broken_link_count: None,
+        orphan_note_count: None,
+        authored_orphan_count: None,
+        isolated_count: None,
+        isolated_pct: None,
+        machine_connected_orphan_count: None,
+        low_confidence_note_count: None,
+        stale_note_count: None,
+        stale_notes_by_folder: None,
+        lifecycle: None,
+        recent_sweep: None,
+        retrieval,
+        error: Some(error),
+    }
+}
+
 pub async fn memory_health(server: &DjinnMcpServer, p: HealthParams) -> MemoryHealthResponse {
-    let project = match &p.project {
-        Some(path) => path.clone(),
+    let config = server.state.retrieval_config();
+    let until = OffsetDateTime::now_utc();
+    let from = until - time::Duration::hours(config.window_hours() as i64);
+    let from_text = health_timestamp(from);
+    let until_text = health_timestamp(until);
+    let process = process_retrieval_scope(server, until);
+    let project = match p.project {
+        Some(project) => project,
         None => {
-            return MemoryHealthResponse {
-                total_notes: None,
-                broken_link_count: None,
-                orphan_note_count: None,
-                authored_orphan_count: None,
-                isolated_count: None,
-                isolated_pct: None,
-                machine_connected_orphan_count: None,
-                low_confidence_note_count: None,
-                stale_note_count: None,
-                stale_notes_by_folder: None,
-                lifecycle: None,
-                recent_sweep: None,
-                error: Some("project parameter required".to_string()),
-            };
+            let persisted =
+                unavailable_retrieval_scope("project_required", from_text, until_text, None);
+            return empty_memory_health(
+                RetrievalHealthResponse {
+                    config_window_hours: config.window_hours() as i64,
+                    persisted,
+                    process,
+                },
+                "project parameter required".to_string(),
+            );
         }
     };
     let project_id = match resolve_project_id(server, &project).await {
         Ok(id) => id,
         Err(error) => {
-            return MemoryHealthResponse {
-                total_notes: None,
-                broken_link_count: None,
-                orphan_note_count: None,
-                authored_orphan_count: None,
-                isolated_count: None,
-                isolated_pct: None,
-                machine_connected_orphan_count: None,
-                low_confidence_note_count: None,
-                stale_note_count: None,
-                stale_notes_by_folder: None,
-                lifecycle: None,
-                recent_sweep: None,
-                error: Some(error),
-            };
+            let persisted =
+                unavailable_retrieval_scope("project_unresolved", from_text, until_text, None);
+            return empty_memory_health(
+                RetrievalHealthResponse {
+                    config_window_hours: config.window_hours() as i64,
+                    persisted,
+                    process,
+                },
+                error,
+            );
         }
+    };
+    let trace_repo = RetrievalTraceRepository::new(server.state.db().clone());
+    let persisted = match trace_repo
+        .health_rollup(&project_id, &from_text, &until_text)
+        .await
+    {
+        Ok(rollup) => RetrievalHealthScope {
+            status: "available".to_string(),
+            error_code: None,
+            window_start: Some(from_text),
+            window_end: Some(until_text),
+            started_at: None,
+            summaries: persisted_retrieval_summaries(&rollup),
+        },
+        Err(_) => unavailable_retrieval_scope("rollup_unavailable", from_text, until_text, None),
+    };
+    let retrieval = RetrievalHealthResponse {
+        config_window_hours: config.window_hours() as i64,
+        persisted,
+        process,
     };
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
         .with_vector_store(server.state.vector_store());
@@ -654,23 +794,10 @@ pub async fn memory_health(server: &DjinnMcpServer, p: HealthParams) -> MemoryHe
             stale_notes_by_folder: Some(h.stale_notes_by_folder),
             lifecycle: Some(h.lifecycle),
             recent_sweep: Some(h.recent_sweep),
+            retrieval,
             error: None,
         },
-        Err(e) => MemoryHealthResponse {
-            total_notes: None,
-            broken_link_count: None,
-            orphan_note_count: None,
-            authored_orphan_count: None,
-            isolated_count: None,
-            isolated_pct: None,
-            machine_connected_orphan_count: None,
-            low_confidence_note_count: None,
-            stale_note_count: None,
-            stale_notes_by_folder: None,
-            lifecycle: None,
-            recent_sweep: None,
-            error: Some(e.to_string()),
-        },
+        Err(error) => empty_memory_health(retrieval, error.to_string()),
     }
 }
 

@@ -1017,6 +1017,10 @@ mod tests {
         assert!(response.isolated_count.is_some());
         assert!(response.isolated_pct.is_some());
         assert!(response.machine_connected_orphan_count.is_some());
+        assert_eq!(response.retrieval.persisted.status, "available");
+        assert_eq!(response.retrieval.process.status, "available");
+        assert_eq!(response.retrieval.persisted.summaries.len(), 4);
+        assert_eq!(response.retrieval.process.summaries.len(), 4);
 
         // orphan_note_count is a backward-compatible alias
         assert_eq!(response.orphan_note_count, response.authored_orphan_count);
@@ -1043,6 +1047,12 @@ mod tests {
         assert!(no_project.isolated_count.is_none());
         assert!(no_project.isolated_pct.is_none());
         assert!(no_project.machine_connected_orphan_count.is_none());
+        assert_eq!(no_project.retrieval.persisted.status, "unavailable");
+        assert_eq!(
+            no_project.retrieval.persisted.error_code.as_deref(),
+            Some("project_required")
+        );
+        assert!(no_project.retrieval.process.started_at.is_some());
 
         // Unknown project
         let bad_project = ops::memory_health(
@@ -1057,6 +1067,11 @@ mod tests {
         assert!(bad_project.isolated_count.is_none());
         assert!(bad_project.isolated_pct.is_none());
         assert!(bad_project.machine_connected_orphan_count.is_none());
+        assert_eq!(bad_project.retrieval.persisted.status, "unavailable");
+        assert_eq!(
+            bad_project.retrieval.persisted.error_code.as_deref(),
+            Some("project_unresolved")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

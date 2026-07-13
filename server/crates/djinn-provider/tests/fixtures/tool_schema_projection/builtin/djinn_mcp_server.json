@@ -7895,6 +7895,113 @@
             "last_archived_count",
             "last_superseded_source_count"
           ]
+        },
+        "RetrievalHealthResponse": {
+          "type": "object",
+          "properties": {
+            "config_window_hours": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "persisted": {
+              "$ref": "#/$defs/RetrievalHealthScope"
+            },
+            "process": {
+              "$ref": "#/$defs/RetrievalHealthScope"
+            }
+          },
+          "required": [
+            "config_window_hours",
+            "persisted",
+            "process"
+          ]
+        },
+        "RetrievalHealthScope": {
+          "description": "A retrieval source remains present when it is unavailable. Stable error\ncodes are `project_required`, `project_unresolved`, `rollup_unavailable`,\nand `process_snapshot_unavailable`.",
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string"
+            },
+            "error_code": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "window_start": {
+              "description": "Inclusive start and exclusive end of the persisted half-open window.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "window_end": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "started_at": {
+              "description": "Process construction time; only applicable to the process scope.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "summaries": {
+              "description": "Fixed, bounded entry-point evidence (four workload entry points).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RetrievalEntryPointHealthSummary"
+              }
+            }
+          },
+          "required": [
+            "status",
+            "summaries"
+          ]
+        },
+        "RetrievalEntryPointHealthSummary": {
+          "type": "object",
+          "properties": {
+            "entry_point": {
+              "type": "string"
+            },
+            "total_queries": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "zero_result_queries": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "error_queries": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "candidate_count": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "injected_count": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "skipped_count": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "entry_point",
+            "total_queries",
+            "zero_result_queries",
+            "error_queries",
+            "candidate_count",
+            "injected_count",
+            "skipped_count"
+          ]
         }
       },
       "type": "object",
@@ -7995,13 +8102,20 @@
             }
           ]
         },
+        "retrieval": {
+          "description": "Required even when the top-level note-health operation returns an error.",
+          "$ref": "#/$defs/RetrievalHealthResponse"
+        },
         "error": {
           "type": [
             "string",
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "retrieval"
+      ]
     },
     "readOnly": false,
     "destructive": true,
