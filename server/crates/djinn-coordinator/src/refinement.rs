@@ -1,3 +1,4 @@
+// djinn:allow-oversize — bounded refinement state machine and regression coverage exceed the byte threshold.
 // Bounded proposal-refinement workflow state machine.
 //
 // Orchestrates Advocate revision, Adversary attack, and Judge adjudication

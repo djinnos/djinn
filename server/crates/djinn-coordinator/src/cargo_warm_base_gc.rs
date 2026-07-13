@@ -1,3 +1,4 @@
+// djinn:allow-oversize — whole-base guardrails and report-only fingerprint orchestration share this safety boundary.
 //! Conservative inventory and guard planning for Cargo warm bases, including
 //! whole-base eviction and a report-only fingerprint-unit inventory.
 //!
