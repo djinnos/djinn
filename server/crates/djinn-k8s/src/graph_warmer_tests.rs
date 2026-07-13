@@ -240,12 +240,23 @@ async fn trigger_coalesces_duplicate_calls_for_same_project() {
     release.notify_one();
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(5)).await;
-        if !warmer.dispatch.in_flight.lock().await.contains_key(&project_id) {
+        if !warmer
+            .dispatch
+            .in_flight
+            .lock()
+            .await
+            .contains_key(&project_id)
+        {
             break;
         }
     }
     assert!(
-        !warmer.dispatch.in_flight.lock().await.contains_key(&project_id),
+        !warmer
+            .dispatch
+            .in_flight
+            .lock()
+            .await
+            .contains_key(&project_id),
         "watcher should have dropped the in-flight entry after release"
     );
 
@@ -719,8 +730,14 @@ async fn debounce_collapses_storm_into_single_dispatch() {
 
     let m = warmer.debounce_metrics();
     assert_eq!(m.triggers_received, 5, "all 5 triggers counted");
-    assert_eq!(m.triggers_coalesced, 4, "4 of 5 folded into the first window");
-    assert_eq!(m.warms_debounced, 1, "one window collapsed into one dispatch");
+    assert_eq!(
+        m.triggers_coalesced, 4,
+        "4 of 5 folded into the first window"
+    );
+    assert_eq!(
+        m.warms_debounced, 1,
+        "one window collapsed into one dispatch"
+    );
 }
 
 /// A continuously-advancing head (each trigger re-arming the quiet window

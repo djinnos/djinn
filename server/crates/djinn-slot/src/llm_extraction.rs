@@ -61,6 +61,11 @@ const DUPLICATE_CONFIDENCE_SIGNAL: f64 = 0.65;
 
 const EXTRACTION_SYSTEM_PROMPT: &str = SYSTEM_PROMPT;
 const NOVELTY_SYSTEM_PROMPT: &str = "You are a semantic novelty judge for extracted knowledge notes. Compare a proposed extracted note against existing candidate notes using their bounded full bodies. Respond with valid JSON only.";
+/// The evidence merge has its own strict response contract so malformed model
+/// output can take the existing confidence-only fallback without aborting work.
+const EVIDENCE_MERGE_SYSTEM_PROMPT: &str = "You merge attributed session evidence into an existing knowledge note. Preserve specific evidence; do not replace the note wholesale. Respond with valid JSON only.";
+/// Curated/high-confidence notes are never rewritten by background extraction.
+const EVIDENCE_MERGE_MAX_CONFIDENCE: f64 = 0.8;
 
 /// Max characters of session transcript fed to the extraction LLM.
 const TRANSCRIPT_EXCERPT_CHARS: usize = 12_000;
@@ -543,13 +548,197 @@ struct QualityAssessment {
 struct NoveltyCheckResult {
     assessment: NoveltyAssessment,
     existing_note_id: Option<String>,
+    selected_candidate: Option<djinn_db::NoteDedupCandidate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvidenceMergeResponse {
+    content: String,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub type CandidateLookupOverride = fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate>;
 
+#[allow(clippy::too_many_arguments)]
+#[async_trait::async_trait]
+pub(crate) trait ExtractionNoteRepository: Send + Sync {
+    async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>>;
+    async fn update(
+        &self,
+        id: &str,
+        title: &str,
+        content: &str,
+        tags: &str,
+    ) -> djinn_db::Result<djinn_memory::Note>;
+    async fn update_confidence(&self, note_id: &str, signal: f64) -> djinn_db::Result<f64>;
+    async fn set_confidence(&self, note_id: &str, value: f64) -> djinn_db::Result<()>;
+    async fn get_by_permalink(
+        &self,
+        project_id: &str,
+        permalink: &str,
+    ) -> djinn_db::Result<Option<djinn_memory::Note>>;
+    async fn create_db_note_with_scope_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+        scope_paths: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> djinn_db::Result<djinn_memory::Note>;
+    async fn create_with_scope_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        permalink: Option<&str>,
+        tags: &str,
+        scope_paths: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> djinn_db::Result<djinn_memory::Note>;
+    async fn create_with_scope(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        permalink: Option<&str>,
+        tags: &str,
+        scope_paths: &str,
+    ) -> djinn_db::Result<djinn_memory::Note>;
+    async fn update_scope_paths(
+        &self,
+        id: &str,
+        scope_paths: &str,
+    ) -> djinn_db::Result<djinn_memory::Note>;
+    async fn dedup_candidates(
+        &self,
+        project_id: &str,
+        folder: &str,
+        note_type: &str,
+        text: &str,
+        limit: usize,
+    ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>>;
+}
+
+#[async_trait::async_trait]
+impl ExtractionNoteRepository for NoteRepository {
+    async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
+        NoteRepository::get(self, id).await
+    }
+    async fn update(
+        &self,
+        id: &str,
+        title: &str,
+        content: &str,
+        tags: &str,
+    ) -> djinn_db::Result<djinn_memory::Note> {
+        NoteRepository::update(self, id, title, content, tags).await
+    }
+    async fn update_confidence(&self, note_id: &str, signal: f64) -> djinn_db::Result<f64> {
+        NoteRepository::update_confidence(self, note_id, signal).await
+    }
+    async fn set_confidence(&self, note_id: &str, value: f64) -> djinn_db::Result<()> {
+        NoteRepository::set_confidence(self, note_id, value).await
+    }
+    async fn get_by_permalink(
+        &self,
+        project_id: &str,
+        permalink: &str,
+    ) -> djinn_db::Result<Option<djinn_memory::Note>> {
+        NoteRepository::get_by_permalink(self, project_id, permalink).await
+    }
+    async fn create_db_note_with_scope_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+        scope_paths: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> djinn_db::Result<djinn_memory::Note> {
+        NoteRepository::create_db_note_with_scope_and_retrieval_anchor(
+            self,
+            project_id,
+            title,
+            content,
+            note_type,
+            tags,
+            scope_paths,
+            retrieval_anchor,
+        )
+        .await
+    }
+    async fn create_with_scope_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        permalink: Option<&str>,
+        tags: &str,
+        scope_paths: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> djinn_db::Result<djinn_memory::Note> {
+        NoteRepository::create_with_scope_and_retrieval_anchor(
+            self,
+            project_id,
+            title,
+            content,
+            note_type,
+            permalink,
+            tags,
+            scope_paths,
+            retrieval_anchor,
+        )
+        .await
+    }
+    async fn create_with_scope(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        permalink: Option<&str>,
+        tags: &str,
+        scope_paths: &str,
+    ) -> djinn_db::Result<djinn_memory::Note> {
+        NoteRepository::create_with_scope(
+            self,
+            project_id,
+            title,
+            content,
+            note_type,
+            permalink,
+            tags,
+            scope_paths,
+        )
+        .await
+    }
+    async fn update_scope_paths(
+        &self,
+        id: &str,
+        scope_paths: &str,
+    ) -> djinn_db::Result<djinn_memory::Note> {
+        NoteRepository::update_scope_paths(self, id, scope_paths).await
+    }
+    async fn dedup_candidates(
+        &self,
+        project_id: &str,
+        folder: &str,
+        note_type: &str,
+        text: &str,
+        limit: usize,
+    ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
+        NoteRepository::dedup_candidates(self, project_id, folder, note_type, text, limit).await
+    }
+}
+
 struct ExtractionContext<'a> {
-    note_repo: &'a NoteRepository,
+    note_repo: &'a dyn ExtractionNoteRepository,
     provider: &'a dyn LlmProvider,
     project_id: &'a str,
     project_path: &'a str,
@@ -559,6 +748,7 @@ struct ExtractionContext<'a> {
     task_title: &'a str,
     task_description: &'a str,
     provenance: &'a str,
+    caller_attributed: bool,
     session_scope_paths: &'a [String],
     #[cfg(any(test, feature = "test-support"))]
     candidate_lookup: CandidateLookup,
@@ -734,6 +924,7 @@ async fn run_llm_extraction_inner(
         }
     };
     // In tests, a provider_override bypasses credential loading entirely.
+    let provider_override_present = provider_override.is_some();
     let provider: Box<dyn LlmProvider> = if let Some(p) = provider_override {
         struct ArcProvider(Arc<dyn LlmProvider>);
         use std::pin::Pin;
@@ -962,6 +1153,9 @@ async fn run_llm_extraction_inner(
         task_title: &task.title,
         task_description: &task.description,
         provenance: &provenance,
+        // Test providers are injected locally; production merge spend requires
+        // the task creator attribution used by provider resolution.
+        caller_attributed: provider_override_present || task.created_by_user_id.is_some(),
         session_scope_paths: &session_scope_paths,
         #[cfg(any(test, feature = "test-support"))]
         candidate_lookup: candidate_lookup_override
@@ -1053,6 +1247,127 @@ fn now_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
+/// Merge only session-originated, non-curated candidates. The 52t1 revision-aware
+/// update chokepoint is absent on this branch (the repository exposes `update`),
+/// so this helper is the single extraction persistence seam for later revision instrumentation.
+async fn persist_merged_extraction_content(
+    context: &ExtractionContext<'_>,
+    existing: &djinn_memory::Note,
+    content: &str,
+) -> djinn_db::Result<djinn_memory::Note> {
+    context
+        .note_repo
+        .update(&existing.id, &existing.title, content, &existing.tags)
+        .await
+}
+
+fn split_provenance_footer(content: &str) -> (&str, Option<&str>) {
+    let marker = "\n\n---\n*Extracted from session ";
+    match content.find(marker) {
+        Some(index) if content[index..].ends_with("(session-extracted).*") => {
+            (&content[..index], Some(&content[index..]))
+        }
+        _ => (content, None),
+    }
+}
+
+fn content_with_one_provenance_footer(
+    model_content: &str,
+    existing_content: &str,
+    fallback: &str,
+) -> String {
+    let (model_body, _) = split_provenance_footer(model_content);
+    let (_, existing_footer) = split_provenance_footer(existing_content);
+    format!(
+        "{}{}",
+        model_body.trim_end(),
+        existing_footer.unwrap_or(fallback)
+    )
+}
+
+fn eligible_evidence_merge(note: &djinn_memory::Note, caller_attributed: bool) -> bool {
+    caller_attributed
+        && note.confidence < EVIDENCE_MERGE_MAX_CONFIDENCE
+        && split_provenance_footer(&note.content).1.is_some()
+}
+
+async fn boost_duplicate_confidence(
+    context: &ExtractionContext<'_>,
+    candidate_id: &str,
+    note_type: &str,
+    title: &str,
+    outcome: &str,
+) {
+    match context
+        .note_repo
+        .update_confidence(candidate_id, DUPLICATE_CONFIDENCE_SIGNAL)
+        .await
+    {
+        Ok(updated_confidence) => {
+            tracing::debug!(session_id = %context.session_id, note_type, title, existing_note_id = candidate_id, updated_confidence, outcome, "llm_extraction: duplicate confidence updated")
+        }
+        Err(error) => {
+            tracing::warn!(session_id = %context.session_id, note_type, title, existing_note_id = candidate_id, %error, outcome, "llm_extraction: duplicate confidence update failed")
+        }
+    }
+}
+
+async fn merge_duplicate_evidence(
+    context: &ExtractionContext<'_>,
+    note: &ExtractedNote,
+    selected: Option<&djinn_db::NoteDedupCandidate>,
+) -> bool {
+    let Some(selected) = selected else {
+        return false;
+    };
+    let existing = match context.note_repo.get(&selected.id).await {
+        Ok(Some(note)) => note,
+        Ok(None) | Err(_) => return false,
+    };
+    if !eligible_evidence_merge(&existing, context.caller_attributed) {
+        return false;
+    }
+    let prompt = format!(
+        "Existing full note body:\n{}\n\nFresh extracted evidence:\n{}\n\nReturn JSON only: {{\"content\":\"merged markdown body\"}}. Preserve concrete evidence from both bodies; do not wholesale replace the existing note. The session provenance footer is managed by the caller.",
+        selected.content, note.content
+    );
+    let response = match complete(
+        context.provider,
+        CompletionRequest {
+            system: EVIDENCE_MERGE_SYSTEM_PROMPT.to_string(),
+            prompt,
+            max_tokens: 800,
+        },
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => return false,
+    };
+    let merged: EvidenceMergeResponse =
+        match serde_json::from_str::<EvidenceMergeResponse>(response.text.trim()) {
+            Ok(merged) if !merged.content.trim().is_empty() => merged,
+            _ => return false,
+        };
+    let content =
+        content_with_one_provenance_footer(&merged.content, &existing.content, context.provenance);
+    // Persistence completes before the confidence signal; failure reaches boost-only fallback.
+    match persist_merged_extraction_content(context, &existing, &content).await {
+        Ok(_) => {
+            boost_duplicate_confidence(
+                context,
+                &existing.id,
+                "merge",
+                &note.title,
+                "evidence_merged",
+            )
+            .await;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 async fn process_extracted_note(
     extraction_context: &ExtractionContext<'_>,
     note_type: &str,
@@ -1096,6 +1411,7 @@ async fn process_extracted_note(
             NoveltyCheckResult {
                 assessment: NoveltyAssessment::Unknown,
                 existing_note_id: None,
+                selected_candidate: None,
             }
         }
     };
@@ -1117,27 +1433,21 @@ async fn process_extracted_note(
     match assessment.outcome {
         ExtractionOutcome::MergeIntoExisting => {
             if let Some(candidate_id) = novelty.existing_note_id.as_deref() {
-                match extraction_context
-                    .note_repo
-                    .update_confidence(candidate_id, DUPLICATE_CONFIDENCE_SIGNAL)
-                    .await
-                {
-                    Ok(updated_confidence) => tracing::debug!(
-                        session_id = %extraction_context.session_id,
-                        note_type = %note_type,
-                        title = %note.title,
-                        existing_note_id = %candidate_id,
-                        updated_confidence,
-                        "llm_extraction: merged extraction into existing note via confidence boost"
-                    ),
-                    Err(e) => tracing::warn!(
-                        session_id = %extraction_context.session_id,
-                        note_type = %note_type,
-                        title = %note.title,
-                        existing_note_id = %candidate_id,
-                        error = %e,
-                        "llm_extraction: merge outcome failed to update existing confidence"
-                    ),
+                let merged = merge_duplicate_evidence(
+                    extraction_context,
+                    note,
+                    novelty.selected_candidate.as_ref(),
+                )
+                .await;
+                if !merged {
+                    boost_duplicate_confidence(
+                        extraction_context,
+                        candidate_id,
+                        note_type,
+                        &note.title,
+                        "boost_fallback",
+                    )
+                    .await;
                 }
                 extraction_quality.novelty_skipped += 1;
                 extraction_quality.merged += 1;
@@ -1393,6 +1703,7 @@ async fn novelty_decision(
         return Ok(NoveltyCheckResult {
             assessment: NoveltyAssessment::Novel,
             existing_note_id: None,
+            selected_candidate: None,
         });
     }
     let response = complete(
@@ -1411,6 +1722,7 @@ async fn novelty_decision(
         NoveltyDecisionKind::Novel => Ok(NoveltyCheckResult {
             assessment: NoveltyAssessment::Novel,
             existing_note_id: None,
+            selected_candidate: None,
         }),
         NoveltyDecisionKind::AlreadyKnown => {
             let existing_note_id = decision
@@ -1428,7 +1740,10 @@ async fn novelty_decision(
             );
             Ok(NoveltyCheckResult {
                 assessment: NoveltyAssessment::Duplicate,
-                existing_note_id: Some(existing_note_id),
+                existing_note_id: Some(existing_note_id.clone()),
+                selected_candidate: candidates
+                    .into_iter()
+                    .find(|candidate| candidate.id == existing_note_id),
             })
         }
     }
@@ -2682,6 +2997,335 @@ mod tests {
         assert!(
             prompt.contains("… [truncated"),
             "truncation must be signaled"
+        );
+    }
+}
+
+#[cfg(test)]
+mod evidence_merge_contract_tests {
+    use super::*;
+
+    #[test]
+    fn evidence_merge_keeps_existing_provenance_footer_exactly_once() {
+        let existing = "existing evidence\n\n---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*";
+        let model = "merged evidence\n\n---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*\n\n---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*";
+        let content = content_with_one_provenance_footer(model, existing, "fallback");
+        assert_eq!(
+            content,
+            "merged evidence\n\n---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*"
+        );
+    }
+}
+
+#[cfg(test)]
+mod evidence_merge_regression_tests {
+    use super::*;
+    use crate::session_extraction::ExtractionQuality;
+    use djinn_core::message::ContentBlock;
+    use djinn_db::NoteDedupCandidate;
+    use djinn_provider::message::Conversation;
+    use djinn_provider::provider::{StreamEvent, ToolChoice};
+    use futures::{Future, Stream};
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone)]
+    enum RepoOp {
+        Get(String),
+        Update {
+            id: String,
+            title: String,
+            content: String,
+            tags: String,
+        },
+        UpdateConfidence {
+            id: String,
+            signal: f64,
+        },
+    }
+
+    struct RecordingExtractionRepository {
+        ops: Arc<Mutex<Vec<RepoOp>>>,
+        existing: Arc<Mutex<Option<djinn_memory::Note>>>,
+    }
+
+    impl RecordingExtractionRepository {
+        fn with_existing(existing: djinn_memory::Note) -> Self {
+            Self {
+                ops: Arc::new(Mutex::new(Vec::new())),
+                existing: Arc::new(Mutex::new(Some(existing))),
+            }
+        }
+
+        fn ops(&self) -> Vec<RepoOp> {
+            self.ops.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExtractionNoteRepository for RecordingExtractionRepository {
+        async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
+            self.ops.lock().unwrap().push(RepoOp::Get(id.to_string()));
+            Ok(self.existing.lock().unwrap().clone())
+        }
+        async fn update(
+            &self,
+            id: &str,
+            title: &str,
+            content: &str,
+            tags: &str,
+        ) -> djinn_db::Result<djinn_memory::Note> {
+            self.ops.lock().unwrap().push(RepoOp::Update {
+                id: id.to_string(),
+                title: title.to_string(),
+                content: content.to_string(),
+                tags: tags.to_string(),
+            });
+            let mut note = self.existing.lock().unwrap().clone().unwrap();
+            note.title = title.to_string();
+            note.content = content.to_string();
+            note.tags = tags.to_string();
+            Ok(note)
+        }
+        async fn update_confidence(&self, note_id: &str, signal: f64) -> djinn_db::Result<f64> {
+            self.ops.lock().unwrap().push(RepoOp::UpdateConfidence {
+                id: note_id.to_string(),
+                signal,
+            });
+            Ok(signal)
+        }
+        async fn set_confidence(&self, _note_id: &str, _value: f64) -> djinn_db::Result<()> {
+            Ok(())
+        }
+        async fn get_by_permalink(
+            &self,
+            _project_id: &str,
+            _permalink: &str,
+        ) -> djinn_db::Result<Option<djinn_memory::Note>> {
+            Ok(None)
+        }
+        async fn create_db_note_with_scope_and_retrieval_anchor(
+            &self,
+            _project_id: &str,
+            _title: &str,
+            _content: &str,
+            _note_type: &str,
+            _tags: &str,
+            _scope_paths: &str,
+            _retrieval_anchor: Option<&str>,
+        ) -> djinn_db::Result<djinn_memory::Note> {
+            unimplemented!("not used in this regression")
+        }
+        async fn create_with_scope_and_retrieval_anchor(
+            &self,
+            _project_id: &str,
+            _title: &str,
+            _content: &str,
+            _note_type: &str,
+            _permalink: Option<&str>,
+            _tags: &str,
+            _scope_paths: &str,
+            _retrieval_anchor: Option<&str>,
+        ) -> djinn_db::Result<djinn_memory::Note> {
+            unimplemented!("not used in this regression")
+        }
+        async fn create_with_scope(
+            &self,
+            _project_id: &str,
+            _title: &str,
+            _content: &str,
+            _note_type: &str,
+            _permalink: Option<&str>,
+            _tags: &str,
+            _scope_paths: &str,
+        ) -> djinn_db::Result<djinn_memory::Note> {
+            unimplemented!("not used in this regression")
+        }
+        async fn update_scope_paths(
+            &self,
+            _id: &str,
+            _scope_paths: &str,
+        ) -> djinn_db::Result<djinn_memory::Note> {
+            unimplemented!("not used in this regression")
+        }
+        async fn dedup_candidates(
+            &self,
+            _project_id: &str,
+            _folder: &str,
+            _note_type: &str,
+            _text: &str,
+            _limit: usize,
+        ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct ScriptedProvider {
+        responses: Mutex<VecDeque<String>>,
+    }
+
+    impl ScriptedProvider {
+        fn new(responses: Vec<String>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+            }
+        }
+    }
+
+    impl LlmProvider for ScriptedProvider {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _conversation: &'a Conversation,
+            _tools: &'a [serde_json::Value],
+            _tool_choice: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = anyhow::Result<
+                            Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let response = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default();
+            let stream = futures::stream::iter(vec![
+                Ok(StreamEvent::Delta(ContentBlock::Text { text: response })),
+                Ok(StreamEvent::Done),
+            ]);
+            Box::pin(async move { Ok(Box::pin(stream) as _) })
+        }
+    }
+
+    fn test_existing_note() -> djinn_memory::Note {
+        let footer = "---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*";
+        djinn_memory::Note {
+            id: "existing-note-1".to_string(),
+            project_id: "project-1".to_string(),
+            permalink: "cases/existing-note-1".to_string(),
+            title: "Existing Case".to_string(),
+            file_path: String::new(),
+            storage: "db".to_string(),
+            note_type: "case".to_string(),
+            folder: "cases".to_string(),
+            status: "active".to_string(),
+            tags: "[]".to_string(),
+            content: format!("Existing evidence\n\n{footer}"),
+            retrieval_anchor: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            last_accessed: "2026-01-01T00:00:00Z".to_string(),
+            access_count: 0,
+            confidence: 0.5,
+            abstract_: None,
+            overview: None,
+            scope_paths: "[]".to_string(),
+        }
+    }
+
+    fn test_extracted_case() -> ExtractedNote {
+        ExtractedNote {
+            title: "Fresh Case".to_string(),
+            content: "## Situation\nA session-extracted case note is produced during task finalization.\n\n## Constraint\nThe existing candidate must be a low-confidence, session-extracted note with a provenance footer.\n\n## Approach taken\nMerge the fresh evidence into the existing note body and keep the provenance footer.\n\n## Result\nThe merged body contains both the original evidence and the new evidence, with the footer preserved.\n\n## Why it worked / failed\nThe merge preserves provenance and avoids wholesale replacement while allowing future sessions to contribute additional evidence.\n\n## Reusable lesson\nSession-extracted notes below the curation threshold can absorb new evidence from later sessions without losing their original provenance.\n\n## Related\n- extraction merge\n- provenance\n".to_string(),
+            retrieval_anchor: None,
+            scope_paths: vec![],
+        }
+    }
+
+    fn test_candidate() -> NoteDedupCandidate {
+        NoteDedupCandidate {
+            id: "existing-note-1".to_string(),
+            permalink: "cases/existing-note-1".to_string(),
+            title: "Existing Case".to_string(),
+            folder: "cases".to_string(),
+            note_type: "case".to_string(),
+            content: "Existing evidence\n\n---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*".to_string(),
+            abstract_: None,
+            overview: None,
+            score: 1.0,
+        }
+    }
+
+    fn test_candidate_lookup(
+        _project_id: &str,
+        _folder: &str,
+        _note_type: &str,
+        _abstract: &str,
+    ) -> Vec<NoteDedupCandidate> {
+        vec![test_candidate()]
+    }
+
+    #[tokio::test]
+    async fn evidence_merge_persists_content_before_confidence() {
+        let provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
+            r#"{"content":"Merged evidence\n\nThe merged note now includes fresh evidence from the latest session and the original evidence."}"#.to_string(),
+        ]);
+        let repo = RecordingExtractionRepository::with_existing(test_existing_note());
+        let provenance =
+            "\n\n---\n*Extracted from session new. Confidence: 0.5 (session-extracted).*";
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance,
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let mut quality = ExtractionQuality::default();
+        process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+
+        let ops = repo.ops();
+        let update_pos = ops
+            .iter()
+            .position(|op| matches!(op, RepoOp::Update { .. }));
+        let confidence_pos = ops
+            .iter()
+            .position(|op| matches!(op, RepoOp::UpdateConfidence { .. }));
+        assert!(update_pos.is_some(), "content update must be recorded");
+        assert!(
+            confidence_pos.is_some(),
+            "confidence update must be recorded"
+        );
+        assert!(
+            update_pos.unwrap() < confidence_pos.unwrap(),
+            "content update must complete before confidence update"
+        );
+
+        let updated_content = ops
+            .iter()
+            .find_map(|op| match op {
+                RepoOp::Update { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("update op must include content");
+        assert!(
+            updated_content
+                .contains("The merged note now includes fresh evidence from the latest session"),
+            "merged content must contain the fresh evidence"
+        );
+        let footer = "---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*";
+        assert_eq!(
+            updated_content.matches(footer).count(),
+            1,
+            "the existing provenance footer must be preserved exactly once"
         );
     }
 }
