@@ -985,6 +985,7 @@ export namespace DoctorFixOutputSchema {
   error?: string
   finding_id: string
   ok: boolean
+  result?: any
   [k: string]: any
   }
 
