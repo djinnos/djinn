@@ -61,6 +61,13 @@ pub use checks::disposition::{
 pub use checks::k8s::{
     K8sJobListing, K8sLeakInputs, K8sLeakOutputs, K8sLeakReason, TaskRunK8sLeakCheck, TaskRunRow,
 };
+pub use checks::retrieval::{
+    DEFAULT_QUERY_FLOOR, DEFAULT_WINDOW_HOURS, DEFAULT_ZERO_RESULT_THRESHOLD, EntryPointCounts,
+    MAX_QUERY_FLOOR, MAX_WINDOW_HOURS, MAX_ZERO_RESULT_THRESHOLD, MIN_QUERY_FLOOR,
+    MIN_WINDOW_HOURS, MIN_ZERO_RESULT_THRESHOLD, RETRIEVAL_ZERO_RESULT_NAME, RetrievalHealthConfig,
+    RetrievalHealthConfigError, RetrievalHealthDataSource, RetrievalHealthSnapshot,
+    RetrievalProjectWindowSnapshot, RetrievalZeroResultCheck,
+};
 pub use checks::sessions::{
     ForceCloseCheckDb, ForceCloseOrphanInputs, ForceCloseOrphanOutputs, ForceCloseOrphanReason,
     ForceCloseOrphanSessionCheck, ForceCloseOrphanSessionRow, SessionRow,
