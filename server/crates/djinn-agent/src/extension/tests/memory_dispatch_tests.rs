@@ -394,6 +394,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
                 "project": project.slug(),
                 "title": "Project Roadmap",
                 "content": "tracks [[ADR-043 Repo Graph]]",
+                "reason": "create roadmap singleton",
                 "type": "roadmap"
             })
             .as_object()
@@ -424,7 +425,8 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
                 "project": project.slug(),
                 "identifier": "roadmap",
                 "operation": "append",
-                "content": "next wave"
+                "content": "next wave",
+                "reason": "append roadmap next wave"
             })
             .as_object()
             .expect("memory_edit args object")
@@ -495,6 +497,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
                 "project": project.slug(),
                 "title": "Project Brief",
                 "content": "tracks [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]]",
+                "reason": "create project brief singleton",
                 "type": "brief"
             })
             .as_object()
@@ -525,7 +528,8 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
                 "project": project.slug(),
                 "identifier": "brief",
                 "operation": "append",
-                "content": "next wave"
+                "content": "next wave",
+                "reason": "append brief next wave"
             })
             .as_object()
             .expect("memory_edit args object")
@@ -663,7 +667,8 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
                 "identifier": "requirements/v1-requirements",
                 "operation": "find_replace",
                 "find_text": "[[Cognitive Memory Scope]]",
-                "content": "[[reference/cognitive-memory-scope]]"
+                "content": "[[reference/cognitive-memory-scope]]",
+                "reason": "normalize requirement reference"
             })
             .as_object()
             .expect("memory_edit args object")
