@@ -1033,6 +1033,12 @@ pub struct BoardHealthClosedParentOpenChildrenFinding {
     pub recommended_action: String,
     pub recommended_status: String,
     pub recommended_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_pr_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_disposition: Option<serde_json::Value>,
 }
 
 /// External open task that depends on a closed-parent orphan.
