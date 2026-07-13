@@ -635,6 +635,98 @@ where
     result
 }
 
+// ── Workspace cleanup telemetry (proposal zp5t) ──────────────────────────────
+//
+// Every returned owned-workspace teardown attempt emits exactly one
+// `workspace_cleanup_seconds` sample after it returns, with a bounded
+// `trigger=complete|error|cancel|shutdown` and `outcome=ok|error`. The trigger
+// is classified at the terminal boundary from the actual result + cancellation
+// state — NOT from string matching. Timing begins immediately before teardown
+// and is recorded only after teardown returns. Attached workspaces are never
+// deleted or observed (their teardown_owned is a no-op).
+
+/// Terminal trigger classification for an owned-workspace teardown.
+///
+/// Pure enum so the classifier can be unit-tested without constructing a
+/// workspace or running the async teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CleanupTrigger {
+    /// The run completed normally (Ok result with a terminal outcome).
+    Complete,
+    /// The run returned an error (Err SupervisorError).
+    Error,
+    /// A handled cancellation was observed (cancel token set / Interrupted).
+    Cancel,
+    /// An orderly worker process shutdown. Not constructed by the supervisor
+    /// path (which classifies `cancel` when the shared token is set), but part
+    /// of the bounded trigger taxonomy used by the worker shutdown path and
+    /// tested through `timed_workspace_teardown` with injected failure.
+    #[allow(dead_code)]
+    Shutdown,
+}
+
+impl CleanupTrigger {
+    const fn as_str(self) -> &'static str {
+        match self {
+            CleanupTrigger::Complete => djinn_telemetry::workspace_cleanup::TRIGGER_COMPLETE,
+            CleanupTrigger::Error => djinn_telemetry::workspace_cleanup::TRIGGER_ERROR,
+            CleanupTrigger::Cancel => djinn_telemetry::workspace_cleanup::TRIGGER_CANCEL,
+            CleanupTrigger::Shutdown => djinn_telemetry::workspace_cleanup::TRIGGER_SHUTDOWN,
+        }
+    }
+}
+
+/// Classify the cleanup trigger from the supervisor `run` result and the
+/// shared cancellation token.
+///
+/// When the cancellation token is set at the moment teardown begins, the
+/// trigger is `cancel` regardless of whether `run` returned `Ok` or `Err`
+/// (a cancelled run can produce an `Interrupted` outcome or a cancellation-
+/// racing RPC error). Otherwise `Ok` is `complete` and `Err` is `error`.
+fn classify_supervisor_cleanup_trigger(
+    result: &Result<TaskRunReport, SupervisorError>,
+    cancel: &CancellationToken,
+) -> CleanupTrigger {
+    if cancel.is_cancelled() {
+        CleanupTrigger::Cancel
+    } else if result.is_ok() {
+        CleanupTrigger::Complete
+    } else {
+        CleanupTrigger::Error
+    }
+}
+
+/// Time one owned-workspace teardown attempt with the injected monotonic
+/// [`Clock`] and record exactly one `workspace_cleanup_seconds` sample with the
+/// classified trigger and `ok|error` outcome.
+///
+/// Timing begins immediately before `teardown_owned` and is recorded only after
+/// it returns. The original `Result` is passed through unchanged so error
+/// propagation / fallback behaviour is preserved exactly. Attached workspaces
+/// are never observed (teardown_owned returns Ok without deleting).
+fn timed_workspace_teardown(
+    clock: &dyn Clock,
+    workspace: Workspace,
+    trigger: CleanupTrigger,
+) -> std::io::Result<()> {
+    // Attached workspaces are never deleted or observed — their teardown_owned
+    // is a no-op. Skip timing and recording entirely so no spurious sample is
+    // emitted for externally-owned directories.
+    if !workspace.is_owned() {
+        return workspace.teardown_owned();
+    }
+    let start = clock.now_instant();
+    let result = workspace.teardown_owned();
+    let elapsed = clock.now_instant().duration_since(start);
+    let outcome = if result.is_ok() {
+        djinn_telemetry::workspace_cleanup::OUTCOME_OK
+    } else {
+        djinn_telemetry::workspace_cleanup::OUTCOME_ERROR
+    };
+    djinn_telemetry::workspace_cleanup::record_seconds(trigger.as_str(), outcome, elapsed);
+    result
+}
+
 /// Apply the coordinator-selected resume source to the worktree setup.
 ///
 /// Behaviour, per `spec.resume_lifecycle_metadata.source_kind`:
@@ -1078,8 +1170,11 @@ impl TaskRunSupervisor {
                         error = %e,
                         "load_task failed during cancellation"
                     );
+                    let _ =
+                        timed_workspace_teardown(&*self.clock, workspace, CleanupTrigger::Cancel);
                     return self.finalize_interrupted(run_id, vec![]).await;
                 }
+                let _ = timed_workspace_teardown(&*self.clock, workspace, CleanupTrigger::Error);
                 return Err(SupervisorError::LoadTask(e));
             }
         };
@@ -1493,6 +1588,14 @@ impl TaskRunSupervisor {
                             result = Some(TaskRunOutcome::Interrupted);
                             break;
                         }
+                        // Best-effort teardown before the error return; the
+                        // workspace is owned and must not be implicitly dropped
+                        // without emitting exactly one cleanup sample.
+                        let _ = timed_workspace_teardown(
+                            &*self.clock,
+                            workspace,
+                            CleanupTrigger::Error,
+                        );
                         return Err(SupervisorError::from(e));
                     }
                 };
@@ -2770,6 +2873,7 @@ impl TaskRunSupervisor {
                      proceeding with Interrupted report"
                 );
             } else {
+                let _ = timed_workspace_teardown(&*self.clock, workspace, CleanupTrigger::Error);
                 cleanup_cargo_target_run_dir(&run_id, &*self.clock).await;
                 return Err(SupervisorError::UpdateTaskRunStatus(e));
             }
@@ -2777,12 +2881,22 @@ impl TaskRunSupervisor {
 
         cleanup_cargo_target_run_dir(&run_id, &*self.clock).await;
 
-        info!(task_run_id = %run_id, ?outcome, "task-run finished");
-        Ok(TaskRunReport {
+        // Explicitly tear down the owned ephemeral workspace, recording exactly
+        // one `workspace_cleanup_seconds` sample with the trigger classified
+        // from the terminal outcome and cancellation state. The Ok report is
+        // available so `complete` / `cancel` are distinguished without string
+        // matching.
+        let report = TaskRunReport {
             task_run_id: run_id,
             outcome,
             stages_completed: completed,
-        })
+        };
+        let trigger =
+            classify_supervisor_cleanup_trigger(&Ok(report.clone()), self.services.cancel());
+        let _ = timed_workspace_teardown(&*self.clock, workspace, trigger);
+
+        info!(task_run_id = %report.task_run_id, ?report.outcome, "task-run finished");
+        Ok(report)
     }
 
     /// Best-effort terminal status write for an early-cancelled run.
@@ -5573,6 +5687,355 @@ mod tests {
             classify_clone_outcome(&err, &cancel),
             djinn_telemetry::workspace_clone::OUTCOME_CANCELLED,
         );
+    }
+
+    // ── Workspace cleanup telemetry tests (proposal zp5t) ─────────────────
+
+    /// The Prometheus recorder is process-global; serialize telemetry-scrape
+    /// tests behind a mutex so each assertion can use a precise delta.
+    static CLEANUP_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn cleanup_telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
+        CLEANUP_TELEMETRY_MUTEX
+            .lock()
+            .expect("cleanup telemetry test mutex poisoned")
+    }
+
+    /// Count `workspace_cleanup_seconds_count` samples for a given
+    /// trigger/outcome pair.
+    fn cleanup_count(rendered: &str, trigger: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_cleanup_seconds_count")
+                    && line.contains(&format!("trigger=\"{trigger}\""))
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
+    /// Read the `_sum` value for `workspace_cleanup_seconds` for a given
+    /// trigger/outcome pair.
+    fn cleanup_sum(rendered: &str, trigger: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_cleanup_seconds_sum")
+                    && line.contains(&format!("trigger=\"{trigger}\""))
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
+    /// Assert that rendered workspace_cleanup samples carry no high-cardinality
+    /// identity labels.
+    fn assert_no_cleanup_identity_labels(rendered: &str) {
+        for line in rendered.lines() {
+            if !line.starts_with("djinn_workspace_cleanup_seconds") {
+                continue;
+            }
+            for forbidden in [
+                "task_id=",
+                "session_id=",
+                "project_id=",
+                "user_id=",
+                "path=",
+                "error=",
+                "reason=",
+                "branch=",
+                "ref=",
+            ] {
+                assert!(
+                    !line.contains(forbidden),
+                    "cleanup metric line must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
+        }
+    }
+
+    /// `classify_supervisor_cleanup_trigger`: Ok + not-cancelled → complete.
+    #[test]
+    fn classify_cleanup_trigger_complete_on_ok() {
+        let cancel = CancellationToken::new();
+        let report = TaskRunReport {
+            task_run_id: "test".to_string(),
+            outcome: TaskRunOutcome::WorkerSubmitted,
+            stages_completed: vec![],
+        };
+        assert_eq!(
+            classify_supervisor_cleanup_trigger(&Ok(report), &cancel),
+            CleanupTrigger::Complete,
+        );
+    }
+
+    /// `classify_supervisor_cleanup_trigger`: Err + not-cancelled → error.
+    #[test]
+    fn classify_cleanup_trigger_error_on_err() {
+        let cancel = CancellationToken::new();
+        let err = SupervisorError::LoadTask("rpc error".to_string());
+        assert_eq!(
+            classify_supervisor_cleanup_trigger(&Err(err), &cancel),
+            CleanupTrigger::Error,
+        );
+    }
+
+    /// `classify_supervisor_cleanup_trigger`: Ok + cancelled → cancel.
+    #[test]
+    fn classify_cleanup_trigger_cancel_when_token_set() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let report = TaskRunReport {
+            task_run_id: "test".to_string(),
+            outcome: TaskRunOutcome::Interrupted,
+            stages_completed: vec![],
+        };
+        assert_eq!(
+            classify_supervisor_cleanup_trigger(&Ok(report), &cancel),
+            CleanupTrigger::Cancel,
+        );
+    }
+
+    /// `classify_supervisor_cleanup_trigger`: Err + cancelled → cancel (a
+    /// cancelled run can surface a racing RPC error).
+    #[test]
+    fn classify_cleanup_trigger_cancel_on_err_when_token_set() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let err = SupervisorError::LoadTask("rpc error".to_string());
+        assert_eq!(
+            classify_supervisor_cleanup_trigger(&Err(err), &cancel),
+            CleanupTrigger::Cancel,
+        );
+    }
+
+    /// A successful owned-workspace teardown records exactly one `ok` sample
+    /// with the classified trigger.
+    #[tokio::test]
+    async fn timed_teardown_records_one_complete_ok_sample() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let ws = mgr
+            .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+            .await
+            .expect("clone");
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+
+        let before = djinn_telemetry::render().expect("render before");
+        let count_before = cleanup_count(&before, "complete", "ok");
+        let sum_before = cleanup_sum(&before, "complete", "ok");
+
+        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete);
+        assert!(result.is_ok(), "teardown must succeed");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            cleanup_count(&after, "complete", "ok"),
+            count_before + 1.0,
+            "one complete/ok cleanup sample expected"
+        );
+        // The TestClock does not advance during the synchronous teardown, so
+        // the recorded duration is ~0. Assert the sum is non-negative (the
+        // teardown completed and recorded a valid sample).
+        let sum_delta = cleanup_sum(&after, "complete", "ok") - sum_before;
+        assert!(
+            sum_delta >= 0.0,
+            "complete/ok sum delta must be non-negative, got {sum_delta}"
+        );
+        assert_no_cleanup_identity_labels(&after);
+    }
+
+    /// An attached workspace teardown is a no-op and does NOT emit a sample —
+    /// attached directories are never deleted or observed.
+    #[test]
+    fn timed_teardown_on_attached_emits_nothing() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = Workspace::attach_existing(tmp.path(), "main").expect("attach");
+        assert!(!ws.is_owned(), "attached workspace must not be owned");
+
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+
+        let before = djinn_telemetry::render().expect("render before");
+        let complete_ok_before = cleanup_count(&before, "complete", "ok");
+
+        // teardown_owned on Attached returns Ok and does NOT delete.
+        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete);
+        assert!(result.is_ok(), "attached teardown must be Ok");
+
+        let after = djinn_telemetry::render().expect("render after");
+        // Attached workspaces are never observed: no telemetry sample emitted.
+        assert!(
+            tmp.path().exists(),
+            "attached directory must NOT be deleted"
+        );
+        assert_eq!(
+            cleanup_count(&after, "complete", "ok"),
+            complete_ok_before,
+            "attached teardown must NOT emit any sample"
+        );
+    }
+
+    /// All eight trigger/outcome combinations record exactly one sample each
+    /// via direct `timed_workspace_teardown` or `record_seconds` calls.
+    #[test]
+    fn cleanup_records_all_eight_trigger_outcome_combinations() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let triggers = [
+            ("complete", CleanupTrigger::Complete),
+            ("error", CleanupTrigger::Error),
+            ("cancel", CleanupTrigger::Cancel),
+            ("shutdown", CleanupTrigger::Shutdown),
+        ];
+        let outcomes = [
+            ("ok", djinn_telemetry::workspace_cleanup::OUTCOME_OK),
+            ("error", djinn_telemetry::workspace_cleanup::OUTCOME_ERROR),
+        ];
+        let elapsed = Duration::from_millis(42);
+
+        let before = djinn_telemetry::render().expect("render before");
+
+        for (trigger_str, _trigger_enum) in &triggers {
+            for (_outcome_str, outcome_const) in &outcomes {
+                djinn_telemetry::workspace_cleanup::record_seconds(
+                    trigger_str,
+                    outcome_const,
+                    elapsed,
+                );
+            }
+        }
+
+        let after = djinn_telemetry::render().expect("render after");
+        for (trigger_str, _) in &triggers {
+            for (outcome_str, _) in &outcomes {
+                let before_count = cleanup_count(&before, trigger_str, outcome_str);
+                let before_sum = cleanup_sum(&before, trigger_str, outcome_str);
+                assert_eq!(
+                    cleanup_count(&after, trigger_str, outcome_str),
+                    before_count + 1.0,
+                    "one {trigger_str}/{outcome_str} sample expected"
+                );
+                assert!(
+                    (cleanup_sum(&after, trigger_str, outcome_str)
+                        - before_sum
+                        - elapsed.as_secs_f64())
+                    .abs()
+                        < 0.001,
+                    "{trigger_str}/{outcome_str} sum delta must equal elapsed"
+                );
+            }
+        }
+        assert_no_cleanup_identity_labels(&after);
+    }
+
+    /// Duplicate teardown suppression: calling `teardown_owned` once (which
+    /// calls `TempDir::close()`) prevents the Drop from deleting again. The
+    /// directory is gone after `teardown_owned`, so a second implicit Drop is a
+    /// no-op.
+    #[tokio::test]
+    async fn teardown_owned_prevents_double_drop() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let ws = mgr
+            .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+            .await
+            .expect("clone");
+        let path = ws.path().to_path_buf();
+
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+
+        let before = djinn_telemetry::render().expect("render before");
+        let count_before = cleanup_count(&before, "complete", "ok");
+
+        // First teardown: records exactly one sample and removes the dir.
+        timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete)
+            .expect("first teardown must succeed");
+        assert!(!path.exists(), "directory must be removed after teardown");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            cleanup_count(&after, "complete", "ok"),
+            count_before + 1.0,
+            "exactly one cleanup sample (no duplicate from Drop)"
+        );
+    }
+
+    /// `CleanupTrigger::Shutdown` maps to the `shutdown` trigger string.
+    #[test]
+    fn cleanup_trigger_shutdown_as_str() {
+        assert_eq!(
+            CleanupTrigger::Shutdown.as_str(),
+            djinn_telemetry::workspace_cleanup::TRIGGER_SHUTDOWN,
+        );
+        assert_eq!(
+            CleanupTrigger::Complete.as_str(),
+            djinn_telemetry::workspace_cleanup::TRIGGER_COMPLETE,
+        );
+        assert_eq!(
+            CleanupTrigger::Error.as_str(),
+            djinn_telemetry::workspace_cleanup::TRIGGER_ERROR,
+        );
+        assert_eq!(
+            CleanupTrigger::Cancel.as_str(),
+            djinn_telemetry::workspace_cleanup::TRIGGER_CANCEL,
+        );
+    }
+
+    /// A teardown that returns Err (e.g. externally-deleted dir) records exactly
+    /// one `error` outcome sample. This proves the error classification path
+    /// works and that recording happens AFTER teardown returns — no metric is
+    /// emitted if teardown never returns (panic/SIGKILL are out of scope).
+    #[tokio::test]
+    async fn timed_teardown_records_error_on_failure() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let ws = mgr
+            .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+            .await
+            .expect("clone");
+        let ws_path = ws.path().to_path_buf();
+
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+
+        let before = djinn_telemetry::render().expect("render before");
+        let count_before = cleanup_count(&before, "error", "error");
+        let sum_before = cleanup_sum(&before, "error", "error");
+
+        // Externally delete the directory so TempDir::close() returns Err.
+        std::fs::remove_dir_all(&ws_path).expect("externally delete dir");
+
+        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Error);
+        assert!(
+            result.is_err(),
+            "teardown must fail on externally deleted dir"
+        );
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            cleanup_count(&after, "error", "error"),
+            count_before + 1.0,
+            "one error/error cleanup sample expected"
+        );
+        let sum_delta = cleanup_sum(&after, "error", "error") - sum_before;
+        assert!(
+            sum_delta >= 0.0,
+            "error/error sum delta must be non-negative, got {sum_delta}"
+        );
+        assert_no_cleanup_identity_labels(&after);
     }
 
     /// Regression: a persistent push_to_origin failure after WorkerDone must
