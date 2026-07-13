@@ -45,5 +45,9 @@ phase1_report.json
 *_report.json
 report.json
 
+# Stray .cargo state created by interrupted session tooling.
+/server/scripts/fixtures/cargo-fingerprint-mtime/.cargo/
+
 # Playwright MCP session artifacts (screenshots/console/page dumps)
 .playwright-mcp/
+

@@ -291,6 +291,62 @@ pub async fn resolve_memory_provider_for_user(
     Ok(create_provider(provider_config))
 }
 
+/// Resolve the caller-scoped memory provider configuration and model identity.
+///
+/// This is the lower-level companion to [`resolve_memory_provider_for_user`]. It
+/// performs the same credential lookup and model selection, but returns the
+/// resolved [`ProviderConfig`] (including the selected model identity) before
+/// constructing a provider. This lets durable attribution record the actual model
+/// that was selected without a second credential lookup or an ad hoc cost table.
+///
+/// Returns `Ok((provider_config, model_id))` where `model_id` is the full catalog
+/// identifier (e.g. `openai/gpt-4o-mini`).
+pub async fn resolve_memory_provider_config_for_user_db(
+    db: &Database,
+    user_id: Option<&str>,
+) -> Result<(ProviderConfig, String)> {
+    let event_bus = EventBus::noop();
+    let settings_repo = SettingsRepository::new(db.clone(), event_bus.clone());
+
+    let settings_raw = settings_repo
+        .get(SETTINGS_RAW_KEY)
+        .await?
+        .map(|s| s.value)
+        .unwrap_or_default();
+    let settings = DjinnSettings::from_db_value(&settings_raw);
+
+    let mut model_candidates = Vec::new();
+    if let Some(uid) = user_id
+        && let Some(user_settings) = UserSettingsRepository::new(db.clone()).get(uid).await?
+        && let Some(lanes) = user_settings.lanes
+    {
+        model_candidates.extend(lanes.all_models());
+    }
+    model_candidates.extend(settings.models_or_default());
+    if model_candidates.is_empty() {
+        return Err(anyhow!(
+            "no model configured — add a model in Settings → Model Configuration"
+        ));
+    }
+
+    let catalog = CatalogService::new();
+    catalog.inject_builtin_providers(builtin::BUILTIN_PROVIDERS);
+
+    let credential_repo = CredentialRepository::new(db.clone(), event_bus);
+    let credentials = credential_repo.list_for_user(user_id).await?;
+    let provider_config = resolve_memory_provider_config_for_candidates(
+        &catalog,
+        &credentials,
+        &credential_repo,
+        model_candidates,
+        user_id,
+    )
+    .await?;
+
+    let model_id = provider_config.model_id.clone();
+    Ok((provider_config, model_id))
+}
+
 pub async fn resolve_memory_provider_config(
     catalog: &CatalogService,
     credentials: &[Credential],

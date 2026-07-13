@@ -272,6 +272,57 @@ pub struct AuthResultMsg {
     pub error: Option<String>,
 }
 
+/// Attributed request for a dedicated host-side planner LLM call.
+///
+/// Carries explicit project/task/task-run/session/creator attribution so the
+/// host can durably record the attempt before provider I/O and finalize it with
+/// the actual usage, catalog price snapshots, and terminal outcome. The
+/// `conversation` and `tools` fields are JSON-encoded strings so the wire
+/// remains compatible with the positional bincode codec.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttributedPlannerRequest {
+    pub project_id: String,
+    pub task_id: String,
+    pub task_run_id: Option<String>,
+    pub session_id: Option<String>,
+    pub created_by_user_id: Option<String>,
+    pub operation: String,
+    pub prompt_id: String,
+    pub conversation: String,
+    pub tools: String,
+    pub tool_choice: Option<djinn_provider::provider::ToolChoice>,
+    pub max_tokens: u32,
+    pub timeout_ms: u64,
+}
+
+/// Terminal outcome of a dedicated host-side planner LLM call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlannerOutcome {
+    Success,
+    Timeout,
+    InvalidPayload,
+    ProviderError,
+}
+
+/// Result of a dedicated host-side planner LLM call.
+///
+/// On success, `content` holds the raw completion text. On failure, `content`
+/// is `None` and `diagnostic` carries a bounded description. The four usage
+/// counters and `cost_usd` are always the latest values observed by the host
+/// before terminal finalization.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlannerAttemptResult {
+    pub outcome: PlannerOutcome,
+    pub content: Option<String>,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub cost_usd: Option<f64>,
+    pub diagnostic: Option<String>,
+}
+
 /// Typed request variants — one per trait method on [`crate::SupervisorServices`]
 /// except `cancel()`, which is satisfied locally on the worker and does not
 /// cross the wire.
@@ -463,6 +514,9 @@ pub enum ServiceRpcRequest {
     /// so GitHub Actions evaluates the latest mirror commit.  Appended at the
     /// enum tail for bincode stability.
     PublishBranchToGithub { spec: TaskRunSpec, task: Task },
+    /// Dedicated host-side planner LLM call with durable attribution.
+    /// Appended at the enum tail for bincode stability.
+    PlanMemoryIntents { request: AttributedPlannerRequest },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -552,6 +606,9 @@ pub enum ServiceRpcResponse {
     /// `Err` is a transport/infra failure.  Appended at the enum tail for
     /// bincode stability.
     PublishBranchToGithub(BranchPublicationResult),
+    /// Dedicated host-side planner LLM call result.  Appended at the enum
+    /// tail for bincode stability.
+    PlanMemoryIntents(Result<PlannerAttemptResult, String>),
 }
 
 #[cfg(test)]
