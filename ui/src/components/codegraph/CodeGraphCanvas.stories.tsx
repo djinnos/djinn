@@ -1,435 +1,403 @@
 /**
- * CodeGraphCanvas storybook — focuses on the reducer-driven highlight
- * states without the network round-trip. We render a small stub graph
- * (4 nodes, 4 edges) through the same reducer pipeline the live
- * canvas uses, so Storybook screenshots reflect the production look.
+ * CodeGraphCanvas storybook — renders the *real* Sigma/WebGL canvas.
  *
- * The full `<CodeGraphCanvas>` requires a snapshot fetch + Sigma WebGL;
- * not great for Storybook. We instead drive the highlight store and
- * render a lightweight SVG preview alongside `<GraphToolbar>` so the
- * full toolbar/highlight UX remains visible.
+ * Storybook runs in a real browser, so we mount the production
+ * `<CodeGraphCanvas>` and seed it with a small hand-authored snapshot
+ * through the aliased `@/api/mcpClient` mock (see `.storybook/main.ts`).
+ * `fetchSnapshot` dispatches `callMcpTool("code_graph", { operation:
+ * "snapshot", … })`, so a per-story `setMcpToolResponder` that answers the
+ * snapshot op is all it takes to feed the fetch → parse → adapt → Sigma
+ * pipeline the live page uses. This mirrors `MemoryGraphCanvas.stories.tsx`,
+ * which drives its real canvas the same way.
+ *
+ * Every fixture node ships finite `x`/`y`, so `buildGraphFromSnapshot`
+ * takes the precomputed-layout branch: no ForceAtlas2 worker, no
+ * "Layout optimizing…" pill, and the graph paints immediately at
+ * deterministic positions (stable screenshots).
+ *
+ * The default "architecture" lens hides every symbol node, so each story
+ * seeds a permissive filter set (all node/symbol/edge kinds on) into the
+ * real `useCodeGraphStore` before the canvas builds its graph — that's the
+ * same store the live toolbar drives. Selection / citation / color-mode
+ * states are seeded the same way.
+ *
+ * The `CitationBadgeMultiId` story is unchanged: it drives the real
+ * `CitationStatusBadge` through the `setCitations` store seam.
  */
 
 import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, waitFor, within } from "storybook/test";
 
-import { CitationStatusBadge } from "./CodeGraphCanvas";
-import { GraphToolbar } from "./GraphToolbar";
+import { CitationStatusBadge, CodeGraphCanvas } from "./CodeGraphCanvas";
+import type { SnapshotPayload } from "@/lib/codeGraphAdapter";
+import { setMcpToolResponder } from "@/storybook-mocks/mcpClient";
 import {
-  EMPTY_HIGHLIGHT_VIEW,
-  computeComplexityThresholds,
-  edgeReducer,
-  nodeReducer,
-  topComplexityIds,
+  EDGE_KINDS,
+  SYMBOL_KIND_FILTERS,
+  useCodeGraphStore,
   type ColorMode,
-  type HighlightView,
-} from "@/lib/codeGraphReducers";
-import { useCodeGraphStore } from "@/stores/codeGraphStore";
+} from "@/stores/codeGraphStore";
 
-interface StubNode {
+// ── Fixture: a small single-project codebase (5 files + 12 symbols) ──────────
+//
+// SCIP-ish ids, real symbol kinds, ContainsDefinition (containment →
+// nesting, not drawn), SymbolReference / Reads / Writes edges, and per-
+// function cognitive complexity so the heatmap story has a real
+// distribution (handleLogin @ 31 is the refactor candidate). All symbols
+// are structural kinds (function/method/class/interface) so the LOD "mid"
+// tier keeps them visible at the default fit-to-view zoom.
+
+interface FixtureNode {
   id: string;
+  kind: SnapshotPayload["nodes"][number]["kind"];
+  label: string;
+  symbol_kind?: string;
+  file_path?: string;
+  pagerank: number;
+  cognitive?: number;
+  workspace?: string;
   x: number;
   y: number;
-  size: number;
-  color: string;
-  label: string;
-  workspace?: string;
-  workspaceColor?: string;
-  workspaceBadge?: string;
-  isWorkspaceContext?: boolean;
-  /** Iter 30: optional cognitive complexity for the heatmap stories. */
-  cognitive?: number;
 }
 
-interface StubEdge {
-  source: string;
-  target: string;
+interface FixtureEdge {
+  from: string;
+  to: string;
   kind: string;
-  size?: number;
-  color?: string;
-  isCrossWorkspace?: boolean;
+  confidence?: number;
 }
 
-const NODES: StubNode[] = [
-  // Iter 30: cognitive values mimic a real distribution — alpha/beta
-  // are tame, gamma is mid-tier, delta is the refactor candidate.
-  { id: "alpha", x: 100, y: 100, size: 12, color: "#a3e635", label: "alpha", cognitive: 3 },
-  { id: "beta", x: 220, y: 100, size: 10, color: "#60a5fa", label: "beta", cognitive: 6 },
-  { id: "gamma", x: 160, y: 220, size: 10, color: "#fbbf24", label: "gamma", cognitive: 14 },
-  { id: "delta", x: 300, y: 240, size: 8, color: "#cbd5e1", label: "delta", cognitive: 38 },
+const PROJECT_NODES: FixtureNode[] = [
+  { id: "folder:src", kind: "folder", label: "src", pagerank: 1.0, x: 10, y: 10 },
+
+  // server.ts
+  { id: "file:server.ts", kind: "file", label: "server.ts", file_path: "src/server.ts", pagerank: 0.4, x: 4, y: 16 },
+  { id: "sym:createServer", kind: "symbol", label: "createServer", symbol_kind: "function", file_path: "src/server.ts", pagerank: 0.55, cognitive: 5, x: 2, y: 18 },
+
+  // router.ts
+  { id: "file:router.ts", kind: "file", label: "router.ts", file_path: "src/router.ts", pagerank: 0.5, x: 16, y: 16 },
+  { id: "sym:Router", kind: "symbol", label: "Router", symbol_kind: "class", file_path: "src/router.ts", pagerank: 0.5, x: 18, y: 17 },
+  { id: "sym:Router.register", kind: "symbol", label: "Router.register", symbol_kind: "method", file_path: "src/router.ts", pagerank: 0.35, cognitive: 8, x: 17, y: 19 },
+  { id: "sym:Router.dispatch", kind: "symbol", label: "Router.dispatch", symbol_kind: "method", file_path: "src/router.ts", pagerank: 0.85, cognitive: 22, x: 19.5, y: 14 },
+
+  // auth.ts
+  { id: "file:auth.ts", kind: "file", label: "auth.ts", file_path: "src/auth.ts", pagerank: 0.55, x: 4, y: 4 },
+  { id: "sym:authenticate", kind: "symbol", label: "authenticate", symbol_kind: "function", file_path: "src/auth.ts", pagerank: 0.7, cognitive: 14, x: 2, y: 6 },
+  { id: "sym:hashToken", kind: "symbol", label: "hashToken", symbol_kind: "function", file_path: "src/auth.ts", pagerank: 0.4, cognitive: 6, x: 2, y: 2 },
+  { id: "sym:AuthConfig", kind: "symbol", label: "AuthConfig", symbol_kind: "interface", file_path: "src/auth.ts", pagerank: 0.3, x: 5, y: 1 },
+
+  // db.ts
+  { id: "file:db.ts", kind: "file", label: "db.ts", file_path: "src/db.ts", pagerank: 0.5, x: 16, y: 4 },
+  { id: "sym:Database", kind: "symbol", label: "Database", symbol_kind: "class", file_path: "src/db.ts", pagerank: 0.5, x: 18, y: 5 },
+  { id: "sym:Database.query", kind: "symbol", label: "Database.query", symbol_kind: "method", file_path: "src/db.ts", pagerank: 0.75, cognitive: 11, x: 19.5, y: 2 },
+  { id: "sym:Database.connect", kind: "symbol", label: "Database.connect", symbol_kind: "method", file_path: "src/db.ts", pagerank: 0.45, cognitive: 4, x: 17, y: 7 },
+
+  // handlers.ts
+  { id: "file:handlers.ts", kind: "file", label: "handlers.ts", file_path: "src/handlers.ts", pagerank: 0.6, x: 10, y: 18 },
+  { id: "sym:handleLogin", kind: "symbol", label: "handleLogin", symbol_kind: "function", file_path: "src/handlers.ts", pagerank: 0.9, cognitive: 31, x: 8, y: 20 },
+  { id: "sym:handleLogout", kind: "symbol", label: "handleLogout", symbol_kind: "function", file_path: "src/handlers.ts", pagerank: 0.4, cognitive: 7, x: 12, y: 20 },
 ];
 
-const EDGES: StubEdge[] = [
-  { source: "alpha", target: "beta", kind: "Reads" },
-  { source: "beta", target: "gamma", kind: "Writes" },
-  { source: "alpha", target: "gamma", kind: "ContainsDefinition" },
-  { source: "gamma", target: "delta", kind: "SymbolReference" },
+const PROJECT_EDGES: FixtureEdge[] = [
+  // Containment (folder → file, file → symbol). Converted to nesting
+  // metadata by the adapter; never drawn as Sigma edges.
+  { from: "folder:src", to: "file:server.ts", kind: "ContainsDefinition" },
+  { from: "folder:src", to: "file:router.ts", kind: "ContainsDefinition" },
+  { from: "folder:src", to: "file:auth.ts", kind: "ContainsDefinition" },
+  { from: "folder:src", to: "file:db.ts", kind: "ContainsDefinition" },
+  { from: "folder:src", to: "file:handlers.ts", kind: "ContainsDefinition" },
+  { from: "file:server.ts", to: "sym:createServer", kind: "ContainsDefinition" },
+  { from: "file:router.ts", to: "sym:Router", kind: "ContainsDefinition" },
+  { from: "file:router.ts", to: "sym:Router.register", kind: "ContainsDefinition" },
+  { from: "file:router.ts", to: "sym:Router.dispatch", kind: "ContainsDefinition" },
+  { from: "file:auth.ts", to: "sym:authenticate", kind: "ContainsDefinition" },
+  { from: "file:auth.ts", to: "sym:hashToken", kind: "ContainsDefinition" },
+  { from: "file:auth.ts", to: "sym:AuthConfig", kind: "ContainsDefinition" },
+  { from: "file:db.ts", to: "sym:Database", kind: "ContainsDefinition" },
+  { from: "file:db.ts", to: "sym:Database.query", kind: "ContainsDefinition" },
+  { from: "file:db.ts", to: "sym:Database.connect", kind: "ContainsDefinition" },
+  { from: "file:handlers.ts", to: "sym:handleLogin", kind: "ContainsDefinition" },
+  { from: "file:handlers.ts", to: "sym:handleLogout", kind: "ContainsDefinition" },
+
+  // Drawn relationships — the call graph + data flow.
+  { from: "sym:createServer", to: "sym:Router.register", kind: "SymbolReference", confidence: 0.95 },
+  { from: "sym:createServer", to: "sym:Database.connect", kind: "SymbolReference", confidence: 0.9 },
+  { from: "sym:Router.dispatch", to: "sym:handleLogin", kind: "SymbolReference", confidence: 0.95 },
+  { from: "sym:Router.dispatch", to: "sym:handleLogout", kind: "SymbolReference", confidence: 0.9 },
+  { from: "sym:handleLogin", to: "sym:authenticate", kind: "SymbolReference", confidence: 0.98 },
+  { from: "sym:handleLogin", to: "sym:Database.query", kind: "Writes", confidence: 0.85 },
+  { from: "sym:handleLogout", to: "sym:Database.query", kind: "SymbolReference", confidence: 0.8 },
+  { from: "sym:authenticate", to: "sym:hashToken", kind: "SymbolReference", confidence: 0.95 },
+  { from: "sym:authenticate", to: "sym:AuthConfig", kind: "Reads", confidence: 0.9 },
+  { from: "sym:hashToken", to: "sym:AuthConfig", kind: "Reads", confidence: 0.85 },
+  { from: "sym:Database.query", to: "sym:Database.connect", kind: "SymbolReference", confidence: 0.9 },
 ];
 
-const WORKSPACE_NODES: StubNode[] = [
-  {
-    id: "api-file",
-    x: 90,
-    y: 95,
-    size: 13,
-    color: "#60a5fa",
-    label: "api/routes.ts · api",
-    workspace: "api",
-    workspaceColor: "#22d3ee",
-    workspaceBadge: "A",
-    cognitive: 4,
-  },
-  {
-    id: "api-handler",
-    x: 205,
-    y: 145,
-    size: 10,
-    color: "#60a5fa",
-    label: "handleCreate · api",
-    workspace: "api",
-    workspaceColor: "#22d3ee",
-    workspaceBadge: "A",
-    cognitive: 9,
-  },
-  {
-    id: "web-client",
-    x: 320,
-    y: 210,
-    size: 9,
-    color: "#f472b6",
-    label: "submitForm · web",
-    workspace: "web",
-    workspaceColor: "#f472b6",
-    workspaceBadge: "W",
-    isWorkspaceContext: true,
-    cognitive: 18,
-  },
+// ── Fixture: two workspaces (api + web) with a cross-workspace edge ───────────
+
+const WORKSPACE_NODES: FixtureNode[] = [
+  // api workspace
+  { id: "ws:file:api/routes.ts", kind: "file", label: "routes.ts", file_path: "api/src/routes.ts", workspace: "api", pagerank: 0.6, x: 4, y: 10 },
+  { id: "ws:sym:registerRoutes", kind: "symbol", label: "registerRoutes", symbol_kind: "function", file_path: "api/src/routes.ts", workspace: "api", pagerank: 0.5, cognitive: 6, x: 2, y: 12 },
+  { id: "ws:sym:createHandler", kind: "symbol", label: "createHandler", symbol_kind: "function", file_path: "api/src/routes.ts", workspace: "api", pagerank: 0.8, cognitive: 12, x: 6, y: 8 },
+  { id: "ws:file:api/db.ts", kind: "file", label: "db.ts", file_path: "api/src/db.ts", workspace: "api", pagerank: 0.5, x: 3, y: 5 },
+  { id: "ws:sym:apiQuery", kind: "symbol", label: "apiQuery", symbol_kind: "function", file_path: "api/src/db.ts", workspace: "api", pagerank: 0.6, cognitive: 8, x: 1, y: 4 },
+
+  // web workspace
+  { id: "ws:file:web/App.tsx", kind: "file", label: "App.tsx", file_path: "web/src/App.tsx", workspace: "web", pagerank: 0.55, x: 16, y: 12 },
+  { id: "ws:sym:submitForm", kind: "symbol", label: "submitForm", symbol_kind: "function", file_path: "web/src/App.tsx", workspace: "web", pagerank: 0.6, cognitive: 15, x: 18, y: 14 },
+  { id: "ws:file:web/api.ts", kind: "file", label: "api.ts", file_path: "web/src/api.ts", workspace: "web", pagerank: 0.5, x: 15, y: 8 },
+  { id: "ws:sym:useApiClient", kind: "symbol", label: "useApiClient", symbol_kind: "function", file_path: "web/src/api.ts", workspace: "web", pagerank: 0.7, cognitive: 9, x: 13, y: 9 },
 ];
 
-const WORKSPACE_EDGES: StubEdge[] = [
-  {
-    source: "api-file",
-    target: "api-handler",
-    kind: "ContainsDefinition",
-    size: 1,
-    color: "#2d5a3d",
-  },
-  {
-    source: "api-handler",
-    target: "web-client",
-    kind: "SymbolReference",
-    size: 2.2,
-    color: "#facc15",
-    isCrossWorkspace: true,
-  },
+const WORKSPACE_EDGES: FixtureEdge[] = [
+  // Containment
+  { from: "ws:file:api/routes.ts", to: "ws:sym:registerRoutes", kind: "ContainsDefinition" },
+  { from: "ws:file:api/routes.ts", to: "ws:sym:createHandler", kind: "ContainsDefinition" },
+  { from: "ws:file:api/db.ts", to: "ws:sym:apiQuery", kind: "ContainsDefinition" },
+  { from: "ws:file:web/App.tsx", to: "ws:sym:submitForm", kind: "ContainsDefinition" },
+  { from: "ws:file:web/api.ts", to: "ws:sym:useApiClient", kind: "ContainsDefinition" },
+
+  // Intra-workspace calls
+  { from: "ws:sym:registerRoutes", to: "ws:sym:createHandler", kind: "SymbolReference", confidence: 0.95 },
+  { from: "ws:sym:createHandler", to: "ws:sym:apiQuery", kind: "SymbolReference", confidence: 0.9 },
+  { from: "ws:sym:submitForm", to: "ws:sym:useApiClient", kind: "SymbolReference", confidence: 0.95 },
+
+  // Cross-workspace: web → api (rendered yellow + dashed by the adapter).
+  { from: "ws:sym:useApiClient", to: "ws:sym:createHandler", kind: "SymbolReference", confidence: 0.9 },
 ];
 
-function StubCanvas({
-  view,
-  nodes = NODES,
-  edges = EDGES,
-}: {
-  view: HighlightView;
-  nodes?: StubNode[];
-  edges?: StubEdge[];
-}) {
-  return (
-    <svg
-      width={400}
-      height={320}
-      className="rounded-md border border-[#2d2d3d]"
-      style={{ background: "#0a0a10" }}
-    >
-      {edges.map((e, i) => {
-        const a = nodes.find((n) => n.id === e.source)!;
-        const b = nodes.find((n) => n.id === e.target)!;
-        const enabled = view.edgeKindFilters[e.kind] !== false;
-        if (!enabled) return null;
-        const out = edgeReducer(
-          e.source,
-          e.target,
-          {
-            kind: e.kind,
-            size: e.size ?? 1,
-            color: e.color ?? "rgba(100,116,139,0.45)",
-            isCrossWorkspace: e.isCrossWorkspace,
-          },
-          view,
-        );
-        return (
-          <line
-            key={i}
-            x1={a.x}
-            y1={a.y}
-            x2={b.x}
-            y2={b.y}
-            stroke={(out.color as string) ?? e.color ?? "rgba(100,116,139,0.45)"}
-            strokeWidth={(out.size as number) ?? e.size ?? 1}
-            strokeDasharray={e.isCrossWorkspace ? "6 4" : undefined}
-          />
-        );
-      })}
-      {nodes.map((n) => {
-        const out = nodeReducer(
-          n.id,
-          {
-            color: n.color,
-            size: n.size,
-            label: n.label,
-            cognitive: n.cognitive,
-            workspace: n.workspace,
-            workspaceColor: n.workspaceColor,
-            workspaceBadge: n.workspaceBadge,
-            borderColor: n.workspaceColor,
-            borderSize: n.workspaceColor ? 2 : undefined,
-            haloed: n.workspaceColor ? true : undefined,
-            isWorkspaceContext: n.isWorkspaceContext,
-          },
-          view,
-        );
-        if (out.hidden) return null;
-        const size = (out.size as number) ?? n.size;
-        const haloed = out.haloed === true;
-        const workspaceBadge = out.workspaceBadge as string | undefined;
-        return (
-          <g key={n.id}>
-            {haloed && (
-              <circle
-                cx={n.x}
-                cy={n.y}
-                r={size + 4}
-                fill="none"
-                stroke={(out.borderColor as string) ?? "rgba(239, 68, 68, 0.6)"}
-                strokeWidth={(out.borderSize as number) ?? 2}
-              />
-            )}
-            <circle
-              cx={n.x}
-              cy={n.y}
-              r={size}
-              fill={(out.color as string) ?? n.color}
-              opacity={out.highlighted === false ? 0.4 : 1}
-            />
-            {workspaceBadge && (
-              <text
-                x={n.x - 4}
-                y={n.y + 4}
-                fontSize={9}
-                fontFamily="monospace"
-                fill="#020617"
-                textAnchor="middle"
-                fontWeight={700}
-              >
-                {workspaceBadge}
-              </text>
-            )}
-            <text
-              x={n.x + size + 4}
-              y={n.y + 4}
-              fontSize={11}
-              fontFamily="monospace"
-              fill={out.label ? "currentColor" : "rgba(100,116,139,0.55)"}
-            >
-              {(out.label as string) ?? n.label}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
-  );
+/**
+ * Coordinates are authored on a ~0..20 grid for readability, then scaled
+ * into a ~[0,1] box. Sigma normalizes for the initial fit regardless of
+ * scale, but `focusNodes` (the citation auto-focus) derives its camera
+ * ratio from *raw* graph coordinates — a ~20-unit span would zoom the
+ * camera 20× too far out and blank the canvas. Keeping raw extent ~1 makes
+ * that ratio land sensibly.
+ */
+const LAYOUT_SCALE = 1 / 20;
+
+function buildSnapshot(
+  nodes: FixtureNode[],
+  edges: FixtureEdge[],
+): SnapshotPayload {
+  return {
+    project_id: "project-djinn",
+    git_head: "abc1234",
+    generated_at: "2026-07-13T00:00:00.000Z",
+    truncated: false,
+    total_nodes: nodes.length,
+    total_edges: edges.length,
+    node_cap: 10_000,
+    // `FixtureNode` is a subset of `SnapshotNode` (every extra field on
+    // `SnapshotNode` is optional), so this assigns directly (with coords
+    // scaled into the ~[0,1] box).
+    nodes: nodes.map((n) => ({
+      ...n,
+      x: n.x * LAYOUT_SCALE,
+      y: n.y * LAYOUT_SCALE,
+    })),
+    edges: edges.map((e) => ({
+      from: e.from,
+      to: e.to,
+      kind: e.kind,
+      confidence: e.confidence ?? 1,
+    })),
+  };
 }
 
-interface StoryShellProps {
+const PROJECT_SNAPSHOT = buildSnapshot(PROJECT_NODES, PROJECT_EDGES);
+const WORKSPACE_SNAPSHOT = buildSnapshot(WORKSPACE_NODES, WORKSPACE_EDGES);
+
+/**
+ * Build a responder for the aliased `@/api/mcpClient` mock. Answers the
+ * `code_graph` snapshot op with `{ snapshot }` (the exact shape
+ * `parseSnapshotResponse` expects); everything else resolves to `{}`.
+ */
+function snapshotResponder(snapshot: SnapshotPayload) {
+  return (name: string, args: Record<string, unknown> | undefined) => {
+    if (name === "code_graph" && args?.operation === "snapshot") {
+      return { snapshot };
+    }
+    return {};
+  };
+}
+
+// ── Permissive filter set ────────────────────────────────────────────────────
+// The default "architecture" lens hides every symbol; these open all node /
+// symbol / edge kinds so files + symbols + the call graph all render.
+// Containment edges stay excluded by the adapter regardless.
+
+const ALL_NODE_KINDS = { folder: true, file: true, symbol: true };
+const ALL_SYMBOL_KINDS = Object.fromEntries(
+  SYMBOL_KIND_FILTERS.map((k) => [k, true]),
+);
+const ALL_EDGE_KINDS = Object.fromEntries(EDGE_KINDS.map((k) => [k, true]));
+
+/**
+ * Stable empty-array default so the seed effect below doesn't re-run (and
+ * `reset()` on cleanup) on every render — a fresh `[]` literal default would
+ * change identity each render and thrash the store (including the heatmap's
+ * complexity-available gate).
+ */
+const NO_IDS: string[] = [];
+
+interface HarnessProps {
   selectionId?: string | null;
-  selectionNeighbors?: string[];
   citationIds?: string[];
   toolHighlightIds?: string[];
-  blastRadiusFrontier?: string[];
-  /** Iter 30: pin the canvas into a specific color mode for the story. */
   colorMode?: ColorMode;
-  workspaceFixture?: boolean;
+  /** Pin the canvas to a single workspace (drives cross-workspace context). */
+  workspaceSlug?: string | null;
 }
 
-function StoryShell({
+/**
+ * Mounts the real `<CodeGraphCanvas>` and seeds the highlight store so the
+ * populated graph is visible. The canvas resets the store on mount (a child
+ * effect); this parent effect runs *after* that reset, so the seed wins.
+ */
+function CanvasHarness({
   selectionId = null,
-  selectionNeighbors = [],
-  citationIds = [],
-  toolHighlightIds = [],
-  blastRadiusFrontier = [],
+  citationIds = NO_IDS,
+  toolHighlightIds = NO_IDS,
   colorMode = "topology",
-  workspaceFixture = false,
-}: StoryShellProps) {
-  // Mirror the inputs into the global store so the toolbar reflects
-  // the selection state correctly for DOI focus controls.
-  const setSelection = useCodeGraphStore((s) => s.setSelection);
-  const setCitations = useCodeGraphStore((s) => s.setCitations);
-  const setToolHighlight = useCodeGraphStore((s) => s.setToolHighlight);
-  const setBlastRadius = useCodeGraphStore((s) => s.setBlastRadiusFrontier);
-  const setColorMode = useCodeGraphStore((s) => s.setColorMode);
-  const setComplexityAvailable = useCodeGraphStore(
-    (s) => s.setComplexityAvailable,
-  );
+  workspaceSlug = null,
+}: HarnessProps) {
+  // Complexity availability is reported up by the canvas once the snapshot is
+  // parsed and the heatmap thresholds are computed.
+  const complexityAvailable = useCodeGraphStore((s) => s.complexityAvailable);
+
   useEffect(() => {
-    setSelection(selectionId);
-    setCitations(citationIds);
-    setToolHighlight(toolHighlightIds);
-    setBlastRadius(blastRadiusFrontier);
-    setComplexityAvailable(true);
-    setColorMode(colorMode);
+    useCodeGraphStore.setState({
+      nodeKindFilters: ALL_NODE_KINDS,
+      symbolKindFilters: ALL_SYMBOL_KINDS,
+      edgeKindFilters: ALL_EDGE_KINDS,
+      activeLens: null,
+      selectionId,
+      citationIds: new Set(citationIds),
+      toolHighlightIds: new Set(toolHighlightIds),
+      selectedWorkspaceSlug: workspaceSlug,
+    });
     return () => {
       useCodeGraphStore.getState().reset();
     };
-  }, [
-    selectionId,
-    citationIds,
-    toolHighlightIds,
-    blastRadiusFrontier,
-    colorMode,
-    setSelection,
-    setCitations,
-    setToolHighlight,
-    setBlastRadius,
-    setColorMode,
-    setComplexityAvailable,
-  ]);
+  }, [selectionId, citationIds, toolHighlightIds, workspaceSlug]);
 
-  // Iter 30: derive heatmap thresholds + top-N halo set from the
-  // stub fixture so the story renders the same colors / ring the live
-  // canvas does.
-  const storyNodes = workspaceFixture ? WORKSPACE_NODES : NODES;
-  const storyEdges = workspaceFixture ? WORKSPACE_EDGES : EDGES;
-  const cognitiveValues = storyNodes.flatMap((n) =>
-    typeof n.cognitive === "number" ? [n.cognitive] : [],
-  );
-  const complexityThresholds = computeComplexityThresholds(cognitiveValues);
-  const complexityHaloIds = topComplexityIds(
-    storyNodes.map((n) => ({ id: n.id, cognitive: n.cognitive ?? null })),
-    1,
-  );
-
-  const storeState = useCodeGraphStore.getState();
-  const view: HighlightView = {
-    ...EMPTY_HIGHLIGHT_VIEW,
-    selectionId,
-    selectionNeighbors: new Set(selectionNeighbors),
-    citationIds: new Set(citationIds),
-    toolHighlightIds: new Set(toolHighlightIds),
-    blastRadiusFrontier: new Set(blastRadiusFrontier),
-    edgeKindFilters: storeState.edgeKindFilters,
-    nodeKindFilters: storeState.nodeKindFilters,
-    symbolKindFilters: storeState.symbolKindFilters,
-    pulsePhase: 0.5,
-    colorMode,
-    complexityThresholds,
-    complexityHaloIds,
-  };
+  // Engage the complexity heatmap only *after* the canvas reports complexity
+  // available. Setting `colorMode` earlier races the canvas's own
+  // `setComplexityAvailable(false)` effect-cleanup (fired as the thresholds
+  // transition null → non-null), whose guard would snap `colorMode` back to
+  // topology. Keying off `complexityAvailable` means the snap has already
+  // happened, so the mode sticks — the same sequencing the live toolbar sees
+  // (the heatmap toggle only enables once the graph is ready).
+  useEffect(() => {
+    if (colorMode === "complexity" && complexityAvailable) {
+      useCodeGraphStore.getState().setColorMode("complexity");
+    }
+  }, [colorMode, complexityAvailable]);
 
   return (
-    <div
-      className="flex flex-col gap-2 p-4"
-      style={{
-        background:
-          "radial-gradient(circle at 50% 50%, rgba(124, 58, 237, 0.05) 0%, transparent 70%), linear-gradient(to bottom, #06060a, #0a0a10)",
-      }}
-    >
-      <GraphToolbar />
-      <StubCanvas view={view} nodes={storyNodes} edges={storyEdges} />
+    <div className="relative h-screen w-full">
+      <CodeGraphCanvas projectId="project-djinn" />
     </div>
   );
 }
 
-const meta: Meta<typeof StoryShell> = {
+const meta = {
   title: "CodeGraph/CodeGraphCanvas",
-  component: StoryShell,
-  parameters: { layout: "centered" },
-};
+  component: CanvasHarness,
+  parameters: { layout: "fullscreen" },
+} satisfies Meta<typeof CanvasHarness>;
 
 export default meta;
-type Story = StoryObj<typeof StoryShell>;
+type Story = StoryObj<typeof meta>;
 
-export const Empty: Story = { args: {} };
-
-export const Selection: Story = {
-  args: {
-    selectionId: "alpha",
-    selectionNeighbors: ["alpha", "beta", "gamma"],
+/**
+ * Populated topology view: files + symbols + the call graph, colored by
+ * crate/folder. The top-5 most-complex symbols wear the persistent red
+ * refactor-candidate halo even in topology mode.
+ */
+export const Default: Story = {
+  beforeEach: () => {
+    setMcpToolResponder(snapshotResponder(PROJECT_SNAPSHOT));
   },
 };
 
+/**
+ * `handleLogin` selected: it renders orange, its 1-hop neighborhood
+ * (Router.dispatch, authenticate, Database.query) amber, and the rest of
+ * the graph dims. Neighbors are derived from the real graph topology by
+ * `useGraphReducers` — the story only seeds `selectionId`.
+ */
+export const Selection: Story = {
+  args: { selectionId: "sym:handleLogin" },
+  beforeEach: () => {
+    setMcpToolResponder(snapshotResponder(PROJECT_SNAPSHOT));
+  },
+};
+
+/**
+ * Three AI citations pinned. Cited symbols render sky-blue, the
+ * `CitationStatusBadge` shows "3 citations pinned", and the canvas
+ * auto-focuses the camera on the citation set (`useAutoFocusOnCitations`).
+ */
 export const Citations: Story = {
   args: {
-    citationIds: ["beta", "delta"],
+    citationIds: ["sym:authenticate", "sym:hashToken", "sym:handleLogin"],
   },
-};
-
-export const ToolHighlight: Story = {
-  args: {
-    toolHighlightIds: ["gamma", "delta"],
-  },
-};
-
-export const BlastRadius: Story = {
-  args: {
-    selectionId: "alpha",
-    selectionNeighbors: ["alpha", "beta"],
-    blastRadiusFrontier: ["beta", "gamma", "delta"],
-  },
-};
-
-export const SelectionPlusCitation: Story = {
-  args: {
-    selectionId: "alpha",
-    selectionNeighbors: ["alpha", "beta"],
-    citationIds: ["delta"],
+  beforeEach: () => {
+    setMcpToolResponder(snapshotResponder(PROJECT_SNAPSHOT));
   },
 };
 
 /**
- * Iter 30: complexity heatmap mode. Nodes recolor along the green→red
- * gradient and the highest-cognitive node (delta) wears the persistent
- * red halo. Reviewers can also flip the toolbar toggle to verify the
- * topology mode still works with the same fixture.
+ * Complexity heatmap: symbols recolor along the green→red cognitive-
+ * complexity gradient (handleLogin @ 31 is red, Router.dispatch @ 22
+ * orange, the tame functions green) and the ComplexityLegend renders
+ * bottom-right. The canvas reports complexity availability up through the
+ * store; the story just pins `colorMode: "complexity"`.
  */
 export const ComplexityHeatmap: Story = {
-  args: {
-    colorMode: "complexity",
+  args: { colorMode: "complexity" },
+  beforeEach: () => {
+    setMcpToolResponder(snapshotResponder(PROJECT_SNAPSHOT));
   },
 };
 
 /**
- * Iter 30: topology mode with the persistent halo always-on. Even
- * without engaging the heatmap, the top refactor candidate is marked.
- */
-export const TopologyWithRefactorHalo: Story = {
-  args: {
-    colorMode: "topology",
-  },
-};
-
-/**
- * Multi-workspace fixture: api owns the left two nodes/intra edge, while web is
- * retained as selected-workspace remote context through the dashed yellow
- * cross-workspace dependency. The web node is intentionally muted but still
- * wears a workspace badge/ring so reviewers can see endpoint identity.
+ * Two workspaces (api + web) with the `api` workspace pinned. The api
+ * cluster renders fully; the `web` endpoint (`useApiClient`) is pulled in
+ * as dimmed remote context, connected by the yellow dashed cross-workspace
+ * dependency. Driven by `filterSnapshotForWorkspace` via the real
+ * `selectedWorkspaceSlug` store slice.
  */
 export const WorkspacesAndCrossWorkspaceEdge: Story = {
-  args: {
-    workspaceFixture: true,
+  args: { workspaceSlug: "api" },
+  beforeEach: () => {
+    setMcpToolResponder(snapshotResponder(WORKSPACE_SNAPSHOT));
+  },
+};
+
+/**
+ * Empty snapshot → the "No graph data yet" overlay path. The canvas chrome
+ * renders even when WebGL can't paint, so this covers the empty state.
+ */
+export const Empty: Story = {
+  beforeEach: () => {
+    setMcpToolResponder(
+      snapshotResponder(buildSnapshot([], [])),
+    );
   },
 };
 
 // ── Multi-id citation badge story (g293) ──────────────────────────────────
+//
+// Unchanged from the prior file: drives the *real* `CitationStatusBadge`
+// through the `setCitations` store seam (the same action the chat-agent
+// harvest uses) and asserts the multi-id "3 citations pinned" text against
+// the production component.
 
-/**
- * Drives the *real* `CitationStatusBadge` through the existing store seam
- * (`setCitations`) so the multi-id text — "3 citations pinned" — is
- * asserted against the production component, not a stub. A button lets the
- * reviewer (and the Storybook `play` function) populate the citationIds
- * interactively, mirroring how the chat-agent harvest
- * (`useChatToolCallHarvest`) populates the store from a `code_graph` tool
- * result.
- */
 function CitationBadgeHarness() {
   const setCitations = useCodeGraphStore((s) => s.setCitations);
   const [applied, setApplied] = useState(false);
@@ -444,9 +412,6 @@ function CitationBadgeHarness() {
           type="button"
           data-testid="populate-citations"
           onClick={() => {
-            // 3 distinct symbol ids, as a `code_graph search` result would
-            // surface. `setCitations` is the same store action the chat
-            // harvest hook and the per-click CitationLink use.
             setCitations(["sym::alpha", "sym::beta", "sym::gamma"]);
             setApplied(true);
           }}
@@ -464,41 +429,24 @@ function CitationBadgeHarness() {
   );
 }
 
-const badgeMeta: Meta<typeof CitationBadgeHarness> = {
-  title: "CodeGraph/CodeGraphCanvas",
-  component: CitationBadgeHarness,
-  parameters: { layout: "centered" },
-};
-
-// `badgeMeta` shares the title with the default `meta` above; Storybook
-// merges all stories under one title. Keep the default export (the
-// StoryShell meta) so the existing stories are unaffected — this block is
-// only referenced to keep the type-checker happy about the unused `Meta`.
-void badgeMeta;
-
 type BadgeStory = StoryObj<typeof CitationBadgeHarness>;
 
 /**
- * Pre-populates `citationIds` with a 3-id set via the existing `setCitations`
- * store action and asserts the `CitationStatusBadge` renders the multi-id
- * "3 citations pinned" text. The `play` function clicks the populate button
- * (the same store seam the chat harvest uses) and checks the rendered badge.
+ * Pre-populates `citationIds` with a 3-id set via `setCitations` and
+ * asserts the `CitationStatusBadge` renders the multi-id
+ * "3 citations pinned" text.
  */
 export const CitationBadgeMultiId: BadgeStory = {
+  parameters: { layout: "centered" },
   render: () => <CitationBadgeHarness />,
   play: async ({ canvasElement }) => {
-    // Start from a clean store so prior stories' state doesn't leak in.
     useCodeGraphStore.getState().clearCitations();
     const canvas = within(canvasElement);
 
-    // Before populating, the badge is absent (citationCount === 0 and no
-    // selection) — the component returns null.
     expect(canvas.queryByTestId("citation-status")).toBeNull();
 
     await userEvent.click(canvas.getByTestId("populate-citations"));
 
-    // The badge reacts to the store update. `setCitations` is synchronous
-    // (Zustand), but wrap in waitFor to let React flush the commit.
     await waitFor(() => {
       expect(canvas.getByTestId("citation-status")).toHaveTextContent(
         "3 citations pinned",

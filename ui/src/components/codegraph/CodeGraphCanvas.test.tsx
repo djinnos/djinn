@@ -15,7 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 
 import { CodeGraphCanvas } from "./CodeGraphCanvas";
 import { useCodeGraphStore } from "@/stores/codeGraphStore";
