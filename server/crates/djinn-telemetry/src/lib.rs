@@ -5,7 +5,7 @@
 // const/helper per new metric. Just over the 50 KiB byte guard.
 use std::sync::OnceLock;
 
-use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 
 pub mod memory_retrieval;
 
@@ -84,6 +84,18 @@ const ZERO_OUTPUT_STALL_SECONDS: &str = "djinn_zero_output_stall_seconds";
 const PROMPT_CONTEXT_LATENCY_SECONDS: &str = "djinn_prompt_context_latency_seconds";
 const PROMPT_CONTEXT_CHILD_SPAN_LATENCY_SECONDS: &str =
     "djinn_prompt_context_child_span_latency_seconds";
+
+// ─── Bounded cargo and workspace duration telemetry (proposal zp5t) ──
+const CARGO_INVOCATION_SECONDS: &str = "djinn_cargo_invocation_seconds";
+const CARGO_INVOCATION_BUCKETS: [f64; 11] = [
+    1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0,
+];
+const WORKSPACE_CLONE_SECONDS: &str = "djinn_workspace_clone_seconds";
+const WORKSPACE_SEED_SECONDS: &str = "djinn_workspace_seed_seconds";
+const WORKSPACE_CLEANUP_SECONDS: &str = "djinn_workspace_cleanup_seconds";
+const WORKSPACE_BUCKETS: [f64; 11] = [
+    0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+];
 
 // ─── Cache cleanup observability ────────────────────────────────────
 const CACHE_CLEANUP_TOTAL: &str = "djinn_cache_cleanup_total";
@@ -523,7 +535,29 @@ fn handle() -> Result<&'static PrometheusHandle, String> {
     HANDLE
         .get_or_init(|| {
             PrometheusBuilder::new()
-                .install_recorder()
+                .set_buckets_for_metric(
+                    Matcher::Full(CARGO_INVOCATION_SECONDS.to_owned()),
+                    &CARGO_INVOCATION_BUCKETS,
+                )
+                .and_then(|b| {
+                    b.set_buckets_for_metric(
+                        Matcher::Full(WORKSPACE_CLONE_SECONDS.to_owned()),
+                        &WORKSPACE_BUCKETS,
+                    )
+                })
+                .and_then(|b| {
+                    b.set_buckets_for_metric(
+                        Matcher::Full(WORKSPACE_SEED_SECONDS.to_owned()),
+                        &WORKSPACE_BUCKETS,
+                    )
+                })
+                .and_then(|b| {
+                    b.set_buckets_for_metric(
+                        Matcher::Full(WORKSPACE_CLEANUP_SECONDS.to_owned()),
+                        &WORKSPACE_BUCKETS,
+                    )
+                })
+                .and_then(|b| b.install_recorder())
                 .map_err(format_build_error)
                 .inspect(|_| register_metrics())
         })
@@ -884,6 +918,24 @@ fn register_metrics() {
             .absolute(0);
         }
     }
+
+    // ─── Bounded cargo and workspace duration telemetry (proposal zp5t) ──
+    metrics::describe_histogram!(
+        CARGO_INVOCATION_SECONDS,
+        "Cargo subprocess invocation duration in seconds, partitioned by bounded kind and exit labels."
+    );
+    metrics::describe_histogram!(
+        WORKSPACE_CLONE_SECONDS,
+        "Workspace clone duration in seconds, partitioned by bounded outcome label."
+    );
+    metrics::describe_histogram!(
+        WORKSPACE_SEED_SECONDS,
+        "Workspace seed duration in seconds, partitioned by bounded outcome label."
+    );
+    metrics::describe_histogram!(
+        WORKSPACE_CLEANUP_SECONDS,
+        "Workspace cleanup duration in seconds, partitioned by bounded trigger and outcome labels."
+    );
 }
 
 pub mod dispatch {
@@ -1624,6 +1676,104 @@ pub mod cache_cleanup {
             "mode" => mode,
         )
         .increment(count);
+    }
+}
+
+/// Bounded cargo and workspace duration telemetry (proposal zp5t).
+///
+/// Collectors for subprocess and workspace lifecycle durations. All label
+/// domains are closed and static; callers pass one of the module constants.
+pub mod cargo_invocation {
+    pub const KIND_CHECK: &str = "check";
+    pub const KIND_CLIPPY: &str = "clippy";
+    pub const KIND_TEST: &str = "test";
+    pub const KIND_BUILD: &str = "build";
+    pub const KIND_OTHER: &str = "other";
+
+    pub const EXIT_OK: &str = "ok";
+    pub const EXIT_FAIL: &str = "fail";
+    pub const EXIT_CANCELLED: &str = "cancelled";
+
+    #[allow(dead_code)]
+    pub(crate) const ALL_KINDS: [&str; 5] =
+        [KIND_CHECK, KIND_CLIPPY, KIND_TEST, KIND_BUILD, KIND_OTHER];
+    #[allow(dead_code)]
+    pub(crate) const ALL_EXITS: [&str; 3] = [EXIT_OK, EXIT_FAIL, EXIT_CANCELLED];
+
+    /// Record the duration of a classified cargo subprocess invocation.
+    ///
+    /// `kind` must be one of the `KIND_*` constants; `exit` must be one of the
+    /// `EXIT_*` constants. The duration is measured in seconds and emitted as a
+    /// histogram with proposal zp5t bucket boundaries.
+    pub fn record_seconds(kind: &'static str, exit: &'static str, duration: std::time::Duration) {
+        metrics::histogram!(
+            super::CARGO_INVOCATION_SECONDS,
+            "kind" => kind,
+            "exit" => exit,
+        )
+        .record(duration);
+    }
+}
+
+pub mod workspace_clone {
+    pub const OUTCOME_OK: &str = "ok";
+    pub const OUTCOME_ERROR: &str = "error";
+    pub const OUTCOME_CANCELLED: &str = "cancelled";
+
+    #[allow(dead_code)]
+    pub(crate) const ALL_OUTCOMES: [&str; 3] = [OUTCOME_OK, OUTCOME_ERROR, OUTCOME_CANCELLED];
+
+    /// Record the duration of a workspace clone operation.
+    pub fn record_seconds(outcome: &'static str, duration: std::time::Duration) {
+        metrics::histogram!(super::WORKSPACE_CLONE_SECONDS, "outcome" => outcome).record(duration);
+    }
+}
+
+pub mod workspace_seed {
+    pub const OUTCOME_OK: &str = "ok";
+    pub const OUTCOME_ERROR: &str = "error";
+    pub const OUTCOME_CANCELLED: &str = "cancelled";
+
+    #[allow(dead_code)]
+    pub(crate) const ALL_OUTCOMES: [&str; 3] = [OUTCOME_OK, OUTCOME_ERROR, OUTCOME_CANCELLED];
+
+    /// Record the duration of a workspace seed operation.
+    pub fn record_seconds(outcome: &'static str, duration: std::time::Duration) {
+        metrics::histogram!(super::WORKSPACE_SEED_SECONDS, "outcome" => outcome).record(duration);
+    }
+}
+
+pub mod workspace_cleanup {
+    pub const TRIGGER_COMPLETE: &str = "complete";
+    pub const TRIGGER_ERROR: &str = "error";
+    pub const TRIGGER_CANCEL: &str = "cancel";
+    pub const TRIGGER_SHUTDOWN: &str = "shutdown";
+
+    pub const OUTCOME_OK: &str = "ok";
+    pub const OUTCOME_ERROR: &str = "error";
+
+    #[allow(dead_code)]
+    pub(crate) const ALL_TRIGGERS: [&str; 4] = [
+        TRIGGER_COMPLETE,
+        TRIGGER_ERROR,
+        TRIGGER_CANCEL,
+        TRIGGER_SHUTDOWN,
+    ];
+    #[allow(dead_code)]
+    pub(crate) const ALL_OUTCOMES: [&str; 2] = [OUTCOME_OK, OUTCOME_ERROR];
+
+    /// Record the duration of a workspace cleanup operation.
+    pub fn record_seconds(
+        trigger: &'static str,
+        outcome: &'static str,
+        duration: std::time::Duration,
+    ) {
+        metrics::histogram!(
+            super::WORKSPACE_CLEANUP_SECONDS,
+            "trigger" => trigger,
+            "outcome" => outcome,
+        )
+        .record(duration);
     }
 }
 
@@ -3385,6 +3535,352 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ─── Bounded cargo and workspace duration telemetry tests (proposal zp5t) ──
+
+    fn histogram_count(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with(metric)
+                    && labels
+                        .iter()
+                        .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")))
+            })
+            .and_then(|line| {
+                line.rsplit_once(' ')
+                    .and_then(|(_, value)| value.parse().ok())
+            })
+            .unwrap_or(0.0)
+    }
+
+    fn histogram_bucket_count(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> usize {
+        rendered
+            .lines()
+            .filter(|line| {
+                line.starts_with(metric)
+                    && line.contains("_bucket")
+                    && labels
+                        .iter()
+                        .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")))
+            })
+            .count()
+    }
+
+    fn histogram_bucket_finite_values(
+        rendered: &str,
+        metric: &str,
+        labels: &[(&str, &str)],
+    ) -> Vec<f64> {
+        rendered
+            .lines()
+            .filter_map(|line| {
+                if !line.starts_with(metric) || !line.contains("_bucket") {
+                    return None;
+                }
+                if !labels
+                    .iter()
+                    .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")))
+                {
+                    return None;
+                }
+                let start = line.find("le=\"")? + 4;
+                let end = line[start..].find('"')? + start;
+                let le = &line[start..end];
+                if le == "+Inf" { None } else { le.parse().ok() }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cargo_and_workspace_metric_helpers_are_synchronous_unit_functions() {
+        let _guard = test_guard();
+        fn assert_sync_unit<F: FnOnce()>(f: F) {
+            f();
+        }
+        init().unwrap();
+        assert_sync_unit(|| {
+            cargo_invocation::record_seconds(
+                cargo_invocation::KIND_CHECK,
+                cargo_invocation::EXIT_OK,
+                std::time::Duration::from_secs(1),
+            );
+        });
+        assert_sync_unit(|| {
+            workspace_clone::record_seconds(
+                workspace_clone::OUTCOME_OK,
+                std::time::Duration::from_secs(1),
+            );
+        });
+        assert_sync_unit(|| {
+            workspace_seed::record_seconds(
+                workspace_seed::OUTCOME_OK,
+                std::time::Duration::from_secs(1),
+            );
+        });
+        assert_sync_unit(|| {
+            workspace_cleanup::record_seconds(
+                workspace_cleanup::TRIGGER_COMPLETE,
+                workspace_cleanup::OUTCOME_OK,
+                std::time::Duration::from_secs(1),
+            );
+        });
+    }
+
+    #[test]
+    fn cargo_invocation_histogram_renders_all_label_combos_and_buckets() {
+        let _guard = test_guard();
+        init().unwrap();
+        let duration = std::time::Duration::from_secs_f64(2.5);
+        let mut rendered = String::new();
+        for kind in cargo_invocation::ALL_KINDS {
+            for exit in cargo_invocation::ALL_EXITS {
+                let labels = &[("kind", kind), ("exit", exit)];
+                let before = render().unwrap();
+                let count_before =
+                    histogram_count(&before, "djinn_cargo_invocation_seconds_count", labels);
+                let sum_before =
+                    histogram_count(&before, "djinn_cargo_invocation_seconds_sum", labels);
+                cargo_invocation::record_seconds(kind, exit, duration);
+                rendered = render().unwrap();
+                let count_after =
+                    histogram_count(&rendered, "djinn_cargo_invocation_seconds_count", labels);
+                let sum_after =
+                    histogram_count(&rendered, "djinn_cargo_invocation_seconds_sum", labels);
+                assert_eq!(
+                    count_after,
+                    count_before + 1.0,
+                    "cargo_invocation count for {kind}/{exit}"
+                );
+                assert!(
+                    (sum_after - sum_before - 2.5).abs() < 0.001,
+                    "cargo_invocation sum for {kind}/{exit}: {sum_after}"
+                );
+                assert_eq!(
+                    histogram_bucket_count(&rendered, "djinn_cargo_invocation_seconds", labels),
+                    CARGO_INVOCATION_BUCKETS.len() + 1,
+                    "cargo_invocation bucket count for {kind}/{exit}"
+                );
+                let finite = histogram_bucket_finite_values(
+                    &rendered,
+                    "djinn_cargo_invocation_seconds",
+                    labels,
+                );
+                assert_eq!(
+                    finite,
+                    CARGO_INVOCATION_BUCKETS.to_vec(),
+                    "cargo_invocation finite buckets for {kind}/{exit}"
+                );
+                let inf = rendered_sample(
+                    &rendered,
+                    "djinn_cargo_invocation_seconds_bucket",
+                    &[("kind", kind), ("exit", exit), ("le", "+Inf")],
+                );
+                let expected = format!(" {count_after}");
+                assert!(
+                    inf.ends_with(&expected),
+                    "cargo_invocation +Inf bucket for {kind}/{exit}: {inf}"
+                );
+            }
+        }
+        assert!(
+            rendered.contains("# HELP djinn_cargo_invocation_seconds"),
+            "missing HELP for cargo invocation histogram:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("# TYPE djinn_cargo_invocation_seconds histogram"),
+            "cargo invocation must render as a histogram:\n{rendered}"
+        );
+        for forbidden in [
+            "task_id=",
+            "session_id=",
+            "workspace=",
+            "project_id=",
+            "argv=",
+        ] {
+            for line in rendered.lines() {
+                if !line.starts_with("djinn_cargo_invocation_seconds") {
+                    continue;
+                }
+                assert!(
+                    !line.contains(forbidden),
+                    "cargo_invocation must not carry high-cardinality label {forbidden}: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_clone_histogram_renders_all_outcomes_and_buckets() {
+        let _guard = test_guard();
+        init().unwrap();
+        let duration = std::time::Duration::from_secs_f64(0.75);
+        let mut rendered = String::new();
+        for outcome in workspace_clone::ALL_OUTCOMES {
+            let labels = &[("outcome", outcome)];
+            let before = render().unwrap();
+            let count_before =
+                histogram_count(&before, "djinn_workspace_clone_seconds_count", labels);
+            let sum_before = histogram_count(&before, "djinn_workspace_clone_seconds_sum", labels);
+            workspace_clone::record_seconds(outcome, duration);
+            rendered = render().unwrap();
+            let count_after =
+                histogram_count(&rendered, "djinn_workspace_clone_seconds_count", labels);
+            let sum_after = histogram_count(&rendered, "djinn_workspace_clone_seconds_sum", labels);
+            assert_eq!(
+                count_after,
+                count_before + 1.0,
+                "workspace_clone count for {outcome}"
+            );
+            assert!(
+                (sum_after - sum_before - 0.75).abs() < 0.001,
+                "workspace_clone sum for {outcome}: {sum_after}"
+            );
+            assert_eq!(
+                histogram_bucket_count(&rendered, "djinn_workspace_clone_seconds", labels),
+                WORKSPACE_BUCKETS.len() + 1,
+                "workspace_clone bucket count for {outcome}"
+            );
+            let finite =
+                histogram_bucket_finite_values(&rendered, "djinn_workspace_clone_seconds", labels);
+            assert_eq!(
+                finite,
+                WORKSPACE_BUCKETS.to_vec(),
+                "workspace_clone buckets for {outcome}"
+            );
+            let inf = rendered_sample(
+                &rendered,
+                "djinn_workspace_clone_seconds_bucket",
+                &[("outcome", outcome), ("le", "+Inf")],
+            );
+            let expected = format!(" {count_after}");
+            assert!(
+                inf.ends_with(&expected),
+                "workspace_clone +Inf for {outcome}: {inf}"
+            );
+        }
+        assert!(
+            rendered.contains("# TYPE djinn_workspace_clone_seconds histogram"),
+            "workspace clone must render as a histogram:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn workspace_seed_histogram_renders_all_outcomes_and_buckets() {
+        let _guard = test_guard();
+        init().unwrap();
+        let duration = std::time::Duration::from_secs_f64(0.75);
+        let mut rendered = String::new();
+        for outcome in workspace_seed::ALL_OUTCOMES {
+            let labels = &[("outcome", outcome)];
+            let before = render().unwrap();
+            let count_before =
+                histogram_count(&before, "djinn_workspace_seed_seconds_count", labels);
+            let sum_before = histogram_count(&before, "djinn_workspace_seed_seconds_sum", labels);
+            workspace_seed::record_seconds(outcome, duration);
+            rendered = render().unwrap();
+            let count_after =
+                histogram_count(&rendered, "djinn_workspace_seed_seconds_count", labels);
+            let sum_after = histogram_count(&rendered, "djinn_workspace_seed_seconds_sum", labels);
+            assert_eq!(
+                count_after,
+                count_before + 1.0,
+                "workspace_seed count for {outcome}"
+            );
+            assert!(
+                (sum_after - sum_before - 0.75).abs() < 0.001,
+                "workspace_seed sum for {outcome}: {sum_after}"
+            );
+            assert_eq!(
+                histogram_bucket_count(&rendered, "djinn_workspace_seed_seconds", labels),
+                WORKSPACE_BUCKETS.len() + 1,
+                "workspace_seed bucket count for {outcome}"
+            );
+            let finite =
+                histogram_bucket_finite_values(&rendered, "djinn_workspace_seed_seconds", labels);
+            assert_eq!(
+                finite,
+                WORKSPACE_BUCKETS.to_vec(),
+                "workspace_seed buckets for {outcome}"
+            );
+            let inf = rendered_sample(
+                &rendered,
+                "djinn_workspace_seed_seconds_bucket",
+                &[("outcome", outcome), ("le", "+Inf")],
+            );
+            let expected = format!(" {count_after}");
+            assert!(
+                inf.ends_with(&expected),
+                "workspace_seed +Inf for {outcome}: {inf}"
+            );
+        }
+        assert!(
+            rendered.contains("# TYPE djinn_workspace_seed_seconds histogram"),
+            "workspace seed must render as a histogram:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn workspace_cleanup_histogram_renders_all_trigger_outcome_combos_and_buckets() {
+        let _guard = test_guard();
+        init().unwrap();
+        let duration = std::time::Duration::from_secs_f64(0.75);
+        let mut rendered = String::new();
+        for trigger in workspace_cleanup::ALL_TRIGGERS {
+            for outcome in workspace_cleanup::ALL_OUTCOMES {
+                let labels = &[("trigger", trigger), ("outcome", outcome)];
+                let before = render().unwrap();
+                let count_before =
+                    histogram_count(&before, "djinn_workspace_cleanup_seconds_count", labels);
+                let sum_before =
+                    histogram_count(&before, "djinn_workspace_cleanup_seconds_sum", labels);
+                workspace_cleanup::record_seconds(trigger, outcome, duration);
+                rendered = render().unwrap();
+                let count_after =
+                    histogram_count(&rendered, "djinn_workspace_cleanup_seconds_count", labels);
+                let sum_after =
+                    histogram_count(&rendered, "djinn_workspace_cleanup_seconds_sum", labels);
+                assert_eq!(
+                    count_after,
+                    count_before + 1.0,
+                    "workspace_cleanup count for {trigger}/{outcome}"
+                );
+                assert!(
+                    (sum_after - sum_before - 0.75).abs() < 0.001,
+                    "workspace_cleanup sum for {trigger}/{outcome}: {sum_after}"
+                );
+                assert_eq!(
+                    histogram_bucket_count(&rendered, "djinn_workspace_cleanup_seconds", labels,),
+                    WORKSPACE_BUCKETS.len() + 1,
+                    "workspace_cleanup bucket count for {trigger}/{outcome}"
+                );
+                let finite = histogram_bucket_finite_values(
+                    &rendered,
+                    "djinn_workspace_cleanup_seconds",
+                    labels,
+                );
+                assert_eq!(
+                    finite,
+                    WORKSPACE_BUCKETS.to_vec(),
+                    "workspace_cleanup buckets for {trigger}/{outcome}"
+                );
+                let inf = rendered_sample(
+                    &rendered,
+                    "djinn_workspace_cleanup_seconds_bucket",
+                    &[("trigger", trigger), ("outcome", outcome), ("le", "+Inf")],
+                );
+                let expected = format!(" {count_after}");
+                assert!(
+                    inf.ends_with(&expected),
+                    "workspace_cleanup +Inf for {trigger}/{outcome}: {inf}"
+                );
+            }
+        }
+        assert!(
+            rendered.contains("# TYPE djinn_workspace_cleanup_seconds histogram"),
+            "workspace cleanup must render as a histogram:\n{rendered}"
+        );
     }
 }
 
