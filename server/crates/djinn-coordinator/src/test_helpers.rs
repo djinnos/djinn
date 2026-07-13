@@ -197,7 +197,7 @@ pub async fn create_test_project(db: &Database) -> djinn_core::models::Project {
     let image = djinn_db::ProjectImage {
         tag: Some(format!(
             "test-registry/djinn-project-{}:testhash",
-            &project.id
+            project.id
         )),
         hash: Some("testhash".into()),
         status: djinn_db::ProjectImageStatus::READY.into(),
