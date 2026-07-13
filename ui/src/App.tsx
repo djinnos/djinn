@@ -22,7 +22,7 @@ import { UsageDashboardPage } from "@/pages/UsageDashboardPage";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { DispatchPauseBanner } from "@/components/DispatchPauseBanner";
 import { AuthGate, useAuthUser } from "@/components/AuthGate";
-import { useEffect, useRef } from "react";
+import { useEffect, useState } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useProviderGateStore } from "@/stores/providerGateStore";
@@ -121,7 +121,7 @@ function AuthenticatedApp() {
   const { hasProvider, refresh: refreshGate } = useProviderGateStore();
   const { hasModels, refresh: refreshModelGate } = useModelGateStore();
   const { hasProject, refresh: refreshProjectGate } = useProjectGateStore();
-  const hasConnectedOnce = useRef(false);
+  const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
 
   useProjectsBootstrap(status);
   useDispatchPauseHydration(status);
@@ -129,17 +129,23 @@ function AuthenticatedApp() {
 
   useEffect(() => {
     if (status === 'connected') {
-      hasConnectedOnce.current = true;
       void refreshGate();
       void refreshModelGate();
       void refreshProjectGate();
     }
   }, [status, refreshGate, refreshModelGate, refreshProjectGate]);
 
+  // Latch "the server was reachable at least once" during render (React's
+  // sanctioned adjust-state-while-rendering pattern) so it can be read below
+  // without a render-phase ref access.
+  if (status === 'connected' && !hasConnectedOnce) {
+    setHasConnectedOnce(true);
+  }
+
   // If the server has been reached once and then drops, keep rendering the
   // shell so the ConnectionBanner can surface the outage without forcing the
   // user back to a blocking overlay.
-  if (status !== 'connected' && hasConnectedOnce.current) {
+  if (status !== 'connected' && hasConnectedOnce) {
     return <MainLayout />;
   }
 

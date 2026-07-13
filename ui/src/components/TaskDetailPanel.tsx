@@ -205,10 +205,14 @@ function CiStatusSection({ ci }: { ci?: CiGateSnapshot | null }) {
 }
 
 export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelProps) {
+  // Hooks must run unconditionally, so this shared (and aggressively cached)
+  // roster query is read before the early return below. Every other consumer
+  // fetches it unconditionally too, so react-query dedupes it to the cache.
+  const { data: users = [] } = useQuery(usersQueryOptions());
+
   if (!open || !task) return null;
 
   const criteria = (task.acceptance_criteria ?? []).map(parseCriterion);
-  const { data: users = [] } = useQuery(usersQueryOptions());
   const creator = task.created_by_user_id
     ? users.find((u) => u.id === task.created_by_user_id)
     : undefined;

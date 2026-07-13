@@ -9,7 +9,6 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { useTaskStore } from "@/stores/useTaskStore";
-import { taskStore } from "@/stores/taskStore";
 import { useSessionMessages } from "@/hooks/useSessionMessages";
 import { SessionThread } from "@/components/SessionThread";
 import ReactMarkdown from "react-markdown";
@@ -189,35 +188,29 @@ export function TaskSessionPage() {
     ? `${selectedProject.github_owner}/${selectedProject.github_repo}`
     : null;
   const tasks = useTaskStore((s) => s.tasks);
-  const [task, setTask] = useState<Task | null>(null);
-  const [loadingTask, setLoadingTask] = useState(true);
 
-  // Find task from store
-  useEffect(() => {
-    if (!taskId) return;
-    const found = tasks.get(taskId);
-    if (found) {
-      setTask(found);
-      setLoadingTask(false);
-    } else {
-      // Give a brief moment for the store to populate before showing not-found
-      const timer = setTimeout(() => setLoadingTask(false), 500);
-      return () => clearTimeout(timer);
-    }
-  }, [taskId, tasks]);
+  // Derive the task straight from the store. `taskStore` replaces the tasks Map
+  // on every mutation, so the selector above re-renders on any change — no
+  // effect-based syncing or manual subscription is needed.
+  const task = taskId ? tasks.get(taskId) ?? null : null;
 
-  // Keep task updated from store
+  // Give the store a brief moment to populate before showing "not found". The
+  // grace window resets whenever the task id changes (render-phase pattern) and
+  // only closes from an async timer, keeping this out of the
+  // set-state-in-effect anti-pattern.
+  const [graceTaskId, setGraceTaskId] = useState(taskId);
+  const [graceElapsed, setGraceElapsed] = useState(false);
+  if (taskId !== graceTaskId) {
+    setGraceTaskId(taskId);
+    setGraceElapsed(false);
+  }
   useEffect(() => {
-    if (!taskId) return;
-    const unsub = taskStore.subscribe((state) => {
-      const updated = state.tasks.get(taskId);
-      if (updated) {
-        setTask(updated);
-        setLoadingTask(false);
-      }
-    });
-    return unsub;
-  }, [taskId]);
+    if (!taskId || task) return;
+    const timer = setTimeout(() => setGraceElapsed(true), 500);
+    return () => clearTimeout(timer);
+  }, [taskId, task]);
+
+  const loadingTask = !task && !graceElapsed;
 
   const { timeline, sessions, loading, error, streamingText, streamingThinking } = useSessionMessages(
     taskId ?? null,

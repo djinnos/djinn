@@ -73,7 +73,7 @@ import { LoadingButton } from './loading-button'
 import { Toaster } from './sonner'
 
 const meta = {
-  title: 'UI/Primitives Gallery',
+  title: 'Shared/Primitives',
   tags: ['autodocs'],
   parameters: { layout: 'padded', backgrounds: { default: 'dark' } },
 }
@@ -165,14 +165,16 @@ export const ComboboxStories = {
   }
 }
 
+function DropdownMenuDemo({ destructive }: { destructive: boolean }) {
+  const [checked, setChecked] = useState(true)
+  const [radio, setRadio] = useState('a')
+  return <DropdownMenu><DropdownMenuTrigger render={<Button>Open menu</Button>} /><DropdownMenuContent><DropdownMenuLabel>Actions</DropdownMenuLabel><DropdownMenuGroup><DropdownMenuItem>Profile</DropdownMenuItem><DropdownMenuItem variant={destructive ? 'destructive' : 'default'}>Delete</DropdownMenuItem><DropdownMenuCheckboxItem checked={checked} onCheckedChange={setChecked}>Pinned</DropdownMenuCheckboxItem></DropdownMenuGroup><DropdownMenuSeparator /><DropdownMenuRadioGroup value={radio} onValueChange={setRadio}><DropdownMenuRadioItem value="a">Alpha</DropdownMenuRadioItem><DropdownMenuRadioItem value="b">Beta</DropdownMenuRadioItem></DropdownMenuRadioGroup><DropdownMenuSub><DropdownMenuSubTrigger>More</DropdownMenuSubTrigger><DropdownMenuSubContent><DropdownMenuItem>Sub action</DropdownMenuItem></DropdownMenuSubContent></DropdownMenuSub></DropdownMenuContent></DropdownMenu>
+}
+
 export const DropdownMenuStories = {
   args: { destructive: false },
   argTypes: { destructive: { control: 'boolean' } },
-  render: ({ destructive }: any) => {
-    const [checked, setChecked] = useState(true)
-    const [radio, setRadio] = useState('a')
-    return <DropdownMenu><DropdownMenuTrigger render={<Button>Open menu</Button>} /><DropdownMenuContent><DropdownMenuLabel>Actions</DropdownMenuLabel><DropdownMenuGroup><DropdownMenuItem>Profile</DropdownMenuItem><DropdownMenuItem variant={destructive ? 'destructive' : 'default'}>Delete</DropdownMenuItem><DropdownMenuCheckboxItem checked={checked} onCheckedChange={setChecked}>Pinned</DropdownMenuCheckboxItem></DropdownMenuGroup><DropdownMenuSeparator /><DropdownMenuRadioGroup value={radio} onValueChange={setRadio}><DropdownMenuRadioItem value="a">Alpha</DropdownMenuRadioItem><DropdownMenuRadioItem value="b">Beta</DropdownMenuRadioItem></DropdownMenuRadioGroup><DropdownMenuSub><DropdownMenuSubTrigger>More</DropdownMenuSubTrigger><DropdownMenuSubContent><DropdownMenuItem>Sub action</DropdownMenuItem></DropdownMenuSubContent></DropdownMenuSub></DropdownMenuContent></DropdownMenu>
-  }
+  render: ({ destructive }: { destructive: boolean }) => <DropdownMenuDemo destructive={destructive} />,
 }
 
 export const FieldStories = { render: () => <FieldGroup><FieldSet><Field><FieldLabel htmlFor="field-input">Name</FieldLabel><FieldContent><Input id="field-input" placeholder="Jane" /><FieldDescription>Enter your full name.</FieldDescription></FieldContent></Field><Field data-invalid><FieldTitle>Email</FieldTitle><FieldContent><Input aria-invalid defaultValue="wrong" /><FieldError errors={[{ message: 'Invalid email' }]} /></FieldContent></Field></FieldSet></FieldGroup> }

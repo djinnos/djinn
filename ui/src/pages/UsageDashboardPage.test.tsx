@@ -264,7 +264,7 @@ describe("UsageDashboardPage — empty state", () => {
   it("renders shared EmptyState with title and Refresh action when query returns empty data", async () => {
     mockReturnEmptyData = true;
 
-    const { getByText, getByRole, getAllByRole } = render(<UsageDashboardPage />, {
+    const { getByText, getAllByRole } = render(<UsageDashboardPage />, {
       wrapperOptions: {
         routerProps: { initialEntries: ["/admin/usage?preset=30d"] },
       },

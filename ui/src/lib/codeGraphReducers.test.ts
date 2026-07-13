@@ -12,7 +12,6 @@ import {
   colorForComplexity,
   computeComplexityThresholds,
   edgeReducer,
-  isTraversalContainmentEdge,
   type EdgeKindAwareGraph,
   isViewEmpty,
   nodeReducer,
