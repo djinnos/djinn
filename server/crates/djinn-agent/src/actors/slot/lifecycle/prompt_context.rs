@@ -19,7 +19,7 @@ use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 use tracing::Instrument;
 
 mod types;
-pub(crate) use types::{PromptContext, PromptContextInputs, ReadSourceInfo};
+pub(crate) use types::{KnowledgeContextIdentity, PromptContext, PromptContextInputs, ReadSourceInfo};
 
 /// Append read-only sibling repo section to prompt. No-op when no read sources.
 fn append_read_sources_prompt(prompt: &str, read_sources: &[ReadSourceInfo]) -> String {
@@ -337,6 +337,7 @@ pub(crate) async fn load_knowledge_context(
     task: &Task,
     epic_context: Option<&str>,
     app_state: &AgentContext,
+    identity: Option<KnowledgeContextIdentity<'_>>,
 ) -> Option<String> {
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_paths = derive_task_scope_paths(task, epic_context);
@@ -391,6 +392,7 @@ pub(crate) async fn load_knowledge_context(
                     },
                     cap_exceeded,
                     &app_state.db,
+                    identity,
                 )
                 .await;
             }
@@ -442,6 +444,7 @@ pub(crate) async fn load_knowledge_context(
         },
         candidate_cap_exceeded,
         &app_state.db,
+        identity,
     )
     .await;
 
@@ -605,6 +608,7 @@ async fn persist_knowledge_trace(
     durations: KnowledgeTraceDurations,
     candidate_cap_exceeded: bool,
     db: &djinn_db::Database,
+    identity: Option<KnowledgeContextIdentity<'_>>,
 ) {
     use djinn_db::repositories::retrieval_trace::{
         CreateRetrievalTraceParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
@@ -653,8 +657,8 @@ async fn persist_knowledge_trace(
     let repo = RetrievalTraceRepository::new(db.clone());
     let params = CreateRetrievalTraceParams {
         project_id: &task.project_id,
-        session_id: None,
-        task_run_id: None,
+        session_id: identity.map(|identity| identity.session_id),
+        task_run_id: identity.map(|identity| identity.task_run_id),
         task_id: Some(&task.id),
         entry_point: RetrievalTraceEntryPoint::LoadKnowledgeContext,
         trigger: Some(&trigger),
@@ -699,6 +703,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         system_prompt_extensions,
         resolved_skills,
         app_state,
+        knowledge_identity,
         read_sources,
         worker_resume_note,
         arbiter_directive,
@@ -782,7 +787,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             );
             async move {
                 let child_start = tokio::time::Instant::now();
-                let result = load_knowledge_context(task, epic_context_ref, app_state).await;
+                let result = load_knowledge_context(task, epic_context_ref, app_state, knowledge_identity).await;
                 (result, child_start.elapsed())
             }
             .instrument(span)

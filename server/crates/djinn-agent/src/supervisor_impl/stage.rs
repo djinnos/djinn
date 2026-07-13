@@ -891,6 +891,21 @@ pub(crate) async fn execute_stage(
         }
     };
 
+    // Create the role session before prompt assembly so retrieval traces use real identities.
+    let billing_signal = resolved.as_ref().map(|r| {
+        let credential_is_oauth = matches!(r.provider_credential, Some(crate::actors::slot::helpers::ProviderCredential::OAuthConfig(_)));
+        derive_billing_signal(&r.catalog_provider_id, &r.model_name, credential_is_oauth)
+    });
+    let cost_basis_hint = billing_signal.map(|(hint, _)| hint);
+    let billing_source = billing_signal.map(|(_, source)| source);
+    let _ = services.report_stage_step(djinn_runtime::stage_step::SESSION_CREATE).await;
+    let session_record = services.create_session(djinn_supervisor::services::SerializableCreateSessionParams {
+        project_id: task.project_id.clone(), task_id: Some(task.id.clone()), model: model_id.clone(),
+        agent_type: runtime_role_name.to_string(), metadata_json: None, task_run_id: Some(task_run_id.to_string()),
+        cost_basis_hint, billing_source,
+    }).await.map_err(StageError::SessionCreate)?;
+    let session_id = session_record.id.clone();
+
     // ── Build prompt context ─────────────────────────────────────────────────
     // `runtime_role` renders the template (may be the specialist's base role);
     // `role_for_epic_check` stays the injected base role because the
@@ -941,9 +956,9 @@ pub(crate) async fn execute_stage(
             "Supervisor stage: injected arbiter directive for monitored reopen"
         );
     }
-    // Coarse pre-session progress marker for the host-side liveness deadline:
-    // model/credential/MCP/skill resolution and prompt assembly happen here,
-    // before any session row exists.
+    // Prompt-context progress marker after the role session has been created:
+    // Prompt assembly happens here,
+    // before the reply loop starts.
     let _ = services
         .report_stage_step(djinn_runtime::stage_step::CONTEXT_BUILD)
         .await;
@@ -963,6 +978,12 @@ pub(crate) async fn execute_stage(
         system_prompt_extensions: &system_prompt_extensions,
         resolved_skills: &resolved_skills,
         app_state: agent_context,
+        knowledge_identity: Some(crate::actors::slot::lifecycle::prompt_context::KnowledgeContextIdentity {
+            session_id: &session_id,
+            task_run_id,
+            created_by_user_id: task.created_by_user_id.as_deref(),
+            resume_progress_summary: spec.resume_lifecycle_metadata.as_ref().and_then(|metadata| metadata.last_durable_progress_summary.as_deref()),
+        }),
         read_sources: &read_sources,
         worker_resume_note: worker_resume_note.as_deref(),
         arbiter_directive: arbiter_directive.as_deref(),
@@ -970,47 +991,6 @@ pub(crate) async fn execute_stage(
     })
     .await;
 
-    // ── Create the session record linked to the task-run ─────────────────────
-    // Phase 6c routes session creation through `SupervisorServices` so the
-    // in-Pod worker never opens its own DB connection.  Host-side
-    // `DirectServices` delegates to `SessionRepository::create` verbatim.
-    //
-    // Derive the billing classification from the RESOLVED CREDENTIAL (not just
-    // model-id substrings) so `DirectServices::create_session` books
-    // `sessions.cost_basis` on explicit signal: a session on `openai/gpt-5.5`
-    // backed by a ChatGPT/Codex PLAN OAuth credential is a $0-spend plan even
-    // though its model id has no `codex` marker. OAuth transport ALONE does not
-    // imply a subscription — see `oauth_is_subscription_plan`. The catalog
-    // string rules stay as an additional signal (a `zai-coding-plan/...` model
-    // remains projected); the legacy fallback covers `hint = None`.
-    let billing_signal = resolved.as_ref().map(|r| {
-        let credential_is_oauth = matches!(
-            r.provider_credential,
-            Some(crate::actors::slot::helpers::ProviderCredential::OAuthConfig(_))
-        );
-        derive_billing_signal(&r.catalog_provider_id, &r.model_name, credential_is_oauth)
-    });
-    let cost_basis_hint = billing_signal.map(|(hint, _)| hint);
-    let billing_source = billing_signal.map(|(_, source)| source);
-    let _ = services
-        .report_stage_step(djinn_runtime::stage_step::SESSION_CREATE)
-        .await;
-    let session_record = services
-        .create_session(
-            djinn_supervisor::services::SerializableCreateSessionParams {
-                project_id: task.project_id.clone(),
-                task_id: Some(task.id.clone()),
-                model: model_id.clone(),
-                agent_type: runtime_role_name.to_string(),
-                metadata_json: None,
-                task_run_id: Some(task_run_id.to_string()),
-                cost_basis_hint,
-                billing_source,
-            },
-        )
-        .await
-        .map_err(StageError::SessionCreate)?;
-    let session_id = session_record.id.clone();
     // 7ry9: Emit session-start structured telemetry with the provider-facing
     // prompt hash. The hash is already computed from the final truncated
     // system prompt; no prompt contents are emitted.

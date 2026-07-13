@@ -117,6 +117,7 @@ pub async fn run_load_knowledge_context_for_test(
         task,
         epic_context,
         app_state,
+        None,
     )
     .await
 }

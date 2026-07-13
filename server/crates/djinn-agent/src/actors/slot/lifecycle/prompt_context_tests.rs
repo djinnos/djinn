@@ -269,7 +269,7 @@ async fn load_knowledge_context_returns_none_when_no_notes() {
         create_project_epic_task(&db, &events, "Knowledge test epic", "Knowledge task").await;
     let app_state = agent_context_from_db(db, CancellationToken::new());
     assert!(
-        load_knowledge_context(&task, None, &app_state)
+        load_knowledge_context(&task, None, &app_state, None)
             .await
             .is_none()
     );
@@ -776,6 +776,7 @@ async fn concurrent_assembly_is_deterministic() {
         system_prompt_extensions: "",
         resolved_skills: &[],
         app_state: &app_state,
+        knowledge_identity: None,
         read_sources: &[],
         worker_resume_note: note.as_deref(),
         arbiter_directive: None,
@@ -795,6 +796,7 @@ async fn concurrent_assembly_is_deterministic() {
         system_prompt_extensions: "",
         resolved_skills: &[],
         app_state: &app_state,
+        knowledge_identity: None,
         read_sources: &[],
         worker_resume_note: note.as_deref(),
         arbiter_directive: None,
@@ -1115,6 +1117,7 @@ async fn ci_blocking_appears_before_resume_context_in_prompt() {
         system_prompt_extensions: "",
         resolved_skills: &[],
         app_state: &app_state,
+        knowledge_identity: None,
         read_sources: &[],
         worker_resume_note: note.as_deref(),
         arbiter_directive: None,
@@ -1260,6 +1263,7 @@ async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
         system_prompt_extensions: "Custom extension.",
         resolved_skills: &skills,
         app_state: &app_state,
+        knowledge_identity: None,
         read_sources: &sources,
         worker_resume_note: note_ref,
         arbiter_directive: None,
@@ -1513,6 +1517,7 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         system_prompt_extensions: "",
         resolved_skills: &[],
         app_state: &app_state,
+        knowledge_identity: None,
         read_sources: &[],
         worker_resume_note: note.as_deref(),
         arbiter_directive: None,
@@ -1532,6 +1537,7 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         system_prompt_extensions: "",
         resolved_skills: &[],
         app_state: &app_state,
+        knowledge_identity: None,
         read_sources: &[],
         worker_resume_note: note.as_deref(),
         arbiter_directive: None,

@@ -43,6 +43,16 @@ pub(crate) struct ReadSourceInfo {
     pub name: String,
 }
 
+/// Real dispatch identities used by knowledge retrieval and trace persistence.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KnowledgeContextIdentity<'a> {
+    pub session_id: &'a str,
+    pub task_run_id: &'a str,
+    pub created_by_user_id: Option<&'a str>,
+    /// This remains untruncated; it is not the worker-facing resume note.
+    pub resume_progress_summary: Option<&'a str>,
+}
+
 /// Inputs for final prompt-context assembly.
 #[allow(clippy::too_many_arguments)]
 pub(crate) struct PromptContextInputs<'a> {
@@ -57,6 +67,7 @@ pub(crate) struct PromptContextInputs<'a> {
     pub system_prompt_extensions: &'a str,
     pub resolved_skills: &'a [ResolvedSkill],
     pub app_state: &'a AgentContext,
+    pub knowledge_identity: Option<KnowledgeContextIdentity<'a>>,
     pub read_sources: &'a [ReadSourceInfo],
     pub worker_resume_note: Option<&'a str>,
     pub arbiter_directive: Option<&'a str>,
