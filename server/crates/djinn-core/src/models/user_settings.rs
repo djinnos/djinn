@@ -24,8 +24,26 @@ pub struct ModelLanes {
     pub review: Vec<String>,
 }
 
+/// Per-user concurrency ceiling for autonomous work in each model lane.
+///
+/// This is deliberately separate from [`UserSettings::max_sessions`], whose
+/// caps are keyed by model and shared across every lane that uses that model.
+/// `lane_max_sessions` limits the amount of work admitted for a role even when
+/// several lanes happen to use the same model. Interactive chat is not subject
+/// to these ceilings even though chat uses the plan lane for model selection.
+///
+/// Persisted as a JSON-object TEXT column (`user_settings.lane_max_sessions`,
+/// migration 114). An absent value means no lane-specific ceiling, preserving
+/// the behavior of users created before lane limits were introduced.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneMaxSessions {
+    pub plan: u32,
+    pub implement: u32,
+    pub review: u32,
+}
+
 /// The three lanes a per-user model selection is split across.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ModelLane {
     Plan,
     Implement,
@@ -43,6 +61,32 @@ impl ModelLane {
             // planner, architect, chat, lead, and anything unknown → plan
             _ => ModelLane::Plan,
         }
+    }
+}
+
+impl LaneMaxSessions {
+    pub const MIN: u32 = 1;
+    pub const MAX: u32 = 10;
+
+    /// The configured ceiling for a lane.
+    pub fn lane(&self, lane: ModelLane) -> u32 {
+        match lane {
+            ModelLane::Plan => self.plan,
+            ModelLane::Implement => self.implement,
+            ModelLane::Review => self.review,
+        }
+    }
+
+    /// The configured ceiling for the lane a dispatch role maps to.
+    pub fn for_role(&self, base_role: &str) -> u32 {
+        self.lane(ModelLane::for_role(base_role))
+    }
+
+    /// True when every ceiling is inside the supported persisted/API range.
+    pub fn is_valid(&self) -> bool {
+        [self.plan, self.implement, self.review]
+            .into_iter()
+            .all(|value| (Self::MIN..=Self::MAX).contains(&value))
     }
 }
 
@@ -104,12 +148,19 @@ pub struct UserSettings {
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub lanes: Option<ModelLanes>,
     /// Per-user, per-model concurrency caps (`{ "provider/model": cap }`). The
-    /// sole admission control at dispatch — the slot pool spawns on demand, with
-    /// no global ceiling. `None`/absent ⇒ default 1 per selected model.
+    /// per-model admission ceiling at dispatch — the slot pool spawns on demand,
+    /// with no global ceiling. Composed with `lane_max_sessions` when a user has
+    /// lane-specific ceilings. `None`/absent ⇒ default 1 per selected model.
     /// Persisted as a JSON-object TEXT column (`user_settings.max_sessions`,
     /// migration 32). Caps are per-model, shared across lanes.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub max_sessions: Option<HashMap<String, u32>>,
+    /// Per-user concurrency ceilings for plan, implement, and review work.
+    /// `None` means no lane-specific ceiling (legacy/unbounded behavior).
+    /// Persisted as a JSON-object TEXT column
+    /// (`user_settings.lane_max_sessions`, migration 114).
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub lane_max_sessions: Option<LaneMaxSessions>,
     /// Cross-model ("Thorough") review. When `true` (the default), a task
     /// dispatched to the reviewer role prefers a model id different from the one
     /// that implemented the task — the reviewer walks its review-lane fallback
@@ -139,6 +190,7 @@ impl UserSettings {
             auto_approve_prs: false,
             lanes: None,
             max_sessions: None,
+            lane_max_sessions: None,
             // Cross-model review is on by default (DB column default TRUE), so a
             // never-written user gets the same behavior as a migrated row.
             diverse_review: true,
@@ -148,5 +200,52 @@ impl UserSettings {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lane_max_sessions_maps_dispatch_roles() {
+        let limits = LaneMaxSessions {
+            plan: 1,
+            implement: 3,
+            review: 2,
+        };
+
+        assert_eq!(limits.for_role("planner"), 1);
+        assert_eq!(limits.for_role("architect"), 1);
+        assert_eq!(limits.for_role("worker"), 3);
+        assert_eq!(limits.for_role("reviewer"), 2);
+    }
+
+    #[test]
+    fn lane_max_sessions_validates_supported_range() {
+        assert!(
+            LaneMaxSessions {
+                plan: 1,
+                implement: 10,
+                review: 3,
+            }
+            .is_valid()
+        );
+        assert!(
+            !LaneMaxSessions {
+                plan: 0,
+                implement: 1,
+                review: 1,
+            }
+            .is_valid()
+        );
+        assert!(
+            !LaneMaxSessions {
+                plan: 1,
+                implement: 11,
+                review: 1,
+            }
+            .is_valid()
+        );
     }
 }
