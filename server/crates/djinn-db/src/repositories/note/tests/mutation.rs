@@ -17,7 +17,7 @@ fn create_command(project_id: &str, note_id: String) -> NoteRevisionMutation {
             scope_paths: "[]".to_owned(),
             confidence: 0.5,
         }),
-        attribution: TrustedNoteRevisionAttribution::system("test").unwrap(),
+        attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Mcp),
         provenance: TrustedNoteRevisionProvenance::default(),
         reason: NoteRevisionReason::new("create audited note").unwrap(),
     }
@@ -48,7 +48,7 @@ async fn revision_mutation_commits_create_and_suppresses_canonical_noop() {
                 content: "initial content".to_owned(),
                 confidence: 0.5,
             },
-            attribution: TrustedNoteRevisionAttribution::system("test").unwrap(),
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Mcp),
             provenance: TrustedNoteRevisionProvenance::default(),
             reason: NoteRevisionReason::new("unchanged desired state").unwrap(),
         })

@@ -50,6 +50,29 @@ impl NoteRevisionActorKind {
     }
 }
 
+/// Closed identities for repository-owned system writers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteRevisionSubsystem {
+    Mcp,
+    Dedup,
+    Consolidation,
+    Enrichment,
+    Extraction,
+}
+
+impl NoteRevisionSubsystem {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mcp => "mcp",
+            Self::Dedup => "dedup",
+            Self::Consolidation => "consolidation",
+            Self::Enrichment => "enrichment",
+            Self::Extraction => "extraction",
+        }
+    }
+}
+
 /// Why a trusted ledger value could not be constructed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NoteRevisionValidationError {
@@ -135,12 +158,12 @@ impl TrustedNoteRevisionAttribution {
         })
     }
 
-    pub fn system(subsystem: impl Into<String>) -> Result<Self, NoteRevisionValidationError> {
-        Ok(Self {
+    pub fn system(subsystem: NoteRevisionSubsystem) -> Self {
+        Self {
             actor_kind: NoteRevisionActorKind::System,
             actor_id: None,
-            subsystem: Some(required("subsystem", subsystem)?),
-        })
+            subsystem: Some(subsystem.as_str().to_owned()),
+        }
     }
 
     pub const fn actor_kind(&self) -> NoteRevisionActorKind {
@@ -261,6 +284,9 @@ mod tests {
     fn attribution_and_provenance_reject_blank_values() {
         assert!(TrustedNoteRevisionAttribution::agent(" ").is_err());
         assert!(TrustedNoteRevisionProvenance::new(Some("".into()), None, None).is_err());
-        assert!(TrustedNoteRevisionAttribution::system("ledger").is_ok());
+        assert_eq!(
+            TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction).subsystem(),
+            Some("extraction")
+        );
     }
 }
