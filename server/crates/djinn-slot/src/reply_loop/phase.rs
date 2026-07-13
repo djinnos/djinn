@@ -110,10 +110,24 @@ impl SessionPhaseTracker {
         self.tool_depth = self.tool_depth.saturating_add(1);
     }
 
-    /// Completes one level of tool dispatch. The caller enters provider wait for
-    /// the tool-to-provider handoff, excluding intervening local work.
+    /// Completes one level of tool dispatch.
+    ///
+    /// Returning from the outermost dispatch closes its interval immediately,
+    /// so prompt assembly and other local work before a later provider entry
+    /// are not attributed to tool execution.
     pub fn exit_tool_execution(&mut self) {
-        self.tool_depth = self.tool_depth.saturating_sub(1);
+        if self.tool_depth == 0 {
+            return;
+        }
+
+        self.tool_depth -= 1;
+        if self.tool_depth == 0
+            && self
+                .active
+                .is_some_and(|active| active.phase == SessionPhase::ToolExecution)
+        {
+            self.close_active(self.clock.now_instant());
+        }
     }
 
     /// Flushes the active interval exactly once.
@@ -243,6 +257,33 @@ mod tests {
         tracker.enter_tool_execution();
         clock.advance_mono(Duration::from_secs(5));
         tracker.exit_tool_execution();
+        tracker.enter_provider_wait();
+        clock.advance_mono(Duration::from_secs(7));
+        tracker.finish();
+        assert_eq!(
+            emitted(&intervals),
+            vec![
+                (
+                    SessionPhase::ToolExecution,
+                    SessionPhaseRole::Planner,
+                    Duration::from_secs(5)
+                ),
+                (
+                    SessionPhase::ProviderWait,
+                    SessionPhaseRole::Planner,
+                    Duration::from_secs(7)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn outer_tool_exit_excludes_local_work_before_provider_entry() {
+        let (clock, mut tracker, intervals) = tracker("planner");
+        tracker.enter_tool_execution();
+        clock.advance_mono(Duration::from_secs(5));
+        tracker.exit_tool_execution();
+        clock.advance_mono(Duration::from_secs(2));
         tracker.enter_provider_wait();
         clock.advance_mono(Duration::from_secs(7));
         tracker.finish();
