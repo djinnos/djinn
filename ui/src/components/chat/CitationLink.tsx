@@ -202,4 +202,5 @@ export function CitationLink({
 
 // Re-exported so tests / sibling components can render the same
 // label without re-implementing the formatting logic.
+// eslint-disable-next-line react-refresh/only-export-components -- intentional test seam colocated with the component.
 export const __testing = { citationLabel };

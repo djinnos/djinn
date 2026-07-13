@@ -10,6 +10,7 @@ mod common;
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_db::LivenessEvidenceSnapshot;
 use djinn_db::LivenessRepository;
+use djinn_db::{EpicRepository, ProposalCreateInput, ProposalRepository, TaskRepository};
 use serde_json::json;
 
 #[tokio::test]
@@ -555,4 +556,159 @@ async fn board_health_closed_parent_open_children_empty_by_default() {
         .expect("closed_parent_open_children section must be present");
     assert_eq!(section.get("total").and_then(|v| v.as_i64()), Some(0));
     assert!(section.get("findings").and_then(|v| v.as_array()).is_some());
+}
+
+/// End-to-end regression: `board_health` reports closed-parent orphan findings
+/// through the MCP surface with the complete snapshot schema expected by the
+/// repair path: status, terminal parent ids, exclusion evidence, and the shared
+/// disposition row.
+#[tokio::test]
+async fn board_health_closed_parent_open_children_reports_populated_findings() {
+    let harness = McpTestHarness::new().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epics = EpicRepository::new(harness.db().clone(), common::test_events());
+    let tasks = TaskRepository::new(harness.db().clone(), common::test_events());
+    let proposals = ProposalRepository::new(harness.db().clone(), common::test_events());
+
+    // Ready orphan: should close with parent_closed.
+    let ready_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let ready = common::create_test_task(harness.db(), &project.id, &ready_epic.id).await;
+    epics
+        .set_status_raw(&ready_epic.id, "closed")
+        .await
+        .unwrap();
+
+    // In-flight orphan: should park with historical_parent_closed_in_flight.
+    let flight_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let flight = common::create_test_task(harness.db(), &project.id, &flight_epic.id).await;
+    tasks.set_status(&flight.id, "in_progress").await.unwrap();
+    let session = common::create_test_session(harness.db(), &project.id, &flight.id).await;
+    epics
+        .set_status_raw(&flight_epic.id, "closed")
+        .await
+        .unwrap();
+
+    // PR-active orphan: should park with historical_parent_closed_pr_active.
+    let pr_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let pr = common::create_test_task(harness.db(), &project.id, &pr_epic.id).await;
+    tasks.set_status(&pr.id, "pr_review").await.unwrap();
+    tasks
+        .set_pr_url(&pr.id, "https://github.com/djinnos/djinn/pull/999999")
+        .await
+        .unwrap();
+    epics.set_status_raw(&pr_epic.id, "closed").await.unwrap();
+
+    // Guarded orphan: another open proposal parent keeps it retained.
+    let guard_epic = common::create_test_epic(harness.db(), &project.id).await;
+    let guard = common::create_test_task(harness.db(), &project.id, &guard_epic.id).await;
+    epics
+        .set_status_raw(&guard_epic.id, "closed")
+        .await
+        .unwrap();
+    let live_proposal = proposals
+        .create(ProposalCreateInput {
+            title: "live parent",
+            body: "",
+            acceptance_criteria: None,
+            status: Some("building"),
+            body_format: None,
+        })
+        .await
+        .unwrap();
+    proposals
+        .link_epic(&live_proposal.id, &guard_epic.id, &project.id)
+        .await
+        .unwrap();
+
+    let response = harness
+        .call_tool("board_health", json!({ "project": project.slug() }))
+        .await
+        .expect("board_health should dispatch");
+
+    let section = response
+        .get("closed_parent_open_children")
+        .expect("closed_parent_open_children section must be present");
+    assert_eq!(section.get("total").and_then(|v| v.as_i64()), Some(4));
+    let findings = section
+        .get("findings")
+        .and_then(|v| v.as_array())
+        .expect("findings must be an array");
+    assert_eq!(findings.len(), 4);
+
+    let mut actual = std::collections::BTreeMap::new();
+    for f in findings {
+        let id = f.get("id").and_then(|v| v.as_str()).unwrap().to_owned();
+        let action = f
+            .get("recommended_action")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_owned();
+        let reason = f
+            .get("recommended_reason")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_owned();
+        let other_open: Vec<String> = f
+            .get("other_open_parent_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let external: Vec<String> = f
+            .get("external_open_dependents")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.get("task_id").and_then(|v| v.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        actual.insert(id, (action, reason, other_open, external));
+    }
+
+    // Ready orphan: close / parent_closed.
+    let (a, r, o, e) = actual.get(&ready.id).unwrap();
+    assert_eq!(a, "close");
+    assert_eq!(r, "parent_closed");
+    assert!(o.is_empty() && e.is_empty());
+
+    // In-flight orphan: park with session retained in evidence.
+    let (a, r, o, e) = actual.get(&flight.id).unwrap();
+    assert_eq!(a, "park");
+    assert_eq!(r, "historical_parent_closed_in_flight");
+    assert!(o.is_empty() && e.is_empty());
+    let flight_finding = findings
+        .iter()
+        .find(|f| f.get("id").and_then(|v| v.as_str()) == Some(&flight.id))
+        .unwrap();
+    assert_eq!(
+        flight_finding
+            .get("preserved_session_id")
+            .and_then(|v| v.as_str()),
+        Some(session.id.as_str())
+    );
+
+    // PR-active orphan: park with PR URL retained in evidence.
+    let (a, r, o, e) = actual.get(&pr.id).unwrap();
+    assert_eq!(a, "park");
+    assert_eq!(r, "historical_parent_closed_pr_active");
+    assert!(o.is_empty() && e.is_empty());
+    let pr_finding = findings
+        .iter()
+        .find(|f| f.get("id").and_then(|v| v.as_str()) == Some(&pr.id))
+        .unwrap();
+    assert_eq!(
+        pr_finding.get("preserved_pr_url").and_then(|v| v.as_str()),
+        Some("https://github.com/djinnos/djinn/pull/999999")
+    );
+
+    // Guarded orphan: retain because another open proposal parent exists.
+    let (a, r, o, _e) = actual.get(&guard.id).unwrap();
+    assert_eq!(a, "retain");
+    assert_eq!(r, "other_open_parent");
+    assert_eq!(o.len(), 1);
+    assert_eq!(o[0], live_proposal.id);
 }

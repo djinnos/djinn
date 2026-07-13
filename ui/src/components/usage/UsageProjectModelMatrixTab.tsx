@@ -340,6 +340,7 @@ interface MetricScale {
   max: number | null;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- pure matrix builder colocated with the tab for its unit tests.
 export function buildProjectModelMatrix(
   cells: UsageProjectModelCell[],
 ): BuiltMatrix {
@@ -384,6 +385,7 @@ export function buildProjectModelMatrix(
   };
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- pure formatter colocated with the tab for its unit tests.
 export function formatMatrixMetricValue(
   cell: UsageProjectModelCell | undefined,
   metricKey: MatrixMetricKey,

@@ -13,7 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-export const BASE_ROLE_LABELS: Record<BaseRole, string> = {
+const BASE_ROLE_LABELS: Record<BaseRole, string> = {
   worker: "Worker",
   reviewer: "Task Reviewer",
   lead: "Lead",
@@ -21,7 +21,7 @@ export const BASE_ROLE_LABELS: Record<BaseRole, string> = {
   architect: "Architect",
 };
 
-export const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner", "architect"];
+const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner", "architect"];
 
 export interface AgentFormProps {
   initial?: Partial<Omit<CreateAgentRequest, "project_id">>;

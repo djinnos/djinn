@@ -95,6 +95,32 @@ pub struct DoctorRunFindingEntry {
     pub check_name: String,
     pub severity: String,
     pub detail: String,
+    /// Recommended action for closed-parent orphan findings (e.g. "close",
+    /// "park", "retain"). Omitted for checks that do not produce a recommendation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_action: Option<String>,
+    /// Reason for the recommended action (e.g. "parent_closed",
+    /// "external_open_dependent"). Omitted for checks that do not produce a recommendation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_reason: Option<String>,
+}
+
+fn recommended_action_from_evidence(evidence: &serde_json::Value) -> Option<String> {
+    evidence
+        .get("board_health_finding")
+        .and_then(|v| v.get("recommended_action"))
+        .or_else(|| evidence.get("recommended_action"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+}
+
+fn recommended_reason_from_evidence(evidence: &serde_json::Value) -> Option<String> {
+    evidence
+        .get("board_health_finding")
+        .and_then(|v| v.get("recommended_reason"))
+        .or_else(|| evidence.get("recommended_reason"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
 }
 
 /// Result of one check execution within a run.
@@ -587,6 +613,12 @@ impl DjinnMcpServer {
                                     check_name: finding.check_name.clone(),
                                     severity: finding.severity.as_str().to_owned(),
                                     detail: finding.detail.clone(),
+                                    recommended_action: recommended_action_from_evidence(
+                                        &finding.evidence,
+                                    ),
+                                    recommended_reason: recommended_reason_from_evidence(
+                                        &finding.evidence,
+                                    ),
                                 })
                                 .collect::<Vec<_>>()
                         }
@@ -1032,6 +1064,8 @@ mod tests {
                     check_name: "test.demo".to_string(),
                     severity: "warn".to_string(),
                     detail: "demo detail".to_string(),
+                    recommended_action: None,
+                    recommended_reason: None,
                 }],
             }],
             total_findings: 1,

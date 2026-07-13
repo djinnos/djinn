@@ -66,7 +66,7 @@ function ProjectStoreSeeder({
 }
 
 const meta = {
-  title: "Pages/CodeGraphPage",
+  title: "CodeGraph/CodeGraphPage",
   component: CodeGraphPage,
   parameters: {
     layout: "fullscreen",

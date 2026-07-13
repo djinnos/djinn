@@ -38,7 +38,7 @@ function ModalDemo({ impact }: ModalDemoProps) {
 }
 
 const meta = {
-  title: "Codegraph/ImpactFlowModal",
+  title: "CodeGraph/ImpactFlowModal",
   component: ModalDemo,
   parameters: {
     layout: "fullscreen",

@@ -106,6 +106,7 @@ function projectFromId(projectId: string): Project {
   } satisfies Project;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- pure selector colocated with the banner for its unit tests.
 export function selectVisibleDispatchPauseEntries(
   entries: Pick<DispatchPauseState, "global" | "projects" | "users">,
   projectContext: ProjectContext,
