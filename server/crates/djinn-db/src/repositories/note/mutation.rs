@@ -368,10 +368,11 @@ fn validate_command(command: &NoteRevisionMutation) -> Result<()> {
         ));
     }
     if command.event_kind == NoteRevisionEventKind::ExtractionSkipped
-        && command.provenance.is_empty()
+        && command.provenance.session_id().is_none()
+        && command.provenance.task_run_id().is_none()
     {
         return Err(Error::InvalidData(
-            "extraction_skipped requires trusted provenance".to_owned(),
+            "extraction_skipped requires trusted session or task-run provenance".to_owned(),
         ));
     }
     Ok(())

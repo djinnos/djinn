@@ -62,7 +62,7 @@ CREATE TABLE note_revision_events (
                 AND note_id IS NULL
                 AND content_before IS NULL AND content_after IS NULL
                 AND confidence_before IS NULL AND confidence_after IS NULL
-                AND (session_id IS NOT NULL OR task_id IS NOT NULL OR task_run_id IS NOT NULL))
+                AND (session_id IS NOT NULL OR task_run_id IS NOT NULL))
         )
 );
 
