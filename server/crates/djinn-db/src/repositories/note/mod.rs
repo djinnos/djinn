@@ -28,6 +28,7 @@ mod lexical_search;
 pub(crate) mod lifecycle;
 mod note_quality;
 pub mod replay_validation;
+mod revisions;
 pub mod rrf;
 mod scoring;
 mod search;
@@ -71,6 +72,11 @@ pub use replay_validation::{
     PromptBudgetReport, QueryReplayReport, RankedHit, RankingReport, ReplayCriteria, ReplayFixture,
     ReplayNote, ReplayQuery, ReplayReport, anchor_embedding_replay_fixture,
     generate_anchor_embedding_replay_report, render_anchor_embedding_replay_report_markdown,
+};
+pub use revisions::{
+    NoteRevisionActorKind, NoteRevisionEventInput, NoteRevisionEventKind, NoteRevisionEventRow,
+    NoteRevisionReason, NoteRevisionSnapshot, NoteRevisionValidationError,
+    TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance,
 };
 pub use rrf::rrf_fuse;
 pub use scoring::{
