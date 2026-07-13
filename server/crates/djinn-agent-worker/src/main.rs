@@ -494,27 +494,6 @@ fn completed_seed_join(
     Ok(result)
 }
 
-// ── Workspace cleanup telemetry (proposal zp5t) ──────────────────────────────
-//
-// The worker owns an *attached* workspace (bind-mounted by the host runtime).
-// Attached workspaces are never deleted or observed — `teardown_owned` is a
-// no-op that returns `Ok(())`. The `shutdown` trigger classification exists so
-// the worker can record an explicit cleanup sample for the owned-workspace
-// teardown path exercised by the in-Pod supervisor (which constructs an Owned
-// workspace via `clone_ephemeral`). The worker records directly via the
-// telemetry collector so tests can inject all trigger/outcome combinations.
-
-/// Record one `workspace_cleanup_seconds` sample with a bounded trigger and
-/// outcome.
-///
-/// Accepts `elapsed` directly so tests can assert deterministic `_sum` deltas
-/// without a wall-clock dependency. This is the single recording seam for
-/// cleanup telemetry in the worker path.
-#[allow(dead_code)]
-fn record_cleanup_seconds(trigger: &'static str, outcome: &'static str, elapsed: Duration) {
-    djinn_telemetry::workspace_cleanup::record_seconds(trigger, outcome, elapsed);
-}
-
 async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> PathBuf {
     // Canonicalize once so every structured event for this task-run shares the
     // same absolute workspace_dir. The cargo warm path uses the SAME canonical
@@ -1565,7 +1544,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    round-trips over RPC.
     let supervisor = TaskRunSupervisor::new(mirror, worker_services.clone());
     let report_result = supervisor
-        .run(spec.clone())
+        .run_for_orderly_shutdown(spec.clone())
         .await
         .context("task-run supervisor drive");
 
@@ -3721,157 +3700,6 @@ warning: something
 
     /// Read the `_sum` value for `workspace_cleanup_seconds` for a given
     /// trigger/outcome pair.
-    fn cleanup_sum(rendered: &str, trigger: &str, outcome: &str) -> f64 {
-        rendered
-            .lines()
-            .find(|line| {
-                line.starts_with("djinn_workspace_cleanup_seconds_sum")
-                    && line.contains(&format!("trigger=\"{trigger}\""))
-                    && line.contains(&format!("outcome=\"{outcome}\""))
-            })
-            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
-            .unwrap_or(0.0)
-    }
-
-    /// Assert that rendered workspace_cleanup samples carry no high-cardinality
-    /// identity labels.
-    fn assert_no_cleanup_identity_labels(rendered: &str) {
-        for line in rendered.lines() {
-            if !line.starts_with("djinn_workspace_cleanup_seconds") {
-                continue;
-            }
-            for forbidden in [
-                "task_id=",
-                "session_id=",
-                "project_id=",
-                "user_id=",
-                "path=",
-                "error=",
-                "reason=",
-                "branch=",
-                "ref=",
-            ] {
-                assert!(
-                    !line.contains(forbidden),
-                    "cleanup metric line must not carry high-cardinality label {forbidden}: {line}",
-                );
-            }
-        }
-    }
-
-    /// All eight trigger/outcome combinations record exactly one sample each
-    /// via the `record_cleanup_seconds` seam.
-    #[test]
-    fn cleanup_records_all_eight_trigger_outcome_combinations() {
-        let _guard = cleanup_telemetry_guard();
-        djinn_telemetry::init().expect("telemetry init");
-
-        let triggers = [
-            djinn_telemetry::workspace_cleanup::TRIGGER_COMPLETE,
-            djinn_telemetry::workspace_cleanup::TRIGGER_ERROR,
-            djinn_telemetry::workspace_cleanup::TRIGGER_CANCEL,
-            djinn_telemetry::workspace_cleanup::TRIGGER_SHUTDOWN,
-        ];
-        let outcomes = [
-            djinn_telemetry::workspace_cleanup::OUTCOME_OK,
-            djinn_telemetry::workspace_cleanup::OUTCOME_ERROR,
-        ];
-        let elapsed = Duration::from_millis(37);
-
-        let before = djinn_telemetry::render().expect("render before");
-
-        for &trigger in &triggers {
-            for &outcome in &outcomes {
-                record_cleanup_seconds(trigger, outcome, elapsed);
-            }
-        }
-
-        let after = djinn_telemetry::render().expect("render after");
-        for &trigger in &triggers {
-            for &outcome in &outcomes {
-                let before_count = cleanup_count(&before, trigger, outcome);
-                let before_sum = cleanup_sum(&before, trigger, outcome);
-                assert_eq!(
-                    cleanup_count(&after, trigger, outcome),
-                    before_count + 1.0,
-                    "one {trigger}/{outcome} sample expected"
-                );
-                assert!(
-                    (cleanup_sum(&after, trigger, outcome) - before_sum - elapsed.as_secs_f64())
-                        .abs()
-                        < 0.001,
-                    "{trigger}/{outcome} sum delta must equal elapsed"
-                );
-            }
-        }
-        assert_no_cleanup_identity_labels(&after);
-    }
-
-    /// The `shutdown` trigger records exactly one `ok` sample via the worker
-    /// recording seam.
-    #[test]
-    fn cleanup_shutdown_ok_records_one_sample() {
-        let _guard = cleanup_telemetry_guard();
-        djinn_telemetry::init().expect("telemetry init");
-
-        let before = djinn_telemetry::render().expect("render before");
-        let count_before = cleanup_count(&before, "shutdown", "ok");
-        let sum_before = cleanup_sum(&before, "shutdown", "ok");
-        let elapsed = Duration::from_millis(55);
-
-        record_cleanup_seconds(
-            djinn_telemetry::workspace_cleanup::TRIGGER_SHUTDOWN,
-            djinn_telemetry::workspace_cleanup::OUTCOME_OK,
-            elapsed,
-        );
-
-        let after = djinn_telemetry::render().expect("render after");
-        assert_eq!(
-            cleanup_count(&after, "shutdown", "ok"),
-            count_before + 1.0,
-            "one shutdown/ok sample expected"
-        );
-        assert!(
-            (cleanup_sum(&after, "shutdown", "ok") - sum_before - elapsed.as_secs_f64()).abs()
-                < 0.001,
-            "shutdown/ok sum delta must equal elapsed"
-        );
-        assert_no_cleanup_identity_labels(&after);
-    }
-
-    /// The `shutdown` trigger records exactly one `error` sample.
-    #[test]
-    fn cleanup_shutdown_error_records_one_sample() {
-        let _guard = cleanup_telemetry_guard();
-        djinn_telemetry::init().expect("telemetry init");
-
-        let before = djinn_telemetry::render().expect("render before");
-        let count_before = cleanup_count(&before, "shutdown", "error");
-        let sum_before = cleanup_sum(&before, "shutdown", "error");
-        let elapsed = Duration::from_millis(12);
-
-        record_cleanup_seconds(
-            djinn_telemetry::workspace_cleanup::TRIGGER_SHUTDOWN,
-            djinn_telemetry::workspace_cleanup::OUTCOME_ERROR,
-            elapsed,
-        );
-
-        let after = djinn_telemetry::render().expect("render after");
-        assert_eq!(
-            cleanup_count(&after, "shutdown", "error"),
-            count_before + 1.0,
-            "one shutdown/error sample expected"
-        );
-        assert!(
-            (cleanup_sum(&after, "shutdown", "error") - sum_before - elapsed.as_secs_f64()).abs()
-                < 0.001,
-            "shutdown/error sum delta must equal elapsed"
-        );
-        assert_no_cleanup_identity_labels(&after);
-    }
-
-    /// An attached workspace teardown_owned is a no-op: returns Ok, does NOT
-    /// delete the directory, and does NOT emit a cleanup sample.
     #[test]
     fn attached_workspace_teardown_owned_is_noop_no_sample() {
         let _guard = cleanup_telemetry_guard();

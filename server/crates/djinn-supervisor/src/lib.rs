@@ -657,11 +657,8 @@ pub(crate) enum CleanupTrigger {
     Error,
     /// A handled cancellation was observed (cancel token set / Interrupted).
     Cancel,
-    /// An orderly worker process shutdown. Not constructed by the supervisor
-    /// path (which classifies `cancel` when the shared token is set), but part
-    /// of the bounded trigger taxonomy used by the worker shutdown path and
-    /// tested through `timed_workspace_teardown` with injected failure.
-    #[allow(dead_code)]
+    /// An orderly worker process shutdown, classified at the supervisor
+    /// owned-workspace teardown boundary.
     Shutdown,
 }
 
@@ -676,24 +673,49 @@ impl CleanupTrigger {
     }
 }
 
-/// Classify the cleanup trigger from the supervisor `run` result and the
-/// shared cancellation token.
+/// Classify the cleanup trigger from the supervisor `run` result, shared
+/// cancellation token, and orderly worker-shutdown state.
 ///
-/// When the cancellation token is set at the moment teardown begins, the
-/// trigger is `cancel` regardless of whether `run` returned `Ok` or `Err`
-/// (a cancelled run can produce an `Interrupted` outcome or a cancellation-
-/// racing RPC error). Otherwise `Ok` is `complete` and `Err` is `error`.
+/// Cancellation wins over every other terminal condition. Returned errors
+/// win over the shutdown intent, preserving their existing propagation.
 fn classify_supervisor_cleanup_trigger(
     result: &Result<TaskRunReport, SupervisorError>,
     cancel: &CancellationToken,
+    orderly_shutdown: bool,
 ) -> CleanupTrigger {
     if cancel.is_cancelled() {
         CleanupTrigger::Cancel
-    } else if result.is_ok() {
-        CleanupTrigger::Complete
-    } else {
+    } else if result.is_err() {
         CleanupTrigger::Error
+    } else if orderly_shutdown {
+        CleanupTrigger::Shutdown
+    } else {
+        CleanupTrigger::Complete
     }
+}
+
+/// Time a returned cleanup operation and record its bounded result.
+///
+/// Recording happens only after `teardown` returns. The injected operation
+/// keeps the ordering and failure semantics testable without filesystem races.
+fn timed_cleanup_operation<F>(
+    clock: &dyn Clock,
+    trigger: CleanupTrigger,
+    teardown: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    let start = clock.now_instant();
+    let result = teardown();
+    let elapsed = clock.now_instant().duration_since(start);
+    let outcome = if result.is_ok() {
+        djinn_telemetry::workspace_cleanup::OUTCOME_OK
+    } else {
+        djinn_telemetry::workspace_cleanup::OUTCOME_ERROR
+    };
+    djinn_telemetry::workspace_cleanup::record_seconds(trigger.as_str(), outcome, elapsed);
+    result
 }
 
 /// Time one owned-workspace teardown attempt with the injected monotonic
@@ -715,16 +737,7 @@ fn timed_workspace_teardown(
     if !workspace.is_owned() {
         return workspace.teardown_owned();
     }
-    let start = clock.now_instant();
-    let result = workspace.teardown_owned();
-    let elapsed = clock.now_instant().duration_since(start);
-    let outcome = if result.is_ok() {
-        djinn_telemetry::workspace_cleanup::OUTCOME_OK
-    } else {
-        djinn_telemetry::workspace_cleanup::OUTCOME_ERROR
-    };
-    djinn_telemetry::workspace_cleanup::record_seconds(trigger.as_str(), outcome, elapsed);
-    result
+    timed_cleanup_operation(clock, trigger, || workspace.teardown_owned())
 }
 
 /// Apply the coordinator-selected resume source to the worktree setup.
@@ -1012,6 +1025,24 @@ impl TaskRunSupervisor {
 
     /// Drive a task-run from start to terminal state.
     pub async fn run(&self, spec: TaskRunSpec) -> Result<TaskRunReport, SupervisorError> {
+        self.run_inner(spec, false).await
+    }
+
+    /// Drive a run whose successful terminal boundary is immediately followed
+    /// by orderly worker shutdown. Its owned-workspace teardown remains here,
+    /// before return; this only supplies the bounded `shutdown` trigger.
+    pub async fn run_for_orderly_shutdown(
+        &self,
+        spec: TaskRunSpec,
+    ) -> Result<TaskRunReport, SupervisorError> {
+        self.run_inner(spec, true).await
+    }
+
+    async fn run_inner(
+        &self,
+        spec: TaskRunSpec,
+        orderly_shutdown: bool,
+    ) -> Result<TaskRunReport, SupervisorError> {
         // Use the host-minted canonical id rather than minting our own — the
         // host's runtime, the `task_runs` row, every session, and the terminal
         // report must all share ONE id so post-session extraction can match
@@ -2891,8 +2922,11 @@ impl TaskRunSupervisor {
             outcome,
             stages_completed: completed,
         };
-        let trigger =
-            classify_supervisor_cleanup_trigger(&Ok(report.clone()), self.services.cancel());
+        let trigger = classify_supervisor_cleanup_trigger(
+            &Ok(report.clone()),
+            self.services.cancel(),
+            orderly_shutdown,
+        );
         let _ = timed_workspace_teardown(&*self.clock, workspace, trigger);
 
         info!(task_run_id = %report.task_run_id, ?report.outcome, "task-run finished");
@@ -5765,7 +5799,7 @@ mod tests {
             stages_completed: vec![],
         };
         assert_eq!(
-            classify_supervisor_cleanup_trigger(&Ok(report), &cancel),
+            classify_supervisor_cleanup_trigger(&Ok(report), &cancel, false),
             CleanupTrigger::Complete,
         );
     }
@@ -5776,7 +5810,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let err = SupervisorError::LoadTask("rpc error".to_string());
         assert_eq!(
-            classify_supervisor_cleanup_trigger(&Err(err), &cancel),
+            classify_supervisor_cleanup_trigger(&Err(err), &cancel, false),
             CleanupTrigger::Error,
         );
     }
@@ -5792,7 +5826,7 @@ mod tests {
             stages_completed: vec![],
         };
         assert_eq!(
-            classify_supervisor_cleanup_trigger(&Ok(report), &cancel),
+            classify_supervisor_cleanup_trigger(&Ok(report), &cancel, false),
             CleanupTrigger::Cancel,
         );
     }
@@ -5805,7 +5839,7 @@ mod tests {
         cancel.cancel();
         let err = SupervisorError::LoadTask("rpc error".to_string());
         assert_eq!(
-            classify_supervisor_cleanup_trigger(&Err(err), &cancel),
+            classify_supervisor_cleanup_trigger(&Err(err), &cancel, false),
             CleanupTrigger::Cancel,
         );
     }
@@ -5882,58 +5916,94 @@ mod tests {
         );
     }
 
-    /// All eight trigger/outcome combinations record exactly one sample each
-    /// via direct `timed_workspace_teardown` or `record_seconds` calls.
+    /// Each bounded trigger/outcome pair passes through the real timed
+    /// cleanup boundary. The injected operation proves no sample exists until
+    /// it returns, without relying on slow filesystem failures.
     #[test]
-    fn cleanup_records_all_eight_trigger_outcome_combinations() {
+    fn cleanup_records_all_eight_returned_operation_outcomes() {
         let _guard = cleanup_telemetry_guard();
         djinn_telemetry::init().expect("telemetry init");
-
-        let triggers = [
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+        let elapsed = Duration::from_millis(42);
+        for (trigger_str, trigger) in [
             ("complete", CleanupTrigger::Complete),
             ("error", CleanupTrigger::Error),
             ("cancel", CleanupTrigger::Cancel),
             ("shutdown", CleanupTrigger::Shutdown),
-        ];
-        let outcomes = [
-            ("ok", djinn_telemetry::workspace_cleanup::OUTCOME_OK),
-            ("error", djinn_telemetry::workspace_cleanup::OUTCOME_ERROR),
-        ];
-        let elapsed = Duration::from_millis(42);
-
-        let before = djinn_telemetry::render().expect("render before");
-
-        for (trigger_str, _trigger_enum) in &triggers {
-            for (_outcome_str, outcome_const) in &outcomes {
-                djinn_telemetry::workspace_cleanup::record_seconds(
-                    trigger_str,
-                    outcome_const,
-                    elapsed,
+        ] {
+            for (outcome_str, succeeds) in [("ok", true), ("error", false)] {
+                let before = djinn_telemetry::render().expect("render before");
+                let count_before = cleanup_count(&before, trigger_str, outcome_str);
+                let sum_before = cleanup_sum(&before, trigger_str, outcome_str);
+                let result = timed_cleanup_operation(&clock, trigger, || {
+                    let during = djinn_telemetry::render().expect("render during teardown");
+                    assert_eq!(
+                        cleanup_count(&during, trigger_str, outcome_str),
+                        count_before,
+                        "sample must wait for returned teardown"
+                    );
+                    clock.advance_mono(elapsed);
+                    if succeeds {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::other("injected cleanup failure"))
+                    }
+                });
+                assert_eq!(
+                    result.is_ok(),
+                    succeeds,
+                    "injected {trigger_str}/{outcome_str} result must propagate"
                 );
-            }
-        }
-
-        let after = djinn_telemetry::render().expect("render after");
-        for (trigger_str, _) in &triggers {
-            for (outcome_str, _) in &outcomes {
-                let before_count = cleanup_count(&before, trigger_str, outcome_str);
-                let before_sum = cleanup_sum(&before, trigger_str, outcome_str);
+                let after = djinn_telemetry::render().expect("render after");
                 assert_eq!(
                     cleanup_count(&after, trigger_str, outcome_str),
-                    before_count + 1.0,
-                    "one {trigger_str}/{outcome_str} sample expected"
+                    count_before + 1.0
                 );
                 assert!(
                     (cleanup_sum(&after, trigger_str, outcome_str)
-                        - before_sum
+                        - sum_before
                         - elapsed.as_secs_f64())
                     .abs()
-                        < 0.001,
-                    "{trigger_str}/{outcome_str} sum delta must equal elapsed"
+                        < 0.001
                 );
             }
         }
-        assert_no_cleanup_identity_labels(&after);
+        assert_no_cleanup_identity_labels(&djinn_telemetry::render().expect("render labels"));
+    }
+
+    #[test]
+    fn cleanup_panic_emits_nothing_until_a_later_returned_teardown() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+        let before = djinn_telemetry::render().expect("render before");
+        let count_before = cleanup_count(&before, "complete", "ok");
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            timed_cleanup_operation(
+                &clock,
+                CleanupTrigger::Complete,
+                || -> std::io::Result<()> { panic!("injected teardown panic") },
+            )
+        }));
+        assert!(panic.is_err());
+        assert_eq!(
+            cleanup_count(
+                &djinn_telemetry::render().expect("render after panic"),
+                "complete",
+                "ok"
+            ),
+            count_before
+        );
+        timed_cleanup_operation(&clock, CleanupTrigger::Complete, || Ok(()))
+            .expect("returned teardown");
+        assert_eq!(
+            cleanup_count(
+                &djinn_telemetry::render().expect("render after returned teardown"),
+                "complete",
+                "ok"
+            ),
+            count_before + 1.0
+        );
     }
 
     /// Duplicate teardown suppression: calling `teardown_owned` once (which
