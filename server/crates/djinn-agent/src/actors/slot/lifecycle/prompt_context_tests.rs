@@ -480,11 +480,7 @@ fn worker_resume_note_truncates_multibyte_progress_summary_on_char_boundary() {
     // A multi-byte char straddling the truncation cut must not panic
     // (byte-index slicing inside '”' crashed the slot actor).
     let metadata = djinn_runtime::ResumeLifecycleMetadata {
-        last_durable_progress_summary: Some(format!(
-            "{}”{}",
-            "a".repeat(116),
-            "b".repeat(200)
-        )),
+        last_durable_progress_summary: Some(format!("{}”{}", "a".repeat(116), "b".repeat(200))),
         ..resume_metadata_with_checkpoint()
     };
     let note = build_worker_resume_note("worker", Some(&metadata)).expect("note present");

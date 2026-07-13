@@ -898,7 +898,9 @@ impl K8sGraphWarmer {
             // never past the hard max-wait deadline (last-wins).
             entry.fire_at = (now + self.debounce.quiet).min(entry.hard_deadline);
             entry.coalesced += 1;
-            self.metrics.triggers_coalesced.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .triggers_coalesced
+                .fetch_add(1, Ordering::Relaxed);
             debug!(
                 project_id,
                 coalesced = entry.coalesced,

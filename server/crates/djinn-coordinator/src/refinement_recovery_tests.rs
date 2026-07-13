@@ -239,10 +239,7 @@ async fn recover_resumes_mid_round_at_advocate_after_blocking_objections() {
         "blocking round-1 objections resume at the Advocate"
     );
     assert_eq!(resumed.current_round, 1);
-    assert_eq!(
-        interrupted_stop_count(&db, &fixture.proposal_id).await,
-        0
-    );
+    assert_eq!(interrupted_stop_count(&db, &fixture.proposal_id).await, 0);
 }
 
 /// (a′) A round advanced by a blocking Judge verdict resumes at the NEXT round's
@@ -340,10 +337,7 @@ async fn recover_closes_orphaned_open_task_and_redispatches_same_round() {
     assert_eq!(session.phase, RefinementPhase::AdvocateRevision);
     assert_eq!(session.model_id, TEST_MODEL);
     let state = &actor.active_refinements[&fixture.proposal_id];
-    assert_eq!(
-        state.current_round, 1,
-        "re-dispatch must not burn a round"
-    );
+    assert_eq!(state.current_round, 1, "re-dispatch must not burn a round");
     assert_eq!(
         state.total_spawns, 2,
         "re-dispatch consumes one more spawn on top of the reconstructed count"
