@@ -44,6 +44,29 @@ pub struct EpicModel {
     /// `TaskModel::created_by_user_id`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by_user_id: Option<String>,
+    /// Originating proposal id (denormalized from `proposal_epics` at
+    /// graduation). `None` for hand-created epics. The board groups its
+    /// swimlanes by it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// Proposal short id, enriched on `epic_list` responses so the board can
+    /// label and link proposal swimlanes without loading proposals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_short_id: Option<String>,
+    /// Proposal title, enriched on `epic_list` responses (see
+    /// `proposal_short_id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_title: Option<String>,
+    /// Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+    /// responses. The board only renders proposal swimlanes for `building`
+    /// proposals so the kanban stays scoped to active work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_status: Option<String>,
+    /// Build owner of the proposal (whose credentials the build consumes),
+    /// enriched on `epic_list` responses. The board shows their avatar on the
+    /// proposal swimlane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_build_owner_user_id: Option<String>,
 }
 
 impl From<&Epic> for EpicModel {
@@ -64,6 +87,11 @@ impl From<&Epic> for EpicModel {
             auto_breakdown: e.auto_breakdown,
             originating_adr_id: e.originating_adr_id.clone(),
             created_by_user_id: e.created_by_user_id.clone(),
+            proposal_id: e.proposal_id.clone(),
+            proposal_short_id: None,
+            proposal_title: None,
+            proposal_status: None,
+            proposal_build_owner_user_id: None,
         }
     }
 }

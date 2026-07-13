@@ -27,4 +27,10 @@ pub struct Epic {
     /// Tasks broken down from this epic inherit it; the board uses it to
     /// scope epics to the owner filter, mirroring `Task::created_by_user_id`.
     pub created_by_user_id: Option<String>,
+    /// Originating proposal, denormalized from `proposal_epics` (unique per
+    /// epic) at graduation link time. `None` for hand-created epics; cleared
+    /// when the proposal unlinks or is deleted. The board groups swimlanes
+    /// by it.
+    #[serde(default)]
+    pub proposal_id: Option<String>,
 }

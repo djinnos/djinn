@@ -62,6 +62,14 @@ export type Task = Omit<TaskShowOutputSchema.TaskShowOutput, "owner"> & {
 
 export type Epic = Omit<EpicListOutputSchema.EpicModel, "owner"> & {
   owner: string | null;
+  /** Originating proposal id (denormalized at graduation). */
+  proposal_id?: string | null;
+  /** Proposal short id/title/status — enriched on `epic_list` responses so the
+   * board can label proposal swimlanes; absent on SSE epic payloads. */
+  proposal_short_id?: string | null;
+  proposal_title?: string | null;
+  proposal_status?: string | null;
+  proposal_build_owner_user_id?: string | null;
 };
 
 // Global proposals layer (project-independent). `acceptance_criteria` arrives

@@ -2498,7 +2498,7 @@ pub(super) async fn maybe_reopen_epic(
         r#"SELECT id, project_id, short_id, title, description, emoji, color, status,
                 owner, created_at, updated_at, closed_at, memory_refs::text AS "memory_refs!",
                 auto_breakdown AS "auto_breakdown!: bool",
-                originating_adr_id, created_by_user_id
+                originating_adr_id, created_by_user_id, proposal_id
          FROM epics WHERE id = $1"#,
         epic_id
     )

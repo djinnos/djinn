@@ -127,7 +127,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status AS "status!", owner, created_at, updated_at, closed_at,
                     memory_refs::text AS "memory_refs!", auto_breakdown AS "auto_breakdown!: bool",
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics ORDER BY created_at"#
         )
         .fetch_all(self.db.pool())
@@ -141,7 +141,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status, owner, created_at, updated_at, closed_at,
                     memory_refs::text, auto_breakdown,
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE project_id = $1 ORDER BY created_at"#,
         )
         .bind(project_id)
@@ -156,7 +156,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status AS "status!", owner, created_at, updated_at, closed_at,
                     memory_refs::text AS "memory_refs!", auto_breakdown AS "auto_breakdown!: bool",
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE id = $1"#,
             id
         )
@@ -171,7 +171,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status AS "status!", owner, created_at, updated_at, closed_at,
                     memory_refs::text AS "memory_refs!", auto_breakdown AS "auto_breakdown!: bool",
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE short_id = $1"#,
             short_id
         )
@@ -247,7 +247,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status AS "status!", owner, created_at, updated_at, closed_at,
                     memory_refs::text AS "memory_refs!", auto_breakdown AS "auto_breakdown!: bool",
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE id = $1"#,
             id
         )
@@ -303,7 +303,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status AS "status!", owner, created_at, updated_at, closed_at,
                     memory_refs::text AS "memory_refs!", auto_breakdown AS "auto_breakdown!: bool",
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE id = $1"#,
             id
         )
@@ -339,7 +339,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status, owner, created_at, updated_at, closed_at,
                     memory_refs::text, auto_breakdown,
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE id = $1"#,
         )
         .bind(id)
@@ -412,7 +412,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status AS "status!", owner, created_at, updated_at, closed_at,
                     memory_refs::text AS "memory_refs!", auto_breakdown AS "auto_breakdown!: bool",
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE id = $1"#,
             id
         )
@@ -715,7 +715,7 @@ impl EpicRepository {
             r#"SELECT e.id, e.project_id, e.short_id, e.title, e.description, e.emoji, e.color,
                     e.status AS "status!", e.owner, e.created_at, e.updated_at, e.closed_at,
                     e.memory_refs::text AS "memory_refs!", e.auto_breakdown AS "auto_breakdown!: bool",
-                    e.originating_adr_id, e.created_by_user_id
+                    e.originating_adr_id, e.created_by_user_id, e.proposal_id
              FROM epic_blockers b
              JOIN epics e ON e.id = b.epic_id
              WHERE b.blocking_epic_id = $1
@@ -746,7 +746,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status AS "status!", owner, created_at, updated_at, closed_at,
                     memory_refs::text AS "memory_refs!", auto_breakdown AS "auto_breakdown!: bool",
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE id = $1 OR short_id = $2"#,
             id_or_short,
             id_or_short
@@ -767,7 +767,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status AS "status!", owner, created_at, updated_at, closed_at,
                     memory_refs::text AS "memory_refs!", auto_breakdown AS "auto_breakdown!: bool",
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE project_id = $1 AND (id = $2 OR short_id = $3)"#,
             project_id,
             id_or_short,
@@ -801,7 +801,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status AS "status!", owner, created_at, updated_at, closed_at,
                     memory_refs::text AS "memory_refs!", auto_breakdown AS "auto_breakdown!: bool",
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE id = $1"#,
             id
         )
@@ -839,7 +839,7 @@ impl EpicRepository {
             r#"SELECT id, project_id, short_id, title, description, emoji, color,
                     status AS "status!", owner, created_at, updated_at, closed_at,
                     memory_refs::text AS "memory_refs!", auto_breakdown AS "auto_breakdown!: bool",
-                    originating_adr_id, created_by_user_id
+                    originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE id = $1"#,
             id
         )
@@ -910,7 +910,7 @@ impl EpicRepository {
         let sql = format!(
             r#"SELECT id, project_id, short_id, title, description, emoji, color, status,
                     owner, created_at, updated_at, closed_at, memory_refs::text AS memory_refs,
-                    auto_breakdown, originating_adr_id, created_by_user_id
+                    auto_breakdown, originating_adr_id, created_by_user_id, proposal_id
              FROM epics WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
         );
         let mut epic_q = sqlx::query_as::<_, Epic>(&sql);
