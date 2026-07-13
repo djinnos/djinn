@@ -56,7 +56,7 @@ sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test Postgres on :
 	@# cargo re-runs the proc-macro. A plain `cargo check` after a clean build
 	@# would be a no-op and leave SQLX_OFFLINE_DIR empty.
 	@grep -rl --include='*.rs' 'sqlx::query' $(SERVER_DIR)/crates/ 2>/dev/null | xargs -r touch
-	@cd $(SERVER_DIR) && SQLX_OFFLINE_DIR=/tmp/sqlx-prepare cargo check --workspace --all-targets --all-features
+	@cd $(SERVER_DIR) && SQLX_OFFLINE=false SQLX_OFFLINE_DIR=/tmp/sqlx-prepare cargo check --workspace --all-targets --all-features
 	@if [ -z "$$(ls -A /tmp/sqlx-prepare 2>/dev/null)" ]; then \
 		echo "ERROR: /tmp/sqlx-prepare is empty — refusing to replace .sqlx/."; \
 		echo "       Try 'cargo clean -p djinn-db' and rerun."; \
@@ -91,7 +91,7 @@ sqlx-verify: ## Verify server/.sqlx/ freshness; assumes schema already applied +
 	@# (Test) job. Mirroring the generator here closes it.
 	@rm -rf /tmp/sqlx-check && mkdir -p /tmp/sqlx-check
 	@grep -rl --include='*.rs' 'sqlx::query' $(SERVER_DIR)/crates/ 2>/dev/null | xargs -r touch
-	@cd $(SERVER_DIR) && SQLX_OFFLINE_DIR=/tmp/sqlx-check cargo check --workspace --all-targets --all-features
+	@cd $(SERVER_DIR) && SQLX_OFFLINE=false SQLX_OFFLINE_DIR=/tmp/sqlx-check cargo check --workspace --all-targets --all-features
 	@if [ -z "$$(ls -A /tmp/sqlx-check 2>/dev/null)" ]; then \
 		echo "ERROR: regeneration produced no query files — cannot validate .sqlx/."; \
 		echo "       Try 'cargo clean -p djinn-db' and rerun."; \
