@@ -1,25 +1,23 @@
 //! Resolved GitHub App configuration.
 //!
 //! Holds the credentials needed to mint App JWTs and complete user-to-server
-//! OAuth. Loads exclusively from environment variables:
+//! OAuth. The server installs its resolved Secret-or-persisted configuration
+//! into a process-wide runtime cache; callers fall back to environment
+//! variables before server initialization:
 //!
 //! - `GITHUB_APP_ID`, `GITHUB_APP_SLUG`,
 //!   `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
 //!   `GITHUB_APP_PRIVATE_KEY` (or `_PATH`),
 //!   `GITHUB_APP_WEBHOOK_SECRET`, `DJINN_PUBLIC_URL`.
 //!
-//! Production deployments mount these via the Helm chart's `djinn-github-app`
-//! Secret (see `server/docker/README.md`). The legacy "in-UI manifest wizard
-//! that wrote a `__GITHUB_APP_CONFIG` row into the encrypted credentials
-//! vault" path was removed once the K8s migration made env-mounted Secrets
-//! the canonical provisioning surface.
-//!
-//! The struct is cloned cheaply via `Arc` and held inside the server
-//! `AppState` behind a `RwLock`. Env vars require a Pod restart to change,
-//! so the in-process cache never needs hot-swapping anymore — `init_app_config`
-//! is the only writer.
+//! Production deployments normally mount these via the Helm chart's
+//! `djinn-github-app` Secret. Self-setup deployments persist the same shape in
+//! the encrypted credential vault and hot-swap this runtime cache after the
+//! manifest exchange, so provider-level JWT and installation-token consumers
+//! do not need environment mirroring.
 
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use super::{ENV_PRIVATE_KEY, ENV_PRIVATE_KEY_PATH};
 
@@ -57,13 +55,14 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    /// Resolve the active config from environment variables.
+    /// Resolve the active config from the installed runtime snapshot, falling
+    /// back to environment variables before server initialization.
     ///
     /// Returns `None` if any required env var (App ID, OAuth client id/secret,
     /// private key) is missing — the server then surfaces a "GitHub App not
     /// configured" status to the UI.
     pub fn load() -> Option<Self> {
-        load_from_env()
+        runtime_config().as_deref().cloned().or_else(load_from_env)
     }
 
     /// Build the install URL for this App's slug. Returns `None` if `slug`
@@ -77,14 +76,123 @@ impl AppConfig {
     }
 }
 
+fn runtime_config_slot() -> &'static RwLock<Option<Arc<AppConfig>>> {
+    static RUNTIME_CONFIG: OnceLock<RwLock<Option<Arc<AppConfig>>>> = OnceLock::new();
+    RUNTIME_CONFIG.get_or_init(|| RwLock::new(None))
+}
+
+/// Install the server's resolved credential snapshot for all provider-level
+/// GitHub App consumers. Replacing the App invalidates cached installation
+/// tokens, which are scoped to the previous App identity.
+pub fn install_runtime_config(config: Arc<AppConfig>) {
+    if let Ok(mut guard) = runtime_config_slot().write() {
+        *guard = Some(config);
+    }
+    super::installations::invalidate_all_cache();
+}
+
+/// Clear the process-wide credential snapshot. Environment fallback remains
+/// available for callers that run before `AppState::init_app_config`.
+pub fn clear_runtime_config() {
+    if let Ok(mut guard) = runtime_config_slot().write() {
+        *guard = None;
+    }
+    super::installations::invalidate_all_cache();
+}
+
+/// Return the currently installed runtime credential snapshot, if any.
+pub fn runtime_config() -> Option<Arc<AppConfig>> {
+    runtime_config_slot().read().ok()?.clone()
+}
+
+/// Resolve the active App slug from runtime credentials, then env fallback.
+pub fn app_slug() -> Option<String> {
+    if let Some(config) = runtime_config() {
+        let slug = config.slug.trim();
+        return (!slug.is_empty()).then(|| slug.to_string());
+    }
+    std::env::var(super::ENV_APP_SLUG)
+        .ok()
+        .map(|slug| slug.trim().to_string())
+        .filter(|slug| !slug.is_empty())
+}
+
+/// Resolve the GitHub App bot's commit identity from the active App slug.
+///
+/// The numeric GitHub App ID is not the bot account's user ID, so it must not
+/// be used as the numeric prefix of a GitHub no-reply address. Djinn does not
+/// currently persist the bot user ID; the login-only no-reply form is the safe
+/// non-personal fallback until that distinct ID is available.
+pub fn bot_git_identity() -> (String, String) {
+    let login = format!(
+        "{}[bot]",
+        app_slug().unwrap_or_else(|| "djinn-bot".to_string())
+    );
+    let email = format!("{login}@users.noreply.github.com");
+    (login, email)
+}
+
+/// Resolve the callback base URL registered for the active GitHub App.
+///
+/// Before self-setup completes there is no runtime config, so the manifest
+/// flow uses `DJINN_PUBLIC_URL` (or the localhost default). After credentials
+/// are loaded, the persisted provisioning URL wins to keep OAuth redirect URIs
+/// aligned with the callback registered on the App.
+pub fn public_url() -> String {
+    if let Some(config) = runtime_config() {
+        let public_url = config.public_url.trim();
+        if !public_url.is_empty() {
+            return public_url.to_string();
+        }
+    }
+    std::env::var(ENV_PUBLIC_URL)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_PUBLIC_URL.to_string())
+}
+
+/// Resolve OAuth client credentials from runtime credentials, then env
+/// fallback. Background refresh paths use this because they do not carry an
+/// `AppState` handle.
+pub fn oauth_client_credentials() -> Option<(String, String)> {
+    if let Some(config) = runtime_config() {
+        let client_id = config.client_id.trim();
+        let client_secret = config.client_secret.trim();
+        return (!client_id.is_empty() && !client_secret.is_empty())
+            .then(|| (client_id.to_string(), client_secret.to_string()));
+    }
+    let client_id = std::env::var(super::ENV_CLIENT_ID)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    let client_secret = std::env::var(super::ENV_CLIENT_SECRET)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    Some((client_id, client_secret))
+}
+
+#[cfg(test)]
+pub(crate) fn github_app_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn load_from_env() -> Option<AppConfig> {
     use super::{ENV_APP_ID, ENV_APP_SLUG, ENV_CLIENT_ID, ENV_CLIENT_SECRET};
 
     let app_id = std::env::var(ENV_APP_ID).ok()?.trim().parse::<u64>().ok()?;
+    if app_id == 0 {
+        return None;
+    }
     let slug = std::env::var(ENV_APP_SLUG).unwrap_or_default();
     let client_id = std::env::var(ENV_CLIENT_ID).unwrap_or_default();
     let client_secret = std::env::var(ENV_CLIENT_SECRET).unwrap_or_default();
     let pem = read_env_pem()?;
+    if super::jwt::validate_rsa_private_key(&pem).is_err() {
+        return None;
+    }
     let webhook_secret = std::env::var(ENV_WEBHOOK_SECRET).unwrap_or_default();
     let public_url =
         std::env::var(ENV_PUBLIC_URL).unwrap_or_else(|_| DEFAULT_PUBLIC_URL.to_string());
@@ -159,5 +267,70 @@ mod tests {
         let s = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn runtime_config_is_first_class_without_env_and_clear_restores_isolation() {
+        let _lock = github_app_test_lock();
+        clear_runtime_config();
+        for key in [
+            super::super::ENV_APP_ID,
+            super::super::ENV_APP_SLUG,
+            super::super::ENV_CLIENT_ID,
+            super::super::ENV_CLIENT_SECRET,
+            super::super::ENV_PRIVATE_KEY,
+            super::super::ENV_PRIVATE_KEY_PATH,
+        ] {
+            unsafe { std::env::remove_var(key) };
+        }
+
+        let cfg = fixture();
+        install_runtime_config(Arc::new(cfg.clone()));
+        assert_eq!(AppConfig::load(), Some(cfg.clone()));
+        assert_eq!(app_slug().as_deref(), Some("djinn-bot"));
+        assert_eq!(
+            oauth_client_credentials(),
+            Some((cfg.client_id.clone(), cfg.client_secret.clone()))
+        );
+
+        clear_runtime_config();
+        assert!(runtime_config().is_none());
+        assert!(AppConfig::load().is_none());
+        assert!(app_slug().is_none());
+        assert!(oauth_client_credentials().is_none());
+    }
+
+    #[test]
+    fn bot_git_identity_uses_runtime_slug_without_fabricating_a_user_id() {
+        let _lock = github_app_test_lock();
+        clear_runtime_config();
+        unsafe { std::env::remove_var(super::super::ENV_APP_SLUG) };
+
+        install_runtime_config(Arc::new(fixture()));
+        assert_eq!(
+            bot_git_identity(),
+            (
+                "djinn-bot[bot]".to_string(),
+                "djinn-bot[bot]@users.noreply.github.com".to_string(),
+            )
+        );
+
+        clear_runtime_config();
+    }
+
+    #[test]
+    fn public_url_prefers_runtime_provisioning_url() {
+        let _lock = github_app_test_lock();
+        clear_runtime_config();
+        unsafe { std::env::set_var(ENV_PUBLIC_URL, "https://env.example") };
+
+        let mut cfg = fixture();
+        cfg.public_url = "https://provisioned.example".to_string();
+        install_runtime_config(Arc::new(cfg));
+        assert_eq!(public_url(), "https://provisioned.example");
+
+        clear_runtime_config();
+        assert_eq!(public_url(), "https://env.example");
+        unsafe { std::env::remove_var(ENV_PUBLIC_URL) };
     }
 }

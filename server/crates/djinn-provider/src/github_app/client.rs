@@ -13,20 +13,17 @@ use serde::Deserialize;
 use super::installations::{
     InstallationToken, get_installation_token, invalidate_cache, list_installations_for_user,
 };
-use super::{ENV_APP_SLUG, app_id};
+use super::{app_id, app_slug};
 
 const GITHUB_API: &str = "https://api.github.com";
 const USER_AGENT: &str = "djinn-server/0.1 (+https://github.com/djinnos/server)";
 
 /// Build the "install this app" URL for the given slug.
 ///
-/// Returns `None` if [`GITHUB_APP_SLUG`](ENV_APP_SLUG) is unset.
+/// Resolves the slug from the runtime credential snapshot, with environment
+/// fallback before server initialization.
 pub fn install_url() -> Option<String> {
-    let slug = std::env::var(ENV_APP_SLUG).ok()?;
-    let slug = slug.trim();
-    if slug.is_empty() {
-        return None;
-    }
+    let slug = app_slug()?;
     Some(format!("https://github.com/apps/{slug}/installations/new"))
 }
 
@@ -259,12 +256,35 @@ mod tests {
 
     #[test]
     fn install_url_respects_env() {
-        unsafe { std::env::set_var(ENV_APP_SLUG, "djinn-bot") };
+        let _lock = super::super::config::github_app_test_lock();
+        super::super::clear_runtime_config();
+        unsafe { std::env::set_var(super::super::ENV_APP_SLUG, "djinn-bot") };
         assert_eq!(
             install_url().as_deref(),
             Some("https://github.com/apps/djinn-bot/installations/new")
         );
-        unsafe { std::env::remove_var(ENV_APP_SLUG) };
+        unsafe { std::env::remove_var(super::super::ENV_APP_SLUG) };
         assert_eq!(install_url(), None);
+    }
+
+    #[test]
+    fn install_url_prefers_runtime_slug() {
+        let _lock = super::super::config::github_app_test_lock();
+        super::super::clear_runtime_config();
+        unsafe { std::env::remove_var(super::super::ENV_APP_SLUG) };
+        super::super::install_runtime_config(std::sync::Arc::new(super::super::AppConfig {
+            app_id: 1,
+            slug: "runtime-app".into(),
+            client_id: "Iv1.runtime".into(),
+            client_secret: "secret".into(),
+            pem: "pem".into(),
+            webhook_secret: String::new(),
+            public_url: "http://localhost:3000".into(),
+        }));
+        assert_eq!(
+            install_url().as_deref(),
+            Some("https://github.com/apps/runtime-app/installations/new")
+        );
+        super::super::clear_runtime_config();
     }
 }

@@ -91,6 +91,14 @@ export interface AuthConfig {
    * `self_setup_available`.
    */
   selfSetupAvailable: boolean;
+  /**
+   * Whether this response established the server-owned launch capability
+   * required by `POST /auth/github/setup-start`. This is intentionally
+   * separate from `selfSetupAvailable`: self-setup may be enabled while the
+   * current origin is not allowed to start it. Defaults to `false` for older
+   * servers so the UI never renders a button that cannot work securely.
+   */
+  setupLaunchAvailable: boolean;
 }
 
 /**
@@ -110,6 +118,7 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
     missing: string[];
     setup_doc_url: string;
     self_setup_available?: boolean;
+    setup_launch_available?: boolean;
   };
   return {
     configured: body.configured,
@@ -118,6 +127,9 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
     // Default to `false` so older servers (pre-self-setup) don't advertise
     // a setup flow that doesn't exist.
     selfSetupAvailable: body.self_setup_available ?? false,
+    // Launching is opt-in. Older servers and non-canonical origins must fall
+    // back to the one-time URL instead of rendering a dead or unsafe CTA.
+    setupLaunchAvailable: body.setup_launch_available ?? false,
   };
 }
 
@@ -281,7 +293,7 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
     needs_app_install: boolean;
     app_credentials_configured?: boolean;
     org_login?: string | null;
-    credential_source?: string;
+    credential_source?: string | null;
     setup_state?: string;
     setup_error?: string | null;
     setup_retryable?: boolean;

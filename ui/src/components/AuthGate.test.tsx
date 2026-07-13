@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@/test/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen, userEvent, waitFor } from "@/test/test-utils";
 import { AuthGate } from "@/components/AuthGate";
 import {
   fetchAuthConfig,
@@ -40,16 +40,20 @@ function baseSetupStatus(overrides: Partial<SetupStatus> = {}): SetupStatus {
 }
 
 /**
- * A minimal auth-config payload with selfSetupAvailable defaulted.
- * Only `selfSetupAvailable` is used by AuthGate's rendering logic; the
- * remaining fields are required by the `AuthConfig` type.
+ * A minimal auth-config payload. Tests that enable self-setup default to a
+ * canonical origin with a launch capability; pass `false` explicitly to
+ * exercise the secure one-time-URL fallback.
  */
-function baseAuthConfig(selfSetupAvailable = false): AuthConfig {
+function baseAuthConfig(
+  selfSetupAvailable = false,
+  setupLaunchAvailable = selfSetupAvailable,
+): AuthConfig {
   return {
     configured: !selfSetupAvailable,
     missing: selfSetupAvailable ? ["GITHUB_APP_CLIENT_ID"] : [],
     setupDocUrl: SETUP_DOC_URL,
     selfSetupAvailable,
+    setupLaunchAvailable,
   };
 }
 
@@ -63,6 +67,11 @@ describe("AuthGate", () => {
     vi.mocked(fetchCurrentUser).mockResolvedValue(null);
     vi.mocked(fetchSetupStatus).mockResolvedValue(baseSetupStatus());
     vi.mocked(fetchAuthConfig).mockResolvedValue(baseAuthConfig(false));
+  });
+
+  afterEach(() => {
+    window.history.replaceState({}, "", "/");
+    vi.restoreAllMocks();
   });
 
   // ─── Existing behavior preserved ────────────────────────────────────────
@@ -134,6 +143,30 @@ describe("AuthGate", () => {
     });
   });
 
+  it("renders a server error instead of signed-out UI when /auth/me fails", async () => {
+    vi.mocked(fetchCurrentUser).mockRejectedValue(new Error("auth service unavailable"));
+    vi.mocked(fetchSetupStatus).mockResolvedValue(
+      baseSetupStatus({
+        needsAppInstall: false,
+        appCredentialsConfigured: true,
+        orgLogin: "acme",
+        setupState: "valid",
+      }),
+    );
+
+    render(
+      <AuthGate>
+        <div>signed-in app</div>
+      </AuthGate>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Can't reach the server")).toBeInTheDocument();
+    });
+    expect(screen.getByText("auth service unavailable")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Sign in with GitHub/i })).not.toBeInTheDocument();
+  });
+
   it("renders children when authed and configured", async () => {
     vi.mocked(fetchCurrentUser).mockResolvedValue({
       id: "1",
@@ -162,9 +195,9 @@ describe("AuthGate", () => {
     });
   });
 
-  // ─── Self-setup guidance ────────────────────────────────────────────────
+  // ─── Self-setup launch ──────────────────────────────────────────────────
 
-  it("renders the self-setup guidance screen when self-setup is available and credentials are missing", async () => {
+  it("renders a direct GitHub setup action when self-setup is available and credentials are missing", async () => {
     vi.mocked(fetchSetupStatus).mockResolvedValue(baseSetupStatus());
     vi.mocked(fetchAuthConfig).mockResolvedValue(baseAuthConfig(true));
 
@@ -175,12 +208,139 @@ describe("AuthGate", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("Set up GitHub access")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Connect GitHub" })).toBeInTheDocument();
     });
-    // Should mention the boot-log setup URL flow.
+
+    const form = screen.getByRole("form", { name: "Start GitHub App setup" });
+    expect(form).toHaveAttribute("action", "/auth/github/setup-start");
+    expect(form).toHaveAttribute("method", "post");
     expect(
-      screen.getByText(/setup URL printed in the server boot logs/i),
-    ).toBeInTheDocument();
+      screen.getByRole("button", { name: "Continue with GitHub" }),
+    ).toHaveAttribute("type", "submit");
+    expect(screen.getByText("Review permissions")).toBeInTheDocument();
+    expect(screen.getByText("Choose repositories")).toBeInTheDocument();
+    expect(screen.getByText("Return to Djinn")).toBeInTheDocument();
+
+    const troubleshooting = screen.getByText("Having trouble?").closest("details");
+    expect(troubleshooting).not.toHaveAttribute("open");
+    expect(troubleshooting).toContainElement(
+      screen.getByText(/setup URL from the server boot logs/i),
+    );
+    expect(troubleshooting).toContainElement(
+      screen.getByText(/restart the local server to generate a new URL/i),
+    );
+  });
+
+  it("refreshes the launch capability immediately before native form submission", async () => {
+    let resolveRefresh!: (config: AuthConfig) => void;
+    const refresh = new Promise<AuthConfig>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    vi.mocked(fetchSetupStatus).mockResolvedValue(baseSetupStatus());
+    vi.mocked(fetchAuthConfig)
+      .mockResolvedValueOnce(baseAuthConfig(true))
+      .mockImplementationOnce(() => refresh);
+    const submitSpy = vi
+      .spyOn(HTMLFormElement.prototype, "submit")
+      .mockImplementation(() => undefined);
+
+    render(
+      <AuthGate>
+        <div>signed-in app</div>
+      </AuthGate>,
+    );
+
+    const button = await screen.findByRole("button", {
+      name: "Continue with GitHub",
+    });
+    await userEvent.click(button);
+
+    expect(fetchAuthConfig).toHaveBeenCalledTimes(2);
+    expect(
+      screen.getByRole("button", { name: "Refreshing secure access…" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("form", { name: "Start GitHub App setup" }),
+    ).toHaveAttribute("aria-busy", "true");
+    expect(submitSpy).not.toHaveBeenCalled();
+
+    resolveRefresh(baseAuthConfig(true));
+
+    await waitFor(() => {
+      expect(submitSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("shows an accessible error and does not submit when capability refresh fails", async () => {
+    vi.mocked(fetchSetupStatus).mockResolvedValue(baseSetupStatus());
+    vi.mocked(fetchAuthConfig)
+      .mockResolvedValueOnce(baseAuthConfig(true))
+      .mockRejectedValueOnce(new Error("server unavailable"));
+    const submitSpy = vi
+      .spyOn(HTMLFormElement.prototype, "submit")
+      .mockImplementation(() => undefined);
+
+    render(
+      <AuthGate>
+        <div>signed-in app</div>
+      </AuthGate>,
+    );
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Continue with GitHub" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Could not refresh secure setup access/i,
+    );
+    expect(submitSpy).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Continue with GitHub" }),
+    ).toBeEnabled();
+  });
+
+  it("does not submit when refreshed config revokes setup launch availability", async () => {
+    vi.mocked(fetchSetupStatus).mockResolvedValue(baseSetupStatus());
+    vi.mocked(fetchAuthConfig)
+      .mockResolvedValueOnce(baseAuthConfig(true))
+      .mockResolvedValueOnce(baseAuthConfig(true, false));
+    const submitSpy = vi
+      .spyOn(HTMLFormElement.prototype, "submit")
+      .mockImplementation(() => undefined);
+
+    render(
+      <AuthGate>
+        <div>signed-in app</div>
+      </AuthGate>,
+    );
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Continue with GitHub" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Secure setup is no longer available from this browser address/i,
+    );
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("explains an expired setup redirect after config refresh and keeps the CTA available", async () => {
+    window.history.replaceState({}, "", "/?setup=expired");
+    vi.mocked(fetchSetupStatus).mockResolvedValue(baseSetupStatus());
+    vi.mocked(fetchAuthConfig).mockResolvedValue(baseAuthConfig(true));
+
+    render(
+      <AuthGate>
+        <div>signed-in app</div>
+      </AuthGate>,
+    );
+
+    const notice = await screen.findByRole("status");
+    expect(notice).toHaveTextContent(/setup access expired/i);
+    expect(notice).toHaveTextContent(/has been refreshed/i);
+    expect(
+      screen.getByRole("button", { name: "Continue with GitHub" }),
+    ).toBeEnabled();
   });
 
   it("does not show a self-setup CTA when self-setup is disabled and credentials are missing", async () => {
@@ -196,7 +356,40 @@ describe("AuthGate", () => {
     await waitFor(() => {
       expect(screen.getByText("GitHub App not configured")).toBeInTheDocument();
     });
-    expect(screen.queryByText("Set up GitHub access")).not.toBeInTheDocument();
+    expect(screen.queryByText("Connect GitHub")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Continue with GitHub" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the secure log-URL fallback without a fake CTA when launch capability is unavailable", async () => {
+    vi.mocked(fetchSetupStatus).mockResolvedValue(baseSetupStatus());
+    vi.mocked(fetchAuthConfig).mockResolvedValue(baseAuthConfig(true, false));
+
+    render(
+      <AuthGate>
+        <div>signed-in app</div>
+      </AuthGate>,
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("heading", { name: "Open the GitHub setup link" }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(/one-time URL in the server boot logs/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/restart the local server to generate a new URL/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Continue with GitHub" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("form", { name: "Start GitHub App setup" }),
+    ).not.toBeInTheDocument();
+    expect(document.querySelectorAll("input")).toHaveLength(0);
   });
 
   it("falls back to the runbook screen when self-setup is available but the App is configured", async () => {
@@ -230,7 +423,7 @@ describe("AuthGate", () => {
     await waitFor(() => {
       expect(screen.getByText("Pick a GitHub installation")).toBeInTheDocument();
     });
-    expect(screen.queryByText("Set up GitHub access")).not.toBeInTheDocument();
+    expect(screen.queryByText("Connect GitHub")).not.toBeInTheDocument();
   });
 
   // ─── Secret / token non-exposure ────────────────────────────────────────
@@ -246,14 +439,15 @@ describe("AuthGate", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("Set up GitHub access")).toBeInTheDocument();
+      expect(screen.getByText("Connect GitHub")).toBeInTheDocument();
     });
 
-    // The rendered guidance should explicitly tell the user they don't need
-    // to paste secrets or tokens.
+    // The page explains that no secret copying is required, and the launch
+    // form itself carries no token or credential fields.
     const bodyText = document.body.textContent ?? "";
-    expect(bodyText).toMatch(/never need to paste secrets or tokens/i);
-    // No password inputs or token prompts in the self-setup screen.
+    expect(bodyText).toMatch(/No tokens or private keys to copy into Djinn/i);
+    const form = screen.getByRole("form", { name: "Start GitHub App setup" });
+    expect(form.querySelectorAll("input")).toHaveLength(0);
     expect(screen.queryByPlaceholderText(/paste.*secret/i)).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/paste.*token/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/private key/i)).not.toBeInTheDocument();
@@ -285,7 +479,7 @@ describe("AuthGate", () => {
       screen.getByText(/GITHUB_APP_CLIENT_ID is empty/i),
     ).toBeInTheDocument();
     // Fatal Secret must NOT silently fall back to self-setup CTA.
-    expect(screen.queryByText("Set up GitHub access")).not.toBeInTheDocument();
+    expect(screen.queryByText("Connect GitHub")).not.toBeInTheDocument();
   });
 
   // ─── Credentials unrecoverable recovery ─────────────────────────────────
@@ -381,7 +575,8 @@ describe("AuthGate", () => {
       "GitHub App Secret is invalid",
       "Stored credentials cannot be recovered",
       "GitHub App setup in progress",
-      "Set up GitHub access",
+      "Connect GitHub",
+      "Open the GitHub setup link",
       "GitHub App not configured",
     ];
 
@@ -414,9 +609,15 @@ describe("AuthGate", () => {
           );
           vi.mocked(fetchAuthConfig).mockResolvedValue(baseAuthConfig(true));
           break;
-        case "Set up GitHub access":
+        case "Connect GitHub":
           vi.mocked(fetchSetupStatus).mockResolvedValue(baseSetupStatus());
           vi.mocked(fetchAuthConfig).mockResolvedValue(baseAuthConfig(true));
+          break;
+        case "Open the GitHub setup link":
+          vi.mocked(fetchSetupStatus).mockResolvedValue(baseSetupStatus());
+          vi.mocked(fetchAuthConfig).mockResolvedValue(
+            baseAuthConfig(true, false),
+          );
           break;
         case "GitHub App not configured":
           vi.mocked(fetchSetupStatus).mockResolvedValue(baseSetupStatus());
