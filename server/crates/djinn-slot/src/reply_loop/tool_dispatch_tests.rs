@@ -4,7 +4,7 @@ use super::super::turn_budget::{
 };
 use super::*;
 use djinn_telemetry::render;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 fn test_tool_schema(
     name: &str,
     read_only: Option<bool>,
@@ -41,6 +41,316 @@ fn test_tool_schema(
         );
     }
     schema
+}
+
+// ─── Session phase dispatcher integration regressions ────────────────────
+
+/// Scripted host boundary timings; no operation uses wall-clock time.
+struct PhaseScriptedDispatcher {
+    clock: Arc<djinn_core::clock::TestClock>,
+    retry_attempts: std::sync::atomic::AtomicUsize,
+}
+
+impl PhaseScriptedDispatcher {
+    fn advance(&self, seconds: u64) {
+        self.clock
+            .advance_mono(std::time::Duration::from_secs(seconds));
+    }
+}
+
+impl crate::host::SlotToolDispatcher for PhaseScriptedDispatcher {
+    fn is_stash_tool(&self, name: &str) -> bool {
+        matches!(name, "output_view" | "output_grep")
+    }
+    fn handle_stash_call(
+        &self,
+        name: &str,
+        _: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<String, String> {
+        match name {
+            "output_view" => {
+                self.advance(1);
+                Ok("stash ok".into())
+            }
+            "output_grep" => {
+                self.advance(2);
+                Err("stash error".into())
+            }
+            _ => unreachable!(),
+        }
+    }
+    fn render_result(&self, _: &str, _: &str, value: &serde_json::Value) -> String {
+        value.to_string()
+    }
+    fn externalize_rendered_result(&self, _: &str, _: &str, rendered: &str, _: usize) -> String {
+        rendered.to_string()
+    }
+    fn dispatch_extension_tool<'a>(
+        &'a self,
+        name: &'a str,
+        _: Option<serde_json::Map<String, serde_json::Value>>,
+        _: &'a std::path::Path,
+        _: &'a str,
+        _: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>,
+    > {
+        match name {
+            "extension_ok" => {
+                self.advance(7);
+                Box::pin(async { Ok(serde_json::json!({"ok": true})) })
+            }
+            "extension_err" => {
+                self.advance(8);
+                Box::pin(async { Err("extension error".into()) })
+            }
+            "retry" => {
+                self.advance(1);
+                let attempt = self
+                    .retry_attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move {
+                    if attempt == 0 {
+                        Err("database is locked".into())
+                    } else {
+                        Ok(serde_json::json!({"retried": true}))
+                    }
+                })
+            }
+            "pending" => Box::pin(std::future::pending()),
+            _ => Box::pin(async { Err("unexpected extension tool".into()) }),
+        }
+    }
+    fn is_mcp_tool(&self, name: &str) -> bool {
+        matches!(name, "mcp_ok" | "mcp_err")
+    }
+    fn dispatch_mcp_tool<'a>(
+        &'a self,
+        name: &'a str,
+        _: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>,
+    > {
+        let result = match name {
+            "mcp_ok" => {
+                self.advance(3);
+                Ok(serde_json::json!({"ok": true}))
+            }
+            "mcp_err" => {
+                self.advance(4);
+                Err("mcp error".into())
+            }
+            _ => unreachable!(),
+        };
+        Box::pin(async move { result })
+    }
+    fn mcp_server_for_tool(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn is_resource_tool(&self, name: &str) -> bool {
+        matches!(name, "resource_ok" | "resource_err")
+    }
+    fn dispatch_resource_tool<'a>(
+        &'a self,
+        name: &'a str,
+        _: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
+    {
+        let result = match name {
+            "resource_ok" => {
+                self.advance(5);
+                Ok("resource ok".into())
+            }
+            "resource_err" => {
+                self.advance(6);
+                Err("resource error".into())
+            }
+            _ => unreachable!(),
+        };
+        Box::pin(async move { result })
+    }
+    fn clear_stash(&self) {}
+}
+
+fn phase_metric_value(rendered: &str) -> f64 {
+    rendered
+        .lines()
+        .find(|line| {
+            line.starts_with("djinn_agent_session_phase_seconds_total")
+                && line.contains("phase=\"tool_execution\"")
+                && line.contains("role=\"worker\"")
+        })
+        .and_then(|line| line.rsplit_once(' ').map(|(_, value)| value))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("missing worker tool_execution sample in:\n{rendered}"))
+}
+
+fn assert_phase_labels_are_bounded(rendered: &str) {
+    for line in rendered
+        .lines()
+        .filter(|line| line.starts_with("djinn_agent_session_phase_seconds_total{"))
+    {
+        let labels = line
+            .split_once('{')
+            .and_then(|(_, tail)| tail.split_once('}'))
+            .map(|(labels, _)| labels)
+            .expect("phase metric must have labels");
+        assert!(
+            labels.split(',').all(|label| {
+                matches!(
+                    label,
+                    "phase=\"provider_wait\""
+                        | "phase=\"tool_execution\""
+                        | "role=\"worker\""
+                        | "role=\"reviewer\""
+                        | "role=\"planner\""
+                        | "role=\"refinement\""
+                )
+            }),
+            "phase metric carries an unbounded label: {line}"
+        );
+    }
+}
+
+fn scripted_phase_context() -> (
+    SlotContext,
+    Arc<djinn_core::clock::TestClock>,
+    Arc<Mutex<SessionPhaseTracker>>,
+    ToolRuntimeMetadataMap,
+) {
+    use crate::test_helpers::{agent_context_from_db_with_dispatcher, create_test_db};
+    use std::time::{Instant, SystemTime};
+    use tokio_util::sync::CancellationToken;
+    let clock = Arc::new(djinn_core::clock::TestClock::new(
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    ));
+    let dispatcher = Arc::new(PhaseScriptedDispatcher {
+        clock: Arc::clone(&clock),
+        retry_attempts: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut ctx = agent_context_from_db_with_dispatcher(
+        create_test_db(),
+        CancellationToken::new(),
+        Some(dispatcher),
+    );
+    ctx.clock = clock.clone();
+    let tracker = Arc::new(Mutex::new(SessionPhaseTracker::new(&ctx, "worker")));
+    (ctx, clock, tracker, ToolRuntimeMetadataMap::new())
+}
+
+fn scripted_request(idx: usize, name: &str, retry_safe: bool) -> ToolDispatchRequest {
+    ToolDispatchRequest {
+        idx,
+        id: format!("call-{name}"),
+        name: name.into(),
+        args: None,
+        tool_span: None,
+        retry_safe,
+    }
+}
+
+#[tokio::test]
+async fn dispatcher_phase_metrics_cover_success_and_returned_errors_for_all_routes() {
+    let _guard = turn_budget_telemetry_guard();
+    djinn_telemetry::init().expect("telemetry init");
+    let (ctx, _clock, tracker, metadata) = scripted_phase_context();
+    let dispatch =
+        test_tracked_dispatch_context(&ctx, &metadata, std::path::Path::new("/tmp"), &tracker);
+    let before = phase_metric_value(&render().expect("render metrics"));
+    for (idx, name) in [
+        "output_view",
+        "output_grep",
+        "mcp_ok",
+        "mcp_err",
+        "resource_ok",
+        "resource_err",
+        "extension_ok",
+        "extension_err",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (_, result) = dispatch_single_tool(scripted_request(idx, name, false), &dispatch).await;
+        let ContentBlock::ToolResult { is_error, .. } = result else {
+            panic!("dispatcher must render a tool result")
+        };
+        assert_eq!(is_error, name.ends_with("err") || name == "output_grep");
+    }
+    let rendered = render().expect("render metrics after dispatches");
+    assert_eq!(phase_metric_value(&rendered) - before, 36.0);
+    assert_phase_labels_are_bounded(&rendered);
+}
+
+#[tokio::test(start_paused = true)]
+async fn extension_retry_and_backoff_are_one_outer_tool_interval() {
+    let _guard = turn_budget_telemetry_guard();
+    djinn_telemetry::init().expect("telemetry init");
+    let (ctx, clock, tracker, metadata) = scripted_phase_context();
+    let dispatch =
+        test_tracked_dispatch_context(&ctx, &metadata, std::path::Path::new("/tmp"), &tracker);
+    let before = phase_metric_value(&render().expect("render metrics"));
+    let future = dispatch_single_tool(scripted_request(0, "retry", true), &dispatch);
+    tokio::pin!(future);
+    assert!(
+        futures::poll!(&mut future).is_pending(),
+        "retry backoff must be pending"
+    );
+    clock.advance_mono(std::time::Duration::from_secs(2));
+    tokio::time::advance(std::time::Duration::from_millis(200)).await;
+    let (_, result) = future.await;
+    assert!(matches!(
+        result,
+        ContentBlock::ToolResult {
+            is_error: false,
+            ..
+        }
+    ));
+    let rendered = render().expect("render metrics after retry");
+    assert_eq!(phase_metric_value(&rendered) - before, 4.0);
+}
+
+#[tokio::test]
+async fn concurrent_dispatch_guards_suppress_nested_tool_intervals_and_drop_flushes_once() {
+    let _guard = turn_budget_telemetry_guard();
+    djinn_telemetry::init().expect("telemetry init");
+    let (ctx, clock, tracker, metadata) = scripted_phase_context();
+    let dispatch =
+        test_tracked_dispatch_context(&ctx, &metadata, std::path::Path::new("/tmp"), &tracker);
+    let before = phase_metric_value(&render().expect("render metrics"));
+    {
+        let first = dispatch_single_tool(scripted_request(0, "pending", false), &dispatch);
+        let second = dispatch_single_tool(scripted_request(1, "pending", false), &dispatch);
+        tokio::pin!(first);
+        tokio::pin!(second);
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
+        clock.advance_mono(std::time::Duration::from_secs(7));
+    }
+    let rendered = render().expect("render metrics after concurrent cancellation");
+    assert_eq!(phase_metric_value(&rendered) - before, 7.0);
+    assert_phase_labels_are_bounded(&rendered);
+}
+
+/// The ordinary dispatch tests intentionally leave phase accounting disabled.
+/// Phase regressions opt in explicitly so their fake `SlotContext` clock and
+/// shared tracker exercise the same dispatcher boundary as production.
+fn test_tracked_dispatch_context<'a>(
+    ctx: &'a SlotContext,
+    tool_metadata: &'a ToolRuntimeMetadataMap,
+    worktree_path: &'a std::path::Path,
+    phase_tracker: &'a Arc<Mutex<SessionPhaseTracker>>,
+) -> ToolDispatchContext<'a> {
+    ToolDispatchContext {
+        ctx,
+        task_id: "test-task",
+        worktree_path,
+        role_name: "worker",
+        tool_metadata,
+        tool_dispatcher: ctx.tool_dispatcher.as_ref().unwrap().as_ref(),
+        otel_session: None,
+        phase_tracker: Some(phase_tracker),
+    }
 }
 #[test]
 fn runtime_metadata_parses_safety_annotations_and_gates_retry() {
