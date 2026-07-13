@@ -942,6 +942,8 @@ pub async fn apply_doctor_repair_tx(
                 "closed",
                 "parent_closed",
                 &original_parent_ids,
+                None,
+                None,
             )
             .await?;
 
@@ -963,6 +965,16 @@ pub async fn apply_doctor_repair_tx(
             .execute(&mut *conn)
             .await?;
 
+            // Capture the live session (if any) before emitting the repair audit
+            // so the doctor_fix_repair payload can include it alongside the PR.
+            let active_session: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM sessions WHERE task_id = $1 AND status = 'running' \
+                 ORDER BY started_at DESC LIMIT 1",
+            )
+            .bind(task_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+
             insert_doctor_repair_activities(
                 conn,
                 task_id,
@@ -970,6 +982,8 @@ pub async fn apply_doctor_repair_tx(
                 "needs_lead_intervention",
                 reason,
                 &original_parent_ids,
+                active_session.clone(),
+                pr_url.clone(),
             )
             .await?;
 
@@ -995,13 +1009,6 @@ pub async fn apply_doctor_repair_tx(
 
             // Preserve live session identity: record any active session so the
             // lead knows the task was mid-flight when parked.
-            let active_session: Option<String> = sqlx::query_scalar(
-                "SELECT id FROM sessions WHERE task_id = $1 AND status = 'running' \
-                 ORDER BY started_at DESC LIMIT 1",
-            )
-            .bind(task_id)
-            .fetch_optional(&mut *conn)
-            .await?;
             if let Some(session_id) = active_session {
                 let audit_payload = serde_json::json!({
                     "source": "doctor_fix",
@@ -1031,6 +1038,7 @@ pub async fn apply_doctor_repair_tx(
 
 /// Emit the normal `status_changed` activity and the doctor-specific audit
 /// evidence for a repair mutation.
+#[allow(clippy::too_many_arguments)]
 async fn insert_doctor_repair_activities(
     conn: &mut sqlx::PgConnection,
     task_id: &str,
@@ -1038,6 +1046,8 @@ async fn insert_doctor_repair_activities(
     to_status: &str,
     reason: &str,
     original_parent_ids: &[String],
+    preserved_session_id: Option<String>,
+    preserved_pr_url: Option<String>,
 ) -> Result<()> {
     // Normal task status-change activity (same shape as lifecycle transitions).
     let status_payload = serde_json::json!({
@@ -1056,7 +1066,7 @@ async fn insert_doctor_repair_activities(
     .await?;
 
     // Doctor-specific audit evidence.
-    let audit_payload = serde_json::json!({
+    let mut audit_payload = serde_json::json!({
         "source": "doctor_fix",
         "check": "closed_parent_open_children",
         "original_parent_ids": original_parent_ids,
@@ -1064,6 +1074,15 @@ async fn insert_doctor_repair_activities(
         "to_status": to_status,
         "reason": reason,
     });
+    if to_status == "needs_lead_intervention" {
+        audit_payload["park_reason"] = serde_json::Value::String(reason.to_owned());
+    }
+    if let Some(session_id) = preserved_session_id {
+        audit_payload["preserved_session_id"] = serde_json::Value::String(session_id);
+    }
+    if let Some(pr_url) = preserved_pr_url {
+        audit_payload["preserved_pr_url"] = serde_json::Value::String(pr_url);
+    }
     sqlx::query(
         "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) \
          VALUES ($1, $2, 'system', 'system', 'doctor_fix_repair', $3)",
