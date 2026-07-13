@@ -46,3 +46,6 @@ data:
   DJINN_WEB_URL: {{ . | quote }}
   {{- end }}
   DJINN_ENABLE_SELF_SETUP: {{ .Values.env.enableSelfSetup | quote }}
+  # Local/solo deployments may bind to a personal GitHub account. Production
+  # defaults to organization-only binding; the server owns enforcement.
+  DJINN_ALLOW_USER_INSTALLATIONS: {{ .Values.env.allowUserInstallations | quote }}

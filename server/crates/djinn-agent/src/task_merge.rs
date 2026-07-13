@@ -20,17 +20,10 @@ pub(crate) fn build_app_push_url(owner: &str, repo: &str, installation_token: &s
     format!("https://x-access-token:{installation_token}@github.com/{owner}/{repo}.git")
 }
 
-/// Bot identity used when committing/pushing through the GitHub App. The
-/// canonical no-reply email form is `<app-id>+djinn-bot[bot]@users.noreply.github.com`.
+/// Bot identity used when committing/pushing through the active GitHub App.
 #[allow(dead_code)]
 fn bot_identity() -> (String, String) {
-    let app_id = djinn_provider::github_app::app_id()
-        .map(|id| id.to_string())
-        .unwrap_or_else(|_| "0".to_string());
-    (
-        "djinn-bot[bot]".to_string(),
-        format!("{app_id}+djinn-bot[bot]@users.noreply.github.com"),
-    )
+    djinn_provider::github_app::bot_git_identity()
 }
 
 /// Parse `owner` and `repo` from a GitHub remote URL.

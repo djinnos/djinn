@@ -149,7 +149,7 @@ export async function setUserCredential(args: {
   apiKey: string;
 }): Promise<void> {
   const response = await callMcpTool("credential_set", {
-    target_user_id: args.targetUserId,
+    ...targetArgs(args.targetUserId),
     provider_id: args.providerId,
     key_name: args.keyName,
     api_key: args.apiKey,
@@ -183,7 +183,7 @@ export async function startUserOAuth(
 ): Promise<UserOAuthResult> {
   try {
     const result = await callMcpTool("provider_oauth_start", {
-      target_user_id: targetUserId,
+      ...targetArgs(targetUserId),
       provider_id: providerId,
     });
     if (!result.ok) {

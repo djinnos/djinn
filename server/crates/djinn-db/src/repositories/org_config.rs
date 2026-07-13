@@ -8,9 +8,10 @@
 //! The row is written by the in-UI installation picker (see
 //! `server/src/server/github_install.rs`) and by the GitHub App-install
 //! redirect callback (`server/src/server/auth.rs::app_setup_callback`),
-//! both of which funnel through the single [`OrgConfigRepository::set`]
-//! writer below. Picking a different installation overwrites the row in
-//! place — there is no env override and no second writer.
+//! both of which use the repository writers below. Bootstrap callers use
+//! [`OrgConfigRepository::create_if_absent`] so concurrent setup requests
+//! cannot replace an established binding. [`OrgConfigRepository::set`] is
+//! retained for explicit operator-controlled replacement paths.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +29,8 @@ pub struct OrgConfig {
     pub created_at: String,
 }
 
-/// Input for [`OrgConfigRepository::set`].
+/// Input for [`OrgConfigRepository::create_if_absent`] and
+/// [`OrgConfigRepository::set`].
 #[derive(Debug, Clone)]
 pub struct NewOrgConfig<'a> {
     pub github_org_id: i64,
@@ -60,14 +62,37 @@ impl OrgConfigRepository {
         .await?)
     }
 
+    /// Create the singleton org binding only when it does not already exist.
+    ///
+    /// Returns `Some(row)` when this call created the binding and `None` when
+    /// another setup request (or an earlier setup) already owns the singleton
+    /// row. The conflict check and insert are one database statement, so two
+    /// concurrent bootstrap requests cannot overwrite each other.
+    pub async fn create_if_absent(&self, cfg: NewOrgConfig<'_>) -> Result<Option<OrgConfig>> {
+        self.db.ensure_initialized().await?;
+
+        let inserted = sqlx::query_as::<_, OrgConfig>(
+            "INSERT INTO org_config
+                (id, github_org_id, github_org_login, app_id, installation_id)
+             VALUES (1, $1, $2, $3, $4)
+             ON CONFLICT (id) DO NOTHING
+             RETURNING id, github_org_id, github_org_login, app_id, installation_id, created_at",
+        )
+        .bind(cfg.github_org_id)
+        .bind(cfg.github_org_login)
+        .bind(cfg.app_id)
+        .bind(cfg.installation_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        Ok(inserted)
+    }
+
     /// Insert or replace the singleton org-binding row.
     ///
-    /// This is the **only** writer for `org_config` — both the in-UI
-    /// installation picker and the GitHub App-install redirect callback
-    /// land here. Re-binding to a different installation is supported by
-    /// design: an operator setting up a fresh deployment may pick the
-    /// wrong installation on the first click and reasonably expect a
-    /// second click to overwrite the binding.
+    /// This explicit replacement API is for operator-controlled repair or
+    /// migration paths. Public bootstrap surfaces must use
+    /// [`Self::create_if_absent`] so they cannot replace a completed binding.
     ///
     /// The `created_at` of an overwriting row reflects the *latest* bind —
     /// callers that need provenance for the original bind should snapshot
@@ -173,5 +198,70 @@ mod tests {
 
         let fetched = repo.get().await.unwrap().unwrap();
         assert_eq!(fetched.github_org_login, "second");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_if_absent_does_not_replace_existing_row() {
+        let repo = OrgConfigRepository::new(test_db());
+
+        let created = repo
+            .create_if_absent(NewOrgConfig {
+                github_org_id: 1,
+                github_org_login: "first",
+                app_id: 10,
+                installation_id: 20,
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.unwrap().github_org_login, "first");
+
+        let conflict = repo
+            .create_if_absent(NewOrgConfig {
+                github_org_id: 2,
+                github_org_login: "second",
+                app_id: 30,
+                installation_id: 40,
+            })
+            .await
+            .unwrap();
+        assert!(conflict.is_none());
+
+        let fetched = repo.get().await.unwrap().unwrap();
+        assert_eq!(fetched.github_org_login, "first");
+        assert_eq!(fetched.installation_id, 20);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_create_if_absent_has_exactly_one_winner() {
+        let repo = OrgConfigRepository::new(test_db());
+        let first_repo = repo.clone();
+        let second_repo = repo.clone();
+
+        let (first, second) = tokio::join!(
+            first_repo.create_if_absent(NewOrgConfig {
+                github_org_id: 1,
+                github_org_login: "first",
+                app_id: 10,
+                installation_id: 20,
+            }),
+            second_repo.create_if_absent(NewOrgConfig {
+                github_org_id: 2,
+                github_org_login: "second",
+                app_id: 30,
+                installation_id: 40,
+            }),
+        );
+
+        let winners = [first.unwrap(), second.unwrap()]
+            .into_iter()
+            .filter(Option::is_some)
+            .count();
+        assert_eq!(winners, 1);
+
+        let fetched = repo.get().await.unwrap().unwrap();
+        assert!(matches!(
+            fetched.github_org_login.as_str(),
+            "first" | "second"
+        ));
     }
 }
