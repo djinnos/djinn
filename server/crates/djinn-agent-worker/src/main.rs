@@ -429,6 +429,71 @@ fn cargo_target_seed_fallback_reason(reason: Option<&CargoTargetSeedFallback>) -
     }
 }
 
+/// Classify the cargo-target seed attempt outcome for the `workspace_seed_seconds`
+/// histogram (proposal zp5t).
+///
+/// - `Ok(Ok(_))` → `ok` (seed succeeded, including cold-start fallback which
+///   is still a completed seed attempt).
+/// - `Ok(Err(_))` → `error` (the seed helper returned a setup/IO error).
+/// - `Err(join_err)` → `cancelled` when the `spawn_blocking` task was
+///   cancelled (runtime shutdown), `error` otherwise (panic).
+///
+/// This is a pure function so tests can assert classification without running
+/// the full async seed path.
+fn classify_seed_outcome(
+    result: &Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError>,
+) -> &'static str {
+    match result {
+        Ok(Ok(_)) => djinn_telemetry::workspace_seed::OUTCOME_OK,
+        Ok(Err(_)) => djinn_telemetry::workspace_seed::OUTCOME_ERROR,
+        Err(join_err) if join_err.is_cancelled() => {
+            djinn_telemetry::workspace_seed::OUTCOME_CANCELLED
+        }
+        Err(_) => djinn_telemetry::workspace_seed::OUTCOME_ERROR,
+    }
+}
+
+/// Terminal state of a started cargo-target seed attempt.
+///
+/// `Cancelled` is separate from the join result so the terminal recording
+/// boundary can be failure-injected without aborting a started
+/// `spawn_blocking` task, which Tokio cannot reliably abort.
+enum SeedAttemptTerminal<'a> {
+    Join(&'a Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError>),
+    // Deterministic failure injection for telemetry tests. Production
+    // cancellation is represented by a cancelled JoinError above.
+    #[cfg(test)]
+    Cancelled,
+}
+
+fn classify_seed_terminal(terminal: SeedAttemptTerminal<'_>) -> &'static str {
+    match terminal {
+        SeedAttemptTerminal::Join(result) => classify_seed_outcome(result),
+        #[cfg(test)]
+        SeedAttemptTerminal::Cancelled => djinn_telemetry::workspace_seed::OUTCOME_CANCELLED,
+    }
+}
+
+/// Record one `workspace_seed_seconds` sample for the cargo-target seed
+/// attempt, classifying its terminal state. Called exactly once per started
+/// seed attempt.
+///
+/// Accepts `elapsed` directly so tests can assert deterministic `_sum`
+/// deltas without a wall-clock dependency.
+fn record_seed_terminal_seconds(elapsed: Duration, terminal: SeedAttemptTerminal<'_>) {
+    let outcome = classify_seed_terminal(terminal);
+    djinn_telemetry::workspace_seed::record_seconds(outcome, elapsed);
+}
+
+/// Build a deterministic successful join boundary for telemetry tests without
+/// starting an unabortable blocking task.
+#[cfg(test)]
+fn completed_seed_join(
+    result: std::io::Result<CargoTargetSeedResult>,
+) -> Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError> {
+    Ok(result)
+}
+
 async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> PathBuf {
     // Canonicalize once so every structured event for this task-run shares the
     // same absolute workspace_dir. The cargo warm path uses the SAME canonical
@@ -501,11 +566,16 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
 
     let seed_source_base = source_base.clone();
     let seed_destination_run_dir = destination_run_dir.clone();
-    match tokio::task::spawn_blocking(move || {
+    let seed_start = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
+    let seed_join_result = tokio::task::spawn_blocking(move || {
         seed_cargo_target_dir(seed_source_base, seed_destination_run_dir)
     })
-    .await
-    {
+    .await;
+    let seed_elapsed = seed_start.elapsed();
+    // Record exactly one workspace_seed_seconds sample per started seed
+    // attempt, regardless of outcome (ok / error / cancelled).
+    record_seed_terminal_seconds(seed_elapsed, SeedAttemptTerminal::Join(&seed_join_result));
+    match seed_join_result {
         Ok(Ok(result)) => {
             record_cargo_target_seed_result("task_run", &result);
             let fallback_reason = result
@@ -3344,5 +3414,262 @@ warning: something
             classify_environmental_failure(&err),
             "service_readiness_failed"
         );
+    }
+
+    // ── Workspace seed telemetry tests (proposal zp5t) ──────────────────
+
+    /// Serialize telemetry-scrape tests so each can use a precise delta.
+    static SEED_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn seed_telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
+        SEED_TELEMETRY_MUTEX
+            .lock()
+            .expect("seed telemetry test mutex poisoned")
+    }
+
+    /// Count `workspace_seed_seconds_count` samples for a given outcome.
+    fn seed_count(rendered: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_seed_seconds_count")
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
+    /// Read the `_sum` value for `workspace_seed_seconds` for a given outcome.
+    fn seed_sum(rendered: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_seed_seconds_sum")
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
+    /// Assert that rendered workspace_seed samples carry no high-cardinality
+    /// identity labels.
+    fn assert_no_seed_identity_labels(rendered: &str) {
+        for line in rendered.lines() {
+            if !line.starts_with("djinn_workspace_seed_seconds") {
+                continue;
+            }
+            for forbidden in [
+                "task_id=",
+                "session_id=",
+                "project_id=",
+                "user_id=",
+                "path=",
+                "error=",
+                "reason=",
+            ] {
+                assert!(
+                    !line.contains(forbidden),
+                    "seed metric line must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
+        }
+    }
+
+    /// `classify_seed_outcome`: Ok(Ok(_)) → ok.
+    #[test]
+    fn classify_seed_outcome_ok() {
+        let result: Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError> =
+            Ok(Ok(CargoTargetSeedResult {
+                elapsed: Duration::from_millis(1),
+                linked_file_count: 0,
+                copied_file_count: 0,
+                skipped_file_count: 0,
+                linked_bytes: 0,
+                copied_bytes: 0,
+                fallback_reason: None,
+            }));
+        assert_eq!(
+            classify_seed_outcome(&result),
+            djinn_telemetry::workspace_seed::OUTCOME_OK,
+        );
+    }
+
+    /// `classify_seed_outcome`: Ok(Err(_)) → error.
+    #[test]
+    fn classify_seed_outcome_error() {
+        let result: Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError> =
+            Ok(Err(std::io::Error::other("setup failed")));
+        assert_eq!(
+            classify_seed_outcome(&result),
+            djinn_telemetry::workspace_seed::OUTCOME_ERROR,
+        );
+    }
+
+    /// A deterministic terminal cancellation is classified as `cancelled`.
+    /// This injects cancellation at the terminal recording seam rather than
+    /// aborting `spawn_blocking`, because started blocking tasks cannot be
+    /// reliably aborted by Tokio.
+    #[test]
+    fn classify_seed_terminal_cancelled() {
+        assert_eq!(
+            classify_seed_terminal(SeedAttemptTerminal::Cancelled),
+            djinn_telemetry::workspace_seed::OUTCOME_CANCELLED,
+        );
+    }
+
+    /// A successful seed records exactly one `ok` `workspace_seed_seconds`
+    /// sample and does not change existing cold-start fallback behavior.
+    #[test]
+    fn seed_records_one_ok_sample_on_success() {
+        let _guard = seed_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("warm-base");
+        let run = tmp.path().join("run-target");
+        // Create a warm-base file so the seed has something to hardlink.
+        let artifact = base.join("debug/deps/libsuccess.rlib");
+        std::fs::create_dir_all(artifact.parent().expect("parent")).expect("create parent");
+        std::fs::write(&artifact, b"seeded artifact").expect("write artifact");
+
+        let before = djinn_telemetry::render().expect("render before");
+        let ok_before = seed_count(&before, "ok");
+        let ok_sum_before = seed_sum(&before, "ok");
+        let elapsed = Duration::from_millis(300);
+
+        let join_result =
+            completed_seed_join(cargo_target_seed::seed_cargo_target_dir(&base, &run));
+        record_seed_terminal_seconds(elapsed, SeedAttemptTerminal::Join(&join_result));
+
+        let result = join_result
+            .expect("join must succeed")
+            .expect("seed must succeed");
+        assert!(result.fallback_reason.is_none(), "seed should succeed");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            seed_count(&after, "ok"),
+            ok_before + 1.0,
+            "one ok seed sample expected"
+        );
+        assert!(
+            (seed_sum(&after, "ok") - ok_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
+            "ok seed sum delta must equal elapsed"
+        );
+        assert_no_seed_identity_labels(&after);
+    }
+
+    /// A cold-start fallback seed (missing base) records exactly one `ok`
+    /// sample — the seed helper returns `Ok` with a fallback reason, so the
+    /// seed attempt itself completed successfully.
+    #[test]
+    fn seed_records_ok_on_cold_start_fallback() {
+        let _guard = seed_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("missing-base");
+        let run = tmp.path().join("run-target");
+
+        let before = djinn_telemetry::render().expect("render before");
+        let ok_before = seed_count(&before, "ok");
+        let ok_sum_before = seed_sum(&before, "ok");
+        let elapsed = Duration::from_millis(180);
+
+        let join_result =
+            completed_seed_join(cargo_target_seed::seed_cargo_target_dir(&base, &run));
+        record_seed_terminal_seconds(elapsed, SeedAttemptTerminal::Join(&join_result));
+
+        let result = join_result
+            .expect("join must succeed")
+            .expect("seed helper returns Ok on missing base");
+        assert_eq!(
+            result.fallback_reason,
+            Some(cargo_target_seed::CargoTargetSeedFallback::BaseMissing),
+            "missing base must produce cold-start fallback"
+        );
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            seed_count(&after, "ok"),
+            ok_before + 1.0,
+            "cold-start fallback seed is a successful attempt: one ok sample"
+        );
+        assert!(
+            (seed_sum(&after, "ok") - ok_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
+            "ok seed sum delta must equal elapsed for cold-start fallback"
+        );
+        assert_no_seed_identity_labels(&after);
+    }
+
+    /// A seed that returns a setup error records exactly one `error` sample.
+    #[test]
+    fn seed_records_one_error_sample_on_setup_failure() {
+        let _guard = seed_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        // Point base at a path under a file (not a dir) so create_dir_all fails.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let blocker = tmp.path().join("blocker-file");
+        std::fs::write(&blocker, b"not a dir").expect("write blocker");
+        // run_dir is under blocker-file → create_dir_all fails → io::Err
+        let run = blocker.join("run-target");
+
+        let before = djinn_telemetry::render().expect("render before");
+        let err_before = seed_count(&before, "error");
+        let err_sum_before = seed_sum(&before, "error");
+        let elapsed = Duration::from_millis(90);
+
+        let base = tmp.path().join("any-base");
+        let join_result =
+            completed_seed_join(cargo_target_seed::seed_cargo_target_dir(&base, &run));
+        record_seed_terminal_seconds(elapsed, SeedAttemptTerminal::Join(&join_result));
+
+        // The injected join succeeds but the seed returns Err (create_dir_all failed).
+        assert!(
+            join_result.is_ok(),
+            "spawn_blocking join must succeed even if seed returns Err"
+        );
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            seed_count(&after, "error"),
+            err_before + 1.0,
+            "one error seed sample expected for setup failure"
+        );
+        assert!(
+            (seed_sum(&after, "error") - err_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
+            "error seed sum delta must equal elapsed"
+        );
+        assert_no_seed_identity_labels(&after);
+    }
+
+    /// A deterministically injected terminal cancellation records exactly one
+    /// `cancelled` sample via the same terminal recording boundary used after
+    /// the worker seed join resolves.
+    #[test]
+    fn seed_records_one_cancelled_sample() {
+        let _guard = seed_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let before = djinn_telemetry::render().expect("render before");
+        let cancel_before = seed_count(&before, "cancelled");
+        let cancel_sum_before = seed_sum(&before, "cancelled");
+        let elapsed = Duration::from_millis(50);
+
+        record_seed_terminal_seconds(elapsed, SeedAttemptTerminal::Cancelled);
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            seed_count(&after, "cancelled"),
+            cancel_before + 1.0,
+            "one cancelled seed sample expected"
+        );
+        assert!(
+            (seed_sum(&after, "cancelled") - cancel_sum_before - elapsed.as_secs_f64()).abs()
+                < 0.001,
+            "cancelled seed sum delta must equal elapsed"
+        );
+        assert_no_seed_identity_labels(&after);
     }
 }

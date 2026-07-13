@@ -513,11 +513,9 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
     const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
-
-    static METRIC_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn classifies_heavy_artifacts_for_hardlink() {
@@ -701,7 +699,7 @@ mod tests {
         // fingerprint + dep-info + .rustc_info.json are byte-copied.
         assert_eq!(result.copied_file_count, 3);
         assert!(
-            result.skipped_file_count >= 1 + lock_files.len() as u64,
+            result.skipped_file_count > lock_files.len() as u64,
             "incremental state and every cargo lock variant should be skipped"
         );
 
@@ -860,9 +858,7 @@ mod tests {
     }
 
     fn metric_test_guard() -> MutexGuard<'static, ()> {
-        METRIC_TEST_MUTEX
-            .lock()
-            .expect("cargo target seed metric test mutex poisoned")
+        crate::tests::seed_telemetry_guard()
     }
 
     fn total_fallback_metric_value() -> f64 {
