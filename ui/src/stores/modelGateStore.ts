@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { fetchUserSettings } from '@/api/userSettings';
+import { fetchUserModelSelection, SELF_TARGET } from '@/api/userConfig';
+import { MODEL_LANE_KEYS } from '@/api/userSettings';
 
 interface ModelGateState {
   /** null = not yet checked */
@@ -13,13 +14,18 @@ export const useModelGateStore = create<ModelGateState>((set) => ({
   refresh: async () => {
     try {
       // The model list is now per-user and per-role: gate onboarding on whether
-      // THIS user has selected at least one model in ANY role lane.
-      const settings = await fetchUserSettings();
-      const { plan, implement, review } = settings.lanes;
-      set({ hasModels: plan.length + implement.length + review.length > 0 });
+      // THIS user has an effective model in EVERY role lane. Locked org policy
+      // still has to resolve all three lanes; a locked-but-empty policy cannot
+      // dispatch work and must remain visibly blocked for an admin to fix.
+      const settings = await fetchUserModelSelection(SELF_TARGET);
+      set({
+        hasModels: MODEL_LANE_KEYS.every(
+          (lane) => settings.lanes[lane].length > 0,
+        ),
+      });
     } catch {
-      // On error leave the gate open so we don't block the user indefinitely
-      set({ hasModels: true });
+      // Required setup must not disappear because a readiness call failed.
+      set({ hasModels: false });
     }
   },
 }));

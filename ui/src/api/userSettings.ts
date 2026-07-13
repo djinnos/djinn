@@ -12,12 +12,24 @@ export interface ModelLanes {
   review: string[];
 }
 
+/** Per-user concurrency ceilings for each role lane. */
+export interface LaneMaxSessions {
+  plan: number;
+  implement: number;
+  review: number;
+}
+
 /** The three lane keys, in display order. */
 export const MODEL_LANE_KEYS = ["plan", "implement", "review"] as const;
 export type ModelLaneKey = (typeof MODEL_LANE_KEYS)[number];
 
 export function emptyLanes(): ModelLanes {
   return { plan: [], implement: [], review: [] };
+}
+
+/** Conservative defaults used when a user explicitly configures lane limits. */
+export function defaultLaneMaxSessions(): LaneMaxSessions {
+  return { plan: 1, implement: 1, review: 1 };
 }
 
 /**
@@ -39,12 +51,56 @@ export function lanesUnion(lanes: ModelLanes): string[] {
   return out;
 }
 
+/**
+ * Minimum per-model cap needed for all configured lane ceilings to be usable
+ * simultaneously. A model selected in multiple lanes needs the sum because
+ * its model cap is shared across those lanes.
+ */
+export function aggregateModelCapacity(
+  lanes: ModelLanes,
+  laneMaxSessions: LaneMaxSessions,
+): Record<string, number> {
+  const aggregate: Record<string, number> = {};
+  for (const lane of MODEL_LANE_KEYS) {
+    for (const modelId of new Set(lanes[lane])) {
+      aggregate[modelId] = (aggregate[modelId] ?? 0) + laneMaxSessions[lane];
+    }
+  }
+  return aggregate;
+}
+
 /** Normalise a raw, possibly-partial lanes object into a complete `ModelLanes`. */
 export function parseLanes(raw: Partial<ModelLanes> | null | undefined): ModelLanes {
   return {
     plan: Array.isArray(raw?.plan) ? raw.plan : [],
     implement: Array.isArray(raw?.implement) ? raw.implement : [],
     review: Array.isArray(raw?.review) ? raw.review : [],
+  };
+}
+
+/**
+ * Parse an optional wire-level lane limit without erasing the legacy/unset
+ * distinction. The server returns all three fields together; malformed or
+ * partial payloads are treated as unset instead of inventing missing limits.
+ */
+export function parseLaneMaxSessions(raw: unknown): LaneMaxSessions | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const candidate = raw as Partial<Record<ModelLaneKey, unknown>>;
+  const values = MODEL_LANE_KEYS.map((lane) => candidate[lane]);
+  if (
+    values.some(
+      (value) =>
+        !Number.isInteger(value) ||
+        (value as number) < 1 ||
+        (value as number) > 10,
+    )
+  ) {
+    return undefined;
+  }
+  return {
+    plan: candidate.plan as number,
+    implement: candidate.implement as number,
+    review: candidate.review as number,
   };
 }
 
@@ -57,6 +113,8 @@ export interface UserSettings {
    * `{}` when unset; consumers default missing entries to 1.
    */
   maxSessions: Record<string, number>;
+  /** Per-lane concurrency ceilings; undefined preserves legacy/unbounded users. */
+  laneMaxSessions?: LaneMaxSessions;
   /**
    * Cross-model ("Thorough") review. When true (the default), the reviewer
    * prefers a model id different from the implementer's. A degenerate
@@ -78,6 +136,7 @@ interface RawGet {
   auto_approve_prs?: boolean;
   lanes?: Partial<ModelLanes> | null;
   max_sessions?: Record<string, number> | null;
+  lane_max_sessions?: LaneMaxSessions | null;
   diverse_review?: boolean | null;
   diverse_refinement?: boolean | null;
   error?: string | null;
@@ -89,6 +148,7 @@ interface RawSet {
   auto_approve_prs?: boolean | null;
   lanes?: Partial<ModelLanes> | null;
   max_sessions?: Record<string, number> | null;
+  lane_max_sessions?: LaneMaxSessions | null;
   diverse_review?: boolean | null;
   diverse_refinement?: boolean | null;
   error?: string | null;
@@ -107,6 +167,7 @@ export async function fetchUserSettings(): Promise<UserSettings> {
     autoApprovePrs: Boolean(resp?.auto_approve_prs),
     lanes: parseLanes(resp?.lanes),
     maxSessions: parseMaxSessions(resp?.max_sessions),
+    laneMaxSessions: parseLaneMaxSessions(resp?.lane_max_sessions),
     // Cross-model review defaults ON; only an explicit `false` disables it.
     diverseReview: resp?.diverse_review !== false,
     // Cross-model refinement defaults ON; only an explicit `false` disables it.
@@ -120,6 +181,8 @@ export async function patchUserSettings(patch: {
   lanes?: ModelLanes;
   /** Per-model caps keyed by full `"provider/model"` id. Omit to keep current. */
   maxSessions?: Record<string, number>;
+  /** Per-role concurrency ceilings. Omit to keep current/unset. */
+  laneMaxSessions?: LaneMaxSessions;
   /** Cross-model ("Thorough") review toggle. Omit to keep current. */
   diverseReview?: boolean;
   /** Cross-model ("Diverse") refinement toggle. Omit to keep current. */
@@ -135,6 +198,9 @@ export async function patchUserSettings(patch: {
   if (patch.maxSessions !== undefined) {
     args.max_sessions = patch.maxSessions;
   }
+  if (patch.laneMaxSessions !== undefined) {
+    args.lane_max_sessions = patch.laneMaxSessions;
+  }
   if (patch.diverseReview !== undefined) {
     args.diverse_review = patch.diverseReview;
   }
@@ -149,6 +215,7 @@ export async function patchUserSettings(patch: {
     autoApprovePrs: Boolean(resp?.auto_approve_prs),
     lanes: parseLanes(resp?.lanes),
     maxSessions: parseMaxSessions(resp?.max_sessions),
+    laneMaxSessions: parseLaneMaxSessions(resp?.lane_max_sessions),
     diverseReview: resp?.diverse_review !== false,
     diverseRefinement: resp?.diverse_refinement !== false,
   };
