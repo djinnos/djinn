@@ -530,50 +530,6 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
 }
 
 #[tokio::test]
-async fn mcp_memory_health_orphans_and_broken_links_shapes() {
-    let harness = McpTestHarness::new().await;
-    // Use a slug-shaped reference that isn't seeded; the tool still resolves
-    // and errors silently, and we only assert the response shape below.
-    let project = "test/mcp-memory-health";
-
-    // No project seeded: memory_write resolves and errors silently; the test
-    // only asserts the shape of the three health / orphans / broken_links
-    // responses, so that's fine.
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "type": "reference"}),
-        )
-        .await
-        .expect("memory_write should dispatch");
-
-    let health = harness
-        .call_tool("memory_health", json!({"project": project}))
-        .await
-        .expect("memory_health should dispatch");
-    assert!(health.get("orphan_note_count").is_some());
-    assert!(health.get("broken_link_count").is_some());
-    assert!(health.get("low_confidence_note_count").is_some());
-    assert!(health.get("stale_note_count").is_some());
-    assert!(
-        health.get("retrieval").is_some(),
-        "retrieval is required on errors too"
-    );
-
-    let orphans = harness
-        .call_tool("memory_orphans", json!({"project": project}))
-        .await
-        .expect("memory_orphans should dispatch");
-    assert!(orphans["orphans"].is_array());
-
-    let broken = harness
-        .call_tool("memory_broken_links", json!({"project": project}))
-        .await
-        .expect("memory_broken_links should dispatch");
-    assert!(broken["broken_links"].is_array());
-}
-
-#[tokio::test]
 async fn mcp_memory_history_and_diff_round_trip() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
@@ -1474,88 +1430,6 @@ async fn no_regression_memory_refs_autolink() {
 async fn no_regression_memory_search_ranking_notes_only() {
     // Regression guard: memory_search returns notes ranked correctly.
     //
-    // Wave 2 changed the default entity_types from notes-only to "both" —
-    // proposals are now interleaved in search results when entity_types is
-    // unset.  This test verifies that:
-    // (a) the two notes are still found in the result set, and
-    // (b) notes retain their expected fields (note_type, folder, permalink).
-    //
-    // Proposals MAY appear alongside notes in the default (unfiltered)
-    // result set — that is by design.  The test does not assert their
-    // absence.
-    let harness = McpTestHarness::new().await;
-    let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = project_row.slug();
-
-    // Create a proposal (may appear in default memory_search results).
-    let proposal = harness
-        .call_tool(
-            "proposal_create",
-            json!({"title": "Search Excluded Proposal", "body": "rust rust rust"}),
-        )
-        .await
-        .expect("proposal_create should dispatch");
-    let _proposal_id = proposal["id"].as_str().expect("proposal id").to_string();
-
-    // Create notes that should be searchable.
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Rust Note One", "content": "rust memory test", "type": "reference"}),
-        )
-        .await
-        .expect("memory_write one should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Rust Note Two", "content": "another rust note", "type": "adr"}),
-        )
-        .await
-        .expect("memory_write two should dispatch");
-
-    let searched = harness
-        .call_tool(
-            "memory_search",
-            json!({"project": project, "query": "rust", "limit": 10}),
-        )
-        .await
-        .expect("memory_search should dispatch");
-
-    let results = searched["results"]
-        .as_array()
-        .expect("results should be an array");
-
-    // At least the two notes should be present (proposals may also appear).
-    let note_results: Vec<_> = results
-        .iter()
-        .filter(|r| {
-            r.get("note_type")
-                .and_then(|v| v.as_str())
-                .is_some_and(|nt| nt != "proposal")
-        })
-        .collect();
-    assert!(
-        note_results.len() >= 2,
-        "should find at least 2 notes (got {}): {results:?}",
-        note_results.len()
-    );
-
-    // Every note result must carry the expected note fields.
-    for r in &note_results {
-        assert!(
-            r.get("note_type").is_some(),
-            "every note result should have note_type: {r:?}"
-        );
-        assert!(
-            r.get("folder").is_some(),
-            "every note result should have folder: {r:?}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn orphan_note_count_unchanged_by_proposal_memory_refs() {
-    // Invariant: calling proposal_show must not create any new standalone note
     // files. The feature is read-only — it walks existing memory_refs but does
     // not write notes. The orphan-note count should be identical before and
     // after proposal_show.

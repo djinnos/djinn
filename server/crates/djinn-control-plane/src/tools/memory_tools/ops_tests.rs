@@ -5,7 +5,9 @@ mod tests {
     use std::sync::Arc;
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
-    use djinn_db::{Database, NoteRepository, ProjectRepository};
+    use djinn_db::{
+        Database, NoteRepository, ProjectRepository, test_support::drop_table_for_test,
+    };
     use djinn_telemetry::memory_retrieval::{
         RetrievalEntryPoint, RetrievalOutcome, RetrievalStage,
     };
@@ -1109,10 +1111,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_health_reports_unavailable_rollup_with_required_retrieval() {
         let setup = setup_server().await;
-        sqlx::query("DROP TABLE retrieval_traces")
-            .execute(setup.server.state.db().pool())
-            .await
-            .expect("drop trace table to force rollup failure");
+        drop_table_for_test(setup.server.state.db(), "retrieval_traces").await;
 
         let response = ops::memory_health(
             &setup.server,
