@@ -952,3 +952,341 @@ async fn closed_parent_open_children_db_dry_run_is_read_only() {
     assert_eq!(tasks_before, tasks_after);
     assert_eq!(activity_before, activity_after);
 }
+
+// ---------------------------------------------------------------------------
+// memory.retrieval_zero_result: production-registered Doctor check
+// ---------------------------------------------------------------------------
+
+/// Integration test for the production-registered `memory.retrieval_zero_result`
+/// Doctor check.
+///
+/// This test exercises the full control-plane path: it inserts real
+/// `retrieval_traces` rows for two active projects, invokes `doctor_run` with
+/// `check_names: ["memory.retrieval_zero_result"]`, and proves that only the
+/// at-floor, strictly-above-threshold project produces a persisted finding.
+///
+/// **AC4**: A control-plane integration test inserts retrieval traces for at
+/// least two active projects, invokes the production-registered check through
+/// `doctor_run`, and proves only the at-floor, strictly-above-threshold project
+/// produces a persisted finding.
+///
+/// **AC5**: The integration asserts persisted evidence includes project,
+/// exact window, threshold, floor, numerator, denominator, rate, and
+/// per-entry-point counts, and covers equality-at-threshold suppression.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_run_retrieval_zero_result_only_above_threshold_emits_finding() {
+    use djinn_core::doctor::RETRIEVAL_ZERO_RESULT_NAME;
+    use djinn_db::repositories::retrieval_trace::{
+        CreateRetrievalTraceParams, DEFAULT_CANDIDATE_CAP, RetrievalTraceEntryPoint,
+        RetrievalTraceRepository,
+    };
+
+    let harness = doctor_test_harness().await;
+    let db = harness.db().clone();
+
+    // Two active projects in the DB.
+    let project_above = common::create_test_project(&db).await;
+    let project_at_threshold = common::create_test_project(&db).await;
+
+    let trace_repo = RetrievalTraceRepository::new(db.clone());
+
+    // The default RetrievalHealthConfig is 24h window, 0.50 threshold, 20-query
+    // floor. We build traces accordingly.
+
+    // An empty candidates array = zero-result trace.
+    let zero_result_candidates = json!([]);
+    // A non-empty candidates array = non-zero-result trace.
+    let non_zero_candidates = json!([{
+        "note_id": "note-1",
+        "outcome": "injected",
+        "rank": 1,
+        "confidence": 0.9,
+    }]);
+
+    // Above-threshold project: 22 total, 12 zero-result -> rate = 12/22 ~ 0.5454
+    // (strictly > 0.50). Total (22) >= floor (20).
+    for _ in 0..12 {
+        trace_repo
+            .insert(CreateRetrievalTraceParams {
+                project_id: &project_above.id,
+                session_id: None,
+                task_run_id: None,
+                task_id: None,
+                entry_point: RetrievalTraceEntryPoint::Dispatch,
+                trigger: None,
+                candidates: &zero_result_candidates,
+                candidate_cap: DEFAULT_CANDIDATE_CAP,
+                candidate_cap_exceeded: false,
+                sampling_metadata: None,
+                durations_ms: &json!({}),
+                estimated_injected_tokens: 0,
+            })
+            .await
+            .expect("insert zero-result trace for above-threshold project");
+    }
+    for _ in 0..10 {
+        trace_repo
+            .insert(CreateRetrievalTraceParams {
+                project_id: &project_above.id,
+                session_id: None,
+                task_run_id: None,
+                task_id: None,
+                entry_point: RetrievalTraceEntryPoint::Dispatch,
+                trigger: None,
+                candidates: &non_zero_candidates,
+                candidate_cap: DEFAULT_CANDIDATE_CAP,
+                candidate_cap_exceeded: false,
+                sampling_metadata: None,
+                durations_ms: &json!({}),
+                estimated_injected_tokens: 0,
+            })
+            .await
+            .expect("insert non-zero-result trace for above-threshold project");
+    }
+
+    // At-threshold project: 20 total, 10 zero-result -> rate = 10/20 = 0.50
+    // exactly (equality passes -- no finding emitted). Total (20) >= floor (20).
+    for _ in 0..10 {
+        trace_repo
+            .insert(CreateRetrievalTraceParams {
+                project_id: &project_at_threshold.id,
+                session_id: None,
+                task_run_id: None,
+                task_id: None,
+                entry_point: RetrievalTraceEntryPoint::Dispatch,
+                trigger: None,
+                candidates: &zero_result_candidates,
+                candidate_cap: DEFAULT_CANDIDATE_CAP,
+                candidate_cap_exceeded: false,
+                sampling_metadata: None,
+                durations_ms: &json!({}),
+                estimated_injected_tokens: 0,
+            })
+            .await
+            .expect("insert zero-result trace for at-threshold project");
+    }
+    for _ in 0..10 {
+        trace_repo
+            .insert(CreateRetrievalTraceParams {
+                project_id: &project_at_threshold.id,
+                session_id: None,
+                task_run_id: None,
+                task_id: None,
+                entry_point: RetrievalTraceEntryPoint::Dispatch,
+                trigger: None,
+                candidates: &non_zero_candidates,
+                candidate_cap: DEFAULT_CANDIDATE_CAP,
+                candidate_cap_exceeded: false,
+                sampling_metadata: None,
+                durations_ms: &json!({}),
+                estimated_injected_tokens: 0,
+            })
+            .await
+            .expect("insert non-zero-result trace for at-threshold project");
+    }
+
+    // Invoke the production-registered check through doctor_run, requesting
+    // ONLY the retrieval check by name.
+    let response = harness
+        .call_tool(
+            "doctor_run",
+            json!({ "check_names": [RETRIEVAL_ZERO_RESULT_NAME] }),
+        )
+        .await
+        .expect("doctor_run should dispatch");
+
+    assert_eq!(response["ok"], true, "doctor_run should succeed");
+
+    // AC4 + behavioral-defect fix: only the retrieval check should be in
+    // results -- NOT every globally-registered check.
+    let results = response["results"]
+        .as_array()
+        .expect("results should be an array");
+    assert_eq!(
+        results.len(),
+        1,
+        "only the retrieval check should run when explicitly requested; \
+         got {} results: {:?}",
+        results.len(),
+        results
+    );
+    assert_eq!(
+        results[0]["check"]["name"], RETRIEVAL_ZERO_RESULT_NAME,
+        "the single result should be the retrieval check"
+    );
+    assert_eq!(results[0]["ran"], true, "the check should have run");
+    assert_eq!(
+        results[0]["error"],
+        serde_json::Value::Null,
+        "the check should not have an error"
+    );
+
+    // Only the above-threshold project should produce a finding.
+    let findings = results[0]["findings"]
+        .as_array()
+        .expect("findings should be an array");
+    assert_eq!(
+        findings.len(),
+        1,
+        "exactly one finding (above-threshold project only); got {}",
+        findings.len()
+    );
+
+    let finding_entry = &findings[0];
+    assert_eq!(finding_entry["check_name"], RETRIEVAL_ZERO_RESULT_NAME);
+    assert_eq!(finding_entry["severity"], "warn");
+
+    let finding_id = finding_entry["finding_id"]
+        .as_str()
+        .expect("finding_id should be present");
+
+    // Fetch the persisted finding and inspect its evidence (AC5).
+    let repo = DoctorFindingRepository::new(harness.db().clone());
+    let persisted = repo
+        .get(finding_id)
+        .await
+        .expect("repo get should succeed")
+        .expect("finding should be persisted in DB");
+    assert_eq!(persisted.check_name, RETRIEVAL_ZERO_RESULT_NAME);
+    assert_eq!(persisted.severity, "warn");
+
+    // The finding should be for the above-threshold project.
+    assert_eq!(
+        persisted.entity_ids["project_id"].as_str(),
+        Some(project_above.id.as_str()),
+        "persisted finding entity_ids must reference the above-threshold project"
+    );
+
+    // AC5: inspect persisted evidence for all required fields.
+    let evidence = &persisted.evidence;
+
+    // project_id
+    assert_eq!(
+        evidence["project_id"].as_str(),
+        Some(project_above.id.as_str()),
+        "evidence must include project_id"
+    );
+
+    // window (start/end)
+    let window = &evidence["window"];
+    assert!(
+        window["start"].is_string(),
+        "evidence must include window.start"
+    );
+    assert!(
+        window["end"].is_string(),
+        "evidence must include window.end"
+    );
+    // The window should span exactly 24 hours (the default config).
+    let start_str = window["start"].as_str().unwrap();
+    let end_str = window["end"].as_str().unwrap();
+    let start = time::OffsetDateTime::parse(
+        start_str,
+        &time::format_description::well_known::Iso8601::DEFAULT,
+    )
+    .expect("window.start should parse as ISO-8601");
+    let end = time::OffsetDateTime::parse(
+        end_str,
+        &time::format_description::well_known::Iso8601::DEFAULT,
+    )
+    .expect("window.end should parse as ISO-8601");
+    let window_hours = (end - start).whole_hours();
+    assert_eq!(
+        window_hours, 24,
+        "evidence window should span exactly 24 hours (default config)"
+    );
+
+    // threshold
+    assert_eq!(
+        evidence["threshold"].as_f64(),
+        Some(0.50),
+        "evidence must include threshold (default 0.50)"
+    );
+
+    // floor
+    assert_eq!(
+        evidence["floor"].as_i64(),
+        Some(20),
+        "evidence must include floor (default 20)"
+    );
+
+    // numerator (zero-result queries)
+    assert_eq!(
+        evidence["numerator"].as_i64(),
+        Some(12),
+        "evidence numerator must be 12 (zero-result traces)"
+    );
+
+    // denominator (total queries)
+    assert_eq!(
+        evidence["denominator"].as_i64(),
+        Some(22),
+        "evidence denominator must be 22 (total traces)"
+    );
+
+    // rate
+    let rate = evidence["rate"]
+        .as_f64()
+        .expect("evidence must include rate");
+    assert!(
+        rate > 0.50,
+        "rate ({rate}) must be strictly above the 0.50 threshold"
+    );
+    // Sanity-check the exact computed rate.
+    let expected_rate = 12.0_f64 / 22.0;
+    assert!(
+        (rate - expected_rate).abs() < 1e-9,
+        "rate ({rate}) must equal 12/22 = {expected_rate}"
+    );
+
+    // per_entry_point_counts
+    let per_ep = &evidence["per_entry_point_counts"];
+    assert!(
+        per_ep.is_object(),
+        "evidence must include per_entry_point_counts as an object"
+    );
+    let dispatch_counts = &per_ep["dispatch"];
+    assert!(
+        dispatch_counts.is_object(),
+        "per_entry_point_counts must include the 'dispatch' entry point"
+    );
+    assert_eq!(
+        dispatch_counts["total_queries"].as_i64(),
+        Some(22),
+        "dispatch total_queries must be 22"
+    );
+    assert_eq!(
+        dispatch_counts["zero_result_queries"].as_i64(),
+        Some(12),
+        "dispatch zero_result_queries must be 12"
+    );
+
+    // Verify no finding was persisted for the at-threshold project.
+    let all_findings = repo
+        .list_recent(djinn_db::RecentDoctorFindings {
+            check_name: Some(RETRIEVAL_ZERO_RESULT_NAME.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("list_recent should succeed");
+    let at_threshold_findings: Vec<_> = all_findings
+        .iter()
+        .filter(|f| f.entity_ids["project_id"].as_str() == Some(project_at_threshold.id.as_str()))
+        .collect();
+    assert!(
+        at_threshold_findings.is_empty(),
+        "no finding should be persisted for the at-threshold (equality) project"
+    );
+
+    // Confirm registration metadata: the retrieval check appears in
+    // registered_checks.
+    let registered = response["registered_checks"]
+        .as_array()
+        .expect("registered_checks should be an array");
+    assert!(
+        registered
+            .iter()
+            .any(|c| c["name"] == RETRIEVAL_ZERO_RESULT_NAME),
+        "registered_checks should include the retrieval check"
+    );
+}

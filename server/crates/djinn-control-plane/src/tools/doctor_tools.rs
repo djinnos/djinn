@@ -482,24 +482,63 @@ impl DjinnMcpServer {
         let retrieval_selected = p.check_names.as_ref().is_none_or(|names| {
             names.is_empty() || names.iter().any(|name| name == RETRIEVAL_ZERO_RESULT_NAME)
         });
-        let ordinary_names = p.check_names.as_ref().map(|names| {
+        // Determine which ordinary (non-retrieval) checks to run.
+        //
+        // The semantics of `check_names` are:
+        //   - `None` or `Some([])` → run ALL registered checks.
+        //   - `Some(names)` → run only the named checks.
+        //
+        // The retrieval check is handled separately (requires async prefetch).
+        // We strip it from the requested names. When the caller requests ONLY
+        // the retrieval check, the remainder is empty — but `resolve_checks`
+        // treats an empty `Some(vec)` as "run all". We distinguish this from
+        // the `Some([])` case by checking whether the *original* list was
+        // non-empty.
+        let original_was_nonempty = p
+            .check_names
+            .as_ref()
+            .is_some_and(|names| !names.is_empty());
+        let ordinary_names: Option<Vec<String>> = p.check_names.as_ref().map(|names| {
             names
                 .iter()
                 .filter(|name| name.as_str() != RETRIEVAL_ZERO_RESULT_NAME)
                 .cloned()
                 .collect()
         });
-        let mut checks = match resolve_checks(reg, &ordinary_names) {
-            Ok(c) => c,
-            Err(error) => {
-                return Json(DoctorRunResponse {
-                    ok: false,
-                    registered_checks,
-                    results: Vec::new(),
-                    total_findings: 0,
-                    error: Some(error),
-                });
+        let mut checks = if !original_was_nonempty {
+            // `None` or `Some([])` → run all registered checks.
+            match resolve_checks(reg, &None) {
+                Ok(c) => c,
+                Err(error) => {
+                    return Json(DoctorRunResponse {
+                        ok: false,
+                        registered_checks,
+                        results: Vec::new(),
+                        total_findings: 0,
+                        error: Some(error),
+                    });
+                }
             }
+        } else if ordinary_names
+            .as_ref()
+            .is_some_and(|names| !names.is_empty())
+        {
+            // Caller named non-retrieval checks — resolve them.
+            match resolve_checks(reg, &ordinary_names) {
+                Ok(c) => c,
+                Err(error) => {
+                    return Json(DoctorRunResponse {
+                        ok: false,
+                        registered_checks,
+                        results: Vec::new(),
+                        total_findings: 0,
+                        error: Some(error),
+                    });
+                }
+            }
+        } else {
+            // Caller named only the retrieval check — no ordinary checks.
+            Vec::new()
         };
 
         if retrieval_selected {
