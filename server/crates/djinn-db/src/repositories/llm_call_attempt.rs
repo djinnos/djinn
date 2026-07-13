@@ -260,7 +260,11 @@ impl LlmCallAttemptRepository {
         Ok(row.map(|r| LlmCallAttemptRecord::from_row(&r)))
     }
 
-    /// List attempts for a task, ordered by creation time.
+    /// List attempts for a task, ordered by creation time and then id.
+    ///
+    /// `created_at` has millisecond precision, so concurrent attempts can share
+    /// a timestamp. The id tie-breaker keeps ledger reads deterministic without
+    /// relying on scheduler timing.
     pub async fn list_for_task(&self, task_id: &str) -> Result<Vec<LlmCallAttemptRecord>> {
         self.db.ensure_initialized().await?;
         let rows = sqlx::query(
@@ -272,7 +276,7 @@ impl LlmCallAttemptRepository {
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
                 cost_usd, diagnostic, outcome, created_at, finalized_at
-             FROM llm_call_attempts WHERE task_id = $1 ORDER BY created_at"#,
+             FROM llm_call_attempts WHERE task_id = $1 ORDER BY created_at, id"#,
         )
         .bind(task_id)
         .fetch_all(self.db.pool())
@@ -447,7 +451,6 @@ mod tests {
             })
             .await
             .unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
 
         let rows = repo.list_for_task(task_id).await.unwrap();
