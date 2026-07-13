@@ -64,6 +64,11 @@ rows that already exist in the transcript.
 
 ### Input contract: `PersistedTranscript`
 
+The exporter constructs this internally from a persisted session record and its
+ordered `session_messages` rows. The operator does not need to build the struct by
+hand; the repository API performs the normalization. The shape is documented for
+traceability:
+
 ```rust
 use djinn_db::{
     ExportDimensions, PersistedTranscript, ToolCallExportRepository,
@@ -71,15 +76,21 @@ use djinn_db::{
 };
 use djinn_core::models::{SessionRecord, SessionMessage};
 
-let transcript = PersistedTranscript {
-    session: SessionRecord { /* ... */ },
-    messages: Vec<SessionMessage>, /* ordered by created_at ASC, id ASC */
-    dimensions: ExportDimensions {
-        provider_id: Some("openai".into()),
-        format_family: Some("OpenAIResponses".into()),
-        tool_surface_family: Some("codex".into()),
-    },
+// Loaded from the production read replica by the repository:
+let session: SessionRecord = /* SELECT * FROM sessions WHERE id = ... */;
+let messages: Vec<SessionMessage> = /* SELECT * FROM session_messages
+                                      WHERE session_id = ...
+                                      ORDER BY created_at ASC, id ASC */;
+
+let dimensions = ExportDimensions {
+    provider_id: Some("openai".into()),
+    format_family: Some("OpenAIResponses".into()),
+    tool_surface_family: Some("codex".into()),
 };
+
+let rows = normalize_persisted_transcript(
+    &PersistedTranscript { session, messages, dimensions },
+);
 ```
 
 ### Repository export (single session)
@@ -87,6 +98,51 @@ let transcript = PersistedTranscript {
 ```rust
 let repo = ToolCallExportRepository::new(db);
 let rows = repo.export_session(session, dimensions).await?;
+```
+
+### Executable full-window export and report
+
+The checked-in example `server/crates/djinn-db/examples/run_telemetry_analysis.rs`
+performs the entire window selection, export, optional enrichment, matched-baseline
+construction, report evaluation, and deterministic 20-trace failed-edit audit
+frame in one command. It is a production operator tool and is **not** run by CI.
+
+```bash
+cd server
+DATABASE_URL=postgres://... cargo run -p djinn-db --example run_telemetry_analysis -- \
+  --window-start 2026-07-01 \
+  --window-end 2026-07-30 \
+  --output report.json \
+  --candidate-family codex \
+  --baseline-families default,Responses/default
+```
+
+The command will:
+
+1. Query the `sessions` table for rows whose `started_at` falls in the inclusive
+   30-day window and whose `task_id` is not null and `agent_type` is not `chat`.
+2. Export each session with the candidate dimensions (`OpenAIResponses`/`codex`).
+3. Export each session again with the baseline dimensions (`default`,
+   `Responses/default`) to build the matched baseline pool.
+4. Join the optional Langfuse/OTel enrichment step (inserted between export and
+   evaluation) if the operator has it.
+5. Run `evaluate(...)` with the default `SampleMinima` and `GateThresholds`.
+6. Write the JSON report to `--output`.
+7. Print the deterministic 20-trace failed-edit audit frame to `stderr`.
+
+With no `--audit-*` flags the report is intentionally `insufficient data` because
+a manual audit has not yet been supplied. After classifying the sample, re-run
+with the audit counts:
+
+```bash
+DATABASE_URL=postgres://... cargo run -p djinn-db --example run_telemetry_analysis -- \
+  --window-start 2026-07-01 \
+  --window-end 2026-07-30 \
+  --output report.json \
+  --candidate-family codex \
+  --baseline-families default,Responses/default \
+  --audit-sampled 20 \
+  --audit-qualifying 12
 ```
 
 For a full window, collect sessions where `started_at` falls inside the window,
@@ -221,6 +277,12 @@ audit:
 
 If fewer than 20 failed edit traces exist, the audit is incomplete and the
 report must be `insufficient data`.
+
+The `run_telemetry_analysis` example computes the same deterministic sample
+frame automatically: failed `edit` rows sorted by `session_id`, `task_id`,
+`turn_index`, `tool_call_id`, then the first 20. Re-run the example without
+`--audit-*` to emit the frame, classify the traces, and then re-run with the
+`--audit-sampled` and `--audit-qualifying` flags.
 
 ## 7. Re-evaluate and commit the decision record
 
