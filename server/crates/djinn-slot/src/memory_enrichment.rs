@@ -31,6 +31,9 @@ use std::sync::Arc;
 
 use djinn_db::repositories::note::{
     MemoryEntityKind, MemoryEntityRef, MemoryEntityType, NoteAssociationKind,
+    NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation,
+    NoteRevisionReason, NoteRevisionSubsystem, TrustedNoteRevisionAttribution,
+    TrustedNoteRevisionProvenance, folder_for_type,
 };
 use djinn_db::{Database, NoteRepository, ProposalListQuery, ProposalRepository};
 use djinn_memory::Note;
@@ -466,18 +469,34 @@ async fn persist_entity(
         return Ok((existing.id, false));
     }
     let content = format_entity_content(canonical_name, aliases);
+    let reason = NoteRevisionReason::new("enrichment:create entity note")
+        .map_err(|e| format!("entity revision reason failed: {e}"))?;
     let note = repo
-        .create_db_note_with_permalink_and_retrieval_anchor(
-            project_id,
-            &permalink,
-            canonical_name,
-            &content,
-            "entity",
-            "[]",
-            Some(canonical_name),
-        )
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project_id.to_owned(),
+            note_id: Some(uuid::Uuid::now_v7().to_string()),
+            event_kind: NoteRevisionEventKind::Created,
+            desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
+                title: canonical_name.to_owned(),
+                permalink,
+                content,
+                note_type: "entity".to_owned(),
+                folder: folder_for_type("entity").to_owned(),
+                status: "active".to_owned(),
+                tags: "[]".to_owned(),
+                retrieval_anchor: Some(canonical_name.to_owned()),
+                scope_paths: "[]".to_owned(),
+                confidence: 0.0,
+            }),
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Enrichment),
+            provenance: TrustedNoteRevisionProvenance::default(),
+            reason,
+        })
         .await
         .map_err(|e| format!("entity create failed: {e}"))?;
+    let note = note
+        .note
+        .ok_or_else(|| "entity create mutation returned no note".to_owned())?;
     Ok((note.id, true))
 }
 
@@ -495,18 +514,34 @@ async fn persist_claim(
         return Ok((existing.id, false));
     }
     let content = format_claim_content(statement, source_note_id, evidence_quote);
+    let reason = NoteRevisionReason::new("enrichment:create claim note")
+        .map_err(|e| format!("claim revision reason failed: {e}"))?;
     let note = repo
-        .create_db_note_with_permalink_and_retrieval_anchor(
-            project_id,
-            &permalink,
-            statement,
-            &content,
-            "claim",
-            "[]",
-            Some(statement),
-        )
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project_id.to_owned(),
+            note_id: Some(uuid::Uuid::now_v7().to_string()),
+            event_kind: NoteRevisionEventKind::Created,
+            desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
+                title: statement.to_owned(),
+                permalink,
+                content,
+                note_type: "claim".to_owned(),
+                folder: folder_for_type("claim").to_owned(),
+                status: "active".to_owned(),
+                tags: "[]".to_owned(),
+                retrieval_anchor: Some(statement.to_owned()),
+                scope_paths: "[]".to_owned(),
+                confidence: 0.0,
+            }),
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Enrichment),
+            provenance: TrustedNoteRevisionProvenance::default(),
+            reason,
+        })
         .await
         .map_err(|e| format!("claim create failed: {e}"))?;
+    let note = note
+        .note
+        .ok_or_else(|| "claim create mutation returned no note".to_owned())?;
     Ok((note.id, true))
 }
 
@@ -1710,6 +1745,118 @@ mod tests {
             .await
             .expect("create note")
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enrichment_note_creation_records_attribution_snapshot_and_noop() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo = NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let aliases = vec!["dispatch".to_owned(), "gate".to_owned()];
+
+        let (entity_id, entity_created) =
+            persist_entity(&note_repo, &project.id, "Dispatch Gate", &aliases)
+                .await
+                .expect("create entity");
+        let (claim_id, claim_created) = persist_claim(
+            &note_repo,
+            &project.id,
+            "The dispatch gate controls concurrency",
+            "source-note",
+            Some("controls concurrency"),
+        )
+        .await
+        .expect("create claim");
+        assert!(entity_created);
+        assert!(claim_created);
+
+        let revisions = note_repo
+            .revision_events_for_test(&project.id)
+            .await
+            .expect("load enrichment revisions");
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].actor_kind, "system");
+        assert_eq!(revisions[0].subsystem.as_deref(), Some("enrichment"));
+        assert_eq!(revisions[0].event_kind, "created");
+        assert_eq!(revisions[0].content_before, None);
+        assert_eq!(
+            revisions[0].content_after.as_deref(),
+            Some(
+                "# The dispatch gate controls concurrency\n\n## Source\n- source-note\n\n## Evidence\n> controls concurrency\n\n---\n*Extracted by memory enrichment pass.*"
+            )
+        );
+        assert_eq!(revisions[0].confidence_before, None);
+        assert_eq!(revisions[0].confidence_after, Some(0.0));
+        assert_eq!(revisions[0].reason, "enrichment:create claim note");
+        assert_eq!(revisions[1].actor_kind, "system");
+        assert_eq!(revisions[1].subsystem.as_deref(), Some("enrichment"));
+        assert_eq!(revisions[1].event_kind, "created");
+        assert_eq!(revisions[1].content_before, None);
+        assert_eq!(
+            revisions[1].content_after.as_deref(),
+            Some(
+                "# Dispatch Gate\n\n## Aliases\n- dispatch\n- gate\n\n---\n*Extracted by memory enrichment pass.*"
+            )
+        );
+        assert_eq!(revisions[1].confidence_before, None);
+        assert_eq!(revisions[1].confidence_after, Some(0.0));
+        assert_eq!(revisions[1].reason, "enrichment:create entity note");
+
+        let (same_entity_id, entity_changed) =
+            persist_entity(&note_repo, &project.id, "Dispatch Gate", &aliases)
+                .await
+                .expect("reuse entity");
+        let (same_claim_id, claim_changed) = persist_claim(
+            &note_repo,
+            &project.id,
+            "The dispatch gate controls concurrency",
+            "source-note",
+            Some("controls concurrency"),
+        )
+        .await
+        .expect("reuse claim");
+        assert_eq!(same_entity_id, entity_id);
+        assert_eq!(same_claim_id, claim_id);
+        assert!(!entity_changed);
+        assert!(!claim_changed);
+        assert_eq!(
+            note_repo
+                .revision_events_for_test(&project.id)
+                .await
+                .expect("count enrichment revisions")
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enrichment_entity_create_rolls_back_when_revision_insert_fails() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo = NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        note_repo.set_revision_event_insertion_failure_for_test(true);
+
+        assert!(
+            persist_entity(&note_repo, &project.id, "Failed Entity", &[])
+                .await
+                .is_err()
+        );
+        note_repo.set_revision_event_insertion_failure_for_test(false);
+        assert!(
+            note_repo
+                .get_by_permalink(&project.id, &entity_permalink("Failed Entity"))
+                .await
+                .expect("lookup failed entity")
+                .is_none()
+        );
+        assert!(
+            note_repo
+                .revision_events_for_test(&project.id)
+                .await
+                .expect("count failed entity revisions")
+                .is_empty()
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn enrichment_with_five_notes_produces_structured_report() {
         let db = create_test_db();
