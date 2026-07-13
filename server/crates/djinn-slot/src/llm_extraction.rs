@@ -50,12 +50,17 @@ summary, extract reusable knowledge as structured notes. Respond with valid JSON
 /// Maximum novelty candidates to check before creating a new note.
 const NOVELTY_CANDIDATE_LIMIT: usize = 3;
 
+/// Maximum Unicode scalar values from one existing candidate body included in
+/// the novelty prompt. The repository still carries the complete body; this cap
+/// keeps the LLM context bounded deterministically.
+const NOVELTY_CANDIDATE_CONTENT_CHAR_CAP: usize = 4_000;
+
 /// Confidence signal applied to an existing note when a new extraction is
 /// semantically judged to be already known.
 const DUPLICATE_CONFIDENCE_SIGNAL: f64 = 0.65;
 
 const EXTRACTION_SYSTEM_PROMPT: &str = SYSTEM_PROMPT;
-const NOVELTY_SYSTEM_PROMPT: &str = "You are a semantic novelty judge for extracted knowledge notes. Compare a proposed note summary against an existing note summary. Respond with valid JSON only.";
+const NOVELTY_SYSTEM_PROMPT: &str = "You are a semantic novelty judge for extracted knowledge notes. Compare a proposed extracted note against existing candidate notes using their bounded full bodies. Respond with valid JSON only.";
 
 /// Max characters of session transcript fed to the extraction LLM.
 const TRANSCRIPT_EXCERPT_CHARS: usize = 12_000;
@@ -1643,6 +1648,22 @@ fn summarize_candidate_note(note: &ExtractedNote) -> String {
     }
 }
 
+/// Truncate an existing candidate body to a deterministic Unicode-safe cap for
+/// the novelty prompt. The repository still carries the full body; this only
+/// bounds what the LLM sees.
+fn truncate_novelty_candidate_content(content: &str) -> String {
+    let mut characters = content.chars();
+    let body: String = characters
+        .by_ref()
+        .take(NOVELTY_CANDIDATE_CONTENT_CHAR_CAP)
+        .collect();
+    if characters.next().is_some() {
+        format!("{body}\n… [truncated at {NOVELTY_CANDIDATE_CONTENT_CHAR_CAP} characters]")
+    } else {
+        body
+    }
+}
+
 fn build_novelty_prompt(
     note_type: &str,
     note: &ExtractedNote,
@@ -1657,9 +1678,10 @@ fn build_novelty_prompt(
                 .as_deref()
                 .or(candidate.overview.as_deref())
                 .unwrap_or("");
+            let body = truncate_novelty_candidate_content(&candidate.content);
             format!(
-                "- id: {}\n  title: {}\n  summary: {}",
-                candidate.id, candidate.title, summary
+                "- id: {}\n  title: {}\n  body:\n{}\n  summary: {}",
+                candidate.id, candidate.title, body, summary
             )
         })
         .collect::<Vec<_>>()
@@ -1699,6 +1721,7 @@ mod tests {
     use super::*;
     use crate::session_extraction::ExtractionQuality;
     use crate::test_helpers::{agent_context_from_db, create_test_db, test_path};
+    use djinn_db::NoteDedupCandidate;
     use tokio_util::sync::CancellationToken;
     #[derive(Clone, Default)]
     struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -2516,5 +2539,149 @@ mod tests {
         // No credentials configured → resolve_memory_provider will fail → graceful skip
         // Should not panic
         run_llm_extraction(session.id, taxonomy, ctx).await;
+    }
+
+    #[test]
+    fn novelty_prompt_renders_existing_full_body_and_incoming_extraction() {
+        let note = ExtractedNote {
+            title: "Proposed Note Title".to_string(),
+            content: "Proposed note body.".to_string(),
+            retrieval_anchor: None,
+            scope_paths: vec![],
+        };
+        let candidate = NoteDedupCandidate {
+            id: "candidate-1".to_string(),
+            permalink: "cases/candidate-1".to_string(),
+            title: "Existing Candidate".to_string(),
+            folder: "cases".to_string(),
+            note_type: "case".to_string(),
+            content: "Full existing candidate body from the database.".to_string(),
+            abstract_: Some("Abstract summary for the candidate.".to_string()),
+            overview: Some("Overview summary for the candidate.".to_string()),
+            score: 0.95,
+        };
+        let prompt = build_novelty_prompt("case", &note, "Incoming proposed summary", &[candidate]);
+        assert!(
+            prompt.contains("Incoming proposed summary"),
+            "incoming extraction summary must be visible"
+        );
+        assert!(
+            prompt.contains("Full existing candidate body from the database."),
+            "existing candidate body must be visible"
+        );
+        assert!(
+            prompt.contains("Abstract summary for the candidate."),
+            "abstract/overview may remain as supplemental metadata"
+        );
+        assert!(
+            !prompt.contains("truncated"),
+            "below-cap body must not have a truncation marker"
+        );
+    }
+
+    #[test]
+    fn novelty_prompt_keeps_body_at_cap_without_truncation_marker() {
+        let note = ExtractedNote {
+            title: "T".to_string(),
+            content: "C".to_string(),
+            retrieval_anchor: None,
+            scope_paths: vec![],
+        };
+        let body = "a".repeat(NOVELTY_CANDIDATE_CONTENT_CHAR_CAP);
+        let candidate = NoteDedupCandidate {
+            id: "c".to_string(),
+            permalink: "cases/c".to_string(),
+            title: "Candidate".to_string(),
+            folder: "cases".to_string(),
+            note_type: "case".to_string(),
+            content: body.clone(),
+            abstract_: None,
+            overview: None,
+            score: 1.0,
+        };
+        let prompt = build_novelty_prompt("case", &note, "summary", &[candidate]);
+        assert!(
+            prompt.contains(&body),
+            "body exactly at cap must be fully present"
+        );
+        assert!(
+            !prompt.contains("truncated"),
+            "exactly-at-cap body must not have a truncation marker"
+        );
+    }
+
+    #[test]
+    fn novelty_prompt_truncates_body_above_cap() {
+        let note = ExtractedNote {
+            title: "T".to_string(),
+            content: "C".to_string(),
+            retrieval_anchor: None,
+            scope_paths: vec![],
+        };
+        let body = "a".repeat(NOVELTY_CANDIDATE_CONTENT_CHAR_CAP + 50);
+        let candidate = NoteDedupCandidate {
+            id: "c".to_string(),
+            permalink: "cases/c".to_string(),
+            title: "Candidate".to_string(),
+            folder: "cases".to_string(),
+            note_type: "case".to_string(),
+            content: body,
+            abstract_: None,
+            overview: None,
+            score: 1.0,
+        };
+        let prompt = build_novelty_prompt("case", &note, "summary", &[candidate]);
+        let expected_present = "a".repeat(NOVELTY_CANDIDATE_CONTENT_CHAR_CAP);
+        let expected_absent = "a".repeat(NOVELTY_CANDIDATE_CONTENT_CHAR_CAP + 1);
+        assert!(
+            prompt.contains(&expected_present),
+            "capped body must include up to the cap"
+        );
+        assert!(
+            !prompt.contains(&expected_absent),
+            "content beyond the cap must be absent"
+        );
+        assert!(
+            prompt.contains("… [truncated"),
+            "above-cap body must have a truncation marker"
+        );
+    }
+
+    #[test]
+    fn novelty_prompt_truncation_respects_unicode_boundaries() {
+        let note = ExtractedNote {
+            title: "T".to_string(),
+            content: "C".to_string(),
+            retrieval_anchor: None,
+            scope_paths: vec![],
+        };
+        let prefix = "a".repeat(NOVELTY_CANDIDATE_CONTENT_CHAR_CAP - 1);
+        let suffix = "🙂 beyond-cap-marker";
+        let body = format!("{prefix}{suffix}");
+        let candidate = NoteDedupCandidate {
+            id: "c".to_string(),
+            permalink: "cases/c".to_string(),
+            title: "Candidate".to_string(),
+            folder: "cases".to_string(),
+            note_type: "case".to_string(),
+            content: body,
+            abstract_: None,
+            overview: None,
+            score: 1.0,
+        };
+        let prompt = build_novelty_prompt("case", &note, "summary", &[candidate]);
+        let expected_present = format!("{prefix}🙂");
+        assert!(
+            prompt.contains(&expected_present),
+            "multi-byte character must be kept whole"
+        );
+        assert!(
+            !prompt.contains("beyond-cap-marker"),
+            "content beyond the cap must be absent"
+        );
+        assert!(
+            prompt.contains("… [truncated"),
+            "truncation must be signaled"
+        );
     }
 }
