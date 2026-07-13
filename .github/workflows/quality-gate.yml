@@ -733,8 +733,14 @@ jobs:
               and ($row.testIds | unique | length == ($row.testIds | length))
               and ($row.filter | type == "string" and length > 0))
           ' nextest-plan/matrix.json
-          jq -er --argjson idx "$SHARD_INDEX" '([.shards[] | select(.shardIndex == $idx)]) as $matches | $matches[0].filter' nextest-plan/matrix.json > nextest-plan/shard-filter.txt
-          jq -ec --argjson idx "$SHARD_INDEX" '([.shards[] | select(.shardIndex == $idx)]) as $matches | $matches[0].testIds' nextest-plan/matrix.json > nextest-plan/shard-test-ids.json
+          jq -er --argjson idx "$SHARD_INDEX" '
+            ([.shards[] | select(.shardIndex == $idx)]) as $matches
+            | if ($matches | length) != 1 then error("expected exactly one shard row for shardIndex \($idx)") else $matches[0].filter end
+          ' nextest-plan/matrix.json > nextest-plan/shard-filter.txt
+          jq -ec --argjson idx "$SHARD_INDEX" '
+            ([.shards[] | select(.shardIndex == $idx)]) as $matches
+            | if ($matches | length) != 1 then error("expected exactly one shard row for shardIndex \($idx)") else $matches[0].testIds end
+          ' nextest-plan/matrix.json > nextest-plan/shard-test-ids.json
       - name: Generate nextest config with file-backed shard filter
         env:
           NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
@@ -768,15 +774,15 @@ jobs:
           set -e
           elapsed_seconds=$(( $(date +%s) - started_seconds ))
           mkdir -p nextest-timing
-          jq --arg generated_at "$started_at" --argjson elapsed "$elapsed_seconds" --slurpfile ids nextest-plan/shard-test-ids.json '
-            ($ids[0]) as $ids |
+          jq -s --arg generated_at "$started_at" --argjson elapsed "$elapsed_seconds" '
+            (.[0]) as $ids |
             ($ids | length) as $count |
             {
               version: "ci-nextest-timing/v1",
               generated_at: $generated_at,
               tests: (reduce $ids[] as $id ({}; .[$id] = (if $count > 0 then ($elapsed / $count) else 0 end)))
             }
-          ' > "nextest-timing/timing-${{ matrix.shardIndex }}.json"
+          ' nextest-plan/shard-test-ids.json > "nextest-timing/timing-${{ matrix.shardIndex }}.json"
           exit "$status"
       - name: Upload retained shard timing data
         if: always()
@@ -808,67 +814,100 @@ jobs:
           merge-multiple: true
       - name: Merge current successful shard timings
         run: |
-          set -euo pipefail
-          shopt -s nullglob
-          files=(nextest-timing-shards/*.json)
-          [ ${#files[@]} -gt 0 ] || { echo '::error::No shard timing artifacts were produced'; exit 1; }
-          # Timing is balancing input only. Publish it only if every current plan row
-          # produced its expected timing file and the combined IDs prove exact-once
-          # coverage of this run's authoritative plan.
-          jq -e '
-            .version == "ci-nextest-plan/v1" and
-            .exactOnce == true and
-            (.shardCount | type == "number" and . > 0) and
-            (.discoveredCount | type == "number" and . >= 0) and
-            (.assignedCount == .discoveredCount) and
-            (.uniqueAssignedCount == .assignedCount) and
-            (.assignedIds | type == "array") and
-            (.assignedIds | length == .assignedCount) and
-            (.assignedIds | unique | length == .assignedCount)
-          ' nextest-plan/proof.json > /dev/null
-          jq -e --slurpfile proof nextest-plan/proof.json '
-            ($proof[0]) as $proof
-            | (.version == $proof.version)
-            and (.shardCount == $proof.shardCount)
-            and (.shards | type == "array" and length == $proof.shardCount)
-            and ([.shards[].shardIndex] | sort == [range(0; $proof.shardCount)])
-            and (all(.shards[];
-              (.count | type == "number" and . > 0)
-              and (.testIds | type == "array" and length == .count)
-              and (.testIds | unique | length == .count)
-              and (all(.testIds[]; type == "string" and length > 0))))
-          ' nextest-plan/matrix.json > /dev/null
-          shard_count=$(jq -r '.shardCount' nextest-plan/proof.json)
-          expected_files=()
-          for ((shard_index = 0; shard_index < shard_count; shard_index++)); do
-            expected_files+=("nextest-timing-shards/timing-${shard_index}.json")
-          done
-          [ ${#files[@]} -eq ${#expected_files[@]} ] || { echo '::error::Missing or unexpected shard timing artifact'; exit 1; }
-          for timing_file in "${files[@]}"; do
-            [[ "$timing_file" =~ ^nextest-timing-shards/timing-[0-9]+\.json$ ]] || { echo "::error::Unexpected timing file $timing_file"; exit 1; }
-          done
-          for expected_file in "${expected_files[@]}"; do
-            [ -s "$expected_file" ] || { echo "::error::Missing expected timing file $expected_file"; exit 1; }
-          done
-          jq -e --slurpfile proof nextest-plan/proof.json --slurpfile matrix nextest-plan/matrix.json '
-            ($proof[0]) as $proof
-            | ($matrix[0].shards) as $shards
-            | [inputs | select(
-                .version == "ci-nextest-timing/v1"
-                and (.tests | type == "object")
-                and (.tests | keys | all(type == "string" and length > 0))
-                and (.tests | all(.[]; type == "number" and isfinite and . >= 0))
-              )] as $timings
-            | ($timings | length == $proof.shardCount)
-            and ([range(0; $proof.shardCount)] | all(. as $idx;
-                ($shards[] | select(.shardIndex == $idx).testIds | sort) as $expected_ids
-                | ($timings[$idx].tests | keys | sort) == $expected_ids))
-            and ([$timings[].tests | keys[]] | sort) == ($proof.assignedIds | sort)
-          ' "${expected_files[@]}" > /dev/null || {
-            echo '::error::Shard timing data does not exactly cover the current exact-once proof'; exit 1;
+          node --input-type=module - <<'NODE'
+          import { readFileSync, readdirSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+          import { join } from 'node:path';
+
+          const PROOF_VERSION = 'ci-nextest-plan/v1';
+          const TIMING_VERSION = 'ci-nextest-timing/v1';
+
+          function fail(message) {
+            console.error(`::error::${message}`);
+            process.exit(1);
           }
-          mkdir -p nextest-timing
-          jq -s '{version: "ci-nextest-timing/v1", generated_at: (now | todateiso8601), tests: (reduce .[] as $timing ({}; . * $timing.tests))}' "${files[@]}" > nextest-timing/timing.json
+
+          function assert(condition, message) {
+            if (!condition) fail(message);
+          }
+
+          const proof = JSON.parse(readFileSync('nextest-plan/proof.json', 'utf8'));
+          assert(typeof proof === 'object' && !Array.isArray(proof), 'proof.json must be a single object');
+          assert(proof.version === PROOF_VERSION, `proof version mismatch: expected ${PROOF_VERSION}, got ${proof.version}`);
+          assert(proof.exactOnce === true, 'proof exactOnce must be true');
+          assert(typeof proof.shardCount === 'number' && proof.shardCount > 0, 'proof.shardCount must be a positive number');
+          assert(typeof proof.discoveredCount === 'number' && proof.discoveredCount >= 0, 'proof.discoveredCount invalid');
+          assert(proof.assignedCount === proof.discoveredCount, 'proof.assignedCount must equal discoveredCount');
+          assert(proof.uniqueAssignedCount === proof.assignedCount, 'proof.uniqueAssignedCount must equal assignedCount');
+          assert(Array.isArray(proof.assignedIds), 'proof.assignedIds must be an array');
+          assert(proof.assignedIds.length === proof.assignedCount, 'proof.assignedIds length mismatch');
+          assert(new Set(proof.assignedIds).size === proof.assignedCount, 'proof.assignedIds must be unique');
+          assert(proof.assignedIds.every(id => typeof id === 'string' && id.length > 0), 'proof.assignedIds must be non-empty strings');
+
+          const matrix = JSON.parse(readFileSync('nextest-plan/matrix.json', 'utf8'));
+          assert(matrix.version === proof.version, 'matrix version mismatch');
+          assert(matrix.shardCount === proof.shardCount, 'matrix.shardCount mismatch');
+          assert(Array.isArray(matrix.shards) && matrix.shards.length === proof.shardCount, 'matrix.shards length mismatch');
+          const sortedShards = matrix.shards.slice().sort((a, b) => a.shardIndex - b.shardIndex);
+          assert(sortedShards.every((row, i) => row.shardIndex === i), 'matrix shard indices must be 0..shardCount-1');
+          for (const row of sortedShards) {
+            assert(typeof row.count === 'number' && row.count > 0, `row ${row.shardIndex} count must be positive`);
+            assert(Array.isArray(row.testIds) && row.testIds.length === row.count, `row ${row.shardIndex} testIds length mismatch`);
+            assert(new Set(row.testIds).size === row.testIds.length, `row ${row.shardIndex} testIds must be unique`);
+            assert(row.testIds.every(id => typeof id === 'string' && id.length > 0), `row ${row.shardIndex} testIds must be non-empty strings`);
+            assert(typeof row.filter === 'string' && row.filter.length > 0, `row ${row.shardIndex} filter must be non-empty string`);
+          }
+
+          const shardDir = 'nextest-timing-shards';
+          const actualFiles = readdirSync(shardDir)
+            .filter(f => f.endsWith('.json'))
+            .map(f => join(shardDir, f));
+          const expectedFiles = Array.from({ length: proof.shardCount }, (_, i) => join(shardDir, `timing-${i}.json`));
+          const expectedSet = new Set(expectedFiles);
+          assert(actualFiles.length > 0, 'no shard timing artifacts were produced');
+          assert(actualFiles.length === expectedFiles.length, `expected ${expectedFiles.length} timing files, found ${actualFiles.length}`);
+          for (const f of actualFiles) {
+            assert(expectedSet.has(f), `unexpected timing file ${f}`);
+            let stats;
+            try { stats = statSync(f); } catch { fail(`timing file ${f} is missing`); }
+            assert(stats.isFile() && stats.size > 0, `timing file ${f} is empty or not a file`);
+          }
+
+          const timings = [];
+          for (let i = 0; i < proof.shardCount; i++) {
+            const file = expectedFiles[i];
+            const timing = JSON.parse(readFileSync(file, 'utf8'));
+            assert(timing.version === TIMING_VERSION, `timing version mismatch in ${file}`);
+            assert(typeof timing.tests === 'object' && !Array.isArray(timing.tests), `timing.tests must be an object in ${file}`);
+            const ids = Object.keys(timing.tests);
+            assert(ids.every(id => typeof id === 'string' && id.length > 0), `timing IDs must be non-empty strings in ${file}`);
+            assert(Object.values(timing.tests).every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0), `timing durations must be non-negative finite numbers in ${file}`);
+            timings.push(timing);
+          }
+
+          for (let i = 0; i < proof.shardCount; i++) {
+            const row = sortedShards[i];
+            const timing = timings[i];
+            const timingIds = Object.keys(timing.tests).sort();
+            const expectedIds = [...row.testIds].sort();
+            assert(JSON.stringify(timingIds) === JSON.stringify(expectedIds), `timing IDs for shard ${i} do not match matrix row`);
+          }
+
+          const allTimingIds = timings.flatMap(t => Object.keys(t.tests));
+          assert(allTimingIds.length === proof.assignedCount, 'total timing ID count mismatch');
+          assert(new Set(allTimingIds).size === allTimingIds.length, 'timing IDs must be unique across all shards');
+          const sortedTimingIds = [...allTimingIds].sort();
+          const sortedAssignedIds = [...proof.assignedIds].sort();
+          assert(JSON.stringify(sortedTimingIds) === JSON.stringify(sortedAssignedIds), 'timing IDs do not match proof.assignedIds');
+
+          const merged = {
+            version: TIMING_VERSION,
+            generated_at: new Date().toISOString(),
+            tests: Object.assign({}, ...timings.map(t => t.tests)),
+          };
+          mkdirSync('nextest-timing', { recursive: true });
+          writeFileSync('nextest-timing/timing.json', JSON.stringify(merged, null, 2));
+          console.log('::notice::Merged shard timings and verified exact-once coverage.');
+          NODE
       - name: Upload latest compatible timing candidate
         uses: actions/upload-artifact@v4
         with:

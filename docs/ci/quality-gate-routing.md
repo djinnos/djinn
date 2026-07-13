@@ -42,7 +42,7 @@ Consumers must use `Swatinem/rust-cache` with `save-if: false` (or an explicitly
 
 The nextest planner accepts only a compatible `ci-nextest-timing/v1` timing artifact within its freshness window (seven days by default). It discards unknown/deleted test IDs and uses current `cargo nextest list` discovery as the sole test-selection authority. When no artifact is available, the version is incompatible, the data is stale, or no usable samples remain, it cold-starts deterministically with four shards and fallback duration estimates. The resulting plan/matrix/exact-once proof make the fallback auditable.
 
-Each test shard uploads its current timing result and the workflow retains the plan, matrix, and proof artifacts. Recover from a bad or unavailable timing artifact by allowing the cold-start plan to run successfully, then use the newly uploaded compatible timing artifact for the next run. Do not hand-edit timing data to omit tests or change selection.
+Each test shard uploads its current timing result and the workflow retains the plan, matrix, and proof artifacts. The timing publisher (`nextest-timing-publish`) downloads the full plan and exact-once proof artifacts, validates that every expected shard timing file is present and non-empty, checks that each timing file's IDs match its matrix row, and verifies that the merged test-ID union exactly equals the proof's assigned IDs before uploading the merged timing artifact. Recover from a bad or unavailable timing artifact by allowing the cold-start plan to run successfully, then use the newly uploaded compatible timing artifact for the next run. Do not hand-edit timing data to omit tests or change selection.
 
 ## Concurrency and admission
 
