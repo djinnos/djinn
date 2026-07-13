@@ -465,6 +465,10 @@ pub struct GraphNode {
     /// remain backward-compatible.
     #[serde(default = "default_note_entity_type")]
     pub entity_type: String,
+    /// Creation time (ISO-8601 UTC string, as stored). Drives the graph
+    /// canvas time axis; optional so older serialized responses stay valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 fn default_note_entity_type() -> String {
