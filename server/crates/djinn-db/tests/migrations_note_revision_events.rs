@@ -112,6 +112,27 @@ async fn migration_109_enforces_ledger_shape_indexes_and_retention() {
         .execute(&pool)
         .await;
         assert!(invalid_reason.is_err());
+        // The database, not just the Rust reason constructor, must reject the
+        // standard whitespace characters that PostgreSQL's default btrim does
+        // not remove.
+        for (id, reason) in [
+            ("66666666-6666-6666-6666-666666666666", "\t"),
+            ("77777777-7777-7777-7777-777777777777", "valid\n"),
+        ] {
+            let invalid_whitespace_reason = sqlx::query(
+                "INSERT INTO note_revision_events \
+                 (id, project_id, event_kind, actor_kind, subsystem, session_id, reason) \
+                 VALUES ($1, 'revision-project', 'extraction_skipped', 'system', 'extractor', 'session-1', $2)",
+            )
+            .bind(id)
+            .bind(reason)
+            .execute(&pool)
+            .await;
+            assert!(
+                invalid_whitespace_reason.is_err(),
+                "reason {reason:?} must be non-blank and trimmed"
+            );
+        }
 
         for index in [
             "note_revision_events_project_note_history",

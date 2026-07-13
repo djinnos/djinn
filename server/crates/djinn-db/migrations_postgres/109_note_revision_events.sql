@@ -30,7 +30,11 @@ CREATE TABLE note_revision_events (
     CONSTRAINT chk_note_revision_events_note_identity
         CHECK ((note_id IS NULL) = (note_seq IS NULL) AND (note_seq IS NULL OR note_seq > 0)),
     CONSTRAINT chk_note_revision_events_reason_trimmed
-        CHECK (length(btrim(reason)) > 0 AND reason = btrim(reason)),
+        CHECK (
+            reason ~ '[^[:space:]]'
+            AND reason !~ '^[[:space:]]'
+            AND reason !~ '[[:space:]]$'
+        ),
     CONSTRAINT chk_note_revision_events_actor_attribution
         CHECK (
             (actor_kind IN ('human', 'agent') AND actor_id IS NOT NULL AND length(btrim(actor_id)) > 0 AND subsystem IS NULL)
