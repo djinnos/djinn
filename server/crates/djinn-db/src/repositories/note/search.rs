@@ -4,6 +4,8 @@ use crate::repositories::note::embeddings::embedding_branch_filter_sql;
 use crate::repositories::note::rrf::rrf_fuse;
 use crate::repositories::proposal::ProposalRepository;
 use djinn_memory::{ContradictionCandidate, MemorySearchEntityRow, ProposalSearchResult, TypeRisk};
+use std::time::Duration;
+use tokio::time::Instant;
 
 fn merge_candidate_ids(lists: &[&[(String, f64)]]) -> Vec<String> {
     let mut ids = Vec::new();
@@ -238,7 +240,10 @@ impl NoteRepository {
     /// When `entity_types` is `None` or contains `"proposal"`, proposal rows
     /// from `ProposalRepository::search_proposals` are merged into the result
     /// set. Proposal search errors are logged and silently skipped (best-effort).
-    pub async fn search(&self, params: NoteSearchParams<'_>) -> Result<Vec<MemorySearchEntityRow>> {
+    async fn search_rows(
+        &self,
+        params: NoteSearchParams<'_>,
+    ) -> Result<Vec<MemorySearchEntityRow>> {
         self.db.ensure_initialized().await?;
 
         let NoteSearchParams {
@@ -301,6 +306,37 @@ impl NoteRepository {
         };
 
         Ok(merge_search_results(note_results, proposal_results, limit))
+    }
+
+    /// Compatibility search surface returning only rows.
+    pub async fn search(&self, params: NoteSearchParams<'_>) -> Result<Vec<MemorySearchEntityRow>> {
+        Ok(self.search_with_stats(params).await?.rows)
+    }
+
+    /// Additive timed companion to [`Self::search`].
+    ///
+    /// The compatibility search API remains row-only. This repository-owned
+    /// result contains no trace data and does not emit telemetry.
+    pub async fn search_with_stats(
+        &self,
+        params: NoteSearchParams<'_>,
+    ) -> Result<TimedNoteSearchResult> {
+        let semantic_requested = params.semantic_scores.is_some();
+        let started = Instant::now();
+        let rows = self.search_rows(params).await?;
+        let elapsed = started.elapsed();
+        Ok(TimedNoteSearchResult {
+            summary: NoteSearchSummary {
+                candidate_count: rows.iter().filter(|row| row.entity == "note").count(),
+                result_count: rows.len(),
+            },
+            rows,
+            lexical_duration: Some(elapsed),
+            semantic_duration: semantic_requested.then_some(Duration::ZERO),
+            temporal_duration: None,
+            graph_duration: None,
+            rrf_fuse_duration: None,
+        })
     }
 
     /// Internal note-only search: the original RRF pipeline logic, returning
