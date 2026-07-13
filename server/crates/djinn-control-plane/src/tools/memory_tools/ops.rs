@@ -1,8 +1,14 @@
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_db::NoteSearchParams;
 use djinn_db::{
     NoteRepository, ProjectRepository, normalize_virtual_note_path,
     permalink_from_virtual_note_path, resolve_short_ids,
 };
+use djinn_telemetry::memory_retrieval::{
+    MemoryRetrievalMetrics, RetrievalEntryPoint, RetrievalOutcome, RetrievalStage,
+};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::server::DjinnMcpServer;
 
@@ -29,6 +35,61 @@ fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
         let normalized = normalize_virtual_note_path(without_scheme);
         (!normalized.is_empty()).then_some(normalized)
     })
+}
+
+/// Observer guard that records exactly one retrieval outcome and any optional
+/// stage durations for the bounded telemetry dimensions.
+pub(crate) struct RetrievalObserver {
+    entry_point: RetrievalEntryPoint,
+    started_at: Instant,
+    metrics: Arc<MemoryRetrievalMetrics>,
+    finished: bool,
+}
+
+impl RetrievalObserver {
+    pub(crate) fn new(server: &DjinnMcpServer, entry_point: RetrievalEntryPoint) -> Self {
+        Self {
+            entry_point,
+            started_at: SystemClock::new().now_instant(),
+            metrics: server.state.retrieval_metrics(),
+            finished: false,
+        }
+    }
+
+    pub(crate) fn observe_embedding(&self, duration: Duration) {
+        self.observe_stage(RetrievalStage::Embedding, Some(duration));
+    }
+
+    pub(crate) fn observe_stage(&self, stage: RetrievalStage, duration: Option<Duration>) {
+        if let Some(duration) = duration {
+            let _ = self
+                .metrics
+                .observe_stage(self.entry_point, stage, duration);
+        }
+    }
+
+    pub(crate) fn finish(mut self, outcome: RetrievalOutcome, candidates: u64) {
+        let _ = self.metrics.observe(
+            self.entry_point,
+            outcome,
+            self.started_at.elapsed(),
+            candidates,
+        );
+        self.finished = true;
+    }
+}
+
+impl Drop for RetrievalObserver {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.metrics.observe(
+                self.entry_point,
+                RetrievalOutcome::Error,
+                self.started_at.elapsed(),
+                0,
+            );
+        }
+    }
 }
 
 fn permalink_candidates(identifier: &str) -> Vec<String> {
@@ -272,9 +333,12 @@ pub async fn memory_search(
     p: SearchParams,
     task_id: Option<&str>,
 ) -> MemorySearchResponse {
+    let observer = RetrievalObserver::new(server, RetrievalEntryPoint::Dispatch);
+
     let project_id = match resolve_project_id(server, &p.project).await {
         Ok(id) => id,
         Err(error) => {
+            observer.finish(RetrievalOutcome::Error, 0);
             return MemorySearchResponse {
                 results: vec![],
                 error: Some(error),
@@ -285,7 +349,12 @@ pub async fn memory_search(
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
         .with_vector_store(server.state.vector_store());
     let limit = p.limit.unwrap_or(10).clamp(1, 100) as usize;
-    let semantic_scores = match server.state.embed_memory_query(&p.query).await {
+
+    let embed_start = SystemClock::new().now_instant();
+    let embedding = server.state.embed_memory_query(&p.query).await;
+    let embed_duration = embed_start.elapsed();
+    observer.observe_embedding(embed_duration);
+    let semantic_scores = match embedding {
         Ok(Some(embedding)) => repo
             .semantic_candidate_scores(
                 &project_id,
@@ -301,7 +370,7 @@ pub async fn memory_search(
     };
 
     match repo
-        .search(NoteSearchParams {
+        .search_with_stats(NoteSearchParams {
             project_id: &project_id,
             query: &p.query,
             task_id,
@@ -314,10 +383,21 @@ pub async fn memory_search(
         })
         .await
     {
-        Ok(results) => {
-            // Record access metrics only for note rows — proposals do not
-            // have access metrics today (spec non-goal: do not duplicate
-            // them as notes).
+        Ok(timed) => {
+            observer.observe_stage(RetrievalStage::Lexical, timed.lexical_duration);
+            observer.observe_stage(RetrievalStage::Semantic, timed.semantic_duration);
+            observer.observe_stage(RetrievalStage::Temporal, timed.temporal_duration);
+            observer.observe_stage(RetrievalStage::Graph, timed.graph_duration);
+            observer.observe_stage(RetrievalStage::RrfFuse, timed.rrf_fuse_duration);
+
+            let results = timed.rows;
+            let outcome = if results.is_empty() {
+                RetrievalOutcome::Empty
+            } else {
+                RetrievalOutcome::Success
+            };
+            let candidates = timed.summary.candidate_count as u64;
+
             let retrieved_note_ids: Vec<String> = results
                 .iter()
                 .filter(|r| r.entity == "note")
@@ -325,7 +405,7 @@ pub async fn memory_search(
                 .collect();
             record_retrieved_notes(server, &repo, &retrieved_note_ids).await;
 
-            MemorySearchResponse {
+            let response = MemorySearchResponse {
                 results: results
                     .into_iter()
                     .map(|r| MemorySearchResultItem {
@@ -340,12 +420,18 @@ pub async fn memory_search(
                     })
                     .collect(),
                 error: None,
-            }
+            };
+            observer.finish(outcome, candidates);
+            response
         }
-        Err(e) => MemorySearchResponse {
-            results: vec![],
-            error: Some(format!("search failed: {e}")),
-        },
+        Err(e) => {
+            let response = MemorySearchResponse {
+                results: vec![],
+                error: Some(format!("search failed: {e}")),
+            };
+            observer.finish(RetrievalOutcome::Error, 0);
+            response
+        }
     }
 }
 
@@ -383,9 +469,12 @@ pub async fn memory_build_context(
     p: BuildContextParams,
     task_id: Option<&str>,
 ) -> MemoryBuildContextResponse {
+    let observer = RetrievalObserver::new(server, RetrievalEntryPoint::LoadKnowledgeContext);
+
     let project_id = match resolve_project_id(server, &p.project).await {
         Ok(id) => id,
         Err(error) => {
+            observer.finish(RetrievalOutcome::Error, 0);
             return MemoryBuildContextResponse {
                 primary: vec![],
                 related_l1: vec![],
@@ -411,19 +500,39 @@ pub async fn memory_build_context(
         } else {
             Some(folder)
         };
-        let all = repo
-            .list(&project_id, folder_filter)
-            .await
-            .unwrap_or_default();
-        return MemoryBuildContextResponse {
-            primary: all.into_iter().map(|n| note_to_view(&n)).collect(),
-            related_l1: vec![],
-            related_l0: vec![],
-            supersedes: vec![],
-            contradicts: vec![],
-            proposals: vec![],
-            error: None,
-        };
+        match repo.list(&project_id, folder_filter).await {
+            Ok(all) => {
+                let response = MemoryBuildContextResponse {
+                    primary: all.into_iter().map(|n| note_to_view(&n)).collect(),
+                    related_l1: vec![],
+                    related_l0: vec![],
+                    supersedes: vec![],
+                    contradicts: vec![],
+                    proposals: vec![],
+                    error: None,
+                };
+                let outcome = if response.primary.is_empty() {
+                    RetrievalOutcome::Empty
+                } else {
+                    RetrievalOutcome::Success
+                };
+                observer.finish(outcome, response.primary.len() as u64);
+                return response;
+            }
+            Err(error) => {
+                let response = MemoryBuildContextResponse {
+                    primary: vec![],
+                    related_l1: vec![],
+                    related_l0: vec![],
+                    supersedes: vec![],
+                    contradicts: vec![],
+                    proposals: vec![],
+                    error: Some(format!("build_context failed: {error}")),
+                };
+                observer.finish(RetrievalOutcome::Error, 0);
+                return response;
+            }
+        }
     }
 
     match repo
@@ -438,36 +547,53 @@ pub async fn memory_build_context(
         )
         .await
     {
-        Ok(response) => MemoryBuildContextResponse {
-            primary: response.primary.iter().map(note_to_view).collect(),
-            related_l1: response.related_l1,
-            related_l0: response.related_l0,
-            supersedes: response.supersedes,
-            contradicts: response.contradicts,
-            proposals: response
-                .proposals
-                .into_iter()
-                .map(|p| MemoryProposalOverview {
-                    id: p.id,
-                    short_id: p.short_id,
-                    title: p.title,
-                    body_format: p.body_format,
-                    acceptance_criteria: p.acceptance_criteria,
-                    status: p.status,
-                    score: p.score,
-                })
-                .collect(),
-            error: None,
-        },
-        Err(e) => MemoryBuildContextResponse {
-            primary: vec![],
-            related_l1: vec![],
-            related_l0: vec![],
-            supersedes: vec![],
-            contradicts: vec![],
-            proposals: vec![],
-            error: Some(format!("build_context failed: {e}")),
-        },
+        Ok(response) => {
+            let response = MemoryBuildContextResponse {
+                primary: response.primary.iter().map(note_to_view).collect(),
+                related_l1: response.related_l1,
+                related_l0: response.related_l0,
+                supersedes: response.supersedes,
+                contradicts: response.contradicts,
+                proposals: response
+                    .proposals
+                    .into_iter()
+                    .map(|p| MemoryProposalOverview {
+                        id: p.id,
+                        short_id: p.short_id,
+                        title: p.title,
+                        body_format: p.body_format,
+                        acceptance_criteria: p.acceptance_criteria,
+                        status: p.status,
+                        score: p.score,
+                    })
+                    .collect(),
+                error: None,
+            };
+            let candidates = response.primary.len()
+                + response.related_l1.len()
+                + response.related_l0.len()
+                + response.proposals.len();
+            let outcome = if response.primary.is_empty() {
+                RetrievalOutcome::Empty
+            } else {
+                RetrievalOutcome::Success
+            };
+            observer.finish(outcome, candidates as u64);
+            response
+        }
+        Err(e) => {
+            let response = MemoryBuildContextResponse {
+                primary: vec![],
+                related_l1: vec![],
+                related_l0: vec![],
+                supersedes: vec![],
+                contradicts: vec![],
+                proposals: vec![],
+                error: Some(format!("build_context failed: {e}")),
+            };
+            observer.finish(RetrievalOutcome::Error, 0);
+            response
+        }
     }
 }
 

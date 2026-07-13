@@ -1,4 +1,5 @@
 use super::lifecycle::schedule_summary_regeneration;
+use super::ops::RetrievalObserver;
 use super::write_dedup::{
     LlmMemoryWriteDedupDecider, WriteDedupOutcome, apply_created_note_supersede,
     maybe_apply_write_dedup,
@@ -8,6 +9,7 @@ use super::write_services::{create_note, maybe_update_singleton_note, note_repos
 use super::{
     DeleteParams, EditParams, MemoryDeleteResponse, MemoryNoteResponse, MoveParams, WriteParams,
 };
+use djinn_telemetry::memory_retrieval::RetrievalOutcome;
 
 use crate::server::DjinnMcpServer;
 use rmcp::{Json, handler::server::wrapper::Parameters, tool, tool_router};
@@ -57,6 +59,11 @@ impl DjinnMcpServer {
             return Json(response);
         }
 
+        let observer = RetrievalObserver::new(
+            self,
+            djinn_telemetry::memory_retrieval::RetrievalEntryPoint::JitPitfalls,
+        );
+
         match maybe_apply_write_dedup(
             &repo,
             decider,
@@ -74,6 +81,14 @@ impl DjinnMcpServer {
         {
             WriteDedupOutcome::Respond(response) => {
                 let response = *response;
+                let outcome = if response.error.is_some() {
+                    RetrievalOutcome::Error
+                } else if response.id.is_some() {
+                    RetrievalOutcome::Success
+                } else {
+                    RetrievalOutcome::Empty
+                };
+                observer.finish(outcome, response.id.is_some() as u64);
                 if let Some(note_id) = response.id.as_deref()
                     && response.error.is_none()
                 {
@@ -82,12 +97,14 @@ impl DjinnMcpServer {
                 Json(response)
             }
             WriteDedupOutcome::CreateNew => {
+                observer.finish(RetrievalOutcome::Empty, 0);
                 Json(create_note(self, &repo, &project_id, &p, &tags_json).await)
             }
             WriteDedupOutcome::SupersedeExisting {
                 candidate_id,
                 reason,
             } => {
+                observer.finish(RetrievalOutcome::Success, 1);
                 // Keep incoming creation exactly on the ordinary memory_write path.
                 let response = create_note(self, &repo, &project_id, &p, &tags_json).await;
                 if let Some(new_note_id) = response.id.as_deref()

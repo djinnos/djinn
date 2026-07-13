@@ -6,6 +6,9 @@ mod tests {
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
+    use djinn_telemetry::memory_retrieval::{
+        RetrievalEntryPoint, RetrievalOutcome, RetrievalStage,
+    };
     use tokio::sync::broadcast;
 
     use crate::bridge::{RuntimeOps, SemanticQueryEmbedding};
@@ -15,6 +18,7 @@ mod tests {
         StubCoordinatorOps, StubGitOps, StubLspOps, StubRepoGraphOps, StubRuntimeOps,
         StubSlotPoolOps,
     };
+    use crate::test_support::StubNoteVectorStore;
     use crate::tools::memory_tools::ops;
     use crate::tools::memory_tools::{
         BrokenLinksParams, BuildContextParams, HealthParams, ListParams, OrphansParams, ReadParams,
@@ -1053,5 +1057,345 @@ mod tests {
         assert!(bad_project.isolated_count.is_none());
         assert!(bad_project.isolated_pct.is_none());
         assert!(bad_project.machine_connected_orphan_count.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_search_records_telemetry_once() {
+        let setup = setup_server().await;
+
+        let params = SearchParams {
+            project: setup.project.clone(),
+            query: "Seed architecture context".to_string(),
+            folder: None,
+            note_type: None,
+            limit: Some(10),
+            entity_types: None,
+            edge_kinds: None,
+        };
+        let result = ops::memory_search(&setup.server, params, None).await;
+        assert!(
+            result.error.is_none(),
+            "unexpected error: {:?}",
+            result.error
+        );
+
+        let metrics = setup.server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let aggregate =
+            snapshot.aggregate(RetrievalEntryPoint::Dispatch, RetrievalOutcome::Success);
+        assert_eq!(
+            aggregate.count, 1,
+            "memory_search should record exactly one success observation"
+        );
+        assert!(aggregate.duration_sum_seconds > 0.0);
+        assert!(aggregate.candidate_sum >= 1.0);
+
+        let lexical =
+            snapshot.stage_aggregate(RetrievalEntryPoint::Dispatch, RetrievalStage::Lexical);
+        assert_eq!(lexical.count, 1);
+        assert!(lexical.duration_sum_seconds >= 0.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_search_empty_records_empty_outcome() {
+        let setup = setup_server().await;
+
+        let params = SearchParams {
+            project: setup.project.clone(),
+            query: "this query will not match anything in the seed notes".to_string(),
+            folder: None,
+            note_type: None,
+            limit: Some(10),
+            entity_types: None,
+            edge_kinds: None,
+        };
+        let result = ops::memory_search(&setup.server, params, None).await;
+        assert!(
+            result.error.is_none(),
+            "unexpected error: {:?}",
+            result.error
+        );
+        assert!(result.results.is_empty());
+
+        let metrics = setup.server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let empty = snapshot.aggregate(RetrievalEntryPoint::Dispatch, RetrievalOutcome::Empty);
+        assert_eq!(
+            empty.count, 1,
+            "memory_search with no matches should record exactly one empty observation"
+        );
+    }
+
+    async fn setup_server_with_semantic() -> SetupResult {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let event_bus = event_bus_for(&tx);
+        let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
+        let project = project_repo
+            .create("test-project", "test", "test-project")
+            .await
+            .unwrap();
+        let note_repo = NoteRepository::new(db.clone(), event_bus);
+        let primary = note_repo
+            .create(
+                &project.id,
+                "Seed Note",
+                "Seed note content with links to [[Related Note]] and architecture context.",
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let related = note_repo
+            .create(
+                &project.id,
+                "Related Note",
+                "Related architecture context note.",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let _ = related;
+        let folder_note = note_repo
+            .create(
+                &project.id,
+                "Folder Note",
+                "Folder wildcard note.",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let state = McpState::new(
+            db,
+            event_bus_for(&tx),
+            djinn_provider::catalog::CatalogService::new(),
+            djinn_provider::catalog::HealthTracker::new(),
+            Some(Arc::new(StubCoordinatorOps)),
+            Some(Arc::new(StubSlotPoolOps)),
+            None,
+            Some(Arc::new(StubNoteVectorStore)),
+            Arc::new(StubLspOps),
+            Arc::new(SemanticRuntimeOps {
+                embedding: vec![0.1; 384],
+            }),
+            Arc::new(StubGitOps),
+            Arc::new(StubRepoGraphOps),
+        );
+        let server = DjinnMcpServer::new(state);
+        SetupResult {
+            server,
+            _tmp: tmp,
+            project: project.slug(),
+            permalink: primary.permalink,
+            folder: folder_note.folder,
+        }
+    }
+
+    fn rendered_stage_sum(rendered: &str, entry_point: &str, stage: &str) -> Option<f64> {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_memory_retrieval_stage_duration_seconds_sum")
+                    && line.contains(&format!("entry_point=\"{entry_point}\""))
+                    && line.contains(&format!("stage=\"{stage}\""))
+            })
+            .and_then(|line| line.rsplit_once(' '))
+            .and_then(|(_, value)| value.parse().ok())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_search_error_records_error_outcome() {
+        let setup = setup_server().await;
+
+        let params = SearchParams {
+            project: "nonexistent-project".to_string(),
+            query: "anything".to_string(),
+            folder: None,
+            note_type: None,
+            limit: Some(10),
+            entity_types: None,
+            edge_kinds: None,
+        };
+        let result = ops::memory_search(&setup.server, params, None).await;
+        assert!(result.error.is_some(), "expected error for invalid project");
+
+        let metrics = setup.server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let error = snapshot.aggregate(RetrievalEntryPoint::Dispatch, RetrievalOutcome::Error);
+        assert_eq!(
+            error.count, 1,
+            "memory_search with invalid project should record exactly one error observation"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_search_forwards_all_stage_timings_and_rendered_samples() {
+        let setup = setup_server_with_semantic().await;
+        djinn_telemetry::init().expect("install recorder");
+
+        let params = SearchParams {
+            project: setup.project.clone(),
+            query: "Seed architecture context".to_string(),
+            folder: None,
+            note_type: None,
+            limit: Some(10),
+            entity_types: None,
+            edge_kinds: None,
+        };
+        let result = ops::memory_search(&setup.server, params, None).await;
+        assert!(
+            result.error.is_none(),
+            "unexpected error: {:?}",
+            result.error
+        );
+        assert!(!result.results.is_empty(), "expected search results");
+
+        let metrics = setup.server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let entry_point = RetrievalEntryPoint::Dispatch;
+
+        for stage in [
+            RetrievalStage::Embedding,
+            RetrievalStage::Lexical,
+            RetrievalStage::Semantic,
+            RetrievalStage::Temporal,
+            RetrievalStage::Graph,
+            RetrievalStage::RrfFuse,
+        ] {
+            let aggregate = snapshot.stage_aggregate(entry_point, stage);
+            assert_eq!(
+                aggregate.count, 1,
+                "stage {stage:?} should be observed exactly once"
+            );
+        }
+
+        let rendered = djinn_telemetry::render().expect("render metrics");
+        for stage in [
+            "embedding",
+            "lexical",
+            "semantic",
+            "temporal",
+            "graph",
+            "rrf_fuse",
+        ] {
+            let _ = rendered_stage_sum(&rendered, "dispatch", stage)
+                .unwrap_or_else(|| panic!("missing rendered sample for stage {stage}"));
+        }
+
+        let success = snapshot.aggregate(entry_point, RetrievalOutcome::Success);
+        assert_eq!(success.count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_build_context_success_records_success() {
+        let setup = setup_server().await;
+
+        let result = ops::memory_build_context(
+            &setup.server,
+            BuildContextParams {
+                project: setup.project.clone(),
+                url: format!("memory://{}", setup.permalink),
+                depth: None,
+                max_related: Some(10),
+                budget: Some(4096),
+                task_id: None,
+                min_confidence: None,
+                edge_kinds: None,
+            },
+            None,
+        )
+        .await;
+        assert!(
+            result.error.is_none(),
+            "unexpected error: {:?}",
+            result.error
+        );
+        assert!(!result.primary.is_empty(), "expected primary context");
+
+        let metrics = setup.server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let success = snapshot.aggregate(
+            RetrievalEntryPoint::LoadKnowledgeContext,
+            RetrievalOutcome::Success,
+        );
+        assert_eq!(success.count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_build_context_empty_records_empty() {
+        let setup = setup_server().await;
+
+        let result = ops::memory_build_context(
+            &setup.server,
+            BuildContextParams {
+                project: setup.project.clone(),
+                url: "memory://nonexistent-permalink".to_string(),
+                depth: None,
+                max_related: Some(10),
+                budget: Some(4096),
+                task_id: None,
+                min_confidence: None,
+                edge_kinds: None,
+            },
+            None,
+        )
+        .await;
+        assert!(
+            result.error.is_none(),
+            "unexpected error: {:?}",
+            result.error
+        );
+        assert!(result.primary.is_empty(), "expected empty primary context");
+
+        let metrics = setup.server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let empty = snapshot.aggregate(
+            RetrievalEntryPoint::LoadKnowledgeContext,
+            RetrievalOutcome::Empty,
+        );
+        assert_eq!(empty.count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_build_context_wildcard_error_records_error() {
+        let setup = setup_server().await;
+        // Close the underlying pool so the wildcard list operation fails with a
+        // repository error, without issuing raw SQL outside the djinn-db crate.
+        setup.server.state.db().pool().clone().close().await;
+
+        let result = ops::memory_build_context(
+            &setup.server,
+            BuildContextParams {
+                project: setup.project.clone(),
+                url: format!("memory://{}/*", setup.folder),
+                depth: None,
+                max_related: Some(10),
+                budget: Some(4096),
+                task_id: None,
+                min_confidence: None,
+                edge_kinds: None,
+            },
+            None,
+        )
+        .await;
+        assert!(
+            result.error.is_some(),
+            "wildcard list failure should surface an error"
+        );
+
+        let metrics = setup.server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let error = snapshot.aggregate(
+            RetrievalEntryPoint::LoadKnowledgeContext,
+            RetrievalOutcome::Error,
+        );
+        assert_eq!(
+            error.count, 1,
+            "wildcard list failure should record exactly one error observation"
+        );
     }
 }
