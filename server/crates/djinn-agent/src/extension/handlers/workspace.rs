@@ -1,6 +1,10 @@
 use super::gate_guard::{gate_guard_edit_check, gate_guard_shell_check};
-use super::workspace_helpers::{cargo_check_denied, emit_edit_match_telemetry};
+use super::workspace_helpers::{
+    cargo_check_denied, classify_cargo_command, emit_edit_match_telemetry,
+};
 use super::*;
+use djinn_core::clock::{Clock, SystemClock};
+use djinn_telemetry::cargo_invocation::{self, EXIT_CANCELLED, EXIT_FAIL, EXIT_OK};
 
 /// Default interactive-shell timeout (ms) when the caller passes no `timeout_ms`.
 /// Overridable via `DJINN_SHELL_TIMEOUT_MS`. Raised well above the old 120s:
@@ -49,6 +53,49 @@ fn effective_shell_timeout_ms(requested: Option<u64>, command: &str) -> u64 {
     } else {
         base
     }
+}
+
+/// Structurally record exactly one cargo invocation observation from a single
+/// runner terminal result.
+///
+/// This is the private testable seam between the process runner and the
+/// telemetry contract. Exactly-once is structural: there is exactly one call
+/// site in [`call_shell`], placed after the single runner return. No Drop
+/// guard, no recordings in individual timeout/cancellation branches.
+///
+/// Mapping:
+/// - `classification == None` (non-cargo command): no observation.
+/// - [`crate::process::ProcessRunError::Spawn`] (child never started): no observation.
+/// - Successful exit ([`crate::process::ProcessTermination::Exited`] + success): `EXIT_OK`.
+/// - Nonzero exit, timeout, or post-start runner error: `EXIT_FAIL`.
+/// - Handled cancellation: `EXIT_CANCELLED`.
+fn finish_shell(
+    classification: Option<&'static str>,
+    started: std::time::Instant,
+    result: &Result<crate::process::ProcessOutput, crate::process::ProcessRunError>,
+    clock: &dyn Clock,
+    recorder: impl Fn(&'static str, &'static str, std::time::Duration),
+) {
+    let Some(kind) = classification else {
+        return;
+    };
+    let exit: &'static str = match result {
+        // Spawn error: child never started — no observation.
+        Err(crate::process::ProcessRunError::Spawn(_)) => return,
+        // Post-start runner error (wait/reap/join): child started.
+        Err(crate::process::ProcessRunError::Started(_)) => EXIT_FAIL,
+        Ok(po) => match po.termination {
+            // Handled cancellation: child started and was cleaned up.
+            crate::process::ProcessTermination::Cancelled => EXIT_CANCELLED,
+            // Timeout: child was killed by the deadline — always fail.
+            crate::process::ProcessTermination::TimedOut => EXIT_FAIL,
+            crate::process::ProcessTermination::Exited if po.output.status.success() => EXIT_OK,
+            crate::process::ProcessTermination::Exited => EXIT_FAIL,
+        },
+    };
+    let ended = clock.now_instant();
+    let elapsed = ended.saturating_duration_since(started);
+    recorder(kind, exit, elapsed);
 }
 
 pub(crate) async fn call_shell(
@@ -137,18 +184,36 @@ pub(crate) async fn call_shell(
         }
     });
 
-    let process_output = crate::process::output_with_kill_cancellable(
+    // Classify for cargo invocation telemetry. `None` means non-cargo: no
+    // observation is recorded and the rest of the function is unchanged.
+    let classification = classify_cargo_command(&p.command);
+
+    // Capture monotonic start immediately before entering the runner.
+    let clock = SystemClock::new();
+    let started = clock.now_instant();
+
+    let runner_result = crate::process::output_with_kill_cancellable(
         cmd,
         Duration::from_millis(timeout_ms),
         child_token,
     )
-    .await
-    .map_err(|e| format!("failed to run shell command: {}", e.into_io_error()))?;
+    .await;
 
-    // The richer terminal reason (`process_output.termination`) is intentionally
-    // not surfaced as a new JSON field in this task; classification/timing
-    // belongs to the blocked successor. Existing shell JSON/error behavior is
-    // unchanged apart from enabling handled cancellation.
+    // Structurally finish exactly one cargo observation from the single
+    // terminal value. Exactly-once is structural: one call site after the
+    // single runner return — no Drop guard, no recordings in individual
+    // timeout/cancellation branches.
+    finish_shell(
+        classification,
+        started,
+        &runner_result,
+        &clock,
+        cargo_invocation::record_seconds,
+    );
+
+    let process_output =
+        runner_result.map_err(|e| format!("failed to run shell command: {}", e.into_io_error()))?;
+
     let output = process_output.output;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -1138,6 +1203,238 @@ async fn enrich_with_related_files(
         obj.insert("related_files".to_string(), value);
     }
     response
+}
+
+#[cfg(all(test, unix))]
+mod cargo_outcome_tests {
+    use super::*;
+    use crate::process::{ProcessOutput, ProcessRunError, ProcessTermination};
+    use djinn_core::clock::{Clock, TestClock};
+    use djinn_telemetry::cargo_invocation::{
+        EXIT_CANCELLED, EXIT_FAIL, EXIT_OK, KIND_BUILD, KIND_CHECK, KIND_CLIPPY, KIND_OTHER,
+        KIND_TEST,
+    };
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::{Arc, Mutex};
+
+    /// Collected recorder calls: `(kind, exit, duration)`.
+    type Calls = Arc<Mutex<Vec<(&'static str, &'static str, std::time::Duration)>>>;
+
+    fn fake_recorder(calls: &Calls) -> impl Fn(&'static str, &'static str, std::time::Duration) {
+        let calls = calls.clone();
+        move |kind, exit, dur| {
+            calls.lock().unwrap().push((kind, exit, dur));
+        }
+    }
+
+    /// Construct a synthetic `ProcessOutput` from an exit code and termination.
+    fn make_output(code: i32, termination: ProcessTermination) -> ProcessOutput {
+        ProcessOutput {
+            output: std::process::Output {
+                status: std::process::ExitStatus::from_raw(code << 8),
+                stdout: vec![],
+                stderr: vec![],
+            },
+            termination,
+        }
+    }
+
+    /// Run `finish_shell` with a `TestClock` advanced by `elapsed`, returning
+    /// the recorded calls.
+    fn run_finish(
+        classification: Option<&'static str>,
+        result: &Result<ProcessOutput, ProcessRunError>,
+        elapsed: std::time::Duration,
+    ) -> Vec<(&'static str, &'static str, std::time::Duration)> {
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let recorder = fake_recorder(&calls);
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+        let started = clock.now_instant();
+        clock.advance_mono(elapsed);
+        finish_shell(classification, started, result, &clock, recorder);
+        calls.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn success_records_ok_once() {
+        let result = Ok(make_output(0, ProcessTermination::Exited));
+        let recorded = run_finish(
+            Some(KIND_CHECK),
+            &result,
+            std::time::Duration::from_millis(2500),
+        );
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, KIND_CHECK);
+        assert_eq!(recorded[0].1, EXIT_OK);
+        assert_eq!(recorded[0].2, std::time::Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn nonzero_exit_records_fail_once() {
+        let result = Ok(make_output(1, ProcessTermination::Exited));
+        let recorded = run_finish(
+            Some(KIND_BUILD),
+            &result,
+            std::time::Duration::from_millis(2500),
+        );
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, KIND_BUILD);
+        assert_eq!(recorded[0].1, EXIT_FAIL);
+        assert_eq!(recorded[0].2, std::time::Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn timeout_records_fail_once() {
+        // A timeout kills the child; the exit status is non-success.
+        let result = Ok(make_output(9, ProcessTermination::TimedOut));
+        let recorded = run_finish(
+            Some(KIND_TEST),
+            &result,
+            std::time::Duration::from_millis(2500),
+        );
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, KIND_TEST);
+        assert_eq!(recorded[0].1, EXIT_FAIL);
+        assert_eq!(recorded[0].2, std::time::Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn cancellation_records_cancelled_once() {
+        let result = Ok(make_output(9, ProcessTermination::Cancelled));
+        let recorded = run_finish(
+            Some(KIND_CLIPPY),
+            &result,
+            std::time::Duration::from_millis(2500),
+        );
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, KIND_CLIPPY);
+        assert_eq!(recorded[0].1, EXIT_CANCELLED);
+        assert_eq!(recorded[0].2, std::time::Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn started_error_records_fail_once() {
+        let result = Err(ProcessRunError::Started(std::io::Error::other(
+            "wait failed",
+        )));
+        let recorded = run_finish(
+            Some(KIND_OTHER),
+            &result,
+            std::time::Duration::from_millis(2500),
+        );
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, KIND_OTHER);
+        assert_eq!(recorded[0].1, EXIT_FAIL);
+        assert_eq!(recorded[0].2, std::time::Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn spawn_error_records_zero() {
+        let result = Err(ProcessRunError::Spawn(std::io::Error::other(
+            "spawn failed",
+        )));
+        let recorded = run_finish(
+            Some(KIND_CHECK),
+            &result,
+            std::time::Duration::from_millis(2500),
+        );
+        assert!(
+            recorded.is_empty(),
+            "spawn error should record nothing (child never started)"
+        );
+    }
+
+    #[test]
+    fn non_cargo_success_records_zero() {
+        let result = Ok(make_output(0, ProcessTermination::Exited));
+        let recorded = run_finish(None, &result, std::time::Duration::from_millis(2500));
+        assert!(
+            recorded.is_empty(),
+            "non-cargo command should record nothing"
+        );
+    }
+
+    #[test]
+    fn non_cargo_nonzero_records_zero() {
+        let result = Ok(make_output(1, ProcessTermination::Exited));
+        let recorded = run_finish(None, &result, std::time::Duration::from_millis(2500));
+        assert!(
+            recorded.is_empty(),
+            "non-cargo command should record nothing"
+        );
+    }
+
+    #[test]
+    fn non_cargo_spawn_error_records_zero() {
+        let result = Err(ProcessRunError::Spawn(std::io::Error::other(
+            "spawn failed",
+        )));
+        let recorded = run_finish(None, &result, std::time::Duration::from_millis(2500));
+        assert!(
+            recorded.is_empty(),
+            "non-cargo command should record nothing"
+        );
+    }
+
+    #[test]
+    fn each_kind_records_correct_exit() {
+        let kinds = [KIND_CHECK, KIND_CLIPPY, KIND_TEST, KIND_BUILD, KIND_OTHER];
+        for &kind in &kinds {
+            let result = Ok(make_output(0, ProcessTermination::Exited));
+            let recorded = run_finish(Some(kind), &result, std::time::Duration::from_secs(1));
+            assert_eq!(recorded.len(), 1, "kind {kind} should record exactly once");
+            assert_eq!(recorded[0].0, kind);
+            assert_eq!(recorded[0].1, EXIT_OK);
+            assert_eq!(recorded[0].2, std::time::Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn timeout_with_success_status_still_fail() {
+        // Edge case: child exited successfully just as the deadline fired.
+        // The timeout classification must still produce EXIT_FAIL.
+        let result = Ok(make_output(0, ProcessTermination::TimedOut));
+        let recorded = run_finish(
+            Some(KIND_CHECK),
+            &result,
+            std::time::Duration::from_millis(2500),
+        );
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].1, EXIT_FAIL);
+    }
+
+    #[test]
+    fn cancellation_with_success_status_still_cancelled() {
+        let result = Ok(make_output(0, ProcessTermination::Cancelled));
+        let recorded = run_finish(
+            Some(KIND_CHECK),
+            &result,
+            std::time::Duration::from_millis(2500),
+        );
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].1, EXIT_CANCELLED);
+    }
+
+    #[test]
+    fn duration_is_monotonic_not_wall_clock() {
+        // Advancing wall-clock without advancing monotonic time must not
+        // change the recorded duration.
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let recorder = fake_recorder(&calls);
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+        let started = clock.now_instant();
+        // Move wall-clock forward by 10 minutes; leave monotonic unchanged.
+        clock.advance_wall(std::time::Duration::from_secs(600));
+        let result = Ok(make_output(0, ProcessTermination::Exited));
+        finish_shell(Some(KIND_CHECK), started, &result, &clock, recorder);
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0].2,
+            std::time::Duration::ZERO,
+            "duration must follow monotonic time, not wall-clock"
+        );
+    }
 }
 
 #[cfg(test)]
