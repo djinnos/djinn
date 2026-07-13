@@ -480,6 +480,8 @@
             base.event_bus(),
             base.catalog().clone(),
             base.health_tracker().clone(),
+            base.retrieval_config(),
+            base.retrieval_metrics(),
             Some(Arc::new(CountingDemandCoordinator {
                 demand_calls: demand_calls.clone(),
             }) as Arc<dyn CoordinatorOps>),

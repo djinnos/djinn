@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use djinn_core::doctor::checks::retrieval::RetrievalHealthConfig;
 use djinn_core::events::EventBus;
 use djinn_core::models::DjinnSettings;
 use djinn_db::{
@@ -8,6 +9,7 @@ use djinn_db::{
     repositories::note::{NoteEmbeddingProvider, NoteVectorStore},
 };
 use djinn_provider::catalog::{CatalogService, HealthTracker, builtin};
+use djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics;
 
 use crate::bridge::{
     CoordinatorOps, GitOps, LspOps, MemoryEnrichmentOps, RepoGraphOps, RuntimeOps,
@@ -26,6 +28,8 @@ pub struct McpState {
     event_bus: EventBus,
     catalog: CatalogService,
     health_tracker: HealthTracker,
+    retrieval_config: RetrievalHealthConfig,
+    retrieval_metrics: Arc<MemoryRetrievalMetrics>,
     coordinator: Option<Arc<dyn CoordinatorOps>>,
     pool: Option<Arc<dyn SlotPoolOps>>,
     embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
@@ -62,6 +66,8 @@ impl McpState {
             event_bus,
             catalog,
             health_tracker,
+            RetrievalHealthConfig::default(),
+            Arc::new(MemoryRetrievalMetrics::new()),
             coordinator,
             pool,
             embedding_provider,
@@ -84,6 +90,8 @@ impl McpState {
         event_bus: EventBus,
         catalog: CatalogService,
         health_tracker: HealthTracker,
+        retrieval_config: RetrievalHealthConfig,
+        retrieval_metrics: Arc<MemoryRetrievalMetrics>,
         coordinator: Option<Arc<dyn CoordinatorOps>>,
         pool: Option<Arc<dyn SlotPoolOps>>,
         embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
@@ -99,6 +107,8 @@ impl McpState {
             event_bus,
             catalog,
             health_tracker,
+            retrieval_config,
+            retrieval_metrics,
             coordinator,
             pool,
             embedding_provider,
@@ -125,6 +135,16 @@ impl McpState {
 
     pub fn health_tracker(&self) -> &HealthTracker {
         &self.health_tracker
+    }
+
+    /// Immutable retrieval-health config parsed once at process startup.
+    pub fn retrieval_config(&self) -> RetrievalHealthConfig {
+        self.retrieval_config
+    }
+
+    /// Process-owned retrieval telemetry shared by every MCP session.
+    pub fn retrieval_metrics(&self) -> Arc<MemoryRetrievalMetrics> {
+        self.retrieval_metrics.clone()
     }
 
     pub async fn coordinator(&self) -> Option<Arc<dyn CoordinatorOps>> {
@@ -954,5 +974,27 @@ pub mod stubs {
             Arc::new(StubGitOps),
             Arc::new(StubRepoGraphOps),
         )
+    }
+
+    #[tokio::test]
+    async fn mcp_state_retrieval_config_is_accessible() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db);
+        let config = state.retrieval_config();
+        assert_eq!(config.window_hours(), 24);
+        assert_eq!(config.zero_result_threshold(), 0.50);
+        assert_eq!(config.query_floor(), 20);
+    }
+
+    #[tokio::test]
+    async fn mcp_state_retrieval_metrics_are_shared_across_clones() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db);
+        let metrics_a = state.retrieval_metrics();
+        let metrics_b = state.clone().retrieval_metrics();
+        assert!(
+            Arc::ptr_eq(&metrics_a, &metrics_b),
+            "clones of McpState must share the same process-owned metrics Arc"
+        );
     }
 }

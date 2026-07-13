@@ -7,6 +7,7 @@ pub mod commands;
 pub mod doctor;
 pub mod error;
 pub mod events;
+pub mod extension_diagnostics;
 pub mod index_tree;
 pub mod liveness;
 pub mod message;

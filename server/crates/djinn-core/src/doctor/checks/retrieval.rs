@@ -73,6 +73,10 @@ pub enum RetrievalHealthConfigError {
         "query_floor {0} is outside the supported range [{MIN_QUERY_FLOOR}, {MAX_QUERY_FLOOR}]"
     )]
     QueryFloor(u64),
+
+    /// An environment variable was set to a non-numeric value.
+    #[error("environment variable {var} has invalid value {value}")]
+    InvalidEnvValue { var: String, value: String },
 }
 
 /// Immutable configuration for retrieval-health checks.
@@ -131,6 +135,25 @@ impl RetrievalHealthConfig {
     pub fn query_floor(&self) -> u64 {
         self.query_floor
     }
+
+    /// Parse a config from the documented environment variables.
+    ///
+    /// Variables:
+    /// * `DJINN_RETRIEVAL_HEALTH_WINDOW_HOURS` — defaults to 24.
+    /// * `DJINN_RETRIEVAL_HEALTH_ZERO_RESULT_THRESHOLD` — defaults to 0.50.
+    /// * `DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR` — defaults to 20.
+    ///
+    /// Any explicitly set value outside the documented bounds returns an error.
+    pub fn from_env() -> Result<Self, RetrievalHealthConfigError> {
+        let window_hours =
+            parse_env_u64("DJINN_RETRIEVAL_HEALTH_WINDOW_HOURS", DEFAULT_WINDOW_HOURS)?;
+        let zero_result_threshold = parse_env_f64(
+            "DJINN_RETRIEVAL_HEALTH_ZERO_RESULT_THRESHOLD",
+            DEFAULT_ZERO_RESULT_THRESHOLD,
+        )?;
+        let query_floor = parse_env_u64("DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR", DEFAULT_QUERY_FLOOR)?;
+        Self::new(window_hours, zero_result_threshold, query_floor)
+    }
 }
 
 impl Default for RetrievalHealthConfig {
@@ -141,6 +164,34 @@ impl Default for RetrievalHealthConfig {
             DEFAULT_QUERY_FLOOR,
         )
         .expect("defaults are within documented bounds")
+    }
+}
+
+fn parse_env_u64(var: &str, default: u64) -> Result<u64, RetrievalHealthConfigError> {
+    match std::env::var(var) {
+        Ok(value) => {
+            value
+                .parse::<u64>()
+                .map_err(|_| RetrievalHealthConfigError::InvalidEnvValue {
+                    var: var.to_string(),
+                    value,
+                })
+        }
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_env_f64(var: &str, default: f64) -> Result<f64, RetrievalHealthConfigError> {
+    match std::env::var(var) {
+        Ok(value) => {
+            value
+                .parse::<f64>()
+                .map_err(|_| RetrievalHealthConfigError::InvalidEnvValue {
+                    var: var.to_string(),
+                    value,
+                })
+        }
+        Err(_) => Ok(default),
     }
 }
 
@@ -355,7 +406,11 @@ fn iso_format(ts: OffsetDateTime) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // -----------------------------------------------------------------
     // In-memory test double
@@ -489,6 +544,96 @@ mod tests {
                 10_000_001
             ),
             Err(RetrievalHealthConfigError::QueryFloor(10_000_001))
+        );
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn clear_env_vars() {
+        for var in [
+            "DJINN_RETRIEVAL_HEALTH_WINDOW_HOURS",
+            "DJINN_RETRIEVAL_HEALTH_ZERO_RESULT_THRESHOLD",
+            "DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR",
+        ] {
+            unsafe {
+                let _ = std::env::remove_var(var);
+            }
+        }
+    }
+
+    fn set_env_vars(window: &str, threshold: &str, floor: &str) {
+        unsafe {
+            std::env::set_var("DJINN_RETRIEVAL_HEALTH_WINDOW_HOURS", window);
+            std::env::set_var("DJINN_RETRIEVAL_HEALTH_ZERO_RESULT_THRESHOLD", threshold);
+            std::env::set_var("DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR", floor);
+        }
+    }
+
+    #[test]
+    fn from_env_uses_defaults() {
+        let _guard = env_lock();
+        clear_env_vars();
+        let config = RetrievalHealthConfig::from_env().unwrap();
+        assert_eq!(config.window_hours(), DEFAULT_WINDOW_HOURS);
+        assert_eq!(
+            config.zero_result_threshold(),
+            DEFAULT_ZERO_RESULT_THRESHOLD
+        );
+        assert_eq!(config.query_floor(), DEFAULT_QUERY_FLOOR);
+    }
+
+    #[test]
+    fn from_env_parses_custom_values() {
+        let _guard = env_lock();
+        set_env_vars("48", "0.75", "50");
+        let config = RetrievalHealthConfig::from_env().unwrap();
+        assert_eq!(config.window_hours(), 48);
+        assert_eq!(config.zero_result_threshold(), 0.75);
+        assert_eq!(config.query_floor(), 50);
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_window_hours() {
+        let _guard = env_lock();
+        set_env_vars("0", "0.5", "20");
+        assert_eq!(
+            RetrievalHealthConfig::from_env(),
+            Err(RetrievalHealthConfigError::WindowHours(0))
+        );
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_threshold() {
+        let _guard = env_lock();
+        set_env_vars("24", "1.1", "20");
+        assert_eq!(
+            RetrievalHealthConfig::from_env(),
+            Err(RetrievalHealthConfigError::Threshold(1.1))
+        );
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_query_floor() {
+        let _guard = env_lock();
+        set_env_vars("24", "0.5", "0");
+        assert_eq!(
+            RetrievalHealthConfig::from_env(),
+            Err(RetrievalHealthConfigError::QueryFloor(0))
+        );
+    }
+
+    #[test]
+    fn from_env_rejects_non_numeric() {
+        let _guard = env_lock();
+        set_env_vars("not-a-number", "0.5", "20");
+        assert!(
+            matches!(
+                RetrievalHealthConfig::from_env(),
+                Err(RetrievalHealthConfigError::InvalidEnvValue { .. })
+            ),
+            "expected InvalidEnvValue for non-numeric env var"
         );
     }
 

@@ -225,6 +225,10 @@ struct Inner {
     pub provider_catalog_refresh_started: AtomicBool,
     /// Per-model circuit-breaker health tracker.
     pub health_tracker: HealthTracker,
+    /// Immutable retrieval-health config parsed once at startup.
+    pub retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
+    /// Process-owned retrieval telemetry shared by every MCP session.
+    pub retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
     pub role_registry: Arc<RoleRegistry>,
     /// Long-running coordinator actor handle.
     pub coordinator: Arc<tokio::sync::Mutex<Option<CoordinatorHandle>>>,
@@ -354,21 +358,31 @@ impl AppState {
         let runtime = DatabaseRuntimeManager::new(
             crate::db::runtime::DatabaseRuntimeConfig::postgres(db.bootstrap_info().target.clone()),
         );
-        Self::new_with_runtime(db, runtime, cancel)
+        Self::new_inner(
+            db,
+            runtime,
+            cancel,
+            djinn_core::doctor::RetrievalHealthConfig::default(),
+            Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+        )
     }
 
     pub fn new_with_runtime(
         db: Database,
         db_runtime: DatabaseRuntimeManager,
         cancel: CancellationToken,
+        retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
+        retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
     ) -> Self {
-        Self::new_inner(db, db_runtime, cancel)
+        Self::new_inner(db, db_runtime, cancel, retrieval_config, retrieval_metrics)
     }
 
     fn new_inner(
         db: Database,
         db_runtime: DatabaseRuntimeManager,
         cancel: CancellationToken,
+        retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
+        retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mirror = Arc::new(MirrorManager::new(mirrors_root()));
@@ -385,6 +399,8 @@ impl AppState {
                     provider_catalog_refresh::refresh_interval_from_env(),
                 provider_catalog_refresh_started: AtomicBool::new(false),
                 health_tracker: HealthTracker::new(),
+                retrieval_config,
+                retrieval_metrics,
                 role_registry: Arc::new(RoleRegistry::new()),
                 coordinator: Arc::new(tokio::sync::Mutex::new(None)),
                 pool: Mutex::new(None),
@@ -681,7 +697,13 @@ impl AppState {
         let db = db_runtime
             .bootstrap()
             .map_err(|e| anyhow::anyhow!("open database runtime: {e}"))?;
-        Ok(Self::new_with_runtime(db, db_runtime, cancel))
+        Ok(Self::new_with_runtime(
+            db,
+            db_runtime,
+            cancel,
+            djinn_core::doctor::RetrievalHealthConfig::default(),
+            Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+        ))
     }
 
     /// Read-only snapshot of the active GitHub App configuration, if any.
@@ -1227,6 +1249,18 @@ impl AppState {
 
     pub fn health_tracker(&self) -> &HealthTracker {
         &self.inner.health_tracker
+    }
+
+    /// Immutable retrieval-health config parsed once at startup.
+    pub fn retrieval_config(&self) -> djinn_core::doctor::RetrievalHealthConfig {
+        self.inner.retrieval_config
+    }
+
+    /// Process-owned retrieval telemetry shared by every MCP session.
+    pub fn retrieval_metrics(
+        &self,
+    ) -> Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics> {
+        self.inner.retrieval_metrics.clone()
     }
 
     pub fn embedding_service(&self) -> &EmbeddingService {
