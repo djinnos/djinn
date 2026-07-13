@@ -16,6 +16,23 @@ use crate::error::{DbError as Error, DbResult as Result};
 use crate::note_hash::note_content_hash;
 use djinn_memory::Note;
 
+/// Test-only projection of a persisted revision event.
+///
+/// Keeping the SQL projection in `djinn-db` lets downstream writer tests prove
+/// ledger attribution without reaching around the repository boundary.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct NoteRevisionEventForTest {
+    pub actor_kind: String,
+    pub subsystem: Option<String>,
+    pub event_kind: String,
+    pub content_before: Option<String>,
+    pub content_after: Option<String>,
+    pub confidence_before: Option<f64>,
+    pub confidence_after: Option<f64>,
+    pub reason: String,
+}
+
 /// Canonical final values for a created note. Updates intentionally use only
 /// `content` and `confidence`: existing public CRUD APIs retain ownership of
 /// the unrelated legacy note fields until their callers migrate.
@@ -317,6 +334,23 @@ impl NoteRepository {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_revision_event_insertion_failure_for_test(&self, enabled: bool) {
         self.revision_event_failure.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Returns a stable ledger projection for focused downstream writer tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn revision_events_for_test(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<NoteRevisionEventForTest>> {
+        sqlx::query_as(
+            "SELECT actor_kind, subsystem, event_kind, content_before, content_after, \
+             confidence_before, confidence_after, reason \
+             FROM note_revision_events WHERE project_id = $1 ORDER BY reason",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(Into::into)
     }
 }
 

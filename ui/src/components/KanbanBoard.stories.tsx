@@ -6,7 +6,7 @@ type BoardFixture = {
   epics: Epic[];
   tasks: Task[];
   initialPath?: string;
-  initialCollapsedEpics?: string[];
+  initialCollapsedLanes?: string[];
 };
 
 const emptyFixture: BoardFixture = {
@@ -14,23 +14,47 @@ const emptyFixture: BoardFixture = {
   tasks: [],
 };
 
-const makeEpic = (id: string, title: string, emoji: string, owner: string): Epic => ({
+const makeEpic = (
+  id: string,
+  title: string,
+  emoji: string,
+  owner: string,
+  overrides?: Partial<Epic>,
+): Epic => ({
   id,
   short_id: id.slice(0, 4),
   title,
   description: "",
   emoji,
   color: "#3B82F6",
-  status: "active",
+  status: "open",
   owner,
   created_at: "2026-03-01T10:00:00.000Z",
   updated_at: "2026-03-01T10:00:00.000Z",
+  ...overrides,
 });
 
+// Two building proposals: the auth one fans out to two epics (a proposal
+// graduates into one epic per target project), the UX one to a single epic.
+// A no-epic task exercises the catch-all "No proposal" lane.
+const authProposal = {
+  proposal_id: "prop-auth",
+  proposal_short_id: "p4au",
+  proposal_title: "Unify platform authentication",
+  proposal_status: "building",
+};
+
+const uxProposal = {
+  proposal_id: "prop-ux",
+  proposal_short_id: "p7ux",
+  proposal_title: "Polish the first-run experience",
+  proposal_status: "building",
+};
+
 const epicsFixture: Epic[] = [
-  makeEpic("epic-foundation", "Platform Foundation", "🚀", "Alex"),
-  makeEpic("epic-ux", "UX Polish", "🎨", "Mina"),
-  makeEpic("epic-auth", "Authentication", "🔐", "Priya"),
+  makeEpic("epic-foundation", "Platform Foundation", "🚀", "Alex", authProposal),
+  makeEpic("epic-auth", "Authentication", "🔐", "Priya", authProposal),
+  makeEpic("epic-ux", "UX Polish", "🎨", "Mina", uxProposal),
 ];
 
 const makeTask = (
@@ -54,6 +78,7 @@ const makeTask = (
   status,
   priority,
   owner,
+  created_by_user_id: owner,
   epic_id: epicId,
   labels,
   memory_refs: [],
@@ -89,12 +114,14 @@ const tasksFixture: Task[] = [
     duration_seconds: 360,
   }),
 
-  // Done
+  // Done (merged — the board only shows closed tasks that actually landed)
   makeTask("t-4", "Keyboard navigation pass", "closed", 1, "Alex", "epic-ux", ["accessibility"], "2026-03-01T11:30:00.000Z", {
     duration_seconds: 1380,
+    merge_commit_sha: "abc123",
   }),
   makeTask("t-7", "SSE initial connect", "closed", 1, "Priya", "epic-foundation", [], "2026-03-01T11:35:00.000Z", {
     duration_seconds: 300,
+    merge_commit_sha: "def456",
   }),
 ];
 
@@ -115,7 +142,7 @@ const meta = {
             <KanbanBoard
               tasks={fixture.tasks}
               epics={new Map(fixture.epics.map((epic) => [epic.id, epic]))}
-              initialCollapsedEpics={fixture.initialCollapsedEpics}
+              initialCollapsedLanes={fixture.initialCollapsedLanes}
             />
           </div>
         </MemoryRouter>
@@ -141,12 +168,12 @@ export const PopulatedAcrossColumns = {
   },
 };
 
-export const CollapsedEpicGroups = {
+export const CollapsedLanes = {
   args: {
     fixture: {
       epics: epicsFixture,
       tasks: tasksFixture,
-      initialCollapsedEpics: ["open:epic-foundation", "done:epic-ux"],
+      initialCollapsedLanes: ["proposal:prop-auth", "proposal:prop-ux"],
     },
   },
 };
