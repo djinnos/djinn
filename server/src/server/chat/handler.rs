@@ -101,7 +101,9 @@ use djinn_agent::actors::slot::{
 use djinn_agent::chat_tools::ChatResolvedProject;
 use djinn_compaction::COMPACTION_SUMMARY_END_MARKER;
 use djinn_control_plane::server::DjinnMcpServer;
-use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
+use djinn_core::auth_context::{
+    REVISION_CALLER_CONTEXT, SESSION_USER_ID, SESSION_USER_TOKEN, TrustedRevisionCallerContext,
+};
 use djinn_db::{
     ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
     ProposalRepository, SessionCompactionBoundaryRepository, SessionMessageRepository,
@@ -977,6 +979,10 @@ pub(super) async fn completions_handler_impl(
     let needs_title = session_row.title.as_deref() == Some(DEFAULT_CHAT_TITLE);
     let user_turn_for_title = last_user_content_for_persist;
     let session_id_for_loop = session_id.clone();
+    let revision_caller = user_id.clone().and_then(|user_id| {
+        TrustedRevisionCallerContext::authenticated_human(user_id)
+            .map(|context| context.with_execution_provenance(Some(session_id.clone()), None, None))
+    });
     let model_for_title = req.model.clone();
     tokio::spawn(async move {
         // Scope the task-locals across the entire chat loop so any MCP
@@ -987,22 +993,25 @@ pub(super) async fn completions_handler_impl(
                 user_token,
                 SESSION_USER_ID.scope(
                     user_id,
-                    run_chat_loop(ChatLoopContext {
-                        state: spawn_state,
-                        provider,
-                        conversation,
-                        tool_schemas,
-                        resolver,
-                        mcp,
-                        tx,
-                        session_id: session_id_for_loop,
-                        needs_title,
-                        user_turn_for_title,
-                        model_id: model_for_title,
-                        context_window,
-                        extra_allowed_mcp,
-                        interruption_notice_ids,
-                    }),
+                    REVISION_CALLER_CONTEXT.scope(
+                        revision_caller,
+                        run_chat_loop(ChatLoopContext {
+                            state: spawn_state,
+                            provider,
+                            conversation,
+                            tool_schemas,
+                            resolver,
+                            mcp,
+                            tx,
+                            session_id: session_id_for_loop,
+                            needs_title,
+                            user_turn_for_title,
+                            model_id: model_for_title,
+                            context_window,
+                            extra_allowed_mcp,
+                            interruption_notice_ids,
+                        }),
+                    ),
                 ),
             )
             .await;
