@@ -1745,6 +1745,118 @@ mod tests {
             .await
             .expect("create note")
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enrichment_note_creation_records_attribution_snapshot_and_noop() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo = NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let aliases = vec!["dispatch".to_owned(), "gate".to_owned()];
+
+        let (entity_id, entity_created) =
+            persist_entity(&note_repo, &project.id, "Dispatch Gate", &aliases)
+                .await
+                .expect("create entity");
+        let (claim_id, claim_created) = persist_claim(
+            &note_repo,
+            &project.id,
+            "The dispatch gate controls concurrency",
+            "source-note",
+            Some("controls concurrency"),
+        )
+        .await
+        .expect("create claim");
+        assert!(entity_created);
+        assert!(claim_created);
+
+        let revisions: Vec<(String, String, String, Option<String>, Option<String>, Option<f64>, Option<f64>, String)> = sqlx::query_as("SELECT actor_kind, subsystem, event_kind, content_before, content_after, confidence_before, confidence_after, reason FROM note_revision_events WHERE project_id = $1 ORDER BY reason")
+            .bind(&project.id)
+            .fetch_all(db.pool())
+            .await
+            .expect("load enrichment revisions");
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(
+            revisions[0],
+            (
+                "system".to_owned(),
+                "enrichment".to_owned(),
+                "created".to_owned(),
+                None,
+                Some("# The dispatch gate controls concurrency\n\n## Source\n- source-note\n\n## Evidence\n> controls concurrency\n\n---\n*Extracted by memory enrichment pass.*".to_owned()),
+                None,
+                Some(0.0),
+                "enrichment:create claim note".to_owned(),
+            )
+        );
+        assert_eq!(
+            revisions[1],
+            (
+                "system".to_owned(),
+                "enrichment".to_owned(),
+                "created".to_owned(),
+                None,
+                Some("# Dispatch Gate\n\n## Aliases\n- dispatch\n- gate\n\n---\n*Extracted by memory enrichment pass.*".to_owned()),
+                None,
+                Some(0.0),
+                "enrichment:create entity note".to_owned(),
+            )
+        );
+
+        let (same_entity_id, entity_changed) =
+            persist_entity(&note_repo, &project.id, "Dispatch Gate", &aliases)
+                .await
+                .expect("reuse entity");
+        let (same_claim_id, claim_changed) = persist_claim(
+            &note_repo,
+            &project.id,
+            "The dispatch gate controls concurrency",
+            "source-note",
+            Some("controls concurrency"),
+        )
+        .await
+        .expect("reuse claim");
+        assert_eq!(same_entity_id, entity_id);
+        assert_eq!(same_claim_id, claim_id);
+        assert!(!entity_changed);
+        assert!(!claim_changed);
+        let revision_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM note_revision_events WHERE project_id = $1")
+                .bind(&project.id)
+                .fetch_one(db.pool())
+                .await
+                .expect("count enrichment revisions");
+        assert_eq!(revision_count, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enrichment_entity_create_rolls_back_when_revision_insert_fails() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo = NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        note_repo.set_revision_event_insertion_failure_for_test(true);
+
+        assert!(
+            persist_entity(&note_repo, &project.id, "Failed Entity", &[])
+                .await
+                .is_err()
+        );
+        note_repo.set_revision_event_insertion_failure_for_test(false);
+        assert!(
+            note_repo
+                .get_by_permalink(&project.id, &entity_permalink("Failed Entity"))
+                .await
+                .expect("lookup failed entity")
+                .is_none()
+        );
+        let revisions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM note_revision_events WHERE project_id = $1")
+                .bind(&project.id)
+                .fetch_one(db.pool())
+                .await
+                .expect("count failed entity revisions");
+        assert_eq!(revisions, 0);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn enrichment_with_five_notes_produces_structured_report() {
         let db = create_test_db();
