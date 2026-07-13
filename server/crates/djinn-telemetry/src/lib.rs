@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 
 use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
 
+pub mod memory_retrieval;
+
 pub const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 
 const DISPATCH_ATTEMPTS_TOTAL: &str = "djinn_dispatch_attempts_total";
@@ -534,6 +536,7 @@ fn format_build_error(error: BuildError) -> String {
 }
 
 fn register_metrics() {
+    memory_retrieval::register_metrics();
     metrics::describe_counter!(
         DISPATCH_ATTEMPTS_TOTAL,
         "Dispatch attempts partitioned by terminal dispatch outcome."
