@@ -726,8 +726,14 @@ jobs:
           set -euo pipefail
           shard_count="$(jq --argjson idx "$SHARD_INDEX" '[.shards[] | select(.shardIndex == $idx)] | length' nextest-plan/matrix.json)"
           [ "$shard_count" -eq 1 ] || { echo "::error::Expected exactly one plan entry for shard $SHARD_INDEX, found $shard_count"; exit 1; }
+          # Keep potentially large planner data in artifact-backed files. Validate the
+          # complete entry here, then let nextest and timing generation read those files
+          # directly instead of exporting either value through the runner environment.
           jq -er --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .filter | select(type == "string" and length > 0)' nextest-plan/matrix.json > nextest-plan/shard-filter.txt
-          jq -ec --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .testIds | select(type == "array")' nextest-plan/matrix.json > nextest-plan/shard-test-ids.json
+          jq -ec --argjson idx "$SHARD_INDEX" '
+            .shards[] | select(.shardIndex == $idx) | .testIds |
+            select(type == "array" and all(.[]; type == "string" and length > 0) and length == (unique | length))
+          ' nextest-plan/matrix.json > nextest-plan/shard-test-ids.json
       - name: Run planner-emitted test filter and record shard timing
         env:
           NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
