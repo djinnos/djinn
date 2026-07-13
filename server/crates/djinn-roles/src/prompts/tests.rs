@@ -1880,20 +1880,13 @@ fn assert_memory_search_contract(prompt: &str, source: &str) {
         "{source} must declare the memory_search query contract header"
     );
 
+    // Require complete directive-bearing clauses rather than loose keywords:
+    // this catches reversed prohibitions such as "use question wording".
     for required in [
-        "declarative",
-        "self-contained",
-        "one information need",
-        "question wording",
-        "retrieval-meta",
-        "find",
-        "information about",
-        "search for",
-        "discriminative symbol names",
-        "exact errors",
-        "config keys",
-        "lexical/BM25",
-        "72iu",
+        "Formulate each query as a declarative, self-contained statement of one information need.",
+        "Do not use question wording or retrieval-meta phrases such as `find`, `information about`, or `search for`.",
+        "Preserve discriminative symbol names, exact errors, and config keys.",
+        "Worker-issued searches remain lexical/BM25-only until 72iu; do not assume embeddings.",
     ] {
         assert!(
             prompt.contains(required),

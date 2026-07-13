@@ -431,19 +431,15 @@ fn memory_search_schema_documents_query_formulation_contract() {
         .as_str()
         .expect("memory_search has a description");
 
-    // Required formulation rules.
+    // Directive-bearing contract clauses. Keep prohibitions coupled to their
+    // forbidden forms so a reversal (for example, permitting questions) fails.
     for required in [
-        "declarative",
-        "interrogative",
-        "one information need per query",
-        "self-contained",
-        "retrieval-meta",
-        "find",
-        "information about",
-        "search for",
-        "discriminative symbol names",
-        "exact error strings",
-        "config keys",
+        "write a declarative statement, not an interrogative question",
+        "express one information need per query",
+        "make each query self-contained",
+        "omit retrieval-meta wording such as `find`, `information about`, and `search for`",
+        "preserve discriminative symbol names, exact error strings, and config keys verbatim",
+        "Worker-issued searches remain lexical/BM25-only until proposal 72iu supplies worker embeddings",
     ] {
         assert!(
             description.contains(required),
