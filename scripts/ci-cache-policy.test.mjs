@@ -13,6 +13,21 @@ const CACHE_OWNERS = new Map([
   ['server-aarch64-check', 'cache-warm-aarch64'],
 ]);
 
+// `on:` accepts only GitHub's event names. Keep this separate from the
+// workflow's other top-level mappings: those mappings (for example
+// `concurrency`) must never be treated as hypothetical dispatch events when
+// checking whether a cache owner is reachable.
+const GITHUB_EVENTS = new Set([
+  'branch_protection_rule', 'check_run', 'check_suite', 'create', 'delete',
+  'deployment', 'deployment_status', 'discussion', 'discussion_comment',
+  'fork', 'gollum', 'issue_comment', 'issues', 'label', 'merge_group',
+  'milestone', 'page_build', 'project', 'project_card', 'project_column',
+  'public', 'pull_request', 'pull_request_review',
+  'pull_request_review_comment', 'pull_request_target', 'push', 'registry_package',
+  'release', 'repository_dispatch', 'schedule', 'status', 'watch',
+  'workflow_call', 'workflow_dispatch', 'workflow_run',
+]);
+
 function fail(message) {
   throw new Error(`ci-cache-policy: ${message}`);
 }
@@ -81,10 +96,18 @@ function isFalse(value) {
 }
 
 function workflowEvents(parsed) {
-  const trigger = parsed.lines.slice(0, parsed.lines.findIndex((line) => /^jobs:/.test(line)));
-  return trigger
-    .map((line) => line.match(/^ {2}([A-Za-z_][A-Za-z0-9_]*):\s*(?:null)?\s*(?:#.*)?$/)?.[1])
-    .filter((event) => event && event !== 'workflow_call');
+  const onAt = parsed.lines.findIndex((line) => /^on:\s*(?:#.*)?$/.test(line));
+  if (onAt < 0) fail('workflow has no on: trigger mapping');
+
+  const events = [];
+  for (const line of parsed.lines.slice(onAt + 1)) {
+    // A new top-level mapping ends the `on:` mapping. Blank lines and comments
+    // do not affect its extent.
+    if (/^\S/.test(line)) break;
+    const event = line.match(/^ {2}([A-Za-z_][A-Za-z0-9_]*):\s*(?:null)?\s*(?:#.*)?$/)?.[1];
+    if (event && GITHUB_EVENTS.has(event) && event !== 'workflow_call') events.push(event);
+  }
+  return events;
 }
 
 /**
