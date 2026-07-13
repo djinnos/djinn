@@ -40,6 +40,10 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<WriteParams>,
         decider: &dyn MemoryWriteDedupDecider,
     ) -> Json<MemoryNoteResponse> {
+        let (reason, attribution, provenance) = match revision_context(&p.reason) {
+            Ok(context) => context,
+            Err(error) => return Json(MemoryNoteResponse::error(error)),
+        };
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => return Json(MemoryNoteResponse::error(e)),
@@ -53,8 +57,17 @@ impl DjinnMcpServer {
 
         let repo = note_repository(self);
 
-        if let Some(response) =
-            maybe_update_singleton_note(self, &repo, &project_id, &p, &tags_json).await
+        if let Some(response) = maybe_update_singleton_note(
+            self,
+            &repo,
+            &project_id,
+            &p,
+            &tags_json,
+            reason.clone(),
+            attribution.clone(),
+            provenance.clone(),
+        )
+        .await
         {
             return Json(response);
         }
@@ -98,7 +111,19 @@ impl DjinnMcpServer {
             }
             WriteDedupOutcome::CreateNew => {
                 observer.finish(RetrievalOutcome::Empty, 0);
-                Json(create_note(self, &repo, &project_id, &p, &tags_json).await)
+                Json(
+                    create_note(
+                        self,
+                        &repo,
+                        &project_id,
+                        &p,
+                        &tags_json,
+                        reason.clone(),
+                        attribution.clone(),
+                        provenance.clone(),
+                    )
+                    .await,
+                )
             }
             WriteDedupOutcome::SupersedeExisting {
                 candidate_id,
@@ -106,7 +131,17 @@ impl DjinnMcpServer {
             } => {
                 observer.finish(RetrievalOutcome::Success, 1);
                 // Keep incoming creation exactly on the ordinary memory_write path.
-                let response = create_note(self, &repo, &project_id, &p, &tags_json).await;
+                let response = create_note(
+                    self,
+                    &repo,
+                    &project_id,
+                    &p,
+                    &tags_json,
+                    reason.clone(),
+                    attribution.clone(),
+                    provenance.clone(),
+                )
+                .await;
                 if let Some(new_note_id) = response.id.as_deref()
                     && response.error.is_none()
                     && let Err(error) =

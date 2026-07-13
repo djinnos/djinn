@@ -263,6 +263,7 @@ pub struct MemoryBuildContextParams {
 pub struct MemoryWriteParams {
     pub title: String,
     pub content: String,
+    pub reason: String,
     #[serde(rename = "type")]
     pub note_type: String,
     pub status: Option<String>,
@@ -285,6 +286,7 @@ pub struct MemoryEditParams {
     pub identifier: String,
     pub operation: String,
     pub content: String,
+    pub reason: String,
     pub find_text: Option<String>,
     pub section: Option<String>,
     #[serde(rename = "type")]

@@ -6,8 +6,11 @@ use std::path::Path;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 
 use crate::server::DjinnMcpServer;
-use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
+use djinn_db::{
+    NoteRepository, NoteRevisionReason, TrustedNoteRevisionAttribution,
+    TrustedNoteRevisionProvenance,
+};
 use djinn_memory::{GitLogEntry, Note};
 
 pub(crate) mod types;
@@ -259,4 +262,28 @@ mod param_tests {
         assert_schema_has_type::<SearchParams>("SearchParams");
         assert_schema_has_type::<MoveParams>("MoveParams");
     }
+}
+
+/// Validate the wire explanation before any project lookup, and derive immutable
+/// revision identity only from the server-owned authenticated execution scope.
+fn revision_context(
+    reason: &str,
+) -> Result<
+    (
+        NoteRevisionReason,
+        TrustedNoteRevisionAttribution,
+        TrustedNoteRevisionProvenance,
+    ),
+    String,
+> {
+    let reason = NoteRevisionReason::new(reason).map_err(|_| {
+        "invalid parameters: field: reason, message: reason must be non-blank".to_owned()
+    })?;
+    let context = djinn_core::auth_context::current_revision_caller_context()
+        .ok_or_else(|| "authenticated revision caller context is required".to_owned())?;
+    Ok((
+        reason,
+        TrustedNoteRevisionAttribution::try_from(&context).map_err(|error| error.to_string())?,
+        TrustedNoteRevisionProvenance::try_from(&context).map_err(|error| error.to_string())?,
+    ))
 }

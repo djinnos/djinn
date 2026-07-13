@@ -693,7 +693,7 @@ pub fn tool_memory_write() -> RmcpTool {
         "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.".to_string(),
         object!({
             "type": "object",
-            "required": ["title", "content", "type"],
+            "required": ["title", "content", "type", "reason"],
             "properties": {
                 "title": {"type": "string", "description": "Note title"},
                 "content": {"type": "string", "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes."},
@@ -711,11 +711,12 @@ pub fn tool_memory_edit() -> RmcpTool {
         "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).".to_string(),
         object!({
             "type": "object",
-            "required": ["identifier", "operation", "content"],
+            "required": ["identifier", "operation", "content", "reason"],
             "properties": {
                 "identifier": {"type": "string", "description": "Note permalink or title"},
                 "operation": {"type": "string", "description": "Edit operation: append, prepend, find_replace, replace_section"},
                 "content": {"type": "string", "description": "New content to insert or replace with"},
+                "reason": {"type": "string", "description": "Non-blank explanation for this mutation."},
                 "find_text": {"type": "string", "description": "Required for find_replace: exact text to search for"},
                 "section": {"type": "string", "description": "Required for replace_section: heading text identifying the section"},
                 "type": {"type": "string", "description": "If provided and different from current type, move the note to the new type's folder"}

@@ -7178,13 +7178,14 @@
     "concurrent_safe": false
   },
   {
-    "name": "memory_delete",
+     "name": "memory_delete",
     "description": "Delete a note. Removes the row from Dolt.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "required": [
         "project",
-        "identifier"
+        "identifier",
+        "reason"
       ],
       "type": "object",
       "properties": {
@@ -7192,6 +7193,10 @@
           "type": "string"
         },
         "identifier": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "Non-blank explanation recorded in the immutable revision ledger.",
           "type": "string"
         }
       }
@@ -7279,7 +7284,8 @@
         "project",
         "identifier",
         "operation",
-        "content"
+        "content",
+        "reason"
       ],
       "type": "object",
       "properties": {
@@ -7295,6 +7301,10 @@
           "type": "string"
         },
         "content": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "Non-blank explanation recorded in the immutable revision ledger.",
           "type": "string"
         },
         "find_text": {
@@ -9747,7 +9757,8 @@
         "project",
         "title",
         "content",
-        "type"
+        "type",
+        "reason"
       ],
       "type": "object",
       "properties": {
@@ -9759,6 +9770,10 @@
           "type": "string"
         },
         "content": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "Non-blank explanation recorded in the immutable revision ledger.",
           "type": "string"
         },
         "type": {
