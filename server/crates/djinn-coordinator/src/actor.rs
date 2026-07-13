@@ -452,10 +452,12 @@ impl CoordinatorActor {
                 events_tx.clone(),
             ),
         );
-        crate::doctor::register_closed_parent_open_children_check(
+        crate::doctor::register_closed_parent_open_children_check_with_repair(
             djinn_core::doctor::registry(),
             Arc::clone(&closed_parent_open_children_source)
                 as Arc<dyn crate::doctor::ClosedParentOpenChildrenSource>,
+            Arc::clone(&closed_parent_open_children_source)
+                as Arc<dyn crate::doctor::ClosedParentOpenChildrenRepairSource>,
         );
 
         Self {
