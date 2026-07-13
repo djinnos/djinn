@@ -67,6 +67,7 @@ export function useProviders() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount trigger for an async catalog/credential load; the synchronous setLoading is the initial fetch transition, not derivable state.
     void loadData();
   }, [loadData]);
 

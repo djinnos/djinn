@@ -109,7 +109,6 @@ const DependencyGraph = ({
   }, []);
 
   const epicsRef = useRef<EpicData[]>(epics);
-  epicsRef.current = epics;
 
   const updateNodeData = useCallback((changedTaskIds: string[]) => {
     const taskMap = new Map<
@@ -150,9 +149,16 @@ const DependencyGraph = ({
   }, []);
 
   const runLayoutRef = useRef(runLayout);
-  runLayoutRef.current = runLayout;
   const updateNodeDataRef = useRef(updateNodeData);
-  updateNodeDataRef.current = updateNodeData;
+
+  // Keep the "latest value" refs current from an effect (after commit) rather
+  // than mutating them during render. This effect is declared before the main
+  // layout effect below, so it commits first and the reads there stay fresh.
+  useEffect(() => {
+    epicsRef.current = epics;
+    runLayoutRef.current = runLayout;
+    updateNodeDataRef.current = updateNodeData;
+  });
 
   const epicsFp = useMemo(() => fingerprintEpics(epics), [epics]);
 

@@ -111,6 +111,7 @@ export function SymbolDetailPanel({
   // ── Fetch context whenever the selection changes ──────────────────────
   useEffect(() => {
     if (injectedContext) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- async fetch state machine: seed/reset the context state before (or in place of) the network read.
       setFetchState({ status: "ready", context: injectedContext });
       return;
     }
@@ -154,6 +155,7 @@ export function SymbolDetailPanel({
   useEffect(() => {
     if (injectedContext) {
       clearDoiImpact();
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- async impact-fetch state machine: reset before (or in place of) the network read.
       setImpactState({ status: "idle" });
       return;
     }

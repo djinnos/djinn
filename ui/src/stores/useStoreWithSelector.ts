@@ -6,8 +6,8 @@
  * selector results to prevent unnecessary re-renders.
  */
 
-import { useEffect, useState, useRef } from "react";
 import type { StoreApi } from "zustand";
+import { useStoreWithEqualityFn } from "zustand/traditional";
 
 // Default shallow equality check
 function shallowEqual<T>(a: T, b: T): boolean {
@@ -37,35 +37,14 @@ export function useStoreWithSelector<TState, TSelected = TState>(
   selector?: (state: TState) => TSelected,
   equalityFn: (a: TSelected, b: TSelected) => boolean = shallowEqual
 ): TState | TSelected {
-  const selectorRef = useRef(selector);
-  selectorRef.current = selector;
-  
-  const equalityFnRef = useRef(equalityFn);
-  equalityFnRef.current = equalityFn;
-  
-  // Get initial state
-  const [selectedState, setSelectedState] = useState<TSelected>(() => {
-    const state = store.getState();
-    return selectorRef.current ? selectorRef.current(state) : (state as unknown as TSelected);
-  });
-  
-  // Subscribe to store changes
-  useEffect(() => {
-    const unsubscribe = store.subscribe(
-      (state) => {
-        const selected = selectorRef.current ? selectorRef.current(state) : (state as unknown as TSelected);
-        setSelectedState((prev) => {
-          if (equalityFnRef.current(prev, selected)) {
-            return prev;
-          }
-          return selected;
-        });
-      }
-    );
-    
-    return unsubscribe;
-  }, [store]);
-  
-  // Return full state if no selector, otherwise selected slice
-  return selector ? selectedState : (store.getState() as TState | TSelected);
+  // Delegate the subscription to Zustand's `useStoreWithEqualityFn`, which is
+  // built on React's `useSyncExternalStoreWithSelector`. That primitive owns the
+  // ref bookkeeping (latest selector / equality fn) in a concurrent-safe way, so
+  // this wrapper stays pure and needs no render-phase ref mutation.
+  //
+  // When no selector is supplied we subscribe to the whole state with the same
+  // shallow-equality gate the previous hand-rolled implementation applied.
+  const select =
+    selector ?? ((state: TState) => state as unknown as TSelected);
+  return useStoreWithEqualityFn(store, select, equalityFn);
 }

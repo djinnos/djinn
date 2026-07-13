@@ -1165,6 +1165,16 @@ export namespace DoctorRunOutputSchema {
    * Persisted finding id (from `doctor_findings.id`).
    */
   finding_id: string
+  /**
+   * Recommended action for closed-parent orphan findings (e.g. "close",
+   * "park", "retain"). Omitted for checks that do not produce a recommendation.
+   */
+  recommended_action?: string
+  /**
+   * Reason for the recommended action (e.g. "parent_closed",
+   * "external_open_dependent"). Omitted for checks that do not produce a recommendation.
+   */
+  recommended_reason?: string
   severity: string
   [k: string]: any
   }
