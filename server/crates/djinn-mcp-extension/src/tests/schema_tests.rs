@@ -471,6 +471,35 @@ fn memory_search_schema_documents_query_formulation_contract() {
 }
 
 #[test]
+fn memory_mutation_schemas_require_typed_reasons_and_reject_spoofed_fields() {
+    for tool in [
+        shared_schemas::tool_memory_write(),
+        shared_schemas::tool_memory_edit(),
+    ] {
+        let schema = serde_json::to_value(tool).expect("serialize memory mutation schema");
+        let input = &schema["inputSchema"];
+        let name = schema["name"].as_str().expect("tool has a name");
+
+        assert!(
+            input["required"]
+                .as_array()
+                .is_some_and(|fields| fields.iter().any(|field| field == "reason")),
+            "{name} must require a reason"
+        );
+        assert_eq!(
+            input["properties"]["reason"]["type"],
+            serde_json::json!("string"),
+            "{name} reason must be a string"
+        );
+        assert_eq!(
+            input["additionalProperties"],
+            serde_json::json!(false),
+            "{name} must schema-reject spoofed actor/provenance and other unknown fields"
+        );
+    }
+}
+
+#[test]
 fn code_graph_schema_embeds_workflow_guidance() {
     let schema = serde_json::to_value(tool_code_graph()).expect("serialize code_graph schema");
     let description = schema

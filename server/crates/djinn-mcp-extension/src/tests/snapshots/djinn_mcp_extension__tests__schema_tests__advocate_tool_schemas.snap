@@ -593,10 +593,12 @@ expression: tool_schemas_advocate()
     "description": "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "required": [
         "title",
         "content",
-        "type"
+        "type",
+        "reason"
       ],
       "properties": {
         "title": {
@@ -610,6 +612,10 @@ expression: tool_schemas_advocate()
         "type": {
           "type": "string",
           "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Non-blank explanation for this mutation."
         },
         "status": {
           "type": "string",
@@ -635,10 +641,12 @@ expression: tool_schemas_advocate()
     "description": "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "required": [
         "identifier",
         "operation",
-        "content"
+        "content",
+        "reason"
       ],
       "properties": {
         "identifier": {
@@ -652,6 +660,10 @@ expression: tool_schemas_advocate()
         "content": {
           "type": "string",
           "description": "New content to insert or replace with"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Non-blank explanation for this mutation."
         },
         "find_text": {
           "type": "string",

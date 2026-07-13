@@ -693,11 +693,13 @@ pub fn tool_memory_write() -> RmcpTool {
         "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.".to_string(),
         object!({
             "type": "object",
+            "additionalProperties": false,
             "required": ["title", "content", "type", "reason"],
             "properties": {
                 "title": {"type": "string", "description": "Note title"},
                 "content": {"type": "string", "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes."},
                 "type": {"type": "string", "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)"},
+                "reason": {"type": "string", "description": "Non-blank explanation for this mutation."},
                 "status": {"type": "string", "description": "Optional explicit status. For ADRs, use \"proposed\" to mark it as an in-flight proposal."},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags for categorisation"}
             }
@@ -711,6 +713,7 @@ pub fn tool_memory_edit() -> RmcpTool {
         "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).".to_string(),
         object!({
             "type": "object",
+            "additionalProperties": false,
             "required": ["identifier", "operation", "content", "reason"],
             "properties": {
                 "identifier": {"type": "string", "description": "Note permalink or title"},
