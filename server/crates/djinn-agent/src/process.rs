@@ -353,13 +353,30 @@ pub(crate) async fn output_with_kill_cancellable(
     .map_err(|e| ProcessRunError::Started(io::Error::other(e)))?
 }
 
-/// Legacy compatibility wrapper: runs the cancellable path with a token that is
-/// never cancelled, discarding the terminal reason and returning the raw output.
+/// Legacy compatibility wrapper for Unix callers.
+///
+/// This preserves the original timeout-and-process-group cleanup behavior while
+/// discarding the richer terminal reason.
+#[cfg(unix)]
 pub async fn output_with_kill(cmd: Command, timeout: Duration) -> io::Result<Output> {
     output_with_kill_cancellable(cmd, timeout, CancellationToken::new())
         .await
         .map(|po| po.output)
         .map_err(|e| e.into_io_error())
+}
+
+/// Legacy compatibility wrapper for non-Unix callers.
+///
+/// Historically this platform used `Command::output` in a blocking task and
+/// ignored `timeout`. Keep that behavior for existing production callers. The
+/// richer cancellable runner above intentionally has direct-child timeout and
+/// cancellation semantics for new internal consumers, but must not alter this
+/// compatibility API.
+#[cfg(not(unix))]
+pub async fn output_with_kill(mut cmd: Command, _timeout: Duration) -> io::Result<Output> {
+    tokio::task::spawn_blocking(move || cmd.output())
+        .await
+        .map_err(io::Error::other)?
 }
 
 #[cfg(all(test, unix))]
