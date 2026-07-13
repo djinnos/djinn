@@ -1,15 +1,47 @@
 use super::config::ResolvedMcpServerConfig;
 use super::*;
+use axum::Router;
 use crate::test_helpers::{agent_context_from_db, create_test_db};
 use djinn_core::events::EventBus;
 use djinn_provider::repos::CredentialRepository;
-use rmcp::object;
+use rmcp::{
+    ServerHandler,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{ServerCapabilities, ServerInfo},
+    object, schemars, tool, tool_router,
+    transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager},
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 fn test_context() -> AgentContext {
     agent_context_from_db(create_test_db(), CancellationToken::new())
+}
+
+#[derive(Clone)]
+struct StartupFixture { tool_router: ToolRouter<Self> }
+impl StartupFixture { fn new() -> Self { Self { tool_router: Self::tool_router() } } }
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct FixtureArguments {}
+#[tool_router]
+impl StartupFixture {
+    #[tool(description = "fixture tool")]
+    fn fixture_tool(&self, Parameters(_): Parameters<FixtureArguments>) -> String { "ok".to_owned() }
+}
+impl ServerHandler for StartupFixture {
+    fn get_info(&self) -> ServerInfo { ServerInfo::new(ServerCapabilities::builder().enable_tools().build()) }
+}
+async fn spawn_startup_fixture() -> (String, CancellationToken) {
+    let cancellation = CancellationToken::new();
+    let config = StreamableHttpServerConfig::default().with_stateful_mode(false).with_json_response(true).with_sse_keep_alive(None).with_cancellation_token(cancellation.child_token());
+    let service: StreamableHttpService<StartupFixture, LocalSessionManager> = StreamableHttpService::new(|| Ok(StartupFixture::new()), Default::default(), config);
+    let router = Router::new().nest_service("/mcp", service);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fixture");
+    let address = listener.local_addr().expect("fixture address");
+    let shutdown = cancellation.clone();
+    tokio::spawn(async move { let _ = axum::serve(listener, router).with_graceful_shutdown(async move { shutdown.cancelled_owned().await }).await; });
+    (format!("http://{address}/mcp"), cancellation)
 }
 
 #[test]
@@ -1208,4 +1240,22 @@ fn startup_diagnostic_facts_are_canonical_and_exclude_runtime_paths() {
         initial_list.remedy_code,
         ExtensionLoadRemedyCode::CheckServer
     );
+}
+
+#[tokio::test]
+async fn diagnostics_entry_point_keeps_runtime_disconnect_invocation_and_refresh_out_of_facts() {
+    let app_state = test_context();
+    let (url, shutdown) = spawn_startup_fixture().await;
+    let servers = vec![("fixture-server".to_owned(), McpServerConfig { url: Some(url), ..Default::default() })];
+    let discovery = connect_and_discover_with_diagnostics("test", "worker", &servers, &app_state).await;
+    assert!(discovery.diagnostics.is_empty(), "successful startup has no facts");
+    let registry = discovery.registry.expect("initial discovery supplies a registry");
+    let tool = mcp_namespaced_name("fixture-server", "fixture_tool");
+    assert!(registry.has_tool(&tool), "initial tools/list discovers the fixture tool");
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(registry.call_tool(&tool, None).await.is_err(), "post-discovery invocation fails");
+    let peer = registry.routing.read().unwrap().peers["fixture-server"].clone();
+    assert!(refresh_tools_list(&peer, Duration::from_millis(100)).await.is_err(), "post-discovery refresh fails");
+    assert!(discovery.diagnostics.is_empty(), "runtime failures do not create startup observations");
 }

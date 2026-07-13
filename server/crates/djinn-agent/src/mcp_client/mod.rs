@@ -291,9 +291,9 @@ impl rmcp::ClientHandler for McpNotificationHandler {
             let timeout = Duration::from_millis(timeout_ms);
 
             // Issue tools/list with request timeout — no lock held.
-            let result = match tokio::time::timeout(timeout, peer.list_tools(None)).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => {
+            let result = match refresh_tools_list(&peer, timeout).await {
+                Ok(result) => result,
+                Err(RefreshToolsListFailure::Request(e)) => {
                     tracing::error!(
                         server = %server_name,
                         task_short_id = %task_short_id,
@@ -302,7 +302,7 @@ impl rmcp::ClientHandler for McpNotificationHandler {
                     );
                     return;
                 }
-                Err(_elapsed) => {
+                Err(RefreshToolsListFailure::Timeout) => {
                     tracing::error!(
                         server = %server_name,
                         task_short_id = %task_short_id,
@@ -338,6 +338,18 @@ impl rmcp::ClientHandler for McpNotificationHandler {
                 );
             }
         }
+    }
+}
+
+/// A failure from a post-discovery `tools/list_changed` refresh.
+/// This remains separate from startup observations.
+enum RefreshToolsListFailure { Request(rmcp::ErrorData), Timeout }
+
+async fn refresh_tools_list(peer: &Peer<RoleClient>, timeout: Duration) -> Result<rmcp::model::ListToolsResult, RefreshToolsListFailure> {
+    match tokio::time::timeout(timeout, peer.list_tools(None)).await {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(error)) => Err(RefreshToolsListFailure::Request(error)),
+        Err(_elapsed) => Err(RefreshToolsListFailure::Timeout),
     }
 }
 
