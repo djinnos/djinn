@@ -46,6 +46,8 @@ jobs:
           fetch-depth: 0
       - name: Verify routed-scope contract
         run: node --test scripts/ci-changed-scope.test.mjs
+      - name: Verify cache ownership policy
+        run: node --test scripts/ci-cache-policy.test.mjs
       - name: Compute safe event diff and route it
         id: router
         env:
