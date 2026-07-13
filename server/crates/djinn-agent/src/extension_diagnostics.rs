@@ -3,6 +3,14 @@
 //! Detectors supply only bounded facts. This module is deliberately the sole
 //! boundary between untrusted extension text and the canonical V1 repository.
 
+// The MCP, skill, session, and doctor call sites are deliberately introduced
+// independently. Keep this shared crate-private boundary available before the
+// first caller lands without weakening the crate-wide `dead_code` policy.
+#![allow(
+    dead_code,
+    reason = "extension diagnostic detector integrations consume this shared boundary incrementally"
+)]
+
 use std::sync::LazyLock;
 
 use djinn_core::extension_diagnostics::{
