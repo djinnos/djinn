@@ -828,12 +828,14 @@ pub async fn run_reply_loop(
                 tool_metadata: &tool_metadata,
                 tool_dispatcher,
                 otel_session: otel_session.as_ref(),
+                phase_tracker: Some(&phase_tracker),
             };
             let mut stream_state = consume_provider_stream(StreamLoopContext {
                 provider,
                 stream,
                 tool_metadata: &tool_metadata,
                 dispatch: &dispatch_ctx,
+                phase_tracker: &phase_tracker,
                 task_id,
                 session_id,
                 role_name,
@@ -1489,6 +1491,10 @@ pub async fn run_reply_loop(
         Ok(())
     }
     .await;
+    phase_tracker
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .finish();
     if let Some(session) = otel_session {
         session.record_usage(total_tokens_in, total_tokens_out);
         session.record_cache_usage(total_cache_read, total_cache_write, total_reasoning_out);
@@ -2013,6 +2019,7 @@ mod tests {
             .tool_dispatcher
             .as_deref()
             .expect("test SlotContext has a tool dispatcher");
+        let phase_tracker = Arc::new(std::sync::Mutex::new(super::super::phase::SessionPhaseTracker::new(&slot_ctx, "worker")));
         let dispatch_ctx = super::super::tool_dispatch::ToolDispatchContext {
             ctx: &slot_ctx,
             task_id: "task",
@@ -2021,6 +2028,7 @@ mod tests {
             tool_metadata: &tool_metadata,
             tool_dispatcher: dispatcher,
             otel_session: None,
+            phase_tracker: None,
         };
 
         let state = consume_provider_stream(StreamLoopContext {
@@ -2028,6 +2036,7 @@ mod tests {
             stream,
             tool_metadata: &tool_metadata,
             dispatch: &dispatch_ctx,
+            phase_tracker: &phase_tracker,
             task_id: "task",
             session_id: "session",
             role_name: "worker",

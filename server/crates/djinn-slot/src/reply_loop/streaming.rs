@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::StreamExt;
@@ -83,6 +83,7 @@ pub(super) struct StreamLoopContext<'a> {
     pub stream: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
     pub tool_metadata: &'a ToolRuntimeMetadataMap,
     pub dispatch: &'a ToolDispatchContext<'a>,
+    pub phase_tracker: &'a Arc<Mutex<super::phase::SessionPhaseTracker>>,
     pub task_id: &'a str,
     pub session_id: &'a str,
     pub role_name: &'a str,

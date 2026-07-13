@@ -9,6 +9,8 @@ pub mod doctor_finding;
 pub mod epic;
 pub mod events;
 pub mod extension_load_diagnostic;
+#[cfg(test)]
+pub mod extension_load_diagnostic_tests;
 pub mod git_settings;
 pub mod image;
 pub mod init;

@@ -165,6 +165,7 @@ fn test_dispatch_context<'a>(
         tool_metadata,
         tool_dispatcher: ctx.tool_dispatcher.as_ref().unwrap().as_ref(),
         otel_session: None,
+        phase_tracker: None,
     }
 }
 
