@@ -27,10 +27,7 @@ use super::refinement_outcome::entry_in_current_run;
 /// historical `Interrupted` stamp rather than guess into a corrupt run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResumePlan {
-    Resume {
-        phase: RefinementPhase,
-        round: i32,
-    },
+    Resume { phase: RefinementPhase, round: i32 },
     Ambiguous(&'static str),
 }
 
@@ -99,9 +96,10 @@ pub(crate) fn derive_resume_plan(
         .collect();
 
     // 1. Judge demanded evidence this round → parked awaiting evidence.
-    if round_entries.iter().any(|e| {
-        e.kind == "needs_evidence" && e.agent_role == "judge" && e.body_metadata.is_some()
-    }) {
+    if round_entries
+        .iter()
+        .any(|e| e.kind == "needs_evidence" && e.agent_role == "judge" && e.body_metadata.is_some())
+    {
         return ResumePlan::Resume {
             phase: RefinementPhase::AwaitingEvidence,
             round,

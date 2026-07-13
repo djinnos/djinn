@@ -541,7 +541,7 @@ mod tests {
         }
         if let Some(sha) = ci_head_sha {
             let pr_number = pr_url
-                .and_then(|u| parse_pr_url(u))
+                .and_then(parse_pr_url)
                 .map(|(_, _, n)| n as i64)
                 .unwrap_or(0);
             task_repo

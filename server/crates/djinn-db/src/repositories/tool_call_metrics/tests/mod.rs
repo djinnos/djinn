@@ -6,6 +6,7 @@ use crate::repositories::tool_call_metrics::{
 
 // ─── Helpers ───────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn row(
     session_id: &str,
     task_id: Option<&str>,

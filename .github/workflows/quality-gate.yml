@@ -46,6 +46,8 @@ jobs:
           fetch-depth: 0
       - name: Verify routed-scope contract
         run: node --test scripts/ci-changed-scope.test.mjs
+      - name: Verify cache ownership policy
+        run: node --test scripts/ci-cache-policy.test.mjs
       - name: Compute safe event diff and route it
         id: router
         env:
@@ -555,7 +557,8 @@ jobs:
           git config --global user.email "ci@test.local"
           git config --global user.name "CI Test"
       - name: Tests
-        run: cargo nextest run --workspace --all-targets --features qdrant --profile ci --partition count:${{ matrix.shard }}/4
+        # Bound concurrent template-database clones so the runner does not exhaust disk.
+        run: cargo nextest run --workspace --all-targets --features qdrant --profile ci --test-threads 4 --partition count:${{ matrix.shard }}/4
   server-sqlx-freshness:
     name: Server sqlx Freshness
     needs: preflight

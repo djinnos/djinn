@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 
+pub mod memory_retrieval;
+
 pub const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 
 const DISPATCH_ATTEMPTS_TOTAL: &str = "djinn_dispatch_attempts_total";
@@ -95,17 +97,32 @@ const WORKSPACE_BUCKETS: [f64; 11] = [
     0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
 ];
 
+// ─── Build-slot queue and occupancy telemetry (proposal zp5t) ──
+const BUILD_SLOT_QUEUE_WAIT_SECONDS: &str = "djinn_build_slot_queue_wait_seconds";
+const BUILD_SLOT_QUEUE_WAIT_BUCKETS: [f64; 15] = [
+    0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0,
+];
+const BUILD_SLOTS_IN_USE: &str = "djinn_build_slots_in_use";
+const BUILD_SLOTS_QUEUED: &str = "djinn_build_slots_queued";
+const AGENT_SESSION_PHASE_SECONDS_TOTAL: &str = "djinn_agent_session_phase_seconds_total";
+
 // ─── Cache cleanup observability ────────────────────────────────────
 const CACHE_CLEANUP_TOTAL: &str = "djinn_cache_cleanup_total";
 const CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL: &str = "djinn_cache_cleanup_reclaimed_bytes_total";
 const CACHE_CLEANUP_CANDIDATES_TOTAL: &str = "djinn_cache_cleanup_candidates_total";
-const CACHE_CLEANUP_COMPONENTS: [&str; 3] = ["sccache", "cargo_target_runs", "cargo_warm_base"];
-const CACHE_CLEANUP_OUTCOMES: [&str; 13] = [
+const CACHE_CLEANUP_COMPONENTS: [&str; 4] = [
+    "sccache",
+    "cargo_target_runs",
+    "cargo_warm_base",
+    "cargo_warm_base_fingerprint",
+];
+const CACHE_CLEANUP_OUTCOMES: [&str; 14] = [
     "deleted",
     "skipped",
     "retained",
     "error",
     "dry_run",
+    "safety_disabled_report_only",
     "uuid_orphan_deleted",
     "malformed_dir_deleted",
     "loose_file_deleted",
@@ -555,6 +572,12 @@ fn handle() -> Result<&'static PrometheusHandle, String> {
                         &WORKSPACE_BUCKETS,
                     )
                 })
+                .and_then(|b| {
+                    b.set_buckets_for_metric(
+                        Matcher::Full(BUILD_SLOT_QUEUE_WAIT_SECONDS.to_owned()),
+                        &BUILD_SLOT_QUEUE_WAIT_BUCKETS,
+                    )
+                })
                 .and_then(|b| b.install_recorder())
                 .map_err(format_build_error)
                 .inspect(|_| register_metrics())
@@ -568,6 +591,7 @@ fn format_build_error(error: BuildError) -> String {
 }
 
 fn register_metrics() {
+    memory_retrieval::register_metrics();
     metrics::describe_counter!(
         DISPATCH_ATTEMPTS_TOTAL,
         "Dispatch attempts partitioned by terminal dispatch outcome."
@@ -933,6 +957,39 @@ fn register_metrics() {
         WORKSPACE_CLEANUP_SECONDS,
         "Workspace cleanup duration in seconds, partitioned by bounded trigger and outcome labels."
     );
+
+    // ─── Build-slot queue and occupancy telemetry (proposal zp5t) ──
+    metrics::describe_histogram!(
+        BUILD_SLOT_QUEUE_WAIT_SECONDS,
+        "Build-slot queue wait duration in seconds, partitioned by bounded terminal outcome label."
+    );
+    for outcome in build_slot_queue::ALL_OUTCOMES {
+        metrics::histogram!(BUILD_SLOT_QUEUE_WAIT_SECONDS, "outcome" => outcome).record(0.0);
+    }
+    metrics::describe_gauge!(
+        BUILD_SLOTS_IN_USE,
+        "Current number of build slots in use across the process. Absolute setter for reconstructed unique state-set cardinality."
+    );
+    metrics::gauge!(BUILD_SLOTS_IN_USE).set(0.0);
+    metrics::describe_gauge!(
+        BUILD_SLOTS_QUEUED,
+        "Current number of build slots queued for admission across the process. Absolute setter for reconstructed unique state-set cardinality."
+    );
+    metrics::gauge!(BUILD_SLOTS_QUEUED).set(0.0);
+    metrics::describe_counter!(
+        AGENT_SESSION_PHASE_SECONDS_TOTAL,
+        "Cumulative seconds spent in agent session phases, partitioned by bounded phase and role labels."
+    );
+    for phase in agent_session_phase::ALL_PHASES {
+        for role in agent_session_phase::ALL_ROLES {
+            metrics::counter!(
+                AGENT_SESSION_PHASE_SECONDS_TOTAL,
+                "phase" => phase,
+                "role" => role,
+            )
+            .absolute(0);
+        }
+    }
 }
 
 pub mod dispatch {
@@ -1567,6 +1624,7 @@ pub mod cache_cleanup {
     pub const COMPONENT_SCCACHE: &str = "sccache";
     pub const COMPONENT_CARGO_TARGET_RUNS: &str = "cargo_target_runs";
     pub const COMPONENT_CARGO_WARM_BASE: &str = "cargo_warm_base";
+    pub const COMPONENT_CARGO_WARM_BASE_FINGERPRINT: &str = "cargo_warm_base_fingerprint";
 
     /// Stable outcome labels for `djinn_cache_cleanup_total`.
     pub const OUTCOME_DELETED: &str = "deleted";
@@ -1574,6 +1632,7 @@ pub mod cache_cleanup {
     pub const OUTCOME_RETAINED: &str = "retained";
     pub const OUTCOME_ERROR: &str = "error";
     pub const OUTCOME_DRY_RUN: &str = "dry_run";
+    pub const OUTCOME_SAFETY_DISABLED_REPORT_ONLY: &str = "safety_disabled_report_only";
 
     /// Granular cargo-target-runs outcome labels for distinguishing
     /// UUID orphan, malformed-dir, loose-file, retained fresh malformed,
@@ -1597,20 +1656,22 @@ pub mod cache_cleanup {
 
     /// All bounded component labels — used for registration seeding.
     #[cfg(test)]
-    pub(crate) const ALL_COMPONENTS: [&str; 3] = [
+    pub(crate) const ALL_COMPONENTS: [&str; 4] = [
         COMPONENT_SCCACHE,
         COMPONENT_CARGO_TARGET_RUNS,
         COMPONENT_CARGO_WARM_BASE,
+        COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
     ];
 
     /// All bounded outcome labels — used for registration seeding.
     #[cfg(test)]
-    pub(crate) const ALL_OUTCOMES: [&str; 13] = [
+    pub(crate) const ALL_OUTCOMES: [&str; 14] = [
         OUTCOME_DELETED,
         OUTCOME_SKIPPED,
         OUTCOME_RETAINED,
         OUTCOME_ERROR,
         OUTCOME_DRY_RUN,
+        OUTCOME_SAFETY_DISABLED_REPORT_ONLY,
         OUTCOME_UUID_ORPHAN_DELETED,
         OUTCOME_MALFORMED_DIR_DELETED,
         OUTCOME_LOOSE_FILE_DELETED,
@@ -1771,6 +1832,102 @@ pub mod workspace_cleanup {
             "outcome" => outcome,
         )
         .record(duration);
+    }
+}
+
+/// Build-slot queue wait telemetry (proposal zp5t).
+///
+/// Histogram for the duration a build-slot request spends waiting in queue
+/// before a terminal outcome. Labels are intentionally bounded to keep
+/// Prometheus cardinality under control:
+///
+/// - `outcome` — one of `OUTCOME_ADMITTED`, `OUTCOME_CANCELLED`, or
+///   `OUTCOME_SHUTDOWN`.
+///
+/// High-cardinality dimensions (`task_id`, `session_id`, `project_id`,
+/// `user_id`, `work_id`) belong in structured tracing fields emitted at the
+/// queue transition site, not in Prometheus labels.
+pub mod build_slot_queue {
+    pub const OUTCOME_ADMITTED: &str = "admitted";
+    pub const OUTCOME_CANCELLED: &str = "cancelled";
+    pub const OUTCOME_SHUTDOWN: &str = "shutdown";
+
+    pub(crate) const ALL_OUTCOMES: [&str; 3] =
+        [OUTCOME_ADMITTED, OUTCOME_CANCELLED, OUTCOME_SHUTDOWN];
+
+    /// Record the queue wait duration for a build-slot request with a terminal
+    /// `outcome`.
+    ///
+    /// `outcome` MUST be one of the `OUTCOME_*` constants above.
+    pub fn record_wait_seconds(outcome: &'static str, duration: std::time::Duration) {
+        metrics::histogram!(
+            super::BUILD_SLOT_QUEUE_WAIT_SECONDS,
+            "outcome" => outcome,
+        )
+        .record(duration);
+    }
+}
+
+/// Build-slot occupancy telemetry (proposal zp5t).
+///
+/// Absolute-setter gauges that reflect the current reconstructed unique
+/// state-set cardinality of build slots. These are intentionally unlabeled so
+/// they can represent process-aggregate unique state without exploding
+/// cardinality.
+pub mod build_slot_occupancy {
+    /// Set the absolute number of build slots currently in use.
+    pub fn set_slots_in_use(count: usize) {
+        metrics::gauge!(super::BUILD_SLOTS_IN_USE).set(count as f64);
+    }
+
+    /// Set the absolute number of build slots currently queued for admission.
+    pub fn set_slots_queued(count: usize) {
+        metrics::gauge!(super::BUILD_SLOTS_QUEUED).set(count as f64);
+    }
+}
+
+/// Agent session phase telemetry (proposal zp5t).
+///
+/// Counter for cumulative seconds spent in non-overlapping provider-wait and
+/// tool-execution phases. Labels are intentionally bounded to keep Prometheus
+/// cardinality under control:
+///
+/// - `phase` — one of `PHASE_PROVIDER_WAIT` or `PHASE_TOOL_EXECUTION`.
+/// - `role` — one of `ROLE_WORKER`, `ROLE_REVIEWER`, `ROLE_PLANNER`, or
+///   `ROLE_REFINEMENT`.
+///
+/// High-cardinality dimensions (`task_id`, `session_id`, `project_id`,
+/// `user_id`, `work_id`) belong in structured tracing fields emitted at the
+/// phase transition site, not in Prometheus labels.
+pub mod agent_session_phase {
+    pub const PHASE_PROVIDER_WAIT: &str = "provider_wait";
+    pub const PHASE_TOOL_EXECUTION: &str = "tool_execution";
+
+    pub const ROLE_WORKER: &str = "worker";
+    pub const ROLE_REVIEWER: &str = "reviewer";
+    pub const ROLE_PLANNER: &str = "planner";
+    pub const ROLE_REFINEMENT: &str = "refinement";
+
+    pub(crate) const ALL_PHASES: [&str; 2] = [PHASE_PROVIDER_WAIT, PHASE_TOOL_EXECUTION];
+    pub(crate) const ALL_ROLES: [&str; 4] =
+        [ROLE_WORKER, ROLE_REVIEWER, ROLE_PLANNER, ROLE_REFINEMENT];
+
+    /// Add `duration` to the cumulative counter for a completed `(phase, role)`
+    /// interval.
+    ///
+    /// `phase` MUST be one of the `PHASE_*` constants above; `role` MUST be one
+    /// of the `ROLE_*` constants above.
+    pub fn add_phase_duration(
+        phase: &'static str,
+        role: &'static str,
+        duration: std::time::Duration,
+    ) {
+        metrics::counter!(
+            super::AGENT_SESSION_PHASE_SECONDS_TOTAL,
+            "phase" => phase,
+            "role" => role,
+        )
+        .increment(duration.as_secs());
     }
 }
 
@@ -3878,6 +4035,244 @@ mod tests {
             rendered.contains("# TYPE djinn_workspace_cleanup_seconds histogram"),
             "workspace cleanup must render as a histogram:\n{rendered}"
         );
+    }
+    // ─── Build-slot queue and occupancy telemetry tests (proposal zp5t) ──
+
+    #[test]
+    fn build_slot_queue_wait_helpers_are_synchronous_unit_functions() {
+        let _guard = test_guard();
+
+        fn assert_sync_unit<F: FnOnce()>(f: F) {
+            f();
+        }
+
+        init().unwrap();
+        assert_sync_unit(|| {
+            build_slot_queue::record_wait_seconds(
+                build_slot_queue::OUTCOME_ADMITTED,
+                std::time::Duration::from_millis(50),
+            );
+        });
+        assert_sync_unit(|| {
+            build_slot_occupancy::set_slots_in_use(2);
+        });
+        assert_sync_unit(|| {
+            build_slot_occupancy::set_slots_queued(3);
+        });
+        assert_sync_unit(|| {
+            agent_session_phase::add_phase_duration(
+                agent_session_phase::PHASE_PROVIDER_WAIT,
+                agent_session_phase::ROLE_WORKER,
+                std::time::Duration::from_secs(1),
+            );
+        });
+    }
+
+    #[test]
+    fn build_slot_queue_wait_histogram_renders_all_outcomes_and_buckets() {
+        let _guard = test_guard();
+        init().unwrap();
+        let duration = std::time::Duration::from_secs_f64(0.75);
+        let mut rendered = String::new();
+        for outcome in build_slot_queue::ALL_OUTCOMES {
+            let labels = &[("outcome", outcome)];
+            let before = render().unwrap();
+            let count_before =
+                histogram_count(&before, "djinn_build_slot_queue_wait_seconds_count", labels);
+            let sum_before =
+                histogram_count(&before, "djinn_build_slot_queue_wait_seconds_sum", labels);
+            build_slot_queue::record_wait_seconds(outcome, duration);
+            rendered = render().unwrap();
+            let count_after = histogram_count(
+                &rendered,
+                "djinn_build_slot_queue_wait_seconds_count",
+                labels,
+            );
+            let sum_after =
+                histogram_count(&rendered, "djinn_build_slot_queue_wait_seconds_sum", labels);
+            assert_eq!(
+                count_after,
+                count_before + 1.0,
+                "build_slot_queue_wait count for {outcome}"
+            );
+            assert!(
+                (sum_after - sum_before - 0.75).abs() < 0.001,
+                "build_slot_queue_wait sum for {outcome}: {sum_after}"
+            );
+            assert_eq!(
+                histogram_bucket_count(&rendered, "djinn_build_slot_queue_wait_seconds", labels),
+                BUILD_SLOT_QUEUE_WAIT_BUCKETS.len() + 1,
+                "build_slot_queue_wait bucket count for {outcome}"
+            );
+            let finite = histogram_bucket_finite_values(
+                &rendered,
+                "djinn_build_slot_queue_wait_seconds",
+                labels,
+            );
+            assert_eq!(
+                finite,
+                BUILD_SLOT_QUEUE_WAIT_BUCKETS.to_vec(),
+                "build_slot_queue_wait buckets for {outcome}"
+            );
+            let inf = rendered_sample(
+                &rendered,
+                "djinn_build_slot_queue_wait_seconds_bucket",
+                &[("outcome", outcome), ("le", "+Inf")],
+            );
+            let expected = format!(" {count_after}");
+            assert!(
+                inf.ends_with(&expected),
+                "build_slot_queue_wait +Inf for {outcome}: {inf}"
+            );
+        }
+        assert!(
+            rendered.contains("# HELP djinn_build_slot_queue_wait_seconds"),
+            "missing HELP for build-slot queue wait histogram:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("# TYPE djinn_build_slot_queue_wait_seconds histogram"),
+            "build-slot queue wait must render as a histogram:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn build_slot_occupancy_gauges_have_no_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        build_slot_occupancy::set_slots_in_use(5);
+        build_slot_occupancy::set_slots_queued(7);
+
+        let rendered = render().unwrap();
+        let in_use = unlabelled_sample_value(&rendered, BUILD_SLOTS_IN_USE);
+        let queued = unlabelled_sample_value(&rendered, BUILD_SLOTS_QUEUED);
+        assert_eq!(in_use, 5.0, "build_slots_in_use must be absolute gauge");
+        assert_eq!(queued, 7.0, "build_slots_queued must be absolute gauge");
+
+        // Verify they render as unlabelled lines (no '=' in the sample line).
+        let in_use_line = rendered
+            .lines()
+            .find(|l| l.starts_with(BUILD_SLOTS_IN_USE))
+            .unwrap();
+        let queued_line = rendered
+            .lines()
+            .find(|l| l.starts_with(BUILD_SLOTS_QUEUED))
+            .unwrap();
+        assert!(
+            !in_use_line.contains('='),
+            "build_slots_in_use must carry no labels: {in_use_line}"
+        );
+        assert!(
+            !queued_line.contains('='),
+            "build_slots_queued must carry no labels: {queued_line}"
+        );
+    }
+
+    #[test]
+    fn build_slot_occupancy_gauges_are_absolute_setters() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        build_slot_occupancy::set_slots_in_use(4);
+        build_slot_occupancy::set_slots_in_use(2);
+        build_slot_occupancy::set_slots_queued(9);
+        build_slot_occupancy::set_slots_queued(1);
+
+        let rendered = render().unwrap();
+        assert_eq!(unlabelled_sample_value(&rendered, BUILD_SLOTS_IN_USE), 2.0);
+        assert_eq!(unlabelled_sample_value(&rendered, BUILD_SLOTS_QUEUED), 1.0);
+    }
+
+    #[test]
+    fn agent_session_phase_counter_covers_all_combinations() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        for phase in agent_session_phase::ALL_PHASES {
+            for role in agent_session_phase::ALL_ROLES {
+                agent_session_phase::add_phase_duration(
+                    phase,
+                    role,
+                    std::time::Duration::from_secs(2),
+                );
+            }
+        }
+
+        let rendered = render().unwrap();
+        for phase in agent_session_phase::ALL_PHASES {
+            for role in agent_session_phase::ALL_ROLES {
+                let value = labeled_sample_value(
+                    &rendered,
+                    AGENT_SESSION_PHASE_SECONDS_TOTAL,
+                    &[("phase", phase), ("role", role)],
+                );
+                assert!(
+                    value >= 2.0,
+                    "phase={phase} role={role} should accumulate at least 2s"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_session_phase_counter_has_no_identity_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        agent_session_phase::add_phase_duration(
+            agent_session_phase::PHASE_TOOL_EXECUTION,
+            agent_session_phase::ROLE_REVIEWER,
+            std::time::Duration::from_secs(2),
+        );
+
+        let rendered = render().unwrap();
+        for forbidden in [
+            "task_id=",
+            "session_id=",
+            "project_id=",
+            "user_id=",
+            "user=",
+            "work_id=",
+        ] {
+            for line in rendered.lines() {
+                if !line.starts_with(AGENT_SESSION_PHASE_SECONDS_TOTAL) {
+                    continue;
+                }
+                assert!(
+                    !line.contains(forbidden),
+                    "agent_session_phase must not carry identity label {forbidden}: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_slot_and_session_phase_metrics_register_idempotently() {
+        let _guard = test_guard();
+        init().unwrap();
+        init().unwrap();
+
+        let rendered = render().unwrap();
+        for outcome in build_slot_queue::ALL_OUTCOMES {
+            assert!(
+                rendered.contains(&format!(
+                    "djinn_build_slot_queue_wait_seconds_bucket{{outcome=\"{outcome}\""
+                )),
+                "missing build-slot queue outcome label {outcome} in:\n{rendered}"
+            );
+        }
+        assert!(rendered.contains(BUILD_SLOTS_IN_USE));
+        assert!(rendered.contains(BUILD_SLOTS_QUEUED));
+        for phase in agent_session_phase::ALL_PHASES {
+            for role in agent_session_phase::ALL_ROLES {
+                assert!(
+                    rendered.contains(&format!(
+                        "djinn_agent_session_phase_seconds_total{{phase=\"{phase}\",role=\"{role}\"}}"
+                    )),
+                    "missing session phase label phase={phase} role={role} in:\n{rendered}"
+                );
+            }
+        }
     }
 }
 
