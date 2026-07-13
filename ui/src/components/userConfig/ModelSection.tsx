@@ -7,20 +7,14 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { InlineError } from "@/components/InlineError";
 import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorEmpty,
-  ModelSelectorGroup,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorLogo,
-  ModelSelectorName,
-  ModelSelectorSeparator,
-  ModelSelectorTrigger,
-} from "@/components/ai-elements/model-selector";
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { InlineError } from "@/components/InlineError";
 import {
   type UserModel,
   fetchUserConnectedModels,
@@ -28,7 +22,10 @@ import {
   saveUserModelSelection,
 } from "@/api/userConfig";
 import {
+  aggregateModelCapacity,
+  defaultLaneMaxSessions,
   MODEL_LANE_KEYS,
+  type LaneMaxSessions,
   type ModelLaneKey,
   type ModelLanes,
   emptyLanes,
@@ -38,11 +35,10 @@ import { showToast } from "@/lib/toast";
 import { userConfigKeys } from "./userConfigKeys";
 import { formatProvider } from "./providerDisplay";
 import {
-  formatModelMetadata,
-  groupModelsByProvider,
   providerDefaultModels,
   stripProviderPrefix,
 } from "./modelPicker";
+import { ConnectedModelPicker } from "./ConnectedModelPicker";
 import { cn } from "@/lib/utils";
 
 /**
@@ -59,18 +55,26 @@ function reviewDiversityModelIds(lanes: ModelLanes): Set<string> {
 
 /** Human-friendly labels + helper copy for each per-role lane. */
 const LANE_META: Record<ModelLaneKey, { title: string; roles: string }> = {
-  plan: { title: "Plan", roles: "Planner, Architect, Chat" },
+  plan: { title: "Plan", roles: "Autonomous planning, Architect, Lead, Refinement" },
   implement: { title: "Implement", roles: "Worker" },
   review: { title: "Review", roles: "Reviewer" },
 };
 
+const MAX_MODEL_SESSIONS = 30;
+
 /**
  * Per-user, per-ROLE model lanes editor. Each lane (plan / implement / review)
- * is an ordered fallback list with the shared Reorder drag UI + per-model
- * `Sessions` cap. Caps are per-model and shared across lanes. One Save persists
- * all three lanes + the union of caps.
+ * is an ordered fallback list with its own concurrency ceiling, plus the
+ * shared Reorder drag UI + advanced per-model `Sessions` cap. Model caps are
+ * shared across lanes. One Save persists all three lanes and both cap layers.
  */
-export function ModelSection({ targetId }: { targetId: string }) {
+export function ModelSection({
+  targetId,
+  onboarding = false,
+}: {
+  targetId: string;
+  onboarding?: boolean;
+}) {
   const queryClient = useQueryClient();
 
   const connectedModels = useQuery({
@@ -90,6 +94,12 @@ export function ModelSection({ targetId }: { targetId: string }) {
   // they save, otherwise we mirror whatever the server last returned.
   const [lanes, setLanes] = useState<ModelLanes>(emptyLanes);
   const [caps, setCaps] = useState<Record<string, number>>({});
+  const [laneMaxSessions, setLaneMaxSessions] = useState<LaneMaxSessions>(
+    defaultLaneMaxSessions,
+  );
+  // Legacy users have no lane ceiling at all. Render conservative values in
+  // the controls, but do not adopt/persist them until the user changes one.
+  const [laneLimitsTouched, setLaneLimitsTouched] = useState(false);
   // Cross-model ("Thorough") review toggle. Defaults ON (server default); the
   // gate below disables interaction when fewer than 2 distinct model ids are
   // reachable by the Implement + Review lanes.
@@ -107,6 +117,10 @@ export function ModelSection({ targetId }: { targetId: string }) {
     if (!dirty) {
       setLanes(selection.data.lanes);
       setCaps(selection.data.maxSessions);
+      setLaneMaxSessions(
+        selection.data.laneMaxSessions ?? defaultLaneMaxSessions(),
+      );
+      setLaneLimitsTouched(false);
       setDiverseReview(selection.data.diverseReview);
       setDiverseRefinement(selection.data.diverseRefinement);
     }
@@ -168,11 +182,29 @@ export function ModelSection({ targetId }: { targetId: string }) {
       // Only persist caps for models still selected in some lane, default 1.
       const maxSessions: Record<string, number> = {};
       for (const id of allSelected) maxSessions[id] = caps[id] ?? 1;
-      return saveUserModelSelection(targetId, lanes, maxSessions, diverseReview, diverseRefinement);
+      if (laneLimitsTouched || selection.data?.laneMaxSessions !== undefined) {
+        // Model caps are shared across lanes. Once lane limits are explicitly
+        // adopted (now or in an earlier save), keep every selected model's cap
+        // at least as high as the sum of the lanes it can serve.
+        const requiredModelSessions = aggregateModelCapacity(
+          lanes,
+          laneMaxSessions,
+        );
+        for (const [modelId, required] of Object.entries(requiredModelSessions)) {
+          maxSessions[modelId] = Math.max(maxSessions[modelId] ?? 1, required);
+        }
+      }
+      return saveUserModelSelection(targetId, lanes, maxSessions, {
+        diverseReview,
+        diverseRefinement,
+        ...(laneLimitsTouched ? { laneMaxSessions } : {}),
+      });
     },
     onSuccess: (saved) => {
       setLanes(saved.lanes);
       setCaps(saved.maxSessions);
+      setLaneMaxSessions(saved.laneMaxSessions ?? laneMaxSessions);
+      setLaneLimitsTouched(false);
       setDiverseReview(saved.diverseReview);
       setDiverseRefinement(saved.diverseRefinement);
       setDirty(false);
@@ -204,6 +236,11 @@ export function ModelSection({ targetId }: { targetId: string }) {
   };
   const updateCap = (id: string, value: number) => {
     setCaps((prev) => ({ ...prev, [id]: value }));
+    setDirty(true);
+  };
+  const updateLaneMaxSessions = (lane: ModelLaneKey, value: number) => {
+    setLaneMaxSessions((current) => ({ ...current, [lane]: value }));
+    setLaneLimitsTouched(true);
     setDirty(true);
   };
 
@@ -274,21 +311,34 @@ export function ModelSection({ targetId }: { targetId: string }) {
         </div>
       ) : (
         <div className="flex flex-col gap-5">
-          <ThoroughReviewToggle
-            checked={effectiveDiverseReview}
-            enabled={diverseReviewEnabled}
-            soleModel={soleReviewModel}
-            saving={saveMutation.isPending}
-            onToggle={toggleDiverseReview}
-          />
+          {!onboarding && (
+            <>
+              <ThoroughReviewToggle
+                checked={effectiveDiverseReview}
+                enabled={diverseReviewEnabled}
+                soleModel={soleReviewModel}
+                saving={saveMutation.isPending}
+                onToggle={toggleDiverseReview}
+              />
 
-          <DiverseRefinementToggle
-            checked={effectiveDiverseRefinement}
-            enabled={diverseRefinementEnabled}
-            soleModel={soleRefinementModel}
-            saving={saveMutation.isPending}
-            onToggle={toggleDiverseRefinement}
-          />
+              <DiverseRefinementToggle
+                checked={effectiveDiverseRefinement}
+                enabled={diverseRefinementEnabled}
+                soleModel={soleRefinementModel}
+                saving={saveMutation.isPending}
+                onToggle={toggleDiverseRefinement}
+              />
+            </>
+          )}
+
+          <div className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">Parallel agents</span>{" "}
+            limits simultaneous work in each lane. The per-model{" "}
+            <span className="font-medium text-foreground">Sessions</span> value
+            below is a separate advanced safety ceiling shared across every
+            lane using that model. Djinn automatically raises a too-low
+            Sessions cap when you save so it cannot undercut your lane limits.
+          </div>
 
           {MODEL_LANE_KEYS.map((lane) => (
             <LaneEditor
@@ -297,6 +347,7 @@ export function ModelSection({ targetId }: { targetId: string }) {
               order={lanes[lane]}
               modelsById={modelsById}
               caps={caps}
+              laneMaxSessions={laneMaxSessions[lane]}
               availableToAdd={defaultPickable.filter(
                 (model) => !lanes[lane].includes(model.id),
               )}
@@ -307,6 +358,9 @@ export function ModelSection({ targetId }: { targetId: string }) {
               onRemove={(id) => removeModel(lane, id)}
               onReorder={(next) => reorderLane(lane, next)}
               onUpdateCap={updateCap}
+              onUpdateLaneMaxSessions={(value) =>
+                updateLaneMaxSessions(lane, value)
+              }
             />
           ))}
         </div>
@@ -451,37 +505,72 @@ function LaneEditor({
   order,
   modelsById,
   caps,
+  laneMaxSessions,
   availableToAdd,
   allAvailableToAdd,
   onAdd,
   onRemove,
   onReorder,
   onUpdateCap,
+  onUpdateLaneMaxSessions,
 }: {
   lane: ModelLaneKey;
   order: string[];
   modelsById: Map<string, UserModel>;
   caps: Record<string, number>;
+  laneMaxSessions: number;
   availableToAdd: UserModel[];
   allAvailableToAdd: UserModel[];
   onAdd: (model: UserModel) => void;
   onRemove: (id: string) => void;
   onReorder: (next: string[]) => void;
   onUpdateCap: (id: string, value: number) => void;
+  onUpdateLaneMaxSessions: (value: number) => void;
 }) {
   const meta = LANE_META[lane];
   return (
     <div className="flex flex-col gap-2 rounded-lg border bg-card/40 p-4">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h4 className="text-sm font-semibold text-foreground">{meta.title}</h4>
           <p className="text-xs text-muted-foreground/70">{meta.roles}</p>
         </div>
-        <AddModelButton
-          models={availableToAdd}
-          allModels={allAvailableToAdd}
-          onSelect={onAdd}
-        />
+        <div className="flex items-end gap-3">
+          <div className="flex flex-col gap-1">
+            <Label
+              htmlFor={`settings-${lane}-parallel-agents`}
+              className="text-[11px] text-muted-foreground"
+            >
+              Parallel agents
+            </Label>
+            <Select
+              value={String(laneMaxSessions)}
+              onValueChange={(value) => onUpdateLaneMaxSessions(Number(value))}
+            >
+              <SelectTrigger
+                id={`settings-${lane}-parallel-agents`}
+                aria-label={`${meta.title} parallel agents`}
+                className="h-8 w-[72px]"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {Array.from({ length: 10 }, (_, index) => index + 1).map(
+                  (value) => (
+                    <SelectItem key={value} value={String(value)}>
+                      {value}
+                    </SelectItem>
+                  ),
+                )}
+              </SelectContent>
+            </Select>
+          </div>
+          <ConnectedModelPicker
+            models={availableToAdd}
+            allModels={allAvailableToAdd}
+            onSelect={onAdd}
+          />
+        </div>
       </div>
       {order.length === 0 ? (
         <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -535,7 +624,7 @@ export function ModelRow({
 
   const commitSessions = () => {
     const value = parseInt(sessionText, 10);
-    if (!isNaN(value) && value >= 1 && value <= 10) {
+    if (!isNaN(value) && value >= 1 && value <= MAX_MODEL_SESSIONS) {
       onUpdateCap(value);
       setSessionText(String(value));
     } else {
@@ -585,126 +674,4 @@ export function ModelRow({
       </div>
     </Reorder.Item>
   );
-}
-
-export function AddModelButton({
-  models,
-  allModels,
-  onSelect,
-}: {
-  models: UserModel[];
-  allModels?: UserModel[];
-  onSelect: (model: UserModel) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(() => new Set());
-
-  const defaultModelIds = useMemo(
-    () => new Set(models.map((model) => model.id)),
-    [models],
-  );
-  const searchableModels = allModels ?? models;
-  const normalizedSearch = search.trim().toLowerCase();
-
-  const groups = useMemo(() => {
-    const source = normalizedSearch
-      ? searchableModels.filter((model) => modelMatchesSearch(model, normalizedSearch))
-      : searchableModels;
-
-    return groupModelsByProvider(source)
-      .map((group) => {
-        const hiddenCount = group.models.filter(
-          (model) => !defaultModelIds.has(model.id),
-        ).length;
-        const expanded = expandedProviders.has(group.providerId);
-        const items = normalizedSearch || expanded
-          ? group.models
-          : group.models.filter((model) => defaultModelIds.has(model.id));
-        return { ...group, hiddenCount, items };
-      })
-      .filter((group) => group.items.length > 0 || group.hiddenCount > 0);
-  }, [defaultModelIds, expandedProviders, normalizedSearch, searchableModels]);
-
-  return (
-    <ModelSelector
-      open={open}
-      onOpenChange={(nextOpen) => {
-        setOpen(nextOpen);
-        if (!nextOpen) {
-          setSearch("");
-          setExpandedProviders(new Set());
-        }
-      }}
-    >
-      <ModelSelectorTrigger render={<Button variant="default" size="sm" />}>
-        Add model
-      </ModelSelectorTrigger>
-      <ModelSelectorContent title="Add a model">
-        <ModelSelectorInput
-          placeholder="Search models…"
-          onInputCapture={(event) => setSearch(event.currentTarget.value)}
-        />
-        <ModelSelectorList>
-          <ModelSelectorEmpty>No connected models available.</ModelSelectorEmpty>
-          {groups.map((group, index) => (
-            <ModelSelectorGroup key={group.providerId} heading={formatProvider(group.providerId)}>
-              {group.items.map((model) => (
-                <ModelSelectorItem
-                  key={model.id}
-                  searchValue={modelSearchValue(model)}
-                  onSelect={() => {
-                    onSelect(model);
-                    setOpen(false);
-                    setSearch("");
-                    setExpandedProviders(new Set());
-                  }}
-                >
-                  <ModelSelectorLogo provider={group.providerId} />
-                  <ModelSelectorName>{model.name || stripProviderPrefix(model.id)}</ModelSelectorName>
-                  {model.recommended && (
-                    <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                      Recommended
-                    </span>
-                  )}
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    {formatModelMetadata(model)}
-                  </span>
-                </ModelSelectorItem>
-              ))}
-              {!normalizedSearch &&
-                !expandedProviders.has(group.providerId) &&
-                group.hiddenCount > 0 && (
-                  <button
-                    type="button"
-                    className="w-full rounded-sm px-2 py-1.5 text-left text-xs font-medium text-primary hover:bg-accent"
-                    onClick={() =>
-                      setExpandedProviders((prev) => {
-                        const next = new Set(prev);
-                        next.add(group.providerId);
-                        return next;
-                      })
-                    }
-                  >
-                    Browse all {formatProvider(group.providerId)} models ({group.hiddenCount} more)
-                  </button>
-                )}
-              {index < groups.length - 1 && <ModelSelectorSeparator />}
-            </ModelSelectorGroup>
-          ))}
-        </ModelSelectorList>
-      </ModelSelectorContent>
-    </ModelSelector>
-  );
-}
-
-function modelSearchValue(model: UserModel): string {
-  const providerId = model.provider_id ?? "unknown";
-  return [model.name, model.id, stripProviderPrefix(model.id), providerId, formatProvider(providerId)]
-    .filter(Boolean)
-    .join(" ");
-}
-
-function modelMatchesSearch(model: UserModel, normalizedSearch: string): boolean {
-  return modelSearchValue(model).toLowerCase().includes(normalizedSearch);
 }
