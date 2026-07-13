@@ -1260,7 +1260,10 @@ async fn run_llm_extraction_inner(
             event_kind: NoteRevisionEventKind::ExtractionSkipped,
             desired: NoteRevisionDesiredState::ExtractionSkipped,
             attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction),
-            provenance: extraction_context.revision_provenance().unwrap_or_default(),
+            provenance: extraction_context.revision_provenance().unwrap_or_else(|error| {
+                tracing::error!(session_id = %session_id, %error, "llm_extraction: invalid trusted extraction provenance");
+                TrustedNoteRevisionProvenance::default()
+            }),
             reason: NoteRevisionReason::new("extraction completed without durable note output")
                 .unwrap_or_else(|_| unreachable!()),
         };
