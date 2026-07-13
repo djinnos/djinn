@@ -485,6 +485,7 @@ pub struct SkipReasonCounts {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetrievalTraceHealthEvidence {
     pub trace_count: i64,
+    pub zero_result_count: i64,
     pub candidate_count: i64,
     pub injected_count: i64,
     pub skipped_count: i64,
@@ -807,6 +808,7 @@ const RETRIEVAL_TRACE_SELECT_BY_ID: &str = r#"
 struct TraceCandidateStatsRow {
     entry_point: String,
     trace_count: i64,
+    zero_result_count: i64,
     cap_exceeded_count: i64,
     estimated_injected_tokens_sum: i64,
     candidate_count: i64,
@@ -827,6 +829,7 @@ struct TraceCandidateStatsRow {
 #[derive(sqlx::FromRow)]
 struct TraceCandidateStatsCombinedRow {
     trace_count: i64,
+    zero_result_count: i64,
     cap_exceeded_count: i64,
     estimated_injected_tokens_sum: i64,
     candidate_count: i64,
@@ -877,6 +880,7 @@ fn build_evidence(
 
     RetrievalTraceHealthEvidence {
         trace_count: stats.trace_count,
+        zero_result_count: stats.zero_result_count,
         candidate_count: stats.candidate_count,
         injected_count: stats.injected_count,
         skipped_count: stats.skipped_count,
@@ -924,6 +928,7 @@ fn build_evidence_combined(
 
     RetrievalTraceHealthEvidence {
         trace_count: stats.trace_count,
+        zero_result_count: stats.zero_result_count,
         candidate_count: stats.candidate_count,
         injected_count: stats.injected_count,
         skipped_count: stats.skipped_count,
@@ -977,6 +982,7 @@ const HEALTH_ROLLUP_TRACE_CANDIDATE_PER_EP_SQL: &str = r#"
         SELECT
             entry_point,
             count(*)::bigint AS trace_count,
+            count(*) FILTER (WHERE jsonb_typeof(candidates) != 'array' OR jsonb_array_length(candidates) = 0)::bigint AS zero_result_count,
             coalesce(sum((candidate_cap_exceeded)::int), 0)::bigint AS cap_exceeded_count,
             coalesce(sum(estimated_injected_tokens), 0)::bigint AS estimated_injected_tokens_sum
         FROM filtered
@@ -1007,6 +1013,7 @@ const HEALTH_ROLLUP_TRACE_CANDIDATE_PER_EP_SQL: &str = r#"
     SELECT
         ts.entry_point,
         ts.trace_count,
+        ts.zero_result_count,
         ts.cap_exceeded_count,
         ts.estimated_injected_tokens_sum,
         cs.candidate_count,
@@ -1042,6 +1049,7 @@ const HEALTH_ROLLUP_TRACE_CANDIDATE_COMBINED_SQL: &str = r#"
     trace_stats AS (
         SELECT
             count(*)::bigint AS trace_count,
+            count(*) FILTER (WHERE jsonb_typeof(candidates) != 'array' OR jsonb_array_length(candidates) = 0)::bigint AS zero_result_count,
             coalesce(sum((candidate_cap_exceeded)::int), 0)::bigint AS cap_exceeded_count,
             coalesce(sum(estimated_injected_tokens), 0)::bigint AS estimated_injected_tokens_sum
         FROM filtered
@@ -1068,6 +1076,7 @@ const HEALTH_ROLLUP_TRACE_CANDIDATE_COMBINED_SQL: &str = r#"
     )
     SELECT
         ts.trace_count,
+        ts.zero_result_count,
         ts.cap_exceeded_count,
         ts.estimated_injected_tokens_sum,
         cs.candidate_count,
