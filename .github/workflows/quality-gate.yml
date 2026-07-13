@@ -689,23 +689,20 @@ jobs:
         run: |
           git config --global user.email "ci@test.local"
           git config --global user.name "CI Test"
-      - name: Download full plan and resolve shard filter
+      - name: Download full shard plan
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-plan-${{ github.run_id }}
+          path: server/nextest-plan
+      - name: Resolve shard filter from full plan
         env:
-          PLAN_RUN_ID: ${{ github.run_id }}
           SHARD_INDEX: ${{ matrix.shardIndex }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p nextest-plan
-          gh api "repos/${{ github.repository }}/actions/artifacts" \
-            --jq "[.artifacts[] | select(.name == \"nextest-plan-$PLAN_RUN_ID\")] | first(.[]).id" > nextest-plan/artifact-id.txt
-          artifact_id="$(cat nextest-plan/artifact-id.txt)"
-          [ -n "$artifact_id" ] || { echo "::error::Could not find nextest-plan artifact for run $PLAN_RUN_ID"; exit 1; }
-          gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > nextest-plan/plan.zip
-          unzip -q nextest-plan/plan.zip -d nextest-plan
           filter="$(jq -r --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .filter' nextest-plan/matrix.json)"
           test_ids="$(jq -c --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .testIds' nextest-plan/matrix.json)"
-          [ -n "$filter" ] || { echo "::error::Could not resolve filter for shard $SHARD_INDEX"; exit 1; }
+          [ -n "$filter" ] && [ "$filter" != null ] || { echo "::error::Could not resolve filter for shard $SHARD_INDEX"; exit 1; }
+          [ -n "$test_ids" ] && [ "$test_ids" != null ] || { echo "::error::Could not resolve test IDs for shard $SHARD_INDEX"; exit 1; }
           echo "NEXTEST_FILTER=$filter" >> "$GITHUB_ENV"
           echo "NEXTEST_TEST_IDS=$test_ids" >> "$GITHUB_ENV"
       - name: Run planner-emitted test filter and record shard timing
