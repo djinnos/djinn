@@ -19,8 +19,12 @@ help: ## Show this help
 
 test-db-migrate: ## Ensure schema is applied to the test Postgres (:5433)
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
-	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
-	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn sqlx migrate run --source migrations_postgres >/dev/null
+	@if [ -n "$$DATABASE_URL" ]; then \
+		cd $(SERVER_DIR)/crates/djinn-db && sqlx migrate run --source migrations_postgres >/dev/null; \
+	else \
+		until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done; \
+		cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn sqlx migrate run --source migrations_postgres >/dev/null; \
+	fi
 
 test-db-postgres-template: ## Build the djinn_test_template DB Postgres clones from
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
