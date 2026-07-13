@@ -1,0 +1,141 @@
+---
+source: crates/djinn-mcp-extension/src/tests/schema_tests.rs
+expression: default_schemas
+---
+[
+  {
+    "name": "shell",
+    "description": "Execute shell commands in the task worktree. Commands always run from the worktree root.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Shell command to execute"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "description": "Timeout in milliseconds (default 120000)"
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
+    "name": "read",
+    "description": "Read a file with line numbers and pagination. Rejects binary files. Pass `project` (UUID or owner/repo slug) to read a file from ANOTHER registered repo — served read-only from its default branch (no checkout); omit it to read your task worktree.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "project": {
+          "type": "string",
+          "description": "Other registered project to read from (UUID or owner/repo slug). Omit for your own task repo."
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
+    "name": "write",
+    "description": "Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "path",
+        "content"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Absolute or worktree-relative file path"
+        },
+        "content": {
+          "type": "string",
+          "description": "File content to write"
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
+    "name": "edit",
+    "description": "Edit a file by replacing text. Provide path, old_text, and new_text. Rescues common whitespace/indentation drift automatically; fails on ambiguous matches or safety-guard rejections.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "path",
+        "old_text",
+        "new_text"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Absolute or worktree-relative file path"
+        },
+        "old_text": {
+          "type": "string",
+          "description": "Text to find and replace (may differ from file in whitespace, indentation, or encoding; the matcher rescues common drift automatically)"
+        },
+        "new_text": {
+          "type": "string",
+          "description": "Replacement text"
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
+    "name": "apply_patch",
+    "description": "Apply a patch to one or more files using a custom LLM-friendly format. Uses content-based context matching (not line numbers). Format:\n\n*** Begin Patch\n*** Update File: path/to/file.rs\n@@ context_line_from_file\n context line (unchanged)\n-old line to remove\n+new line to add\n context line (unchanged)\n\n*** Add File: path/to/new_file.rs\n+line 1\n+line 2\n\n*** Delete File: path/to/old_file.rs\n*** End Patch\n\nRules: ' ' prefix = context (must match file), '-' = delete, '+' = add. The @@ line text is searched in the file to locate each chunk. Multiple @@ chunks per file are allowed. Files being updated or deleted must be read first.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "patch"
+      ],
+      "properties": {
+        "patch": {
+          "type": "string",
+          "description": "Patch content in the custom format (see tool description)"
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  }
+]
