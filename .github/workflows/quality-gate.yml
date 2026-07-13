@@ -555,7 +555,8 @@ jobs:
           git config --global user.email "ci@test.local"
           git config --global user.name "CI Test"
       - name: Tests
-        run: cargo nextest run --workspace --all-targets --features qdrant --profile ci --partition count:${{ matrix.shard }}/4
+        # Bound concurrent template-database clones so the runner does not exhaust disk.
+        run: cargo nextest run --workspace --all-targets --features qdrant --profile ci --test-threads 4 --partition count:${{ matrix.shard }}/4
   server-sqlx-freshness:
     name: Server sqlx Freshness
     needs: preflight

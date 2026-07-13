@@ -1412,4 +1412,5 @@ async fn pressure_lock_busy_and_error_retained() {
 }
 
 mod fingerprint_inventory;
+mod fingerprint_sweep;
 mod pressure_execution;
