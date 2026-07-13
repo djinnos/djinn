@@ -31,6 +31,9 @@ use std::sync::Arc;
 
 use djinn_db::repositories::note::{
     MemoryEntityKind, MemoryEntityRef, MemoryEntityType, NoteAssociationKind,
+    NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation,
+    NoteRevisionReason, NoteRevisionSubsystem, TrustedNoteRevisionAttribution,
+    TrustedNoteRevisionProvenance, folder_for_type,
 };
 use djinn_db::{Database, NoteRepository, ProposalListQuery, ProposalRepository};
 use djinn_memory::Note;
@@ -466,18 +469,34 @@ async fn persist_entity(
         return Ok((existing.id, false));
     }
     let content = format_entity_content(canonical_name, aliases);
+    let reason = NoteRevisionReason::new("enrichment:create entity note")
+        .map_err(|e| format!("entity revision reason failed: {e}"))?;
     let note = repo
-        .create_db_note_with_permalink_and_retrieval_anchor(
-            project_id,
-            &permalink,
-            canonical_name,
-            &content,
-            "entity",
-            "[]",
-            Some(canonical_name),
-        )
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project_id.to_owned(),
+            note_id: Some(uuid::Uuid::now_v7().to_string()),
+            event_kind: NoteRevisionEventKind::Created,
+            desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
+                title: canonical_name.to_owned(),
+                permalink,
+                content,
+                note_type: "entity".to_owned(),
+                folder: folder_for_type("entity").to_owned(),
+                status: "active".to_owned(),
+                tags: "[]".to_owned(),
+                retrieval_anchor: Some(canonical_name.to_owned()),
+                scope_paths: "[]".to_owned(),
+                confidence: 0.0,
+            }),
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Enrichment),
+            provenance: TrustedNoteRevisionProvenance::default(),
+            reason,
+        })
         .await
         .map_err(|e| format!("entity create failed: {e}"))?;
+    let note = note
+        .note
+        .ok_or_else(|| "entity create mutation returned no note".to_owned())?;
     Ok((note.id, true))
 }
 
@@ -495,18 +514,34 @@ async fn persist_claim(
         return Ok((existing.id, false));
     }
     let content = format_claim_content(statement, source_note_id, evidence_quote);
+    let reason = NoteRevisionReason::new("enrichment:create claim note")
+        .map_err(|e| format!("claim revision reason failed: {e}"))?;
     let note = repo
-        .create_db_note_with_permalink_and_retrieval_anchor(
-            project_id,
-            &permalink,
-            statement,
-            &content,
-            "claim",
-            "[]",
-            Some(statement),
-        )
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project_id.to_owned(),
+            note_id: Some(uuid::Uuid::now_v7().to_string()),
+            event_kind: NoteRevisionEventKind::Created,
+            desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
+                title: statement.to_owned(),
+                permalink,
+                content,
+                note_type: "claim".to_owned(),
+                folder: folder_for_type("claim").to_owned(),
+                status: "active".to_owned(),
+                tags: "[]".to_owned(),
+                retrieval_anchor: Some(statement.to_owned()),
+                scope_paths: "[]".to_owned(),
+                confidence: 0.0,
+            }),
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Enrichment),
+            provenance: TrustedNoteRevisionProvenance::default(),
+            reason,
+        })
         .await
         .map_err(|e| format!("claim create failed: {e}"))?;
+    let note = note
+        .note
+        .ok_or_else(|| "claim create mutation returned no note".to_owned())?;
     Ok((note.id, true))
 }
 

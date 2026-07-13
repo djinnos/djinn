@@ -6,7 +6,12 @@ use djinn_memory::{
     ConsolidationNote, ConsolidationRunMetric, DbNoteGroup, Note, NoteDedupCandidate,
 };
 
-use super::{NoteRepository, note_select_where_id};
+use super::{
+    CONFIDENCE_CEILING, CONFIDENCE_FLOOR, NoteRepository, NoteRevisionCreateState,
+    NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation, NoteRevisionReason,
+    NoteRevisionSubsystem, TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance,
+    folder_for_type, note_select_where_id, permalink_for,
+};
 use crate::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
@@ -62,6 +67,8 @@ pub struct CreateCanonicalConsolidatedNote<'a> {
     pub abstract_: Option<&'a str>,
     pub overview: Option<&'a str>,
     pub confidence: f64,
+    /// Immutable explanation for the canonical creation revision.
+    pub reason: NoteRevisionReason,
     pub source_session_ids: &'a [&'a str],
     pub scope_paths: &'a str,
     /// Cluster source note ids that the canonical note supersedes.
@@ -71,24 +78,6 @@ pub struct CreateCanonicalConsolidatedNote<'a> {
     /// Legacy callers may pass `&[]` (or omit the field via `..Default::default()`)
     /// to preserve the old behavior — no edges recorded, no error.
     pub source_note_ids: &'a [String],
-}
-
-impl<'a> Default for CreateCanonicalConsolidatedNote<'a> {
-    fn default() -> Self {
-        Self {
-            project_id: "",
-            note_type: "",
-            title: "",
-            content: "",
-            tags: "[]",
-            abstract_: None,
-            overview: None,
-            confidence: 0.0,
-            source_session_ids: &[],
-            scope_paths: "[]",
-            source_note_ids: &[],
-        }
-    }
 }
 
 pub struct CreatedCanonicalConsolidatedNote {
@@ -262,6 +251,7 @@ impl NoteConsolidationRepository {
             abstract_,
             overview,
             confidence,
+            reason,
             source_session_ids,
             scope_paths,
             source_note_ids,
@@ -284,11 +274,34 @@ impl NoteConsolidationRepository {
         }
 
         let note_repo = NoteRepository::new(self.db.clone(), EventBus::noop());
+        let note_id = uuid::Uuid::now_v7().to_string();
         let created = note_repo
-            .create_db_note_with_scope(project_id, title, content, note_type, tags, scope_paths)
+            .mutate_with_revision(NoteRevisionMutation {
+                project_id: project_id.to_owned(),
+                note_id: Some(note_id),
+                event_kind: NoteRevisionEventKind::Created,
+                desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
+                    title: title.to_owned(),
+                    permalink: permalink_for(note_type, title),
+                    content: content.to_owned(),
+                    note_type: note_type.to_owned(),
+                    folder: folder_for_type(note_type).to_owned(),
+                    status: "active".to_owned(),
+                    tags: tags.to_owned(),
+                    retrieval_anchor: None,
+                    scope_paths: scope_paths.to_owned(),
+                    confidence: confidence.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEILING),
+                }),
+                attribution: TrustedNoteRevisionAttribution::system(
+                    NoteRevisionSubsystem::Consolidation,
+                ),
+                provenance: TrustedNoteRevisionProvenance::default(),
+                reason,
+            })
             .await?;
-
-        note_repo.set_confidence(&created.id, confidence).await?;
+        let created = created.note.ok_or_else(|| {
+            Error::Internal("created canonical mutation returned no note".to_owned())
+        })?;
 
         sqlx::query!(
             "UPDATE notes SET abstract = $1, overview = $2 WHERE id = $3",

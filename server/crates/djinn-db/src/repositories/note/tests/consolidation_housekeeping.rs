@@ -249,6 +249,7 @@ async fn consolidation_create_canonical_note_persists_db_note_confidence_and_pro
             abstract_: Some("short abstract"),
             overview: Some("overview summary"),
             confidence: 1.2,
+            reason: NoteRevisionReason::new("consolidation:test canonical create").unwrap(),
             source_session_ids: &[&session_a, &session_b],
             scope_paths: "[]",
             source_note_ids: &[],
@@ -272,6 +273,19 @@ async fn consolidation_create_canonical_note_persists_db_note_confidence_and_pro
     assert_eq!(fetched.confidence, CONFIDENCE_CEILING);
     assert_eq!(fetched.abstract_.as_deref(), Some("short abstract"));
     assert_eq!(fetched.overview.as_deref(), Some("overview summary"));
+
+    let revision: (String, String, Option<String>, Option<String>, Option<f64>, Option<f64>, String) = sqlx::query_as("SELECT actor_kind, subsystem, content_before, content_after, confidence_before, confidence_after, reason FROM note_revision_events WHERE note_id = $1")
+        .bind(&created.note.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(revision.0, "system");
+    assert_eq!(revision.1, "consolidation");
+    assert_eq!(revision.2, None);
+    assert_eq!(revision.3.as_deref(), Some("synthesized canonical content"));
+    assert_eq!(revision.4, None);
+    assert_eq!(revision.5, Some(CONFIDENCE_CEILING));
+    assert_eq!(revision.6, "consolidation:test canonical create");
 
     let provenance = consolidation_repo
         .list_provenance(&created.note.id)
@@ -904,6 +918,7 @@ async fn create_canonical_with_source_note_ids_records_supersedes_edges() {
             abstract_: Some("abstract"),
             overview: Some("overview"),
             confidence: 0.8,
+            reason: NoteRevisionReason::new("consolidation:test supersedes create").unwrap(),
             source_session_ids: &[],
             scope_paths: "[]",
             source_note_ids: &source_note_ids,
@@ -945,6 +960,7 @@ async fn create_canonical_without_source_note_ids_preserves_legacy_behavior() {
             abstract_: None,
             overview: None,
             confidence: 0.5,
+            reason: NoteRevisionReason::new("consolidation:test no-edge create").unwrap(),
             source_session_ids: &[],
             scope_paths: "[]",
             source_note_ids: &[],
