@@ -12,7 +12,7 @@ use serde_json::Value;
 // This repository-level PostgreSQL contract lives in djinn-db because catalog
 // and deliberate negative SQL must not cross the raw-SQL repository boundary.
 const CONTRACT: &str =
-    include_str!("../../../../djinn-control-plane/tests/fixtures/memory_revision_contract.json");
+    include_str!("../../../../../djinn-control-plane/tests/fixtures/memory_revision_contract.json");
 
 #[derive(sqlx::FromRow)]
 struct PersistedRow {
@@ -296,17 +296,38 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
     ))
     .await
     .unwrap();
-    repo.mutate_with_revision(NoteRevisionMutation {
-        project_id: project.clone(),
-        note_id: Some(primary.into()),
-        event_kind: NoteRevisionEventKind::Deleted,
-        desired: NoteRevisionDesiredState::Delete,
-        attribution: attribution(&rows[7]),
-        provenance: provenance(&rows[7]),
-        reason: reason(rows[7]["reason_input"].as_str().unwrap()),
-    })
-    .await
-    .unwrap();
+    let delete_result = repo
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project.clone(),
+            note_id: Some(primary.into()),
+            event_kind: NoteRevisionEventKind::Deleted,
+            desired: NoteRevisionDesiredState::Delete,
+            attribution: attribution(&rows[7]),
+            provenance: provenance(&rows[7]),
+            reason: reason(rows[7]["reason_input"].as_str().unwrap()),
+        })
+        .await
+        .unwrap();
+    assert!(
+        delete_result.note.is_none(),
+        "delete returns no primary note"
+    );
+    let retained_history = &f["retained_deleted_note_history"];
+    assert_eq!(retained_history["note_id"].as_str(), Some(primary));
+    let note_row_exists_after_delete: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM notes WHERE id = $1 AND project_id = $2)")
+            .bind(primary)
+            .bind(&project)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        note_row_exists_after_delete,
+        retained_history["note_row_exists_after_delete"]
+            .as_bool()
+            .unwrap(),
+        "primary note row is removed while delete revision history is retained"
+    );
     repo.mutate_with_revision(NoteRevisionMutation {
         project_id: project.clone(),
         note_id: None,
