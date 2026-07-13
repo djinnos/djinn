@@ -35,10 +35,11 @@ use djinn_core::models::{Task, TaskRunStatus, TaskRunTrigger, TaskStatus};
 use djinn_runtime::{ResumeLifecycleMetadata, ResumeSourceKind};
 use djinn_workspace::{
     EphemeralWorkspaceError, GitIdentity, MergeOutcome, MergeParentOutcome, MirrorError,
-    MirrorManager,
+    MirrorManager, Workspace,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 pub mod services;
@@ -583,6 +584,57 @@ impl ResumeWorkspaceOutcome {
     }
 }
 
+// ── Workspace clone telemetry (proposal zp5t) ──────────────────────────────
+//
+// Every actual `clone_ephemeral` / `clone_ephemeral_at_ref` attempt in the
+// supervisor records exactly one `workspace_clone_seconds` sample with a
+// bounded `outcome=ok|error|cancelled` label. Cancellation is classified from
+// the shared `CancellationToken` at the terminal boundary (not from string
+// matching). A fallback clone is a *distinct* attempt — it starts a second
+// timing window only when the second operation actually begins.
+
+/// Classify the outcome of a clone attempt at the terminal boundary.
+///
+/// When the shared cancellation token is set at the moment the clone future
+/// resolves, the attempt is `cancelled` regardless of whether it returned
+/// `Ok` or `Err` (a clone racing a cancel can complete with a partial result
+/// or surface a transport error that is really the cancel). Otherwise `Ok` is
+/// `ok` and `Err` is `error`.
+fn classify_clone_outcome(
+    result: &Result<Workspace, MirrorError>,
+    cancel: &CancellationToken,
+) -> &'static str {
+    if cancel.is_cancelled() {
+        djinn_telemetry::workspace_clone::OUTCOME_CANCELLED
+    } else if result.is_ok() {
+        djinn_telemetry::workspace_clone::OUTCOME_OK
+    } else {
+        djinn_telemetry::workspace_clone::OUTCOME_ERROR
+    }
+}
+
+/// Time one clone attempt with the injected monotonic [`Clock`] and record
+/// exactly one `workspace_clone_seconds` sample.
+///
+/// The outcome is classified from the result + cancellation token at the
+/// terminal boundary. The original `Result` is passed through unchanged so
+/// fallback / error propagation behaviour is preserved exactly.
+async fn timed_clone_attempt<F>(
+    clock: &dyn Clock,
+    cancel: &CancellationToken,
+    attempt: F,
+) -> Result<Workspace, MirrorError>
+where
+    F: std::future::Future<Output = Result<Workspace, MirrorError>>,
+{
+    let start = clock.now_instant();
+    let result = attempt.await;
+    let elapsed = clock.now_instant().duration_since(start);
+    let outcome = classify_clone_outcome(&result, cancel);
+    djinn_telemetry::workspace_clone::record_seconds(outcome, elapsed);
+    result
+}
+
 /// Apply the coordinator-selected resume source to the worktree setup.
 ///
 /// Behaviour, per `spec.resume_lifecycle_metadata.source_kind`:
@@ -629,6 +681,8 @@ async fn prepare_resume_workspace(
     task_branch: &str,
     base_branch: &str,
     resume: Option<&ResumeLifecycleMetadata>,
+    clock: &dyn Clock,
+    cancel: &CancellationToken,
 ) -> Result<Option<ResumeWorkspaceOutcome>, SupervisorError> {
     let Some(meta) = resume else {
         return Ok(None);
@@ -683,7 +737,11 @@ async fn prepare_resume_workspace(
         // detached checkout has a populated alternates pool. Fall back to
         // base_branch if the task branch is missing (preserves existing
         // legacy semantics for first-cycle runs).
-        let workspace = match mirror.clone_ephemeral(project_id, task_branch).await {
+        let workspace = match timed_clone_attempt(clock, cancel, async {
+            mirror.clone_ephemeral(project_id, task_branch).await
+        })
+        .await
+        {
             Ok(ws) => ws,
             Err(
                 MirrorError::Missing(_)
@@ -696,7 +754,13 @@ async fn prepare_resume_workspace(
                     "resume: task branch not in mirror for safe checkpoint — \
                      cloning base_branch for checkout"
                 );
-                mirror.clone_ephemeral(project_id, base_branch).await?
+                // Distinct attempt: the base-branch fallback clone starts its
+                // own timing window only here (when the second operation
+                // actually begins).
+                timed_clone_attempt(clock, cancel, async {
+                    mirror.clone_ephemeral(project_id, base_branch).await
+                })
+                .await?
             }
         };
         // Stage 2: detach HEAD on the selected SHA. `Workspace::checkout_ref`
@@ -754,7 +818,11 @@ async fn prepare_resume_workspace(
             )));
         };
 
-        match mirror.clone_ephemeral_at_ref(project_id, &target_ref).await {
+        match timed_clone_attempt(clock, cancel, async {
+            mirror.clone_ephemeral_at_ref(project_id, &target_ref).await
+        })
+        .await
+        {
             Ok(_workspace_at_ref) => {
                 debug!(
                     task_branch,
@@ -940,6 +1008,8 @@ impl TaskRunSupervisor {
             &spec.task_branch,
             &spec.base_branch,
             spec.resume_lifecycle_metadata.as_ref(),
+            &*self.clock,
+            self.services.cancel(),
         )
         .await?;
         if let Some(outcome) = resume_outcome.as_ref() {
@@ -964,10 +1034,12 @@ impl TaskRunSupervisor {
         // throwing away every prior cycle's worker progress. Observed on
         // task avoy: 3/3 ACs met in cycle 1, dropped to 1/3 in cycle 2 after
         // CI bounced the task back to open.
-        let workspace = match self
-            .mirror
-            .clone_ephemeral(&spec.project_id, &spec.task_branch)
-            .await
+        let workspace = match timed_clone_attempt(&*self.clock, self.services.cancel(), async {
+            self.mirror
+                .clone_ephemeral(&spec.project_id, &spec.task_branch)
+                .await
+        })
+        .await
         {
             Ok(ws) => {
                 debug!(
@@ -985,9 +1057,15 @@ impl TaskRunSupervisor {
                     error = %e,
                     "task_branch not in mirror; cloning on base_branch (first cycle)"
                 );
-                self.mirror
-                    .clone_ephemeral(&spec.project_id, &spec.base_branch)
-                    .await?
+                // Distinct attempt: the base-branch fallback clone starts its
+                // own timing window only here (when the second operation
+                // actually begins).
+                timed_clone_attempt(&*self.clock, self.services.cancel(), async {
+                    self.mirror
+                        .clone_ephemeral(&spec.project_id, &spec.base_branch)
+                        .await
+                })
+                .await?
             }
         };
 
@@ -4768,6 +4846,20 @@ mod tests {
     const RESUME_TEST_TASK: &str = "task/resume-supervisor";
     const RESUME_TEST_ALT_REF: &str = "refs/djinn/checkpoints/task/resume-supervisor/s1";
 
+    /// Test clock + cancel token pair for resume-helper telemetry tests.
+    /// The system clock is sufficient because these tests assert the resume
+    /// outcome structure (not exact elapsed sums); the dedicated
+    /// clone-telemetry tests below use a fake clock and scrape deltas.
+    fn resume_test_clock_and_cancel() -> (
+        std::sync::Arc<dyn djinn_core::clock::Clock>,
+        tokio_util::sync::CancellationToken,
+    ) {
+        (
+            std::sync::Arc::new(SystemClock::new()),
+            tokio_util::sync::CancellationToken::new(),
+        )
+    }
+
     /// Run `git <args>` in `cwd` and return the trimmed stdout. Panics on
     /// non-zero exit. Used by the resume-helper tests below to capture SHAs.
     fn run_git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
@@ -4838,12 +4930,16 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let outcome = prepare_resume_workspace(
             &mgr,
             RESUME_TEST_PROJECT_ID,
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             None,
+            &*clock,
+            &cancel,
         )
         .await
         .expect("missing metadata must not error");
@@ -4860,6 +4956,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: false,
             ..Default::default()
@@ -4870,6 +4968,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("un-considered metadata must not error");
@@ -4887,6 +4987,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
@@ -4899,6 +5001,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("clean task branch must not error");
@@ -4916,6 +5020,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             submit_or_review_id: Some("review-1".to_string()),
@@ -4929,6 +5035,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("auto-submit selection must not error");
@@ -4948,6 +5056,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             commit_sha: Some(tip.clone()),
@@ -4961,6 +5071,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("safe checkpoint apply must succeed");
@@ -4984,6 +5096,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             // commit_sha intentionally absent
@@ -4997,6 +5111,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("missing-SHA fallback must not error");
@@ -5022,6 +5138,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), true).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             target_ref: Some(RESUME_TEST_ALT_REF.to_string()),
@@ -5035,6 +5153,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("alternate ref apply must succeed");
@@ -5058,6 +5178,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), true).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             target_ref: Some("refs/djinn/checkpoints/does/not/exist".to_string()),
@@ -5071,6 +5193,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("unavailable ref must not error");
@@ -5097,6 +5221,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             // target_ref intentionally absent
@@ -5110,6 +5236,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("missing-target fallback must not error");
@@ -5125,6 +5253,259 @@ mod tests {
         assert!(
             reason.contains("missing_target_ref"),
             "fallback reason must identify the missing-target case, got: {reason}"
+        );
+    }
+
+    // ── Workspace clone telemetry tests (proposal zp5t) ──────────────────
+
+    use djinn_core::clock::TestClock;
+
+    /// The Prometheus recorder is process-global; serialize telemetry-scrape
+    /// tests behind a mutex so each assertion can use a precise delta.
+    static CLONE_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn clone_telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
+        CLONE_TELEMETRY_MUTEX
+            .lock()
+            .expect("clone telemetry test mutex poisoned")
+    }
+
+    /// Count `workspace_clone_seconds_count` samples for a given outcome.
+    fn clone_count(rendered: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_clone_seconds_count")
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
+    /// Assert that rendered workspace_clone / workspace_seed samples carry no
+    /// high-cardinality identity labels.
+    fn assert_no_identity_labels(rendered: &str, metric_prefix: &str) {
+        for line in rendered.lines() {
+            if !line.starts_with(metric_prefix) {
+                continue;
+            }
+            for forbidden in [
+                "task_id=",
+                "session_id=",
+                "project_id=",
+                "user_id=",
+                "path=",
+                "error=",
+                "branch=",
+                "ref=",
+            ] {
+                assert!(
+                    !line.contains(forbidden),
+                    "metric line must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
+        }
+    }
+
+    /// Successful clone records exactly one `ok` sample, measured by the
+    /// injected monotonic clock.
+    #[tokio::test]
+    async fn timed_clone_attempt_records_one_ok_sample() {
+        let _guard = clone_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let clock = Arc::new(TestClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::Instant::now(),
+        )) as Arc<dyn Clock>;
+        let cancel = CancellationToken::new();
+
+        let before = djinn_telemetry::render().expect("render before");
+        let ok_before = clone_count(&before, "ok");
+
+        timed_clone_attempt(&*clock, &cancel, async {
+            mgr.clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                .await
+        })
+        .await
+        .expect("clone must succeed");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            clone_count(&after, "ok"),
+            ok_before + 1.0,
+            "one ok clone sample expected"
+        );
+        // Error/cancelled must not increase.
+        assert_eq!(
+            clone_count(&after, "error"),
+            clone_count(&before, "error"),
+            "error count must not change for a successful clone"
+        );
+        assert_eq!(
+            clone_count(&after, "cancelled"),
+            clone_count(&before, "cancelled"),
+            "cancelled count must not change for a successful clone"
+        );
+        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+    }
+
+    /// A failed clone (missing mirror project) records exactly one `error`
+    /// sample when the cancel token is NOT set.
+    #[tokio::test]
+    async fn timed_clone_attempt_records_one_error_sample() {
+        let _guard = clone_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let mgr = MirrorManager::new(tmp.path().to_path_buf());
+        let clock = Arc::new(TestClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::Instant::now(),
+        )) as Arc<dyn Clock>;
+        let cancel = CancellationToken::new();
+
+        let before = djinn_telemetry::render().expect("render before");
+        let err_before = clone_count(&before, "error");
+
+        let result = timed_clone_attempt(&*clock, &cancel, async {
+            mgr.clone_ephemeral("nonexistent-project", RESUME_TEST_BASE)
+                .await
+        })
+        .await;
+        assert!(result.is_err(), "clone of missing project must fail");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            clone_count(&after, "error"),
+            err_before + 1.0,
+            "one error clone sample expected"
+        );
+        assert_eq!(
+            clone_count(&after, "ok"),
+            clone_count(&before, "ok"),
+            "ok count must not change for a failed clone"
+        );
+        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+    }
+
+    /// A clone that resolves (Ok or Err) while the cancel token IS set
+    /// records exactly one `cancelled` sample.
+    #[tokio::test]
+    async fn timed_clone_attempt_records_cancelled_when_token_set() {
+        let _guard = clone_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let clock = Arc::new(TestClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::Instant::now(),
+        )) as Arc<dyn Clock>;
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let before = djinn_telemetry::render().expect("render before");
+        let cancel_before = clone_count(&before, "cancelled");
+
+        // Even though the clone succeeds, the cancel token is set so the
+        // outcome is `cancelled`.
+        timed_clone_attempt(&*clock, &cancel, async {
+            mgr.clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                .await
+        })
+        .await
+        .expect("clone itself succeeds");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            clone_count(&after, "cancelled"),
+            cancel_before + 1.0,
+            "one cancelled clone sample expected when token is set"
+        );
+        assert_eq!(
+            clone_count(&after, "ok"),
+            clone_count(&before, "ok"),
+            "ok count must not change when cancel token is set"
+        );
+        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+    }
+
+    /// Multi-attempt fallback: when task_branch clone fails and base_branch
+    /// clone succeeds, two distinct samples are recorded — one `error` and
+    /// one `ok`. The fallback starts a new attempt only when the second
+    /// operation actually begins.
+    #[tokio::test]
+    async fn timed_clone_attempt_multi_attempt_fallback_records_two_samples() {
+        let _guard = clone_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let clock = Arc::new(TestClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::Instant::now(),
+        )) as Arc<dyn Clock>;
+        let cancel = CancellationToken::new();
+
+        let before = djinn_telemetry::render().expect("render before");
+        let ok_before = clone_count(&before, "ok");
+        let err_before = clone_count(&before, "error");
+
+        // First attempt: task_branch doesn't exist → error.
+        let first = timed_clone_attempt(&*clock, &cancel, async {
+            mgr.clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_TASK)
+                .await
+        })
+        .await;
+        assert!(first.is_err(), "task_branch clone must fail (first cycle)");
+
+        // Second attempt (fallback): base_branch exists → ok.
+        timed_clone_attempt(&*clock, &cancel, async {
+            mgr.clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                .await
+        })
+        .await
+        .expect("base_branch clone must succeed");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            clone_count(&after, "error"),
+            err_before + 1.0,
+            "one error sample for the failed task_branch attempt"
+        );
+        assert_eq!(
+            clone_count(&after, "ok"),
+            ok_before + 1.0,
+            "one ok sample for the successful base_branch fallback attempt"
+        );
+        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+    }
+
+    /// `classify_clone_outcome`: Err + not-cancelled → error. This pure
+    /// function test uses the Err variant which doesn't require constructing
+    /// a `Workspace` (whose `new` is crate-private to `djinn-workspace`).
+    #[test]
+    fn classify_clone_outcome_error_when_not_cancelled() {
+        let cancel = CancellationToken::new();
+        let err: Result<Workspace, MirrorError> = Err(MirrorError::Missing("proj".to_string()));
+        assert_eq!(
+            classify_clone_outcome(&err, &cancel),
+            djinn_telemetry::workspace_clone::OUTCOME_ERROR,
+        );
+    }
+
+    /// `classify_clone_outcome`: Err + cancelled → cancelled.
+    #[test]
+    fn classify_clone_outcome_cancelled_when_token_set() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let err: Result<Workspace, MirrorError> = Err(MirrorError::Missing("proj".to_string()));
+        assert_eq!(
+            classify_clone_outcome(&err, &cancel),
+            djinn_telemetry::workspace_clone::OUTCOME_CANCELLED,
         );
     }
 
