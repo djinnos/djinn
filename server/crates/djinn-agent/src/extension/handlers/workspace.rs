@@ -1,6 +1,10 @@
 use super::gate_guard::{gate_guard_edit_check, gate_guard_shell_check};
-use super::workspace_helpers::{cargo_check_denied, emit_edit_match_telemetry};
+use super::workspace_helpers::{
+    cargo_check_denied, classify_cargo_command, emit_edit_match_telemetry,
+};
 use super::*;
+use djinn_core::clock::{Clock, SystemClock};
+use djinn_telemetry::cargo_invocation::{self, EXIT_CANCELLED, EXIT_FAIL, EXIT_OK};
 
 /// Default interactive-shell timeout (ms) when the caller passes no `timeout_ms`.
 /// Overridable via `DJINN_SHELL_TIMEOUT_MS`. Raised well above the old 120s:
@@ -49,6 +53,49 @@ fn effective_shell_timeout_ms(requested: Option<u64>, command: &str) -> u64 {
     } else {
         base
     }
+}
+
+/// Structurally record exactly one cargo invocation observation from a single
+/// runner terminal result.
+///
+/// This is the private testable seam between the process runner and the
+/// telemetry contract. Exactly-once is structural: there is exactly one call
+/// site in [`call_shell`], placed after the single runner return. No Drop
+/// guard, no recordings in individual timeout/cancellation branches.
+///
+/// Mapping:
+/// - `classification == None` (non-cargo command): no observation.
+/// - [`crate::process::ProcessRunError::Spawn`] (child never started): no observation.
+/// - Successful exit ([`crate::process::ProcessTermination::Exited`] + success): `EXIT_OK`.
+/// - Nonzero exit, timeout, or post-start runner error: `EXIT_FAIL`.
+/// - Handled cancellation: `EXIT_CANCELLED`.
+fn finish_shell(
+    classification: Option<&'static str>,
+    started: std::time::Instant,
+    result: &Result<crate::process::ProcessOutput, crate::process::ProcessRunError>,
+    clock: &dyn Clock,
+    recorder: impl Fn(&'static str, &'static str, std::time::Duration),
+) {
+    let Some(kind) = classification else {
+        return;
+    };
+    let exit: &'static str = match result {
+        // Spawn error: child never started — no observation.
+        Err(crate::process::ProcessRunError::Spawn(_)) => return,
+        // Post-start runner error (wait/reap/join): child started.
+        Err(crate::process::ProcessRunError::Started(_)) => EXIT_FAIL,
+        Ok(po) => match po.termination {
+            // Handled cancellation: child started and was cleaned up.
+            crate::process::ProcessTermination::Cancelled => EXIT_CANCELLED,
+            // Timeout: child was killed by the deadline — always fail.
+            crate::process::ProcessTermination::TimedOut => EXIT_FAIL,
+            crate::process::ProcessTermination::Exited if po.output.status.success() => EXIT_OK,
+            crate::process::ProcessTermination::Exited => EXIT_FAIL,
+        },
+    };
+    let ended = clock.now_instant();
+    let elapsed = ended.saturating_duration_since(started);
+    recorder(kind, exit, elapsed);
 }
 
 pub(crate) async fn call_shell(
@@ -137,18 +184,36 @@ pub(crate) async fn call_shell(
         }
     });
 
-    let process_output = crate::process::output_with_kill_cancellable(
+    // Classify for cargo invocation telemetry. `None` means non-cargo: no
+    // observation is recorded and the rest of the function is unchanged.
+    let classification = classify_cargo_command(&p.command);
+
+    // Capture monotonic start immediately before entering the runner.
+    let clock = SystemClock::new();
+    let started = clock.now_instant();
+
+    let runner_result = crate::process::output_with_kill_cancellable(
         cmd,
         Duration::from_millis(timeout_ms),
         child_token,
     )
-    .await
-    .map_err(|e| format!("failed to run shell command: {}", e.into_io_error()))?;
+    .await;
 
-    // The richer terminal reason (`process_output.termination`) is intentionally
-    // not surfaced as a new JSON field in this task; classification/timing
-    // belongs to the blocked successor. Existing shell JSON/error behavior is
-    // unchanged apart from enabling handled cancellation.
+    // Structurally finish exactly one cargo observation from the single
+    // terminal value. Exactly-once is structural: one call site after the
+    // single runner return — no Drop guard, no recordings in individual
+    // timeout/cancellation branches.
+    finish_shell(
+        classification,
+        started,
+        &runner_result,
+        &clock,
+        cargo_invocation::record_seconds,
+    );
+
+    let process_output =
+        runner_result.map_err(|e| format!("failed to run shell command: {}", e.into_io_error()))?;
+
     let output = process_output.output;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -1139,6 +1204,10 @@ async fn enrich_with_related_files(
     }
     response
 }
+
+#[cfg(all(test, unix))]
+#[path = "workspace_cargo_outcome_tests.rs"]
+mod cargo_outcome_tests;
 
 #[cfg(test)]
 mod timeout_tests {
