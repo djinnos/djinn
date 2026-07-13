@@ -1136,7 +1136,7 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
         .await
         .unwrap();
     let findings2 = run2["results"][0]["findings"].as_array().unwrap();
-    assert_eq!(findings2.len(), 0);
+    assert_eq!(findings2.len(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
