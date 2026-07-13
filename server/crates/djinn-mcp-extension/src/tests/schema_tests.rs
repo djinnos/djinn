@@ -417,6 +417,63 @@ fn memory_recall_trace_schema_discriminates_list_and_detail_modes() {
     assert!(variants[1]["not"]["anyOf"].is_array());
 }
 
+/// Phase 1 c4r6: the memory_search tool description must encode the query-style
+/// contract in the shared MCP schema. This test fails if any required
+/// formulation rule, the good/bad example pair, or the lexical/BM25-until-72iu
+/// caveat is removed.
+#[test]
+fn memory_search_schema_documents_query_formulation_contract() {
+    let schema = serde_json::to_value(shared_schemas::tool_memory_search())
+        .expect("serialize memory_search schema");
+    assert_eq!(schema["name"], "memory_search");
+
+    let description = schema["description"]
+        .as_str()
+        .expect("memory_search has a description");
+
+    // Required formulation rules.
+    for required in [
+        "declarative",
+        "interrogative",
+        "one information need per query",
+        "self-contained",
+        "retrieval-meta",
+        "find",
+        "information about",
+        "search for",
+        "discriminative symbol names",
+        "exact error strings",
+        "config keys",
+    ] {
+        assert!(
+            description.contains(required),
+            "memory_search description should mention `{required}`: {description}"
+        );
+    }
+
+    // Good/bad example pair must be present and recognisable.
+    let good_example = "Good query: `Authentication timeout handling for E_CONNRESET`";
+    let bad_example = "Bad query: `Can you find information about authentication timeout errors?`";
+    assert!(
+        description.contains(good_example),
+        "memory_search description should include the good example: {description}"
+    );
+    assert!(
+        description.contains(bad_example),
+        "memory_search description should include the bad example: {description}"
+    );
+
+    // Lexical/BM25-only caveat until worker embeddings land in 72iu.
+    assert!(
+        description.contains("lexical/BM25"),
+        "memory_search description should caveat lexical/BM25 retrieval: {description}"
+    );
+    assert!(
+        description.contains("72iu"),
+        "memory_search description should reference 72iu: {description}"
+    );
+}
+
 #[test]
 fn code_graph_schema_embeds_workflow_guidance() {
     let schema = serde_json::to_value(tool_code_graph()).expect("serialize code_graph schema");
