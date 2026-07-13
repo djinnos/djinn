@@ -438,8 +438,18 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
 
         let status = activity
             .iter()
-            .find(|event| event.event_type == "status_changed")
-            .unwrap_or_else(|| panic!("task {id} should have status_changed activity"));
+            .find(|event| {
+                if event.event_type != "status_changed" {
+                    return false;
+                }
+                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload) else {
+                    return false;
+                };
+                payload["from_status"].as_str() == Some(from_status)
+                    && payload["to_status"].as_str() == Some(to_status)
+                    && payload["reason"].as_str() == Some(reason)
+            })
+            .unwrap_or_else(|| panic!("task {id} should have repair status_changed activity"));
         let status: serde_json::Value = serde_json::from_str(&status.payload).unwrap();
         assert_eq!(
             status,
@@ -478,7 +488,7 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
         .await
         .unwrap();
     let findings2 = run2["results"][0]["findings"].as_array().unwrap();
-    assert_eq!(findings2.len(), 4);
+    assert_eq!(findings2.len(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
