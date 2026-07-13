@@ -76,7 +76,7 @@ pub use replay_validation::{
 };
 pub use revisions::{
     NoteRevisionActorKind, NoteRevisionEventInput, NoteRevisionEventKind, NoteRevisionEventRow,
-    NoteRevisionReason, NoteRevisionSnapshot, NoteRevisionValidationError,
+    NoteRevisionReason, NoteRevisionSnapshot, NoteRevisionSubsystem, NoteRevisionValidationError,
     TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance,
 };
 pub use rrf::rrf_fuse;
