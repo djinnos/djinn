@@ -56,6 +56,7 @@ pub(crate) async fn call_shell(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
     session_role: Option<&str>,
+    cancel: &super::super::ToolCancellation,
 ) -> Result<serde_json::Value, String> {
     let p: ShellParams = parse_args(arguments)?;
 
@@ -118,9 +119,37 @@ pub(crate) async fn call_shell(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::process::isolate_process_group(&mut cmd);
-    let output = crate::process::output_with_kill(cmd, Duration::from_millis(timeout_ms))
-        .await
-        .map_err(|e| format!("failed to run shell command: {e}"))?;
+
+    // Agent-private cancellation: the child token is cancelled as soon as
+    // either the session or global token fires, but the shell future is NOT
+    // dropped — the cancellable runner owns the child process and runs the
+    // process-group TERM/grace/KILL/reap cleanup before returning its handled
+    // terminal result. We await that future to completion so the terminal
+    // observation is preserved rather than lost to a dropped future.
+    let child_token = tokio_util::sync::CancellationToken::new();
+    let forward_token = child_token.clone();
+    let session = cancel.session.clone();
+    let global = cancel.global.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = session.cancelled() => forward_token.cancel(),
+            _ = global.cancelled() => forward_token.cancel(),
+        }
+    });
+
+    let process_output = crate::process::output_with_kill_cancellable(
+        cmd,
+        Duration::from_millis(timeout_ms),
+        child_token,
+    )
+    .await
+    .map_err(|e| format!("failed to run shell command: {}", e.into_io_error()))?;
+
+    // The richer terminal reason (`process_output.termination`) is intentionally
+    // not surfaced as a new JSON field in this task; classification/timing
+    // belongs to the blocked successor. Existing shell JSON/error behavior is
+    // unchanged apart from enabling handled cancellation.
+    let output = process_output.output;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

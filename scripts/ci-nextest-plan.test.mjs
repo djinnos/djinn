@@ -5,6 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdtemp, rm, access } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -15,6 +16,7 @@ import {
   planTests,
   validateExactOnce,
   buildFilterExpression,
+  injectDefaultFilter,
   parseArgs,
   TIMING_VERSION,
   PROOF_VERSION,
@@ -26,12 +28,14 @@ import {
   COLD_START_SHARDS,
   PR_WIDEN_TEST_THRESHOLD,
   PR_WIDEN_DURATION_THRESHOLD_SECONDS,
+  MAX_ARG_STRLEN,
 } from './ci-nextest-plan.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SCRIPT = join(__dirname, 'ci-nextest-plan.mjs');
 const NEXTEST_TOML = join(__dirname, '..', 'server', '.config', 'nextest.toml');
+const WORKFLOW = join(__dirname, '..', '.github', 'workflows', 'quality-gate.yml');
 
 function makeSummary(overrides = {}) {
   return {
@@ -375,6 +379,34 @@ describe('buildFilterExpression', () => {
       ],
     });
     assert.equal(expr, '(binary_id(=pkg::bin) & test(=a)) | (binary_id(=other::it) & test(=b))');
+  });
+});
+
+describe('injectDefaultFilter', () => {
+  it('adds default-filter to the requested profile while preserving other settings', () => {
+    const base = `[profile.default]\nretries = 0\n\n[profile.pull-request]\ninherits = "ci"\nfail-fast = true\n`;
+    const filter = 'binary_id(=pkg::bin) & test(=a)';
+    const rendered = injectDefaultFilter(base, 'pull-request', filter);
+    assert.ok(rendered.includes('[profile.pull-request]'));
+    assert.ok(rendered.includes('inherits = "ci"'));
+    assert.ok(rendered.includes('fail-fast = true'));
+    assert.ok(rendered.includes('default-filter = "binary_id(=pkg::bin) & test(=a)"'));
+    assert.ok(!rendered.includes('[profile.default]\ndefault-filter'));
+  });
+
+  it('escapes filter punctuation so it stays a valid TOML basic string', () => {
+    const base = `[profile.pull-request]\ninherits = "ci"\n`;
+    const filter = 'binary_id(=pkg::bin) & test(/=test_with\\backslash\\t/)';
+    const rendered = injectDefaultFilter(base, 'pull-request', filter);
+    assert.ok(rendered.includes('default-filter = "binary_id(=pkg::bin) & test(/=test_with\\\\backslash\\\\t/)"'));
+  });
+
+  it('fails when the requested profile header is missing', () => {
+    assert.throws(() => injectDefaultFilter('[profile.ci]\n', 'pull-request', 'filter'), /missing nextest profile pull-request/);
+  });
+
+  it('fails when the requested profile header is duplicated', () => {
+    assert.throws(() => injectDefaultFilter('[profile.pull-request]\n[profile.pull-request]\n', 'pull-request', 'filter'), /duplicate nextest profile pull-request/);
   });
 });
 
@@ -756,3 +788,78 @@ describe('nextest.toml compatibility', () => {
     assert.equal(sections['profile.default'].retries, '0');
   });
 });
+
+describe('consumer boundary: file-backed filter transport', () => {
+  it('produces a matrix row filter larger than the Linux single-argument ceiling', () => {
+    // Synthesize enough tests that the planner emits a filter exceeding
+    // Linux's MAX_ARG_STRLEN. This mirrors the PR #1988 failure mode.
+    const binaryCount = 260;
+    const testsPerBinary = 50;
+    const suites = {};
+    for (let b = 0; b < binaryCount; b += 1) {
+      const binaryId = `pkg${b}::bin`;
+      const testCases = {};
+      for (let t = 0; t < testsPerBinary; t += 1) {
+        testCases[`test_${t}_name_with_some_length`] = testCase();
+      }
+      suites[binaryId] = suite(`pkg${b}`, 'bin', testCases, { binaryId });
+    }
+    const summary = makeSummary({ 'rust-suites': suites });
+    const tests = parseDiscovery(JSON.stringify(summary));
+    const plan = planTests({ tests, timings: new Map(), profile: 'pull-request' });
+    validateExactOnce(plan);
+
+    const largestFilter = plan.matrix
+      .map((row) => Buffer.byteLength(row.filter, 'utf8'))
+      .reduce((max, len) => Math.max(max, len), 0);
+    assert.ok(largestFilter > MAX_ARG_STRLEN, `expected filter > ${MAX_ARG_STRLEN}, got ${largestFilter}`);
+  });
+
+  it('materializes the oversized filter through a generated nextest config', async () => {
+    const dir = await makeTempDir();
+    try {
+      const binaryCount = 260;
+      const testsPerBinary = 50;
+      const suites = {};
+      for (let b = 0; b < binaryCount; b += 1) {
+        const binaryId = `pkg${b}::bin`;
+        const testCases = {};
+        for (let t = 0; t < testsPerBinary; t += 1) {
+          testCases[`test_${t}_name_with_some_length`] = testCase();
+        }
+        suites[binaryId] = suite(`pkg${b}`, 'bin', testCases, { binaryId });
+      }
+      const summary = makeSummary({ 'rust-suites': suites });
+      const tests = parseDiscovery(JSON.stringify(summary));
+      const plan = planTests({ tests, timings: new Map(), profile: 'pull-request' });
+
+      const row = plan.matrix[0];
+      assert.ok(Buffer.byteLength(row.filter, 'utf8') > MAX_ARG_STRLEN);
+
+      const baseToml = await readFile(NEXTEST_TOML, 'utf8');
+      const rendered = injectDefaultFilter(baseToml, 'pull-request', row.filter);
+      assert.ok(rendered.includes('[profile.pull-request]'));
+      assert.ok(rendered.includes('default-filter ='));
+      assert.ok(rendered.includes('inherits = "ci"'));
+      assert.ok(rendered.includes('fail-fast = true'));
+
+      const configPath = join(dir, 'shard-nextest.toml');
+      await writeFile(configPath, rendered);
+      const written = await readFile(configPath, 'utf8');
+      assert.ok(written.includes(`default-filter = ${JSON.stringify(row.filter)}`));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('workflow static checks', () => {
+  it('rejects expanding a filter file into a single argv string', () => {
+    const source = readFileSync(WORKFLOW, 'utf8');
+    assert.ok(!source.includes('--filter-expr "$(cat'), 'workflow must not expand a filter file into one argv argument');
+    assert.ok(!source.includes("--filter-expr '$(cat"), 'workflow must not expand a filter file into one argv argument');
+    // Also reject any --filter-expr line that uses command substitution to read a file.
+    assert.ok(!/--filter-expr\s+["']?\$\(cat\s/.test(source), 'workflow must not use command substitution to feed --filter-expr');
+  });
+});
+

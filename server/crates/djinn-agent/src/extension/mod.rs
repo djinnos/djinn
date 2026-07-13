@@ -35,6 +35,38 @@ use std::path::Path;
 
 use crate::context::AgentContext;
 use crate::mcp_client::McpToolRegistry;
+use tokio_util::sync::CancellationToken;
+
+/// Agent-private cancellation pair for tool dispatch.
+///
+/// Retains cloned session and global cancellation tokens on the concrete
+/// `AgentToolDispatcher` so cancellation can flow to the shell runner without
+/// modifying the shared `SlotToolDispatcher` trait or storing tokens broadly
+/// on `AgentContext`. Only the local shell handler acts on cancellation; other
+/// extension handlers preserve behavior and ignore it.
+#[derive(Clone)]
+pub(crate) struct ToolCancellation {
+    pub(crate) session: CancellationToken,
+    pub(crate) global: CancellationToken,
+}
+
+impl ToolCancellation {
+    pub(crate) fn new(session: CancellationToken, global: CancellationToken) -> Self {
+        Self { session, global }
+    }
+
+    /// A pair of never-cancelled tokens, for tests and non-cancelling callers.
+    #[cfg(test)]
+    pub(crate) fn never() -> Self {
+        Self::new(CancellationToken::new(), CancellationToken::new())
+    }
+
+    /// Synchronous check: cancelled if either the session or global token fired.
+    #[allow(dead_code)] // consumed by T3/T4 telemetry/producer wiring
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.session.is_cancelled() || self.global.is_cancelled()
+    }
+}
 
 /// Public entry point for the Djinn-native reply loop to call a tool by name.
 ///
@@ -66,6 +98,7 @@ pub(crate) async fn call_tool(
     session_role: Option<&str>,
     mcp_registry: Option<&McpToolRegistry>,
     allowed_schemas: Option<&[serde_json::Value]>,
+    cancel: &ToolCancellation,
 ) -> Result<serde_json::Value, String> {
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
 
@@ -98,6 +131,7 @@ pub(crate) async fn call_tool(
                 session_task_id,
                 session_role,
                 mcp_registry,
+                cancel,
             )
             .await
         }

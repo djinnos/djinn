@@ -24,6 +24,7 @@ async fn code_graph_tool(
         None,
         None,
         None,
+        &crate::extension::ToolCancellation::never(),
     )
     .await
 }
