@@ -295,7 +295,7 @@ describe("groupModelsByProvider", () => {
   });
 
   it("uses 'unknown' for models without provider_id", () => {
-    const model = um("custom-model", { provider_id: undefined as any });
+    const model = um("custom-model", { provider_id: undefined as unknown as string });
     const groups = groupModelsByProvider([model]);
     expect(groups).toHaveLength(1);
     expect(groups[0]!.providerId).toBe("unknown");

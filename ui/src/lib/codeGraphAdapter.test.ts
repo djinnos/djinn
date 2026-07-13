@@ -40,7 +40,6 @@ import {
   prettifyLabel,
   viewportBoundsEqual,
   type CommunityHull,
-  type LodTier,
   type SnapshotNode,
   type SnapshotPayload,
   type ViewportBounds,

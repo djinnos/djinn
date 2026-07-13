@@ -158,14 +158,25 @@ describe("ProposalsPage", () => {
 
   it("scrolls to and temporarily highlights an MDX block from the block query param", async () => {
     let removeHighlight: (() => void) | undefined;
+    // Capture ONLY the 3s highlight-removal timer; everything else must reach
+    // the real setTimeout — testing-library's waitFor/findBy* polls through it,
+    // and swallowing those timers hangs this test AND (because the vitest
+    // timeout abandons the promise before `finally` restores the spy) leaves
+    // window.setTimeout broken for every test after it.
+    const realSetTimeout = window.setTimeout.bind(window);
     const setTimeoutSpy = vi
       .spyOn(window, "setTimeout")
-      .mockImplementation((handler: TimerHandler, timeout?: number) => {
+      .mockImplementation(((
+        handler: TimerHandler,
+        timeout?: number,
+        ...args: unknown[]
+      ) => {
         if (timeout === 3000 && typeof handler === "function") {
           removeHighlight = handler as () => void;
+          return 1;
         }
-        return 1;
-      });
+        return realSetTimeout(handler, timeout, ...args);
+      }) as typeof window.setTimeout);
     const proposal = makeProposal({
       id: "proposal-anchor",
       short_id: "anch",
@@ -865,7 +876,14 @@ describe("ProposalsPage", () => {
     expect(
       await screen.findByText("Proposal revision diff"),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/Base body/)).not.toBeInTheDocument();
+    // The history timeline previews revision bodies, so "Base body" may
+    // legitimately be on the page while the diff is closed — assert on the
+    // diff's own chrome and on the COUNT of body occurrences instead.
+    expect(
+      screen.queryByRole("button", { name: "Hide diff" }),
+    ).not.toBeInTheDocument();
+    const baseBodyBefore = screen.queryAllByText(/Base body/).length;
+    const headBodyBefore = screen.queryAllByText(/Head body/).length;
 
     await user.click(
       screen.getByRole("button", {
@@ -874,8 +892,8 @@ describe("ProposalsPage", () => {
     );
 
     expect(screen.getByRole("button", { name: "Hide diff" })).toHaveFocus();
-    expect(screen.getByText(/Base body/)).toBeInTheDocument();
-    expect(screen.getAllByText(/Head body/)).toHaveLength(2);
+    expect(screen.getAllByText(/Base body/)).toHaveLength(baseBodyBefore + 1);
+    expect(screen.getAllByText(/Head body/)).toHaveLength(headBodyBefore + 1);
   });
 
   it("shows an amber needs-reconcile badge for graduated epics that need reconcile", async () => {

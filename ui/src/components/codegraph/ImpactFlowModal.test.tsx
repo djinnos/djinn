@@ -73,7 +73,7 @@ describe("buildImpactMermaid", () => {
       [
         "flowchart TD",
         '  target["lonely()"]:::target',
-        "classDef target fill:#fde68a,stroke:#b45309;",
+        "classDef target fill:#fde68a,stroke:#b45309,color:#78350f;",
       ].join("\n"),
     );
   });

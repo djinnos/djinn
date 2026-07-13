@@ -1,8 +1,10 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { vi } from "vitest";
 import { TaskSessionPage } from "./TaskSessionPage";
-import type { Task } from "@/api/types";
+import { projectStore } from "@/stores/projectStore";
+import { taskStore } from "@/stores/taskStore";
+import { setSessionMessages } from "@/storybook-mocks/useSessionMessages";
+import type { Project, Task } from "@/api/types";
 import type { TimelineEntry, SessionInfo } from "@/hooks/useSessionMessages";
 
 // ── Mock data ────────────────────────────────────────────────────────────────
@@ -228,63 +230,45 @@ const baseTimeline: TimelineEntry[] = [
   },
 ];
 
-// ── Mutable state used by mocks ──────────────────────────────────────────────
+// ── Story state seeding ──────────────────────────────────────────────────────
+//
+// `vi.mock` crashes under `storybook dev` (Vite builder). Instead we drive the
+// page through the REAL zustand stores (seeded via `setState`) and the aliased
+// `@/hooks/useSessionMessages` mock (see `.storybook/main.ts` +
+// src/storybook-mocks). Storybook does a full page reload between stories, so
+// this module-level state resets each time.
+//
+// The page reads only `useSelectedProject` (for the projectSlug), `useTaskStore`
+// / `taskStore` (for the task), and `useSessionMessages` — it does not touch the
+// epic store or the window shim, so those former mocks are dropped.
 
-let currentTask: Task | null = mockTask;
-let currentTimeline: TimelineEntry[] = baseTimeline;
-let currentSessions: SessionInfo[] = mockSessions;
-let currentLoading = false;
-let currentStreamingText = new Map<string, string>();
+const project: Project = {
+  id: "project-djinn",
+  name: "djinnos/djinn",
+  github_owner: "djinnos",
+  github_repo: "djinn",
+};
 
-// ── vi.mock calls ────────────────────────────────────────────────────────────
+function applyStory(opts: {
+  task: Task | null;
+  timeline?: TimelineEntry[];
+  sessions?: SessionInfo[];
+  loading?: boolean;
+  streamingText?: Map<string, string>;
+}) {
+  projectStore.setState({ projects: [project], selectedProjectId: project.id });
 
-vi.mock("@/electron/shims/window", () => ({
-  getCurrentWindow: () => ({ startDragging: async () => {} }),
-}));
+  const tasks = new Map<string, Task>();
+  if (opts.task) tasks.set(opts.task.id, opts.task);
+  taskStore.setState({ tasks });
 
-vi.mock("@/stores/useProjectStore", () => ({
-  useSelectedProject: () => ({ path: "/home/fernando/git/project", name: "project" }),
-}));
-
-vi.mock("@/stores/useTaskStore", () => ({
-  useTaskStore: (selector: (state: { tasks: Map<string, Task> }) => unknown) => {
-    const tasks = new Map<string, Task>();
-    if (currentTask) tasks.set(currentTask.id, currentTask);
-    return selector({ tasks });
-  },
-}));
-
-vi.mock("@/stores/taskStore", () => ({
-  taskStore: {
-    subscribe: () => () => {},
-    getState: () => ({ tasks: new Map() }),
-  },
-}));
-
-vi.mock("@/stores/useEpicStore", () => ({
-  useEpicStore: (selector: (state: { epics: Map<string, unknown> }) => unknown) => {
-    const epics = new Map();
-    epics.set("epic-foundation", {
-      id: "epic-foundation",
-      short_id: "ep01",
-      title: "Platform Foundation",
-      status: "active",
-      owner: "fernando",
-    });
-    return selector({ epics });
-  },
-}));
-
-vi.mock("@/hooks/useSessionMessages", () => ({
-  useSessionMessages: () => ({
-    timeline: currentTimeline,
-    sessions: currentSessions,
-    loading: currentLoading,
-    error: null,
-    streamingText: currentStreamingText,
-    refetch: async () => {},
-  }),
-}));
+  setSessionMessages({
+    timeline: opts.timeline ?? [],
+    sessions: opts.sessions ?? [],
+    loading: opts.loading ?? false,
+    streamingText: opts.streamingText ?? new Map(),
+  });
+}
 
 // ── Story wrapper ────────────────────────────────────────────────────────────
 
@@ -299,7 +283,7 @@ function TaskSessionStory() {
 }
 
 const meta: Meta<typeof TaskSessionStory> = {
-  title: "Pages/TaskSession",
+  title: "Session/TaskSessionPage",
   component: TaskSessionStory,
   parameters: { layout: "fullscreen" },
 };
@@ -311,21 +295,24 @@ type Story = StoryObj<typeof TaskSessionStory>;
 
 export const ActiveSession: Story = {
   beforeEach: () => {
-    currentTask = mockTask;
-    currentTimeline = baseTimeline;
-    currentSessions = mockSessions;
-    currentLoading = false;
-    currentStreamingText = new Map([
-      ["sess-003", "I've updated the `MAX_RETRIES` to be configurable via `project_config_set`. Now working on the connection status badge..."],
-    ]);
+    applyStory({
+      task: mockTask,
+      timeline: baseTimeline,
+      sessions: mockSessions,
+      streamingText: new Map([
+        ["sess-003", "I've updated the `MAX_RETRIES` to be configurable via `project_config_set`. Now working on the connection status badge..."],
+      ]),
+    });
   },
 };
 
 export const CompletedTask: Story = {
   beforeEach: () => {
-    currentTask = closedTask;
-    currentTimeline = [
-      ...baseTimeline,
+    applyStory({
+      task: closedTask,
+      sessions: completedSessions,
+      timeline: [
+        ...baseTimeline,
       {
         kind: "message" as const,
         role: "assistant" as const,
@@ -352,29 +339,19 @@ export const CompletedTask: Story = {
         label: "Review → Done",
         timestamp: minutesAgo(2),
       },
-    ];
-    currentSessions = completedSessions;
-    currentLoading = false;
-    currentStreamingText = new Map();
+      ],
+    });
   },
 };
 
 export const Loading: Story = {
   beforeEach: () => {
-    currentTask = mockTask;
-    currentTimeline = [];
-    currentSessions = [];
-    currentLoading = true;
-    currentStreamingText = new Map();
+    applyStory({ task: mockTask, loading: true });
   },
 };
 
 export const TaskNotFound: Story = {
   beforeEach: () => {
-    currentTask = null;
-    currentTimeline = [];
-    currentSessions = [];
-    currentLoading = false;
-    currentStreamingText = new Map();
+    applyStory({ task: null });
   },
 };

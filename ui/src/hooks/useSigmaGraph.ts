@@ -305,6 +305,7 @@ export function useSigmaGraph(
       return;
     }
     sigmaRef.current = sigma;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reveals the canvas once the imperative Sigma/WebGL instance has initialized; cannot be derived during render.
     setReady(true);
 
     const sigmaInstance = sigma;
@@ -606,17 +607,6 @@ export function useSigmaGraph(
           // Sigma may already be killed by unmount; ignore.
         }
       }, runMs);
-    } else if (!precomputedLayout) {
-      // Non-force deterministic modes (sequential / radial) skip the
-      // FA2 supervisor and noverlap pass so positions stay exactly as
-      // computed by the pure layout module. Just refresh Sigma and
-      // reset the camera once on mount.
-      try {
-        sigma?.refresh();
-        sigma?.getCamera().animatedReset({ duration: 400 });
-      } catch {
-        // Sigma may already be killed by unmount; ignore.
-      }
     }
 
     return () => {

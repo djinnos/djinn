@@ -80,9 +80,15 @@ export function BoardHealthBanner({ projectSlugs }: BoardHealthBannerProps) {
   const health = useBoardHealth(projectSlugs);
   const [dismissed, setDismissed] = useState(false);
 
-  // Reset dismissed when project selection changes
+  // Reset dismissed when project selection changes. Uses React's sanctioned
+  // adjust-state-during-render pattern (track the previous key) instead of a
+  // reset effect, so the banner re-appears in the same render the slugs change.
   const slugsKey = projectSlugs.slice().sort().join("\0");
-  useEffect(() => setDismissed(false), [slugsKey]);
+  const [prevSlugsKey, setPrevSlugsKey] = useState(slugsKey);
+  if (slugsKey !== prevSlugsKey) {
+    setPrevSlugsKey(slugsKey);
+    setDismissed(false);
+  }
 
   if (!health || dismissed) return null;
 

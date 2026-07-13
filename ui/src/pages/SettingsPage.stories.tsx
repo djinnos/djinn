@@ -1,487 +1,302 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { MemoryRouter } from "react-router-dom";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { within, userEvent } from "storybook/test";
+
+import { SettingsPage } from "@/pages/SettingsPage";
+import { AuthGate } from "@/components/AuthGate";
+import { userConfigKeys } from "@/components/userConfig/userConfigKeys";
+import {
+  type CatalogProvider,
+  type ConnectedProvider,
+  type UserModel,
+  type UserModelSelection,
+  SELF_TARGET,
+} from "@/api/userConfig";
+import type { OrgPolicy } from "@/api/orgPolicy";
 
 /* -------------------------------------------------------------------------- */
-/*  Visual-replica approach                                                    */
+/*  Real-component stories for the routed /settings page.                      */
 /*                                                                            */
-/*  The real SettingsPage calls hooks that reach out to a live backend.        */
-/*  Rather than wrestling with module-level mocks that can't vary per story,   */
-/*  we build lightweight replicas of the shell + each sub-view so every story  */
-/*  gets deterministic, self-contained markup.                                 */
+/*  These render the ACTUAL `SettingsPage` (Connections / Model Roles /        */
+/*  Preferences / AI Policy tabs), not a hand-built replica. Data is seeded    */
+/*  into a per-story TanStack Query cache (retry:false, staleTime:Infinity) so */
+/*  the components' `useQuery` calls resolve from the fixtures instead of      */
+/*  hitting a live backend — the same pattern as CodeGraphPage.stories.        */
+/*                                                                            */
+/*  Two hooks the page depends on fire imperative (non-query) fetches that     */
+/*  can't be seeded through the cache:                                         */
+/*   - `useServerHealth` polls `GET /health` to gate the whole page, and       */
+/*   - `AuthGate` reads `/auth/me` + `/setup/status` + `/auth/config` to prove */
+/*     the caller (and whether they're an admin, which reveals AI Policy).     */
+/*  A tiny `window.fetch` shim below answers exactly those four endpoints and  */
+/*  delegates everything else (including the MCP transport the Preferences tab */
+/*  uses) to the real fetch, which fails into a graceful inline-error state.   */
 /* -------------------------------------------------------------------------- */
 
-// -- Shared types & constants ------------------------------------------------
+// Whether the seeded caller is an admin. Set from each story's render below,
+// BEFORE AuthGate mounts and fires `/auth/me`, so the shim reports the right
+// flag and the AI Policy tab is shown/hidden accordingly.
+let mockIsAdmin = true;
 
-type SettingsCategory = "providers" | "projects" | "agents";
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
-const categories: Array<{ key: SettingsCategory; label: string }> = [
-  { key: "providers", label: "Providers" },
-  { key: "projects", label: "Projects" },
-  { key: "agents", label: "Agents" },
+// Patch once per Storybook session; unknown URLs fall through to real fetch.
+if (!(window as unknown as { __djinnSettingsFetchStub?: boolean }).__djinnSettingsFetchStub) {
+  (window as unknown as { __djinnSettingsFetchStub?: boolean }).__djinnSettingsFetchStub = true;
+  const realFetch = window.fetch.bind(window);
+  const stub: typeof window.fetch = (input, init) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+    if (url.endsWith("/health")) {
+      return Promise.resolve(json({ status: "ok", version: "0.6.94" }));
+    }
+    if (url.includes("/auth/me")) {
+      return Promise.resolve(
+        json({
+          id: "u-fernando",
+          login: "fernando",
+          name: "Fernando Bandeira",
+          avatar_url: null,
+          is_admin: mockIsAdmin,
+          role: "engineer",
+        }),
+      );
+    }
+    if (url.includes("/setup/status")) {
+      return Promise.resolve(
+        json({
+          needs_app_install: false,
+          app_credentials_configured: true,
+          org_login: "djinnos",
+          setup_state: "valid",
+        }),
+      );
+    }
+    if (url.includes("/auth/config")) {
+      return Promise.resolve(
+        json({
+          configured: true,
+          missing: [],
+          setup_doc_url: "https://www.djinnai.io/docs/setup",
+          self_setup_available: false,
+        }),
+      );
+    }
+    return realFetch(input, init);
+  };
+  window.fetch = stub;
+}
+
+/* -------------------------------- fixtures -------------------------------- */
+
+function connectedProvider(
+  over: Partial<ConnectedProvider> & { id: string; name: string },
+): ConnectedProvider {
+  return {
+    base_url: "",
+    builtin_id: over.id,
+    connected: true,
+    connection_methods: ["api_key"],
+    docs_url: "",
+    env_vars: [],
+    goose_provider_id: over.id,
+    is_openai_compatible: false,
+    npm: "",
+    oauth_keys: [],
+    oauth_supported: false,
+    ...over,
+  };
+}
+
+const connectedProviders: ConnectedProvider[] = [
+  // openai-via-oauth ⇒ ChatGPT/Codex is signed in (rendered by the Codex row).
+  connectedProvider({
+    id: "openai",
+    name: "OpenAI",
+    connection_methods: ["oauth"],
+    env_vars: ["OPENAI_API_KEY"],
+  }),
+  // Personal subscriptions → "Your subscriptions" bucket.
+  connectedProvider({
+    id: "kimi-for-coding",
+    name: "Kimi for Coding",
+    env_vars: ["MOONSHOT_API_KEY"],
+  }),
+  // Two Zhipu plans share ZHIPU_API_KEY → collapse into one "Z.AI / Zhipu" card.
+  connectedProvider({
+    id: "zai-coding-plan",
+    name: "Z.AI Coding Plan",
+    env_vars: ["ZHIPU_API_KEY"],
+  }),
+  connectedProvider({
+    id: "zhipuai-coding-plan",
+    name: "Zhipu AI Coding Plan",
+    env_vars: ["ZHIPU_API_KEY"],
+  }),
+  // Org-provisioned API keys → "Provided by your org" bucket (locked).
+  connectedProvider({
+    id: "anthropic",
+    name: "Anthropic",
+    env_vars: ["ANTHROPIC_API_KEY"],
+  }),
+  connectedProvider({
+    id: "google",
+    name: "Google Gemini",
+    env_vars: ["GEMINI_API_KEY"],
+  }),
 ];
 
-// -- Settings shell ----------------------------------------------------------
+const catalog: CatalogProvider[] = [
+  connectedProvider({ id: "anthropic", name: "Anthropic", connected: false, connection_methods: [], env_vars: ["ANTHROPIC_API_KEY"] }),
+  connectedProvider({ id: "openai", name: "OpenAI", connected: false, connection_methods: [], env_vars: ["OPENAI_API_KEY"] }),
+  connectedProvider({ id: "google", name: "Google Gemini", connected: false, connection_methods: [], env_vars: ["GEMINI_API_KEY"] }),
+  connectedProvider({ id: "mistral", name: "Mistral", connected: false, connection_methods: [], env_vars: ["MISTRAL_API_KEY"] }),
+  connectedProvider({ id: "groq", name: "Groq", connected: false, connection_methods: [], env_vars: ["GROQ_API_KEY"] }),
+];
 
-function SettingsShell({
-  activeCategory,
-  children,
-}: {
-  activeCategory: SettingsCategory;
-  children: React.ReactNode;
-}) {
-  return (
-    <MemoryRouter initialEntries={[`/settings/${activeCategory}`]}>
-      <div className="flex h-full flex-col overflow-hidden p-6">
-        <div className="mb-6 shrink-0">
-          <h1 className="text-2xl font-bold text-foreground">Settings</h1>
-          <p className="mt-1 text-muted-foreground">
-            Configure your workspace preferences
-          </p>
-        </div>
-
-        <div className="flex min-h-0 flex-1 flex-col gap-6 md:flex-row">
-          <aside className="md:w-56 md:shrink-0">
-            <nav className="flex flex-row gap-2 overflow-x-auto md:flex-col md:overflow-visible">
-              {categories.map((item) => (
-                <span
-                  key={item.key}
-                  className={cn(
-                    "rounded-md px-3 py-2 text-sm transition-colors cursor-default",
-                    item.key === activeCategory
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                >
-                  {item.label}
-                </span>
-              ))}
-            </nav>
-          </aside>
-
-          <section className="min-h-0 min-w-0 flex-1 flex flex-col overflow-y-auto pb-6">
-            {children}
-          </section>
-        </div>
-      </div>
-    </MemoryRouter>
-  );
+function model(
+  over: Partial<UserModel> & { id: string; name: string; provider_id: string },
+): UserModel {
+  return {
+    attachment: false,
+    context_window: 200_000,
+    output_limit: 8_192,
+    pricing: {
+      cache_read_per_million: 0.3,
+      cache_write_per_million: 3.75,
+      input_per_million: 3,
+      output_per_million: 15,
+    },
+    reasoning: false,
+    recommended: false,
+    tool_call: true,
+    ...over,
+  };
 }
 
-// -- Providers replica -------------------------------------------------------
+const connectedModels: UserModel[] = [
+  model({ id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider_id: "anthropic", recommended: true }),
+  model({ id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", provider_id: "anthropic", recommended: true, reasoning: true }),
+  model({ id: "openai/gpt-4o", name: "GPT-4o", provider_id: "openai" }),
+  model({ id: "openai/gpt-4.1", name: "GPT-4.1", provider_id: "openai" }),
+  model({ id: "google/gemini-2.5-pro", name: "Gemini 2.5 Pro", provider_id: "google", recommended: true }),
+];
 
-interface ProviderEntry {
-  id: string;
-  name: string;
-  description: string;
-}
-
-function ProvidersReplica({
-  configured,
-}: {
-  configured: ProviderEntry[];
-}) {
-  return (
-    <div className="flex flex-col gap-4 flex-1 min-h-0">
-      <div className="flex items-center justify-between shrink-0">
-        <h2 className="text-lg font-semibold">Configured Providers</h2>
-        <Button>Add Provider</Button>
-      </div>
-
-      <div className="space-y-2 shrink-0">
-        {configured.map((provider) => (
-          <div
-            key={provider.id}
-            className="flex items-center justify-between rounded-lg border border-border bg-card p-4"
-          >
-            <div>
-              <p className="font-medium">{provider.name}</p>
-              <p className="text-xs text-muted-foreground">Configured</p>
-            </div>
-            <Button variant="destructive" size="sm">
-              Remove
-            </Button>
-          </div>
-        ))}
-        {configured.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            No providers configured yet.
-          </p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// -- Projects replica --------------------------------------------------------
-
-interface ProjectEntry {
-  id: string;
-  name: string;
-  github_owner: string;
-  github_repo: string;
-  branch: string;
-  auto_merge: boolean;
-}
-
-function ProjectsReplica({
-  projects,
-  expandedId,
-}: {
-  projects: ProjectEntry[];
-  expandedId?: string;
-}) {
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">Projects</h2>
-          <p className="text-sm text-muted-foreground">
-            Registered projects and defaults.
-          </p>
-        </div>
-        <Button>Add Project</Button>
-      </div>
-
-      {projects.length === 0 ? (
-        <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
-          No projects registered yet.
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {projects.map((project) => {
-            const expanded = expandedId === project.id;
-            return (
-              <div
-                key={project.id}
-                className="rounded-lg border border-border bg-card p-4 space-y-3"
-              >
-                <div className="flex items-center justify-between gap-4">
-                  <button className="min-w-0 text-left cursor-pointer">
-                    <div className="flex items-center gap-2">
-                      <p className="font-medium">{project.name}</p>
-                    </div>
-                    <p className="truncate text-xs text-muted-foreground">
-                      {project.github_owner}/{project.github_repo}
-                    </p>
-                  </button>
-                  <Button variant="destructive" size="sm">
-                    Remove
-                  </Button>
-                </div>
-                {expanded && (
-                  <div className="grid gap-3 pt-2 border-t border-border">
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium">Target branch</p>
-                      <Input defaultValue={project.branch} placeholder="main" />
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm font-medium">Auto-merge</p>
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4"
-                        defaultChecked={project.auto_merge}
-                      />
-                    </div>
-                    <p className="border-t border-border pt-3 text-xs text-muted-foreground">
-                      Setup commands are configured via the project's{" "}
-                      <code className="rounded bg-muted px-1">environment config</code>
-                    </p>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// -- Agents replica ----------------------------------------------------------
-
-const ROLE_LABELS: Record<string, string> = {
-  worker: "W",
-  reviewer: "R",
-  lead: "L",
-  planner: "P",
+const modelSelection: UserModelSelection = {
+  lanes: {
+    plan: ["anthropic/claude-opus-4-6", "google/gemini-2.5-pro"],
+    implement: ["anthropic/claude-sonnet-4-6"],
+    review: ["openai/gpt-4o"],
+  },
+  maxSessions: {
+    "anthropic/claude-opus-4-6": 2,
+    "google/gemini-2.5-pro": 1,
+    "anthropic/claude-sonnet-4-6": 3,
+    "openai/gpt-4o": 2,
+  },
+  diverseReview: true,
+  diverseRefinement: true,
 };
 
-const ROLE_FULL_LABELS: Record<string, string> = {
-  worker: "Worker",
-  reviewer: "Reviewer",
-  lead: "Lead",
-  planner: "Planner",
+const orgPolicy: OrgPolicy = {
+  subscriptions: [
+    { id: "chatgpt_codex", name: "ChatGPT / Codex", jurisdiction: "us", blocked: false },
+    { id: "opencode", name: "OpenCode", jurisdiction: "us", blocked: false },
+    { id: "mistral-coding-plan", name: "Mistral Coding Plan", jurisdiction: "eu", blocked: false },
+    { id: "kimi-for-coding", name: "Kimi for Coding", jurisdiction: "cn", blocked: false },
+    { id: "zai-coding-plan", name: "Z.AI Coding Plan", jurisdiction: "cn", blocked: true },
+    { id: "minimax-coding-plan", name: "MiniMax Coding Plan", jurisdiction: "cn", blocked: false },
+  ],
+  blockedSubscriptions: ["zai-coding-plan"],
+  defaultLanes: {
+    plan: ["anthropic/claude-opus-4-6"],
+    implement: ["anthropic/claude-sonnet-4-6"],
+    review: ["openai/gpt-4o"],
+  },
+  lockLevel: "flexible",
 };
 
-const ALL_ROLES = [
-  "worker",
-  "reviewer",
-  "lead",
-  "planner",
-];
-
-interface ModelEntry {
-  model: string;
-  provider: string;
-  enabledRoles: string[];
-  max_concurrent: number;
+/** A fresh QueryClient seeded with every fixture the four tabs read. */
+function seededClient(): QueryClient {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  client.setQueryData(userConfigKeys.connectedProviders(SELF_TARGET), connectedProviders);
+  client.setQueryData(userConfigKeys.catalog(SELF_TARGET), catalog);
+  client.setQueryData(userConfigKeys.connectedModels(SELF_TARGET), connectedModels);
+  client.setQueryData(userConfigKeys.modelSelection(SELF_TARGET), modelSelection);
+  client.setQueryData(["org-policy"], orgPolicy);
+  return client;
 }
 
-function AgentsReplica({ models }: { models: ModelEntry[] }) {
-  return (
-    <div className="space-y-6">
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-lg font-semibold">Model Configuration</h3>
-            <p className="text-sm text-muted-foreground">
-              Add models, set session limits, and toggle which agents can use
-              each model. Drag to reorder priority.
-            </p>
-          </div>
-        </div>
-
-        {/* Add Model */}
-        <Input placeholder="Search models..." />
-
-        {/* Role Legend */}
-        <div className="flex items-center gap-4 text-xs text-muted-foreground">
-          {ALL_ROLES.map((role) => (
-            <span key={role}>
-              <span className="font-semibold text-foreground">
-                {ROLE_LABELS[role]}
-              </span>
-              {" = "}
-              {ROLE_FULL_LABELS[role]}
-            </span>
-          ))}
-        </div>
-
-        {/* Model List */}
-        {models.length === 0 ? (
-          <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
-            No models configured. Add models from connected providers above.
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {models.map((entry, index) => (
-              <div key={`${entry.provider}-${entry.model}-${index}`}>
-                <div className="flex items-center gap-3 rounded-md border bg-card p-3">
-                  {/* Drag Handle */}
-                  <div className="flex flex-col text-muted-foreground cursor-grab shrink-0">
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      width="16"
-                      height="16"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <circle cx="9" cy="12" r="1" />
-                      <circle cx="9" cy="5" r="1" />
-                      <circle cx="9" cy="19" r="1" />
-                      <circle cx="15" cy="12" r="1" />
-                      <circle cx="15" cy="5" r="1" />
-                      <circle cx="15" cy="19" r="1" />
-                    </svg>
-                  </div>
-
-                  {/* Model Info */}
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium truncate">{entry.model}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {entry.provider}
-                    </div>
-                  </div>
-
-                  {/* Agent Role Toggles */}
-                  <div className="flex items-center gap-1 shrink-0">
-                    {ALL_ROLES.map((role) => {
-                      const enabled = entry.enabledRoles.includes(role);
-                      return (
-                        <span
-                          key={role}
-                          className={cn(
-                            "flex h-7 min-w-[28px] items-center justify-center rounded px-1.5 text-xs font-semibold",
-                            enabled
-                              ? "bg-primary text-primary-foreground"
-                              : "bg-muted text-muted-foreground",
-                          )}
-                        >
-                          {ROLE_LABELS[role]}
-                        </span>
-                      );
-                    })}
-                  </div>
-
-                  {/* Max Sessions */}
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="text-xs text-muted-foreground whitespace-nowrap">
-                      Max:
-                    </span>
-                    <Input
-                      type="number"
-                      min={1}
-                      max={10}
-                      defaultValue={entry.max_concurrent}
-                      className="w-16 h-8"
-                    />
-                  </div>
-
-                  {/* Remove */}
-                  <Button variant="ghost" size="sm" className="h-8 w-8 p-0 shrink-0">
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      width="16"
-                      height="16"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <path d="M18 6 6 18" />
-                      <path d="m6 6 12 12" />
-                    </svg>
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// -- Mock data ---------------------------------------------------------------
-
-const sampleProviders: ProviderEntry[] = [
-  { id: "anthropic", name: "Anthropic", description: "Claude models" },
-  { id: "openai", name: "OpenAI", description: "GPT models" },
-];
-
-const sampleProjects: ProjectEntry[] = [
-  {
-    id: "proj-1",
-    name: "desktop",
-    github_owner: "djinnos",
-    github_repo: "desktop",
-    branch: "main",
-    auto_merge: false,
-  },
-  {
-    id: "proj-2",
-    name: "api-server",
-    github_owner: "djinnos",
-    github_repo: "api",
-    branch: "develop",
-    auto_merge: true,
-  },
-];
-
-const sampleModels: ModelEntry[] = [
-  {
-    model: "claude-sonnet-4-20250514",
-    provider: "anthropic",
-    enabledRoles: ["worker", "reviewer", "planner"],
-    max_concurrent: 3,
-  },
-  {
-    model: "gpt-4o",
-    provider: "openai",
-    enabledRoles: ["worker", "lead"],
-    max_concurrent: 2,
-  },
-];
-
-// -- Story wrapper -----------------------------------------------------------
-
-interface SettingsStoryProps {
-  activeCategory: SettingsCategory;
-  providers?: ProviderEntry[];
-  projects?: ProjectEntry[];
-  expandedProjectId?: string;
-  models?: ModelEntry[];
-}
-
-function SettingsStory({
-  activeCategory,
-  providers = [],
-  projects = [],
-  expandedProjectId,
-  models = [],
-}: SettingsStoryProps) {
-  return (
-    <SettingsShell activeCategory={activeCategory}>
-      {activeCategory === "providers" && (
-        <ProvidersReplica configured={providers} />
-      )}
-      {activeCategory === "projects" && (
-        <ProjectsReplica projects={projects} expandedId={expandedProjectId} />
-      )}
-      {activeCategory === "agents" && <AgentsReplica models={models} />}
-    </SettingsShell>
-  );
-}
-
-// -- Storybook meta ----------------------------------------------------------
-
-const meta: Meta<typeof SettingsStory> = {
-  title: "Pages/Settings",
-  component: SettingsStory,
+const meta = {
+  title: "Settings/SettingsPage",
+  component: SettingsPage,
   parameters: { layout: "fullscreen" },
-};
+  decorators: [
+    (Story, ctx) => {
+      mockIsAdmin = (ctx.parameters?.isAdmin as boolean | undefined) ?? true;
+      return (
+        <QueryClientProvider client={seededClient()}>
+          <MemoryRouter initialEntries={["/settings"]}>
+            <AuthGate>
+              <div className="h-screen">
+                <Story />
+              </div>
+            </AuthGate>
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+    },
+  ],
+} satisfies Meta<typeof SettingsPage>;
 
 export default meta;
-type Story = StoryObj<typeof SettingsStory>;
 
-// -- Stories -----------------------------------------------------------------
+type Story = StoryObj<typeof meta>;
 
-/** Providers tab with two configured providers (Anthropic + OpenAI). */
-export const ProvidersView: Story = {
-  args: {
-    activeCategory: "providers",
-    providers: sampleProviders,
+/** Default landing tab — connected subscriptions + org-provided API keys. */
+export const Connections: Story = {};
+
+/** Model Roles tab — per-role (plan / implement / review) model lanes. */
+export const ModelRoles: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole("tab", { name: "Model Roles" }));
   },
 };
 
-/** Providers tab with no providers configured. */
-export const ProvidersEmpty: Story = {
-  args: {
-    activeCategory: "providers",
-    providers: [],
+/**
+ * Preferences tab — the real PreferencesTab. Its `useUserSettings` hook fires an
+ * imperative MCP call that can't be cache-seeded, so with no live server it
+ * settles into its graceful inline-error state rather than crashing.
+ */
+export const Preferences: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole("tab", { name: "Preferences" }));
   },
 };
 
-/** Projects tab showing two registered projects (collapsed). */
-export const ProjectsView: Story = {
-  args: {
-    activeCategory: "projects",
-    projects: sampleProjects,
+/** AI Policy tab (admin-only) — subscription residency controls + org lanes. */
+export const AiPolicy: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole("tab", { name: "AI Policy" }));
   },
 };
 
-/** Projects tab with the first project expanded, showing branch & auto-merge settings. */
-export const ProjectsExpanded: Story = {
-  args: {
-    activeCategory: "projects",
-    projects: sampleProjects,
-    expandedProjectId: "proj-1",
-  },
-};
-
-/** Agents tab with two models configured and role toggles visible. */
-export const AgentsView: Story = {
-  args: {
-    activeCategory: "agents",
-    models: sampleModels,
-  },
+/** Non-admin caller — the AI Policy tab is hidden entirely. */
+export const MemberView: Story = {
+  parameters: { isAdmin: false },
 };
