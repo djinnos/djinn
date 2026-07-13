@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 // Bounded proposal-refinement workflow state machine.
 //
 // Orchestrates Advocate revision, Adversary attack, and Judge adjudication
