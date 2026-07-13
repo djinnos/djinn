@@ -158,6 +158,8 @@ pub struct DoctorFixResponse {
     pub check_name: String,
     pub finding_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<AnyJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -547,6 +549,7 @@ impl DjinnMcpServer {
                 ok: false,
                 check_name,
                 finding_id,
+                result: None,
                 error: Some(error),
             });
         }
@@ -564,6 +567,7 @@ impl DjinnMcpServer {
                 ok: false,
                 check_name,
                 finding_id,
+                result: None,
                 error: Some(error),
             });
         };
@@ -578,6 +582,7 @@ impl DjinnMcpServer {
                     ok: false,
                     check_name,
                     finding_id,
+                    result: None,
                     error: Some(error),
                 });
             }
@@ -587,6 +592,7 @@ impl DjinnMcpServer {
                     ok: false,
                     check_name,
                     finding_id,
+                    result: None,
                     error: Some(error),
                 });
             }
@@ -604,6 +610,7 @@ impl DjinnMcpServer {
                 ok: false,
                 check_name,
                 finding_id,
+                result: None,
                 error: Some(error),
             });
         }
@@ -617,6 +624,7 @@ impl DjinnMcpServer {
                     ok: false,
                     check_name,
                     finding_id,
+                    result: None,
                     error: Some(e),
                 });
             }
@@ -625,17 +633,19 @@ impl DjinnMcpServer {
         // Invoke only this check's explicit fix. The default trait impl
         // returns FixNotSupported, so checks that don't opt in get a clear
         // error here.
-        match check.fix(&finding) {
-            Ok(()) => Json(DoctorFixResponse {
+        match check.fix_with_result(&finding) {
+            Ok(result) => Json(DoctorFixResponse {
                 ok: true,
                 check_name,
                 finding_id,
+                result: result.map(AnyJson),
                 error: None,
             }),
             Err(e) => Json(DoctorFixResponse {
                 ok: false,
                 check_name,
                 finding_id,
+                result: None,
                 error: Some(e.to_string()),
             }),
         }
@@ -945,16 +955,19 @@ mod tests {
             ok: true,
             check_name: "c".to_string(),
             finding_id: "f".to_string(),
+            result: None,
             error: None,
         };
         let v = serde_json::to_value(&ok).unwrap();
         assert_eq!(v["ok"], true);
+        assert!(v.as_object().unwrap().get("result").is_none());
         assert!(v.as_object().unwrap().get("error").is_none());
 
         let err = DoctorFixResponse {
             ok: false,
             check_name: "c".to_string(),
             finding_id: "f".to_string(),
+            result: None,
             error: Some("boom".to_string()),
         };
         let v = serde_json::to_value(&err).unwrap();

@@ -112,6 +112,56 @@ impl ClosedParentOpenChildrenCheck {
             })),
         )
     }
+
+    /// Apply one repair and retain its structured applied-or-skipped outcome.
+    ///
+    /// This is an inherent helper rather than a [`DoctorCheck`] trait method:
+    /// the public trait's additive `fix_with_result` seam returns JSON so it
+    /// remains independent of this check's database-specific outcome type.
+    fn repair_outcome(
+        &self,
+        finding: &Finding,
+    ) -> DoctorResult<djinn_db::repositories::task::DoctorRepairOutcome> {
+        let Some(repair_source) = &self.repair_source else {
+            return Err(DoctorError::FixNotSupported {
+                check: self.name().to_string(),
+            });
+        };
+
+        let task_id = finding
+            .entity_ids
+            .get("task_id")
+            .ok_or_else(|| {
+                DoctorError::InvalidInput(
+                    "closed_parent_open_children fix: finding missing task_id entity".to_string(),
+                )
+            })?
+            .clone();
+
+        let board_health_finding = &finding.evidence["board_health_finding"];
+        let snapshot_status = board_health_finding
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let snapshot_action = board_health_finding
+            .get("recommended_disposition")
+            .and_then(|d| d.get("action"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("retain");
+        let terminal_epic_ids = extract_string_array(board_health_finding, "terminal_epic_ids");
+        let terminal_proposal_ids =
+            extract_string_array(board_health_finding, "terminal_proposal_ids");
+
+        repair_source
+            .repair(
+                &task_id,
+                snapshot_status,
+                snapshot_action,
+                &terminal_epic_ids,
+                &terminal_proposal_ids,
+            )
+            .map_err(DoctorError::Backend)
+    }
 }
 
 impl DoctorCheck for ClosedParentOpenChildrenCheck {
@@ -151,51 +201,15 @@ impl DoctorCheck for ClosedParentOpenChildrenCheck {
     }
 
     fn fix(&self, finding: &Finding) -> DoctorResult<()> {
-        let Some(repair_source) = &self.repair_source else {
-            return Err(DoctorError::FixNotSupported {
-                check: self.name().to_string(),
-            });
-        };
+        self.repair_outcome(finding).map(|_| ())
+    }
 
-        // Extract the task_id and snapshot evidence from the persisted finding.
-        // The finding's resolver_snapshot.inputs carries the full board-health
-        // child snapshot (status, recommended_disposition, terminal_epic_ids,
-        // etc.). The evidence also carries the same data.
-        let task_id = finding
-            .entity_ids
-            .get("task_id")
-            .ok_or_else(|| {
-                DoctorError::InvalidInput(
-                    "closed_parent_open_children fix: finding missing task_id entity".to_string(),
-                )
-            })?
-            .clone();
-
-        let board_health_finding = &finding.evidence["board_health_finding"];
-        let snapshot_status = board_health_finding
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let snapshot_action = board_health_finding
-            .get("recommended_disposition")
-            .and_then(|d| d.get("action"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("retain");
-
-        let terminal_epic_ids = extract_string_array(board_health_finding, "terminal_epic_ids");
-        let terminal_proposal_ids =
-            extract_string_array(board_health_finding, "terminal_proposal_ids");
-
-        repair_source
-            .repair(
-                &task_id,
-                snapshot_status,
-                snapshot_action,
-                &terminal_epic_ids,
-                &terminal_proposal_ids,
-            )
-            .map(|_| ())
-            .map_err(DoctorError::Backend)
+    fn fix_with_result(&self, finding: &Finding) -> DoctorResult<Option<serde_json::Value>> {
+        self.repair_outcome(finding).and_then(|outcome| {
+            serde_json::to_value(outcome)
+                .map(Some)
+                .map_err(|error| DoctorError::Backend(error.to_string()))
+        })
     }
 }
 

@@ -359,6 +359,16 @@ pub trait DoctorCheck: Send + Sync {
             check: self.name().to_string(),
         })
     }
+
+    /// Attempt a fix and optionally return structured check-specific evidence
+    /// about the completed operation.
+    ///
+    /// This additive seam preserves [`fix`](Self::fix)'s public signature for
+    /// existing checks. Checks without a result payload inherit this forwarding
+    /// implementation, so their observable fix behavior remains unchanged.
+    fn fix_with_result(&self, finding: &Finding) -> DoctorResult<Option<serde_json::Value>> {
+        self.fix(finding).map(|()| None)
+    }
 }
 
 // ---------------------------------------------------------------------------
