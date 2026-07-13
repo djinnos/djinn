@@ -195,9 +195,14 @@ function bucketStart(ts: number, unit: (typeof UNITS)[number]): number {
 const populatedStarts = (stamps: number[], unit: (typeof UNITS)[number]) =>
   [...new Set(stamps.map((t) => bucketStart(t, unit)))].sort((a, b) => a - b);
 
-/** Aim for ~5–12 rings (growing ~log2 with span), snapped to a calendar interval. */
-function chooseUnit(stamps: number[], spanDays: number): (typeof UNITS)[number] {
-  const target = clamp(Math.round(4 + Math.log2(Math.max(1, spanDays / 60))), 5, 12);
+/**
+ * Aim for ~5–12 rings (growing ~log2 with span), snapped to a calendar
+ * interval. Dense graphs push the target up so the disk grows outward and
+ * thousands of notes get room instead of packing a fixed area solid.
+ */
+function chooseUnit(stamps: number[], spanDays: number, nodeCount: number): (typeof UNITS)[number] {
+  const densityBoost = nodeCount > 200 ? Math.round(Math.log2(nodeCount / 200)) : 0;
+  const target = clamp(Math.round(4 + Math.log2(Math.max(1, spanDays / 60))) + densityBoost, 5, 24);
   let best = UNITS[0];
   let bestScore = Number.POSITIVE_INFINITY;
   for (const unit of UNITS) {
@@ -258,7 +263,7 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
   let rings: DiskRing[];
   let ringIndexOf: (n: MemoryGraphOutput["nodes"][number]) => number;
   if (timed && minTs !== null && maxTs !== null) {
-    const unit = chooseUnit(stamps, (maxTs - minTs) / DAY);
+    const unit = chooseUnit(stamps, (maxTs - minTs) / DAY, rawNodes.length);
     const starts = populatedStarts(stamps, unit);
     const last = Math.max(1, starts.length - 1);
     const indexOfStart = new Map(starts.map((s, i) => [s, i]));
@@ -272,10 +277,13 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
       return ts !== null ? (indexOfStart.get(bucketStart(ts, unit)) ?? starts.length - 1) : starts.length - 1;
     };
   } else {
-    rings = Array.from({ length: RING_STEPS + 1 }, (_, i) => ({
+    // Undated fallback: scale the ring count with node count so a large
+    // graph still gets a proportionally large disk.
+    const steps = clamp(Math.round(Math.sqrt(rawNodes.length) / 6), RING_STEPS, 24);
+    rings = Array.from({ length: steps + 1 }, (_, i) => ({
       label: null,
       r: ringRadius(i),
-      ratio: recForRatio(i / RING_STEPS),
+      ratio: recForRatio(i / steps),
     }));
     ringIndexOf = (n) => {
       const rec = recOf(n);
@@ -313,6 +321,10 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
   const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
   const orderIndex = new Map(ordered.map((n, i) => [n.id, i]));
 
+  // Shrink orbs as the graph grows so dense disks read as star fields, not a
+  // solid ball. ~1500 notes is where the default size starts crowding.
+  const sizeScale = clamp(Math.sqrt(1500 / Math.max(1, rawNodes.length)), 0.45, 1);
+
   const nodes: DiskNode[] = rawNodes.map((n) => {
     const rec = recOf(n);
     const tr = placeRadius(ringIndexOf(n), n.id);
@@ -331,7 +343,7 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
       rec,
       igniteAt: igniteByNode.get(n.id) ?? rec,
       tr,
-      r: 3 + Math.sqrt(connectionCount) * 0.9 + (n.entity_type === "proposal" ? 0.6 : 0),
+      r: Math.max(1.1, (3 + Math.sqrt(connectionCount) * 0.9 + (n.entity_type === "proposal" ? 0.6 : 0)) * sizeScale),
       x: Math.cos(angle) * tr,
       y: Math.sin(angle) * tr,
       vx: 0,
@@ -356,35 +368,79 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
   return { links, maxTs, minTs, nodes, rings, timed };
 }
 
+/** Short-range repulsion cutoff (world units, squared). */
+const REPULSE_CUTOFF_SQ = 2600;
+const GRID_CELL = Math.ceil(Math.sqrt(REPULSE_CUTOFF_SQ));
+
 /**
  * Tiny bespoke force relaxation: a dominant radial spring pins each node to
  * its date band; short-range repulsion, weak link springs, and collision
  * passes fan co-timed nodes out by angle. Runs once at build time.
+ *
+ * Neighbor lookups go through a uniform grid (cell = the repulsion cutoff),
+ * so a tick is O(n · local density) instead of O(n²) — a 6.5k-note prod
+ * graph relaxes in well under a second where the naive pairwise version
+ * froze the tab.
  */
 function relax(nodes: DiskNode[], links: DiskLink[]): void {
+  const ticks = nodes.length > 2500 ? 120 : nodes.length > 800 ? 200 : 300;
+  const grid = new Map<number, number[]>();
+  const cellOf = (x: number, y: number) =>
+    (Math.floor(x / GRID_CELL) + 32768) * 65536 + (Math.floor(y / GRID_CELL) + 32768);
+
   let alpha = 1;
-  for (let tick = 0; tick < 300 && alpha > 0.02; tick += 1) {
+  for (let tick = 0; tick < ticks && alpha > 0.02; tick += 1) {
     for (const n of nodes) {
       const r = Math.hypot(n.x, n.y) || 1;
       const k = ((n.tr - r) * 0.55 * alpha) / r;
       n.vx += n.x * k;
       n.vy += n.y * k;
     }
+
+    grid.clear();
+    nodes.forEach((n, i) => {
+      const key = cellOf(n.x, n.y);
+      const cell = grid.get(key);
+      if (cell) cell.push(i);
+      else grid.set(key, [i]);
+    });
+
+    // Repulsion + positional collision in one 3×3-neighborhood sweep; each
+    // pair is handled once from the lower index.
     for (let i = 0; i < nodes.length; i += 1) {
-      for (let j = i + 1; j < nodes.length; j += 1) {
-        const a = nodes[i];
-        const b = nodes[j];
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const d2 = dx * dx + dy * dy;
-        if (d2 > 2600 || d2 === 0) continue;
-        const f = (14 * alpha) / d2;
-        a.vx -= dx * f;
-        a.vy -= dy * f;
-        b.vx += dx * f;
-        b.vy += dy * f;
+      const a = nodes[i];
+      const cx = Math.floor(a.x / GRID_CELL);
+      const cy = Math.floor(a.y / GRID_CELL);
+      for (let gx = cx - 1; gx <= cx + 1; gx += 1) {
+        for (let gy = cy - 1; gy <= cy + 1; gy += 1) {
+          const cell = grid.get((gx + 32768) * 65536 + (gy + 32768));
+          if (!cell) continue;
+          for (const j of cell) {
+            if (j <= i) continue;
+            const b = nodes[j];
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 > REPULSE_CUTOFF_SQ || d2 === 0) continue;
+            const f = (14 * alpha) / d2;
+            a.vx -= dx * f;
+            a.vy -= dy * f;
+            b.vx += dx * f;
+            b.vy += dy * f;
+            const min = a.r + b.r + 2.5;
+            if (d2 < min * min) {
+              const d = Math.sqrt(d2);
+              const push = (min - d) / d / 2;
+              a.x -= dx * push;
+              a.y -= dy * push;
+              b.x += dx * push;
+              b.y += dy * push;
+            }
+          }
+        }
       }
     }
+
     for (const l of links) {
       const a = nodes[l.a];
       const b = nodes[l.b];
@@ -403,25 +459,86 @@ function relax(nodes: DiskNode[], links: DiskLink[]): void {
       n.x += n.vx;
       n.y += n.vy;
     }
-    // Positional collision pass.
-    for (let i = 0; i < nodes.length; i += 1) {
-      for (let j = i + 1; j < nodes.length; j += 1) {
-        const a = nodes[i];
-        const b = nodes[j];
-        const min = a.r + b.r + 2.5;
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const d = Math.hypot(dx, dy);
-        if (d >= min || d === 0) continue;
-        const push = (min - d) / d / 2;
-        a.x -= dx * push;
-        a.y -= dy * push;
-        b.x += dx * push;
-        b.y += dy * push;
-      }
-    }
     alpha *= 0.985;
   }
+}
+
+// ── Orb rendering ────────────────────────────────────────────────────────────
+
+/** Supersample factor for cached orb sprites (stays crisp up to ~3× zoom). */
+const SPRITE_SS = 3;
+
+/** Paint one orb (glow + body + highlight core) at (x, y) with radius r·scale. */
+function drawOrb(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  r: number,
+  color: string,
+  bodyInk: number,
+  glowInk: number,
+  glowMult: number,
+  isProposal: boolean,
+  scale: number,
+): void {
+  const gr = r * glowMult * scale;
+  const rr = r * scale;
+  const glow = ctx.createRadialGradient(x, y, 0, x, y, gr);
+  glow.addColorStop(0, rgba(color, glowInk));
+  glow.addColorStop(1, rgba(color, 0));
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(x, y, gr, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.beginPath();
+  if (isProposal) {
+    // Proposals are diamonds; notes are orbs.
+    ctx.moveTo(x, y - rr);
+    ctx.lineTo(x + rr, y);
+    ctx.lineTo(x, y + rr);
+    ctx.lineTo(x - rr, y);
+    ctx.closePath();
+  } else {
+    ctx.arc(x, y, rr, 0, Math.PI * 2);
+  }
+  ctx.fillStyle = rgba(color, bodyInk);
+  ctx.fill();
+  // A brighter core so dense clusters read as individual stars.
+  ctx.beginPath();
+  ctx.arc(x - rr * 0.25, y - rr * 0.25, rr * 0.35, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(255,255,255,${(bodyInk * 0.5).toFixed(3)})`;
+  ctx.fill();
+}
+
+/**
+ * Cached supersampled orb sprite. Radius and ink are quantized so the cache
+ * stays bounded (colors × ~radius steps × 9 ink levels × 2 glyphs); birth and
+ * age transitions step through quantized levels, which is invisible at orb
+ * sizes.
+ */
+function orbSprite(
+  cache: Map<string, HTMLCanvasElement>,
+  color: string,
+  r: number,
+  ink: number,
+  glowMult: number,
+  isProposal: boolean,
+): HTMLCanvasElement {
+  const rq = Math.max(0.5, Math.round(r * 2) / 2);
+  const inkq = Math.round(clamp(ink, 0, 1) * 8) / 8;
+  const key = `${color}|${rq}|${inkq}|${isProposal ? "p" : "n"}|${glowMult}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+  if (cache.size > 1500) cache.clear();
+  const half = Math.ceil(rq * glowMult * SPRITE_SS) + 2;
+  const sprite = document.createElement("canvas");
+  sprite.width = half * 2;
+  sprite.height = half * 2;
+  const g = sprite.getContext("2d");
+  if (g) drawOrb(g, half, half, rq, color, inkq, inkq * 0.38, glowMult, isProposal, SPRITE_SS);
+  cache.set(key, sprite);
+  return sprite;
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -544,6 +661,10 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
     ro.observe(container);
     cameraRef.current = fitCamera(size.w, size.h, fullOuter, fullOuter);
 
+    // Orb sprite cache for this graph; tighter glow on dense disks.
+    const sprites = new Map<string, HTMLCanvasElement>();
+    const glowMult = disk.nodes.length > 1500 ? 2.4 : 3.4;
+
     // Static starfield, seeded so it never re-rolls between frames.
     const rand = createSeededRandom(7);
     const stars = Array.from({ length: 160 }, () => ({
@@ -648,68 +769,80 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
         ctx.stroke();
       });
 
-      // Links: quiet threads; a hovered node's links light up.
+      // Links: quiet threads; a hovered node's links light up. Quiet edges
+      // batch into one path per style so a 10k-edge graph costs a handful of
+      // stroke calls, not one per edge.
       const hover = hoverRef.current;
       const revealed = (idx: number) => disk.nodes[idx].igniteAt <= reveal + 1e-3;
+      const hotLinks: DiskLink[] = [];
+      const quietByStyle = new Map<string, DiskLink[]>();
       for (const l of disk.links) {
         if (!revealed(l.a) || !revealed(l.b)) continue;
-        const a = disk.nodes[l.a];
-        const b = disk.nodes[l.b];
-        const hot = hover === l.a || hover === l.b;
-        const typed = TYPED_EDGE_STYLES[l.kind];
+        if (hover === l.a || hover === l.b) {
+          hotLinks.push(l);
+          continue;
+        }
+        const bucket = quietByStyle.get(l.kind);
+        if (bucket) bucket.push(l);
+        else quietByStyle.set(l.kind, [l]);
+      }
+      for (const [kind, bucket] of quietByStyle) {
+        const typed = TYPED_EDGE_STYLES[kind];
         ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
+        for (const l of bucket) {
+          ctx.moveTo(disk.nodes[l.a].x, disk.nodes[l.a].y);
+          ctx.lineTo(disk.nodes[l.b].x, disk.nodes[l.b].y);
+        }
         if (typed) {
-          ctx.strokeStyle = rgba(typed.color, hot ? 0.85 : 0.3);
-          ctx.lineWidth = (hot ? 1.4 : 0.9) / cam.k;
+          ctx.strokeStyle = rgba(typed.color, 0.3);
+          ctx.lineWidth = 0.9 / cam.k;
           ctx.setLineDash(typed.dashed ? [4 / cam.k, 4 / cam.k] : []);
         } else {
-          ctx.strokeStyle = `rgba(148,163,184,${hot ? 0.7 : 0.14})`;
-          ctx.lineWidth = (hot ? 1.2 : 0.7) / cam.k;
+          ctx.strokeStyle = "rgba(148,163,184,0.14)";
+          ctx.lineWidth = 0.7 / cam.k;
+          ctx.setLineDash([]);
+        }
+        ctx.stroke();
+      }
+      for (const l of hotLinks) {
+        const typed = TYPED_EDGE_STYLES[l.kind];
+        ctx.beginPath();
+        ctx.moveTo(disk.nodes[l.a].x, disk.nodes[l.a].y);
+        ctx.lineTo(disk.nodes[l.b].x, disk.nodes[l.b].y);
+        if (typed) {
+          ctx.strokeStyle = rgba(typed.color, 0.85);
+          ctx.lineWidth = 1.4 / cam.k;
+          ctx.setLineDash(typed.dashed ? [4 / cam.k, 4 / cam.k] : []);
+        } else {
+          ctx.strokeStyle = "rgba(148,163,184,0.7)";
+          ctx.lineWidth = 1.2 / cam.k;
           ctx.setLineDash([]);
         }
         ctx.stroke();
       }
       ctx.setLineDash([]);
 
-      // Nodes: glow + core, aged ink, warp-in on ignite.
+      // Nodes: glow + core, aged ink, warp-in on ignite. Steady-state nodes
+      // draw from a sprite cache (one drawImage each) so big graphs never pay
+      // for per-node gradient allocation; only the hovered node paints live.
       const appear = appearRef.current;
       disk.nodes.forEach((n, i) => {
         const on = n.igniteAt <= reveal + 1e-3;
         appear[i] = clamp(appear[i] + (on ? 1 : -1) * (dt / 420), 0, 1);
         if (appear[i] <= 0.01) return;
         const birth = smooth(appear[i]);
-        const ink = styleInk(n.rec) * birth;
+        // Orphans dim to 55% so a mostly-orphan graph doesn't drown in red.
+        const ink = styleInk(n.rec) * birth * (n.isOrphan ? 0.55 : 1);
         const hot = hover === i;
         const r = n.r * (0.35 + 0.65 * birth) * (hot ? 1.25 : 1);
 
-        const glow = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 3.4);
-        glow.addColorStop(0, rgba(n.color, ink * (hot ? 0.6 : 0.38)));
-        glow.addColorStop(1, rgba(n.color, 0));
-        ctx.fillStyle = glow;
-        ctx.beginPath();
-        ctx.arc(n.x, n.y, r * 3.4, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.beginPath();
-        if (n.isProposal) {
-          // Proposals are diamonds; notes are orbs.
-          ctx.moveTo(n.x, n.y - r);
-          ctx.lineTo(n.x + r, n.y);
-          ctx.lineTo(n.x, n.y + r);
-          ctx.lineTo(n.x - r, n.y);
-          ctx.closePath();
-        } else {
-          ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+        if (hot) {
+          drawOrb(ctx, n.x, n.y, r, n.color, clamp(ink + 0.15, 0, 1), 0.6 * ink, glowMult, n.isProposal, 1);
+          return;
         }
-        ctx.fillStyle = rgba(n.color, clamp(ink + (hot ? 0.15 : 0), 0, 1));
-        ctx.fill();
-        // A brighter core so dense clusters read as individual stars.
-        ctx.beginPath();
-        ctx.arc(n.x - r * 0.25, n.y - r * 0.25, r * 0.35, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255,255,255,${(ink * 0.5).toFixed(3)})`;
-        ctx.fill();
+        const sprite = orbSprite(sprites, n.color, r, ink, glowMult, n.isProposal);
+        const w = sprite.width / SPRITE_SS;
+        ctx.drawImage(sprite, n.x - w / 2, n.y - w / 2, w, w);
       });
 
       ctx.restore();

@@ -196,14 +196,14 @@ describe("parseMemoryGraphResponse", () => {
     ]);
   });
 
-  it("passes through created_at as epoch seconds or ISO string", () => {
+  it("passes through ISO created_at and normalizes epoch seconds to ISO", () => {
     const parsed = parseMemoryGraphResponse({
       nodes: [
         { id: "num", created_at: 1773964800 },
         { id: "iso", created_at: "2026-07-12T08:00:00Z" },
       ],
     });
-    expect(parsed!.nodes[0].created_at).toBe(1773964800);
+    expect(parsed!.nodes[0].created_at).toBe(new Date(1773964800 * 1000).toISOString());
     expect(parsed!.nodes[1].created_at).toBe("2026-07-12T08:00:00Z");
   });
 
