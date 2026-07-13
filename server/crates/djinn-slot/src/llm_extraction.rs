@@ -559,8 +559,186 @@ struct EvidenceMergeResponse {
 #[cfg(any(test, feature = "test-support"))]
 pub type CandidateLookupOverride = fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate>;
 
+#[allow(clippy::too_many_arguments)]
+#[async_trait::async_trait]
+pub(crate) trait ExtractionNoteRepository: Send + Sync {
+    async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>>;
+    async fn update(
+        &self,
+        id: &str,
+        title: &str,
+        content: &str,
+        tags: &str,
+    ) -> djinn_db::Result<djinn_memory::Note>;
+    async fn update_confidence(&self, note_id: &str, signal: f64) -> djinn_db::Result<f64>;
+    async fn set_confidence(&self, note_id: &str, value: f64) -> djinn_db::Result<()>;
+    async fn get_by_permalink(
+        &self,
+        project_id: &str,
+        permalink: &str,
+    ) -> djinn_db::Result<Option<djinn_memory::Note>>;
+    async fn create_db_note_with_scope_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+        scope_paths: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> djinn_db::Result<djinn_memory::Note>;
+    async fn create_with_scope_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        permalink: Option<&str>,
+        tags: &str,
+        scope_paths: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> djinn_db::Result<djinn_memory::Note>;
+    async fn create_with_scope(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        permalink: Option<&str>,
+        tags: &str,
+        scope_paths: &str,
+    ) -> djinn_db::Result<djinn_memory::Note>;
+    async fn update_scope_paths(
+        &self,
+        id: &str,
+        scope_paths: &str,
+    ) -> djinn_db::Result<djinn_memory::Note>;
+    async fn dedup_candidates(
+        &self,
+        project_id: &str,
+        folder: &str,
+        note_type: &str,
+        text: &str,
+        limit: usize,
+    ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>>;
+}
+
+#[async_trait::async_trait]
+impl ExtractionNoteRepository for NoteRepository {
+    async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
+        NoteRepository::get(self, id).await
+    }
+    async fn update(
+        &self,
+        id: &str,
+        title: &str,
+        content: &str,
+        tags: &str,
+    ) -> djinn_db::Result<djinn_memory::Note> {
+        NoteRepository::update(self, id, title, content, tags).await
+    }
+    async fn update_confidence(&self, note_id: &str, signal: f64) -> djinn_db::Result<f64> {
+        NoteRepository::update_confidence(self, note_id, signal).await
+    }
+    async fn set_confidence(&self, note_id: &str, value: f64) -> djinn_db::Result<()> {
+        NoteRepository::set_confidence(self, note_id, value).await
+    }
+    async fn get_by_permalink(
+        &self,
+        project_id: &str,
+        permalink: &str,
+    ) -> djinn_db::Result<Option<djinn_memory::Note>> {
+        NoteRepository::get_by_permalink(self, project_id, permalink).await
+    }
+    async fn create_db_note_with_scope_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+        scope_paths: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> djinn_db::Result<djinn_memory::Note> {
+        NoteRepository::create_db_note_with_scope_and_retrieval_anchor(
+            self,
+            project_id,
+            title,
+            content,
+            note_type,
+            tags,
+            scope_paths,
+            retrieval_anchor,
+        )
+        .await
+    }
+    async fn create_with_scope_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        permalink: Option<&str>,
+        tags: &str,
+        scope_paths: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> djinn_db::Result<djinn_memory::Note> {
+        NoteRepository::create_with_scope_and_retrieval_anchor(
+            self,
+            project_id,
+            title,
+            content,
+            note_type,
+            permalink,
+            tags,
+            scope_paths,
+            retrieval_anchor,
+        )
+        .await
+    }
+    async fn create_with_scope(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        permalink: Option<&str>,
+        tags: &str,
+        scope_paths: &str,
+    ) -> djinn_db::Result<djinn_memory::Note> {
+        NoteRepository::create_with_scope(
+            self,
+            project_id,
+            title,
+            content,
+            note_type,
+            permalink,
+            tags,
+            scope_paths,
+        )
+        .await
+    }
+    async fn update_scope_paths(
+        &self,
+        id: &str,
+        scope_paths: &str,
+    ) -> djinn_db::Result<djinn_memory::Note> {
+        NoteRepository::update_scope_paths(self, id, scope_paths).await
+    }
+    async fn dedup_candidates(
+        &self,
+        project_id: &str,
+        folder: &str,
+        note_type: &str,
+        text: &str,
+        limit: usize,
+    ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
+        NoteRepository::dedup_candidates(self, project_id, folder, note_type, text, limit).await
+    }
+}
+
 struct ExtractionContext<'a> {
-    note_repo: &'a NoteRepository,
+    note_repo: &'a dyn ExtractionNoteRepository,
     provider: &'a dyn LlmProvider,
     project_id: &'a str,
     project_path: &'a str,
@@ -2835,6 +3013,319 @@ mod evidence_merge_contract_tests {
         assert_eq!(
             content,
             "merged evidence\n\n---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*"
+        );
+    }
+}
+
+#[cfg(test)]
+mod evidence_merge_regression_tests {
+    use super::*;
+    use crate::session_extraction::ExtractionQuality;
+    use djinn_core::message::ContentBlock;
+    use djinn_db::NoteDedupCandidate;
+    use djinn_provider::message::Conversation;
+    use djinn_provider::provider::{StreamEvent, ToolChoice};
+    use futures::{Future, Stream};
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone)]
+    enum RepoOp {
+        Get(String),
+        Update {
+            id: String,
+            title: String,
+            content: String,
+            tags: String,
+        },
+        UpdateConfidence {
+            id: String,
+            signal: f64,
+        },
+    }
+
+    struct RecordingExtractionRepository {
+        ops: Arc<Mutex<Vec<RepoOp>>>,
+        existing: Arc<Mutex<Option<djinn_memory::Note>>>,
+    }
+
+    impl RecordingExtractionRepository {
+        fn with_existing(existing: djinn_memory::Note) -> Self {
+            Self {
+                ops: Arc::new(Mutex::new(Vec::new())),
+                existing: Arc::new(Mutex::new(Some(existing))),
+            }
+        }
+
+        fn ops(&self) -> Vec<RepoOp> {
+            self.ops.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExtractionNoteRepository for RecordingExtractionRepository {
+        async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
+            self.ops.lock().unwrap().push(RepoOp::Get(id.to_string()));
+            Ok(self.existing.lock().unwrap().clone())
+        }
+        async fn update(
+            &self,
+            id: &str,
+            title: &str,
+            content: &str,
+            tags: &str,
+        ) -> djinn_db::Result<djinn_memory::Note> {
+            self.ops.lock().unwrap().push(RepoOp::Update {
+                id: id.to_string(),
+                title: title.to_string(),
+                content: content.to_string(),
+                tags: tags.to_string(),
+            });
+            let mut note = self.existing.lock().unwrap().clone().unwrap();
+            note.title = title.to_string();
+            note.content = content.to_string();
+            note.tags = tags.to_string();
+            Ok(note)
+        }
+        async fn update_confidence(&self, note_id: &str, signal: f64) -> djinn_db::Result<f64> {
+            self.ops.lock().unwrap().push(RepoOp::UpdateConfidence {
+                id: note_id.to_string(),
+                signal,
+            });
+            Ok(signal)
+        }
+        async fn set_confidence(&self, _note_id: &str, _value: f64) -> djinn_db::Result<()> {
+            Ok(())
+        }
+        async fn get_by_permalink(
+            &self,
+            _project_id: &str,
+            _permalink: &str,
+        ) -> djinn_db::Result<Option<djinn_memory::Note>> {
+            Ok(None)
+        }
+        async fn create_db_note_with_scope_and_retrieval_anchor(
+            &self,
+            _project_id: &str,
+            _title: &str,
+            _content: &str,
+            _note_type: &str,
+            _tags: &str,
+            _scope_paths: &str,
+            _retrieval_anchor: Option<&str>,
+        ) -> djinn_db::Result<djinn_memory::Note> {
+            unimplemented!("not used in this regression")
+        }
+        async fn create_with_scope_and_retrieval_anchor(
+            &self,
+            _project_id: &str,
+            _title: &str,
+            _content: &str,
+            _note_type: &str,
+            _permalink: Option<&str>,
+            _tags: &str,
+            _scope_paths: &str,
+            _retrieval_anchor: Option<&str>,
+        ) -> djinn_db::Result<djinn_memory::Note> {
+            unimplemented!("not used in this regression")
+        }
+        async fn create_with_scope(
+            &self,
+            _project_id: &str,
+            _title: &str,
+            _content: &str,
+            _note_type: &str,
+            _permalink: Option<&str>,
+            _tags: &str,
+            _scope_paths: &str,
+        ) -> djinn_db::Result<djinn_memory::Note> {
+            unimplemented!("not used in this regression")
+        }
+        async fn update_scope_paths(
+            &self,
+            _id: &str,
+            _scope_paths: &str,
+        ) -> djinn_db::Result<djinn_memory::Note> {
+            unimplemented!("not used in this regression")
+        }
+        async fn dedup_candidates(
+            &self,
+            _project_id: &str,
+            _folder: &str,
+            _note_type: &str,
+            _text: &str,
+            _limit: usize,
+        ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct ScriptedProvider {
+        responses: Mutex<VecDeque<String>>,
+    }
+
+    impl ScriptedProvider {
+        fn new(responses: Vec<String>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+            }
+        }
+    }
+
+    impl LlmProvider for ScriptedProvider {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _conversation: &'a Conversation,
+            _tools: &'a [serde_json::Value],
+            _tool_choice: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = anyhow::Result<
+                            Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let response = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default();
+            let stream = futures::stream::iter(vec![
+                Ok(StreamEvent::Delta(ContentBlock::Text { text: response })),
+                Ok(StreamEvent::Done),
+            ]);
+            Box::pin(async move { Ok(Box::pin(stream) as _) })
+        }
+    }
+
+    fn test_existing_note() -> djinn_memory::Note {
+        let footer = "---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*";
+        djinn_memory::Note {
+            id: "existing-note-1".to_string(),
+            project_id: "project-1".to_string(),
+            permalink: "cases/existing-note-1".to_string(),
+            title: "Existing Case".to_string(),
+            file_path: String::new(),
+            storage: "db".to_string(),
+            note_type: "case".to_string(),
+            folder: "cases".to_string(),
+            status: "active".to_string(),
+            tags: "[]".to_string(),
+            content: format!("Existing evidence\n\n{footer}"),
+            retrieval_anchor: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            last_accessed: "2026-01-01T00:00:00Z".to_string(),
+            access_count: 0,
+            confidence: 0.5,
+            abstract_: None,
+            overview: None,
+            scope_paths: "[]".to_string(),
+        }
+    }
+
+    fn test_extracted_case() -> ExtractedNote {
+        ExtractedNote {
+            title: "Fresh Case".to_string(),
+            content: "## Situation\nA session-extracted case note is produced during task finalization.\n\n## Constraint\nThe existing candidate must be a low-confidence, session-extracted note with a provenance footer.\n\n## Approach taken\nMerge the fresh evidence into the existing note body and keep the provenance footer.\n\n## Result\nThe merged body contains both the original evidence and the new evidence, with the footer preserved.\n\n## Why it worked / failed\nThe merge preserves provenance and avoids wholesale replacement while allowing future sessions to contribute additional evidence.\n\n## Reusable lesson\nSession-extracted notes below the curation threshold can absorb new evidence from later sessions without losing their original provenance.\n\n## Related\n- extraction merge\n- provenance\n".to_string(),
+            retrieval_anchor: None,
+            scope_paths: vec![],
+        }
+    }
+
+    fn test_candidate() -> NoteDedupCandidate {
+        NoteDedupCandidate {
+            id: "existing-note-1".to_string(),
+            permalink: "cases/existing-note-1".to_string(),
+            title: "Existing Case".to_string(),
+            folder: "cases".to_string(),
+            note_type: "case".to_string(),
+            content: "Existing evidence\n\n---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*".to_string(),
+            abstract_: None,
+            overview: None,
+            score: 1.0,
+        }
+    }
+
+    fn test_candidate_lookup(
+        _project_id: &str,
+        _folder: &str,
+        _note_type: &str,
+        _abstract: &str,
+    ) -> Vec<NoteDedupCandidate> {
+        vec![test_candidate()]
+    }
+
+    #[tokio::test]
+    async fn evidence_merge_persists_content_before_confidence() {
+        let provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
+            r#"{"content":"Merged evidence\n\nThe merged note now includes fresh evidence from the latest session and the original evidence."}"#.to_string(),
+        ]);
+        let repo = RecordingExtractionRepository::with_existing(test_existing_note());
+        let provenance =
+            "\n\n---\n*Extracted from session new. Confidence: 0.5 (session-extracted).*";
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance,
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let mut quality = ExtractionQuality::default();
+        process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+
+        let ops = repo.ops();
+        let update_pos = ops
+            .iter()
+            .position(|op| matches!(op, RepoOp::Update { .. }));
+        let confidence_pos = ops
+            .iter()
+            .position(|op| matches!(op, RepoOp::UpdateConfidence { .. }));
+        assert!(update_pos.is_some(), "content update must be recorded");
+        assert!(
+            confidence_pos.is_some(),
+            "confidence update must be recorded"
+        );
+        assert!(
+            update_pos.unwrap() < confidence_pos.unwrap(),
+            "content update must complete before confidence update"
+        );
+
+        let updated_content = ops
+            .iter()
+            .find_map(|op| match op {
+                RepoOp::Update { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("update op must include content");
+        assert!(
+            updated_content
+                .contains("The merged note now includes fresh evidence from the latest session"),
+            "merged content must contain the fresh evidence"
+        );
+        let footer = "---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*";
+        assert_eq!(
+            updated_content.matches(footer).count(),
+            1,
+            "the existing provenance footer must be preserved exactly once"
         );
     }
 }
