@@ -150,7 +150,10 @@ impl DoctorCheck for ClosedParentOpenChildrenCheck {
             .collect())
     }
 
-    fn fix(&self, finding: &Finding) -> DoctorResult<()> {
+    fn repair_outcome(
+        &self,
+        finding: &Finding,
+    ) -> DoctorResult<djinn_db::repositories::task::DoctorRepairOutcome> {
         let Some(repair_source) = &self.repair_source else {
             return Err(DoctorError::FixNotSupported {
                 check: self.name().to_string(),
@@ -194,8 +197,17 @@ impl DoctorCheck for ClosedParentOpenChildrenCheck {
                 &terminal_epic_ids,
                 &terminal_proposal_ids,
             )
-            .map(|_| ())
             .map_err(DoctorError::Backend)
+    }
+
+    fn fix(&self, finding: &Finding) -> DoctorResult<()> {
+        self.repair_outcome(finding).map(|_| ())
+    }
+
+    fn fix_with_result(&self, finding: &Finding) -> DoctorResult<Option<serde_json::Value>> {
+        self.repair_outcome(finding).map(|outcome| {
+            Some(serde_json::to_value(outcome).expect("DoctorRepairOutcome serializes"))
+        })
     }
 }
 
