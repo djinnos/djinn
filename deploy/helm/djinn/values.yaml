@@ -201,9 +201,11 @@ secrets:
     # If non-empty, the Deployment mounts the named Secret instead of a
     # chart-rendered one. The Secret must expose the same keys listed below.
     existingSecret: ""
-    # Literal values — rendered into a chart-managed Secret when
-    # existingSecret is empty. Leave blank in VCS; set via `--set` or
-    # a local -f overrides file.
+    # Literal values. When existingSecret is empty, the chart renders a Secret
+    # only if at least one value below is non-empty. All-empty means the Secret
+    # source is absent (required by manifest self-setup); any partial set means
+    # configuration was attempted and is exposed to the server for fatal
+    # validation. Leave blank in VCS; set via `--set` or a local override file.
     appId: ""
     privateKey: ""
     clientId: ""
@@ -379,6 +381,10 @@ env:
   # load GitHub App credentials from the mounted Secret only. This flag is
   # rendered into the server ConfigMap as DJINN_ENABLE_SELF_SETUP.
   enableSelfSetup: false
+  # Allow binding the deployment to a personal GitHub account (installation
+  # account type `User`) as well as an organization. Intended for local/solo
+  # evaluation; production remains organization-only by default.
+  allowUserInstallations: false
 
 # Arbitrary extra env injected into the server container. Useful for ad-hoc
 # tuning knobs without re-templating.

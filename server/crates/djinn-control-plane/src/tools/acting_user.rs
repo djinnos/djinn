@@ -69,8 +69,10 @@ pub(crate) async fn acting_caps(db: &Database) -> Result<Option<ActingCaps>, Str
 
 /// Resolve the effective user for an admin "act-as" operation. `None` target →
 /// the acting user (`current_user_id()`). `Some(t)` → requires the caller to be
-/// admin and returns `t`, letting an admin read/write another user's per-user
-/// config (e.g. another target user that can't self-configure).
+/// admin and verifies that `t` is a real `users.id` before returning it, letting
+/// an admin read/write another user's per-user config (e.g. another target user
+/// that can't self-configure). Rejecting unknown targets here keeps invalid UI
+/// sentinels or stale user IDs from reaching writes guarded by user FKs.
 pub(crate) async fn resolve_effective_user(
     db: &Database,
     target_user_id: Option<&str>,
@@ -79,7 +81,65 @@ pub(crate) async fn resolve_effective_user(
         None => Ok(current_user_id()),
         Some(t) => {
             require_admin(db).await?;
-            Ok(Some(t.to_string()))
+            match UserRepository::new(db.clone()).get_by_id(t).await {
+                Ok(Some(_)) => Ok(Some(t.to_string())),
+                Ok(None) => Err(format!("target user '{t}' was not found")),
+                Err(e) => Err(format!("target user lookup failed: {e}")),
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_core::auth_context::SESSION_USER_ID;
+
+    async fn seed_user(db: &Database, github_id: i64, login: &str) -> String {
+        UserRepository::new(db.clone())
+            .upsert_from_github(github_id, login, None, None)
+            .await
+            .expect("seed user")
+            .id
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn explicit_unknown_target_is_rejected_before_fk_backed_writes() {
+        let db = Database::open_in_memory().expect("open in-memory database");
+        let admin_id = seed_user(&db, 90_001, "acting-admin").await;
+        UserRepository::new(db.clone())
+            .set_admin_status(&admin_id, true)
+            .await
+            .expect("promote acting user");
+
+        let result = SESSION_USER_ID
+            .scope(Some(admin_id), async {
+                resolve_effective_user(&db, Some("__self__")).await
+            })
+            .await;
+
+        assert_eq!(
+            result,
+            Err("target user '__self__' was not found".to_string())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn explicit_existing_target_is_returned_for_admin() {
+        let db = Database::open_in_memory().expect("open in-memory database");
+        let admin_id = seed_user(&db, 90_002, "acting-admin-existing").await;
+        let target_id = seed_user(&db, 90_003, "oauth-target").await;
+        UserRepository::new(db.clone())
+            .set_admin_status(&admin_id, true)
+            .await
+            .expect("promote acting user");
+
+        let result = SESSION_USER_ID
+            .scope(Some(admin_id), async {
+                resolve_effective_user(&db, Some(&target_id)).await
+            })
+            .await;
+
+        assert_eq!(result, Ok(Some(target_id)));
     }
 }

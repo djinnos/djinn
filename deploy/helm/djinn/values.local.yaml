@@ -51,9 +51,10 @@ ingress:
 # manual credential files are needed. The `.tilt/github-app/` path with
 # `helm --set-file` is still supported as an override/fallback for operators
 # who already have credentials, but it is NOT the default local self-serve
-# path. Leave `secrets.githubApp` alone here so the chart's default path
-# (render a Secret from values) stays active; the Tiltfile overrides the
-# fields when the local files exist.
+# path. Leave `secrets.githubApp` empty here so the chart omits the
+# Secret/env/path surface; the Tiltfile overrides fields when local files exist.
+# Supplying only some files still counts as attempted configuration and remains
+# a fatal server-side validation error.
 
 # Tighter resource defaults so the whole stack fits on a laptop.
 # Server limit accounts for the in-process nomic-embed model (~1GB FP32)
@@ -176,3 +177,6 @@ env:
   # `.tilt/github-app/` credential files are needed. Operators who already
   # have credentials can still override via the Tiltfile's --set-file path.
   enableSelfSetup: true
+  # Local contributors commonly install the generated App on their personal
+  # GitHub account. Production values keep this organization-only.
+  allowUserInstallations: true

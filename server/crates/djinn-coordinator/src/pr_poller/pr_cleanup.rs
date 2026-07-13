@@ -86,11 +86,8 @@ impl PrCleanupPolicyConfig {
 impl Default for PrCleanupPolicyConfig {
     fn default() -> Self {
         let mut bot_logins = HashSet::new();
-        if let Ok(slug) = std::env::var("GITHUB_APP_SLUG") {
-            let slug = slug.trim();
-            if !slug.is_empty() {
-                bot_logins.insert(format!("{slug}[bot]"));
-            }
+        if let Some(slug) = djinn_provider::github_app::app_slug() {
+            bot_logins.insert(format!("{slug}[bot]"));
         }
         bot_logins.insert("djinn-bot[bot]".to_string());
 

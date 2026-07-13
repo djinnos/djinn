@@ -26,20 +26,15 @@ use serde::{Deserialize, Serialize};
 /// initial code exchange and refresh-token rotations.
 const GITHUB_TOKEN_ENDPOINT: &str = "https://github.com/login/oauth/access_token";
 
-/// Read the GitHub App OAuth client_id + client_secret from the process
-/// environment, returning `None` if either is missing or empty.
+/// Resolve the GitHub App OAuth client_id + client_secret from the provider's
+/// runtime credential snapshot, with environment fallback before server
+/// initialization.
 ///
 /// Centralised here so that background paths (`pr_poller`'s refresh
 /// hook) and the web layer (`/auth/github/callback`) read the same
 /// pair of env vars without duplicating the trim+empty filtering.
-pub fn client_credentials_from_env() -> Option<(String, String)> {
-    let cid = std::env::var("GITHUB_APP_CLIENT_ID")
-        .ok()
-        .filter(|v| !v.trim().is_empty())?;
-    let secret = std::env::var("GITHUB_APP_CLIENT_SECRET")
-        .ok()
-        .filter(|v| !v.trim().is_empty())?;
-    Some((cid, secret))
+pub fn client_credentials() -> Option<(String, String)> {
+    crate::github_app::oauth_client_credentials()
 }
 
 /// Tokens minted by GitHub for a user-to-server OAuth flow.
