@@ -145,14 +145,13 @@ impl DjinnMcpServer {
                 .await;
                 if let Some(new_note_id) = response.id.as_deref()
                     && response.error.is_none()
-                    && let Err(error) =
-                        apply_created_note_supersede(
-                            &repo,
-                            new_note_id,
-                            &candidate_id,
-                            &supersede_reason,
-                        )
-                        .await
+                    && let Err(error) = apply_created_note_supersede(
+                        &repo,
+                        new_note_id,
+                        &candidate_id,
+                        &supersede_reason,
+                    )
+                    .await
                 {
                     // The new note has already been durably created. Keep its normal
                     // public creation response while making incomplete association

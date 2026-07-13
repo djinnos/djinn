@@ -35,18 +35,39 @@ mod tests {
 
     impl std::ops::Deref for TestMcpServer {
         type Target = DjinnMcpServer;
-        fn deref(&self) -> &Self::Target { &self.0 }
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
     }
 
     impl TestMcpServer {
-        async fn memory_write(&self, params: Parameters<WriteParams>) -> Json<super::super::MemoryNoteResponse> {
-            REVISION_CALLER_CONTEXT.scope(test_revision_caller(), self.0.memory_write(params)).await
+        async fn memory_write(
+            &self,
+            params: Parameters<WriteParams>,
+        ) -> Json<super::super::MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT
+                .scope(test_revision_caller(), self.0.memory_write(params))
+                .await
         }
-        async fn memory_edit(&self, params: Parameters<EditParams>) -> Json<super::super::MemoryNoteResponse> {
-            REVISION_CALLER_CONTEXT.scope(test_revision_caller(), self.0.memory_edit(params)).await
+        async fn memory_edit(
+            &self,
+            params: Parameters<EditParams>,
+        ) -> Json<super::super::MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT
+                .scope(test_revision_caller(), self.0.memory_edit(params))
+                .await
         }
-        async fn memory_write_with_decider(&self, params: Parameters<WriteParams>, decider: &dyn MemoryWriteDedupDecider) -> Json<super::super::MemoryNoteResponse> {
-            REVISION_CALLER_CONTEXT.scope(test_revision_caller(), self.0.memory_write_with_decider(params, decider)).await
+        async fn memory_write_with_decider(
+            &self,
+            params: Parameters<WriteParams>,
+            decider: &dyn MemoryWriteDedupDecider,
+        ) -> Json<super::super::MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT
+                .scope(
+                    test_revision_caller(),
+                    self.0.memory_write_with_decider(params, decider),
+                )
+                .await
         }
     }
 

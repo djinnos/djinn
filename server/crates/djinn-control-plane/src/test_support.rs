@@ -30,8 +30,11 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use djinn_core::events::EventBus;
-use djinn_core::models::DjinnSettings;
+use djinn_core::{
+    auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
+    events::EventBus,
+    models::DjinnSettings,
+};
 use djinn_db::{
     Database,
     error::{DbError, DbResult},
@@ -677,8 +680,9 @@ impl McpTestHarness {
     /// name-keyed match against the `#[tool_router]` methods — so what tests
     /// assert on is the live tool surface, not a bespoke test router.
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value> {
-        self.server
-            .dispatch_tool(name, args)
+        let caller = TrustedRevisionCallerContext::authenticated_agent("mcp-test-harness");
+        REVISION_CALLER_CONTEXT
+            .scope(caller, self.server.dispatch_tool(name, args))
             .await
             .map_err(|e| anyhow!("call_tool({name}) failed: {e}"))
     }

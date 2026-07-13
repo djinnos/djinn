@@ -167,6 +167,7 @@ mod param_tests {
             "project": "/tmp/test",
             "title": "Test Note",
             "content": "hello",
+            "reason": "exercise type deserialization",
             "type": "adr"
         });
         let params: WriteParams = serde_json::from_value(json).unwrap();
@@ -179,6 +180,7 @@ mod param_tests {
             "project": "/tmp/test",
             "title": "Recovered Incident",
             "content": "details",
+            "reason": "exercise mergeable type deserialization",
             "type": "case"
         }))
         .unwrap();
@@ -189,6 +191,7 @@ mod param_tests {
             "identifier": "reference/test",
             "operation": "append",
             "content": "details",
+            "reason": "exercise mergeable type deserialization",
             "type": "pitfall"
         }))
         .unwrap();
@@ -202,6 +205,7 @@ mod param_tests {
             "identifier": "decisions/test",
             "operation": "append",
             "content": "new content",
+            "reason": "exercise type deserialization",
             "type": "pattern"
         });
         let params: EditParams = serde_json::from_value(json).unwrap();
