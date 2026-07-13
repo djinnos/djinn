@@ -9,5 +9,6 @@
 
 pub mod disposition;
 pub mod k8s;
+pub mod retrieval;
 pub mod sessions;
 pub mod slots;

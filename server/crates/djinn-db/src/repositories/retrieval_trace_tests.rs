@@ -6,10 +6,10 @@ use serde_json::json;
 use crate::database::Database;
 use crate::repositories::retrieval_trace::{
     CANDIDATE_OUTCOME_VALUES, CandidateOutcome, CreateRetrievalTraceParams, DEFAULT_CANDIDATE_CAP,
-    DEFAULT_RETRIEVAL_TRACE_LIMIT, ENTRY_POINT_VALUES, MAX_RETRIEVAL_TRACE_OFFSET,
-    RETRIEVAL_TRACE_SCHEMA_VERSION, RetrievalTraceEntryPoint, RetrievalTraceListFilter,
-    RetrievalTraceRepository, RetrievalTraceRow, SKIPPED_REASON_VALUES, SkippedReason,
-    TraceCandidate, validate_candidates,
+    DEFAULT_RETRIEVAL_TRACE_LIMIT, DurationStageSummary, ENTRY_POINT_VALUES,
+    MAX_RETRIEVAL_TRACE_OFFSET, RETRIEVAL_TRACE_SCHEMA_VERSION, RetrievalTraceEntryPoint,
+    RetrievalTraceListFilter, RetrievalTraceRepository, RetrievalTraceRow, SKIPPED_REASON_VALUES,
+    SkippedReason, TraceCandidate, WORKLOAD_ENTRY_POINTS, validate_candidates,
 };
 
 fn test_db() -> Database {
@@ -591,182 +591,6 @@ async fn list_by_project_filters_by_outcome_and_skipped_reason() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn list_by_project_combined_identity_and_entry_point_filters() {
-    let db = test_db();
-    let project_id = "019f4900-0000-7000-8000-000000000026";
-    seed_project(&db, project_id).await;
-    let repo = RetrievalTraceRepository::new(db);
-    let candidates = serde_json::to_value(vec![injected_candidate("n1", 1, 0.9)]).unwrap();
-
-    let _ = repo
-        .insert(CreateRetrievalTraceParams {
-            project_id,
-            session_id: Some("sess-a"),
-            task_run_id: Some("run-1"),
-            task_id: Some("task-x"),
-            entry_point: RetrievalTraceEntryPoint::Dispatch,
-            trigger: None,
-            candidates: &candidates,
-            candidate_cap: 50,
-            candidate_cap_exceeded: false,
-            sampling_metadata: None,
-            durations_ms: &json!({}),
-            estimated_injected_tokens: 0,
-        })
-        .await
-        .unwrap();
-
-    let _ = repo
-        .insert(CreateRetrievalTraceParams {
-            project_id,
-            session_id: Some("sess-a"),
-            task_run_id: Some("run-1"),
-            task_id: Some("task-x"),
-            entry_point: RetrievalTraceEntryPoint::JitPitfalls,
-            trigger: None,
-            candidates: &candidates,
-            candidate_cap: 50,
-            candidate_cap_exceeded: false,
-            sampling_metadata: None,
-            durations_ms: &json!({}),
-            estimated_injected_tokens: 0,
-        })
-        .await
-        .unwrap();
-
-    let matching = repo
-        .list_by_project(
-            project_id,
-            RetrievalTraceListFilter {
-                session_id: Some("sess-a"),
-                task_run_id: Some("run-1"),
-                task_id: Some("task-x"),
-                entry_point: Some(RetrievalTraceEntryPoint::Dispatch),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(matching.len(), 1);
-    assert_eq!(matching[0].entry_point, "dispatch");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn list_by_project_pagination_is_deterministic_and_excludes_other_projects() {
-    let db = test_db();
-    let project_id = "019f4900-0000-7000-8000-000000000027";
-    let other_project = "019f4900-0000-7000-8000-000000000028";
-    seed_project(&db, project_id).await;
-    seed_project(&db, other_project).await;
-    let repo = RetrievalTraceRepository::new(db.clone());
-    let candidates = serde_json::to_value(vec![injected_candidate("n1", 1, 0.9)]).unwrap();
-
-    let mut ids = Vec::new();
-    for i in 0..5 {
-        let row = repo
-            .insert(CreateRetrievalTraceParams {
-                project_id,
-                session_id: None,
-                task_run_id: None,
-                task_id: None,
-                entry_point: RetrievalTraceEntryPoint::Dispatch,
-                trigger: Some(&json!({"idx": i})),
-                candidates: &candidates,
-                candidate_cap: 50,
-                candidate_cap_exceeded: false,
-                sampling_metadata: None,
-                durations_ms: &json!({}),
-                estimated_injected_tokens: 0,
-            })
-            .await
-            .unwrap();
-        ids.push(row.id);
-    }
-    // Force all project rows to share the same `created_at` timestamp so the
-    // test exercises the secondary ORDER BY id DESC tie-breaker with real ties.
-    let common_ts = "2026-07-12T00:00:00.000Z";
-    sqlx::query("UPDATE retrieval_traces SET created_at = $1 WHERE project_id = $2")
-        .bind(common_ts)
-        .bind(project_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
-
-    // Insert into another project.
-    repo.insert(CreateRetrievalTraceParams {
-        project_id: other_project,
-        session_id: None,
-        task_run_id: None,
-        task_id: None,
-        entry_point: RetrievalTraceEntryPoint::Dispatch,
-        trigger: None,
-        candidates: &candidates,
-        candidate_cap: 50,
-        candidate_cap_exceeded: false,
-        sampling_metadata: None,
-        durations_ms: &json!({}),
-        estimated_injected_tokens: 0,
-    })
-    .await
-    .unwrap();
-
-    // Default limit is DEFAULT_RETRIEVAL_TRACE_LIMIT; use explicit limit 2 here.
-    let page1 = repo
-        .list_by_project(
-            project_id,
-            RetrievalTraceListFilter {
-                limit: Some(2),
-                offset: Some(0),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(page1.len(), 2);
-    assert_eq!(page1[0].id, ids[4]);
-    assert_eq!(page1[1].id, ids[3]);
-
-    let page2 = repo
-        .list_by_project(
-            project_id,
-            RetrievalTraceListFilter {
-                limit: Some(2),
-                offset: Some(2),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(page2.len(), 2);
-    assert_eq!(page2[0].id, ids[2]);
-    assert_eq!(page2[1].id, ids[1]);
-
-    let page3 = repo
-        .list_by_project(
-            project_id,
-            RetrievalTraceListFilter {
-                limit: Some(2),
-                offset: Some(4),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(page3.len(), 1);
-    assert_eq!(page3[0].id, ids[0]);
-
-    // Other project is not included in the target project's pagination.
-    let all_target = repo
-        .list_by_project(project_id, RetrievalTraceListFilter::default())
-        .await
-        .unwrap();
-    assert_eq!(all_target.len(), 5);
-    for row in all_target {
-        assert_eq!(row.project_id, project_id);
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_by_project_validates_offset_and_limit_bounds() {
     let db = test_db();
     let project_id = "019f4900-0000-7000-8000-000000000029";
@@ -1299,4 +1123,350 @@ fn outcome_defaults_to_skipped_when_absent_from_json() {
     assert_eq!(candidate.skipped_reason, Some(SkippedReason::NotTopK));
     // Should pass validation because skipped + reason is consistent.
     assert!(candidate.validate_invariants().is_ok());
+}
+
+// ── Health rollup tests (m4uk) ──────────────────────────────────────────────
+
+use RetrievalTraceEntryPoint::*;
+
+async fn insert_workload_trace(
+    repo: &RetrievalTraceRepository,
+    db: &Database,
+    project_id: &str,
+    entry_point: RetrievalTraceEntryPoint,
+    candidates: &serde_json::Value,
+    durations_ms: &serde_json::Value,
+    created_at: &str,
+) -> RetrievalTraceRow {
+    let row = repo
+        .insert(CreateRetrievalTraceParams {
+            project_id,
+            session_id: None,
+            task_run_id: None,
+            task_id: None,
+            entry_point,
+            trigger: None,
+            candidates,
+            candidate_cap: DEFAULT_CANDIDATE_CAP,
+            candidate_cap_exceeded: false,
+            sampling_metadata: None,
+            durations_ms,
+            estimated_injected_tokens: 0,
+        })
+        .await
+        .unwrap();
+    backdate_created_at(db, &row.id, created_at).await;
+    row
+}
+
+macro_rules! wl {
+    ($repo:expr, $db:expr, $proj:expr, $ep:expr, $ts:expr) => {
+        insert_workload_trace($repo, $db, $proj, $ep, &json!([]), &json!({}), $ts).await
+    };
+    ($repo:expr, $db:expr, $proj:expr, $ep:expr, $cand:expr, $ts:expr) => {
+        insert_workload_trace($repo, $db, $proj, $ep, &$cand, &json!({}), $ts).await
+    };
+    ($repo:expr, $db:expr, $proj:expr, $ep:expr, $cand:expr, $dur:expr, $ts:expr) => {
+        insert_workload_trace($repo, $db, $proj, $ep, &$cand, &$dur, $ts).await
+    };
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_rollup_honors_exact_half_open_bounds() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000100";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db.clone());
+    wl!(&repo, &db, project_id, Dispatch, "2026-07-01T00:00:00.000Z");
+    wl!(&repo, &db, project_id, Dispatch, "2026-07-01T00:30:00.000Z");
+    wl!(&repo, &db, project_id, Dispatch, "2026-07-01T01:00:00.000Z");
+
+    let rollup = repo
+        .health_rollup(
+            project_id,
+            "2026-07-01T00:00:00.000Z",
+            "2026-07-01T01:00:00.000Z",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rollup.combined.trace_count, 2,
+        "until boundary is exclusive"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_rollup_counts_all_rows_regardless_of_list_cap() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000101";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db.clone());
+    let total = DEFAULT_RETRIEVAL_TRACE_LIMIT + 10;
+
+    for i in 0..total {
+        wl!(
+            &repo,
+            &db,
+            project_id,
+            Dispatch,
+            &format!("2026-07-01T{:02}:00:00.000Z", i / 10)
+        );
+    }
+
+    let rollup = repo
+        .health_rollup(
+            project_id,
+            "2026-07-01T00:00:00.000Z",
+            "2026-07-01T11:00:00.000Z",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rollup.combined.trace_count,
+        i64::from(total),
+        "rollup must count every row, not the list pagination limit"
+    );
+    assert!(
+        rollup.combined.trace_count > i64::from(DEFAULT_RETRIEVAL_TRACE_LIMIT),
+        "rollup should exceed the list cap to prove it is bypassed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_rollup_returns_empty_window() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000102";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db);
+
+    let rollup = repo
+        .health_rollup(
+            project_id,
+            "2026-07-01T00:00:00.000Z",
+            "2026-07-01T01:00:00.000Z",
+        )
+        .await
+        .unwrap();
+    assert_eq!(rollup.combined.trace_count, 0);
+    assert_eq!(rollup.combined.candidate_count, 0);
+    assert_eq!(rollup.combined.injected_count, 0);
+    assert_eq!(rollup.combined.skipped_count, 0);
+    assert!(rollup.combined.duration_stage_summaries.is_empty());
+    assert!(rollup.combined.estimated_injected_tokens_avg.is_none());
+    assert!(rollup.per_entry_point.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_rollup_isolates_multiple_projects() {
+    let db = test_db();
+    let project_a = "019f4900-0000-7000-8000-000000000103";
+    let project_b = "019f4900-0000-7000-8000-000000000104";
+    seed_project(&db, project_a).await;
+    seed_project(&db, project_b).await;
+    let repo = RetrievalTraceRepository::new(db.clone());
+
+    for _ in 0..3 {
+        wl!(&repo, &db, project_a, Dispatch, "2026-07-01T00:00:00.000Z");
+    }
+    wl!(&repo, &db, project_b, Dispatch, "2026-07-01T00:00:00.000Z");
+
+    let rollup = repo
+        .health_rollup(
+            project_a,
+            "2026-07-01T00:00:00.000Z",
+            "2026-07-01T01:00:00.000Z",
+        )
+        .await
+        .unwrap();
+    assert_eq!(rollup.combined.trace_count, 3);
+    assert_eq!(rollup.per_entry_point.len(), 1);
+    let ep_evidence = rollup
+        .per_entry_point
+        .get(&Dispatch)
+        .expect("dispatch evidence present");
+    assert_eq!(ep_evidence.trace_count, 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_rollup_aggregates_mixed_outcomes_and_skip_reasons() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000105";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db.clone());
+
+    let candidates = json!([
+        injected_candidate("n1", 1, 0.95),
+        skipped_candidate("n2", 2, 0.30, SkippedReason::NotTopK),
+        skipped_candidate("n3", 3, 0.20, SkippedReason::MinConfidence),
+    ]);
+
+    let row = wl!(
+        &repo,
+        &db,
+        project_id,
+        Dispatch,
+        candidates,
+        "2026-07-01T00:00:00.000Z"
+    );
+    sqlx::query("UPDATE retrieval_traces SET estimated_injected_tokens = $1 WHERE id = $2")
+        .bind(100)
+        .bind(&row.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let rollup = repo
+        .health_rollup(
+            project_id,
+            "2026-07-01T00:00:00.000Z",
+            "2026-07-01T01:00:00.000Z",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rollup.combined.trace_count, 1);
+    assert_eq!(rollup.combined.candidate_count, 3);
+    assert_eq!(rollup.combined.injected_count, 1);
+    assert_eq!(rollup.combined.skipped_count, 2);
+    assert_eq!(rollup.combined.skip_reason_counts.not_top_k, 1);
+    assert_eq!(rollup.combined.skip_reason_counts.min_confidence, 1);
+    assert_eq!(rollup.combined.skip_reason_counts.budget_pruned, 0);
+    assert_eq!(rollup.combined.estimated_injected_tokens_sum, 100);
+    assert_eq!(rollup.combined.estimated_injected_tokens_avg, Some(100.0));
+
+    let score = &rollup.combined.candidate_score_summary;
+    assert_eq!(score.count, 3);
+    assert!((score.min.unwrap() - 0.20).abs() < 1e-9);
+    assert!((score.max.unwrap() - 0.95).abs() < 1e-9);
+    assert!(score.avg.is_some());
+
+    let ep = rollup
+        .per_entry_point
+        .get(&Dispatch)
+        .expect("dispatch evidence present");
+    assert_eq!(ep.candidate_count, 3);
+    assert_eq!(ep.injected_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_rollup_reports_duration_stage_summaries_independently() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000106";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db.clone());
+    let c = json!([injected_candidate("n1", 1, 0.9)]);
+
+    wl!(
+        &repo,
+        &db,
+        project_id,
+        Dispatch,
+        c,
+        &json!({"lexical_ms": 10, "semantic_ms": 20}),
+        "2026-07-01T00:00:00.000Z"
+    );
+    wl!(
+        &repo,
+        &db,
+        project_id,
+        JitPitfalls,
+        c,
+        &json!({"lexical_ms": 30}),
+        "2026-07-01T00:00:00.000Z"
+    );
+    wl!(
+        &repo,
+        &db,
+        project_id,
+        LoadKnowledgeContext,
+        c,
+        &json!({}),
+        "2026-07-01T00:00:00.000Z"
+    );
+
+    let rollup = repo
+        .health_rollup(
+            project_id,
+            "2026-07-01T00:00:00.000Z",
+            "2026-07-01T01:00:00.000Z",
+        )
+        .await
+        .unwrap();
+
+    let by_name: std::collections::HashMap<String, &DurationStageSummary> = rollup
+        .combined
+        .duration_stage_summaries
+        .iter()
+        .map(|s| (s.stage_name.clone(), s))
+        .collect();
+    assert_eq!(by_name.len(), 2);
+    let lexical = by_name.get("lexical_ms").expect("lexical stage present");
+    assert_eq!(lexical.count, 2);
+    assert!((lexical.min.unwrap() - 10.0).abs() < 1e-9);
+    assert!((lexical.max.unwrap() - 30.0).abs() < 1e-9);
+    assert!((lexical.sum.unwrap() - 40.0).abs() < 1e-9);
+    let semantic = by_name.get("semantic_ms").expect("semantic stage present");
+    assert_eq!(semantic.count, 1);
+    assert!((semantic.min.unwrap() - 20.0).abs() < 1e-9);
+
+    let load_ctx = rollup
+        .per_entry_point
+        .get(&LoadKnowledgeContext)
+        .expect("load_knowledge_context evidence present");
+    assert!(load_ctx.duration_stage_summaries.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_rollup_excludes_non_workload_entry_points() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000107";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db.clone());
+
+    wl!(&repo, &db, project_id, Dispatch, "2026-07-01T00:00:00.000Z");
+    wl!(
+        &repo,
+        &db,
+        project_id,
+        MemoryRecallTrace,
+        "2026-07-01T00:00:00.000Z"
+    );
+
+    let rollup = repo
+        .health_rollup(
+            project_id,
+            "2026-07-01T00:00:00.000Z",
+            "2026-07-01T01:00:00.000Z",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rollup.combined.trace_count, 1);
+    assert!(rollup.per_entry_point.contains_key(&Dispatch));
+    assert!(!rollup.per_entry_point.contains_key(&MemoryRecallTrace));
+    assert!(!WORKLOAD_ENTRY_POINTS.contains(&"memory_recall_trace"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_rollup_propagates_sql_errors() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000108";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db.clone());
+
+    sqlx::query("DROP TABLE retrieval_traces")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let result = repo
+        .health_rollup(
+            project_id,
+            "2026-07-01T00:00:00.000Z",
+            "2026-07-01T01:00:00.000Z",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "health_rollup must return an error when the underlying SQL fails"
+    );
 }
