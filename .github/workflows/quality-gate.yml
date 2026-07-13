@@ -699,28 +699,25 @@ jobs:
           SHARD_INDEX: ${{ matrix.shardIndex }}
         run: |
           set -euo pipefail
-          filter="$(jq -r --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .filter' nextest-plan/matrix.json)"
-          test_ids="$(jq -c --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .testIds' nextest-plan/matrix.json)"
-          [ -n "$filter" ] && [ "$filter" != null ] || { echo "::error::Could not resolve filter for shard $SHARD_INDEX"; exit 1; }
-          [ -n "$test_ids" ] && [ "$test_ids" != null ] || { echo "::error::Could not resolve test IDs for shard $SHARD_INDEX"; exit 1; }
-          echo "NEXTEST_FILTER=$filter" >> "$GITHUB_ENV"
-          echo "NEXTEST_TEST_IDS=$test_ids" >> "$GITHUB_ENV"
+          shard_count="$(jq --argjson idx "$SHARD_INDEX" '[.shards[] | select(.shardIndex == $idx)] | length' nextest-plan/matrix.json)"
+          [ "$shard_count" -eq 1 ] || { echo "::error::Expected exactly one plan entry for shard $SHARD_INDEX, found $shard_count"; exit 1; }
+          jq -er --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .filter | select(type == "string" and length > 0)' nextest-plan/matrix.json > nextest-plan/shard-filter.txt
+          jq -ec --argjson idx "$SHARD_INDEX" '.shards[] | select(.shardIndex == $idx) | .testIds | select(type == "array")' nextest-plan/matrix.json > nextest-plan/shard-test-ids.json
       - name: Run planner-emitted test filter and record shard timing
         env:
           NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
-          NEXTEST_FILTER: ${{ env.NEXTEST_FILTER }}
-          NEXTEST_TEST_IDS: ${{ env.NEXTEST_TEST_IDS }}
         run: |
           set -uo pipefail
           started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           started_seconds=$(date +%s)
           set +e
-          cargo nextest run --workspace --all-targets --features qdrant --profile "$NEXTEST_PROFILE" --filter-expr "$NEXTEST_FILTER"
+          cargo nextest run --workspace --all-targets --features qdrant --profile "$NEXTEST_PROFILE" --filter-expr "$(cat nextest-plan/shard-filter.txt)"
           status=$?
           set -e
           elapsed_seconds=$(( $(date +%s) - started_seconds ))
           mkdir -p nextest-timing
-          jq --arg generated_at "$started_at" --argjson elapsed "$elapsed_seconds" --argjson ids "$NEXTEST_TEST_IDS" '
+          jq --arg generated_at "$started_at" --argjson elapsed "$elapsed_seconds" --slurpfile ids nextest-plan/shard-test-ids.json '
+            ($ids[0]) as $ids |
             ($ids | length) as $count |
             {
               version: "ci-nextest-timing/v1",
