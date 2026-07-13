@@ -12,7 +12,7 @@ Use `shell` to read the relevant files in the workspace. Focus on files related 
 
 **Batch independent reads into one turn.** Every assistant turn is a metered request that re-reads your whole context, so don't read files one-per-turn. When you need to inspect several changed files (or run several independent `grep`/`lsp` lookups), emit all of those tool calls in a single turn — they dispatch in parallel. Use `offset`/`limit` to read enough of a large file in one pass. Only serialize a call that genuinely needs a previous result.
 
-For memory-note changes, inspect notes via the registered memory MCP tools (`memory_read`, `memory_search`, `memory_list`, `memory_build_context`) — memory is not stored in the workspace filesystem, so don't try to read note files from disk.
+For memory-note changes, inspect notes via the registered memory MCP tools (`memory_read`, `memory_search`, `memory_list`, `memory_build_context`) — memory is not stored in the workspace filesystem, so don't try to read note files from disk. **`memory_search` query contract:** Formulate each query as a declarative, self-contained statement of one information need. Do not use question wording or retrieval-meta phrases such as `find`, `information about`, or `search for`. Preserve discriminative symbol names, exact errors, and config keys. Worker-issued searches remain lexical/BM25-only until 72iu; do not assume embeddings.
 
 ### Step 2: Check Each Criterion
 

@@ -1448,6 +1448,25 @@ async fn process_extracted_note(
                         "boost_fallback",
                     )
                     .await;
+                    extraction_quality.boost_fallback += 1;
+                    tracing::debug!(
+                        session_id = %extraction_context.session_id,
+                        note_type = %note_type,
+                        title = %note.title,
+                        existing_note_id = %candidate_id,
+                        outcome = "boost_fallback",
+                        "llm_extraction: already-known decision completed with confidence-only fallback"
+                    );
+                } else {
+                    extraction_quality.evidence_merged += 1;
+                    tracing::debug!(
+                        session_id = %extraction_context.session_id,
+                        note_type = %note_type,
+                        title = %note.title,
+                        existing_note_id = %candidate_id,
+                        outcome = "evidence_merged",
+                        "llm_extraction: already-known decision completed with evidence merge"
+                    );
                 }
                 extraction_quality.novelty_skipped += 1;
                 extraction_quality.merged += 1;
@@ -3048,6 +3067,7 @@ mod evidence_merge_regression_tests {
     struct RecordingExtractionRepository {
         ops: Arc<Mutex<Vec<RepoOp>>>,
         existing: Arc<Mutex<Option<djinn_memory::Note>>>,
+        fail_updates: bool,
     }
 
     impl RecordingExtractionRepository {
@@ -3055,11 +3075,30 @@ mod evidence_merge_regression_tests {
             Self {
                 ops: Arc::new(Mutex::new(Vec::new())),
                 existing: Arc::new(Mutex::new(Some(existing))),
+                fail_updates: false,
+            }
+        }
+
+        fn with_update_failure(existing: djinn_memory::Note) -> Self {
+            Self {
+                ops: Arc::new(Mutex::new(Vec::new())),
+                existing: Arc::new(Mutex::new(Some(existing))),
+                fail_updates: true,
             }
         }
 
         fn ops(&self) -> Vec<RepoOp> {
             self.ops.lock().unwrap().clone()
+        }
+
+        fn existing_content(&self) -> String {
+            self.existing
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("test repository retains existing note")
+                .content
+                .clone()
         }
     }
 
@@ -3082,6 +3121,11 @@ mod evidence_merge_regression_tests {
                 content: content.to_string(),
                 tags: tags.to_string(),
             });
+            if self.fail_updates {
+                return Err(djinn_db::Error::Internal(
+                    "controlled content update failure".to_string(),
+                ));
+            }
             let mut note = self.existing.lock().unwrap().clone().unwrap();
             note.title = title.to_string();
             note.content = content.to_string();
@@ -3161,14 +3205,35 @@ mod evidence_merge_regression_tests {
         }
     }
 
+    enum ScriptedProviderResponse {
+        Text(String),
+        TransportError,
+    }
+
     struct ScriptedProvider {
-        responses: Mutex<VecDeque<String>>,
+        responses: Mutex<VecDeque<ScriptedProviderResponse>>,
     }
 
     impl ScriptedProvider {
         fn new(responses: Vec<String>) -> Self {
             Self {
-                responses: Mutex::new(responses.into_iter().collect()),
+                responses: Mutex::new(
+                    responses
+                        .into_iter()
+                        .map(ScriptedProviderResponse::Text)
+                        .collect(),
+                ),
+            }
+        }
+
+        fn with_transport_error_after(responses: Vec<String>) -> Self {
+            let mut responses: VecDeque<_> = responses
+                .into_iter()
+                .map(ScriptedProviderResponse::Text)
+                .collect();
+            responses.push_back(ScriptedProviderResponse::TransportError);
+            Self {
+                responses: Mutex::new(responses),
             }
         }
     }
@@ -3198,7 +3263,15 @@ mod evidence_merge_regression_tests {
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or_default();
+                .unwrap_or_else(|| ScriptedProviderResponse::Text(String::new()));
+            if matches!(response, ScriptedProviderResponse::TransportError) {
+                return Box::pin(async {
+                    Err(anyhow::anyhow!("controlled provider transport failure"))
+                });
+            }
+            let ScriptedProviderResponse::Text(response) = response else {
+                unreachable!("transport errors return before constructing a stream");
+            };
             let stream = futures::stream::iter(vec![
                 Ok(StreamEvent::Delta(ContentBlock::Text { text: response })),
                 Ok(StreamEvent::Done),
@@ -3326,6 +3399,193 @@ mod evidence_merge_regression_tests {
             updated_content.matches(footer).count(),
             1,
             "the existing provenance footer must be preserved exactly once"
+        );
+        assert_eq!(quality.evidence_merged, 1);
+        assert_eq!(quality.boost_fallback, 0);
+    }
+
+    #[tokio::test]
+    async fn provider_transport_failure_falls_back_without_aborting_extraction() {
+        let provider = ScriptedProvider::with_transport_error_after(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
+        ]);
+        let repo = RecordingExtractionRepository::with_existing(test_existing_note());
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "\n\n---\n*Extracted from session new. Confidence: 0.5 (session-extracted).*",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let mut quality = ExtractionQuality::default();
+        process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+
+        assert_eq!(quality.evidence_merged, 0);
+        assert_eq!(quality.boost_fallback, 1);
+        assert_eq!(quality.novelty_skipped, 1);
+        assert_eq!(
+            quality.merged, 1,
+            "fallback remains a successful terminal path"
+        );
+        let ops = repo.ops();
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+                .count(),
+            1,
+            "transport failure must retain exactly one confidence-only boost"
+        );
+        assert!(
+            !ops.iter().any(|op| matches!(op, RepoOp::Update { .. })),
+            "transport failure must not persist content"
+        );
+    }
+
+    #[tokio::test]
+    async fn content_update_failure_falls_back_without_aborting_extraction() {
+        let original_content = test_existing_note().content;
+        let provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
+            r#"{"content":"Merged evidence that cannot be persisted because the controlled repository update fails."}"#.to_string(),
+        ]);
+        let repo = RecordingExtractionRepository::with_update_failure(test_existing_note());
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "\n\n---\n*Extracted from session new. Confidence: 0.5 (session-extracted).*",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let mut quality = ExtractionQuality::default();
+        process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+
+        assert_eq!(quality.evidence_merged, 0);
+        assert_eq!(quality.boost_fallback, 1);
+        assert_eq!(quality.novelty_skipped, 1);
+        assert_eq!(
+            quality.merged, 1,
+            "fallback remains a successful terminal path"
+        );
+        let ops = repo.ops();
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, RepoOp::Update { .. }))
+                .count(),
+            1,
+            "the controlled repository must receive the failed persistence attempt"
+        );
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+                .count(),
+            1,
+            "update failure must retain exactly one confidence-only boost"
+        );
+        assert_eq!(
+            repo.existing_content(),
+            original_content,
+            "failed persistence must leave the existing content unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_merge_response_falls_back_without_aborting_extraction() {
+        let provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
+            "not valid merge json".to_string(),
+        ]);
+        let repo = RecordingExtractionRepository::with_existing(test_existing_note());
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "\n\n---\n*Extracted from session new. Confidence: 0.5 (session-extracted).*",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let mut quality = ExtractionQuality::default();
+        process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+
+        assert_eq!(quality.evidence_merged, 0);
+        assert_eq!(quality.boost_fallback, 1);
+        assert_eq!(
+            quality.novelty_skipped, 1,
+            "fallback remains a successful terminal path"
+        );
+        assert!(
+            repo.ops()
+                .iter()
+                .any(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+        );
+        assert!(
+            !repo
+                .ops()
+                .iter()
+                .any(|op| matches!(op, RepoOp::Update { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_high_confidence_note_is_classified_as_boost_fallback() {
+        let provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
+        ]);
+        let mut protected = test_existing_note();
+        protected.confidence = EVIDENCE_MERGE_MAX_CONFIDENCE;
+        let repo = RecordingExtractionRepository::with_existing(protected);
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "footer",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let mut quality = ExtractionQuality::default();
+        process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+
+        assert_eq!(quality.evidence_merged, 0);
+        assert_eq!(quality.boost_fallback, 1);
+        assert!(
+            repo.ops()
+                .iter()
+                .any(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+        );
+        assert!(
+            !repo
+                .ops()
+                .iter()
+                .any(|op| matches!(op, RepoOp::Update { .. }))
         );
     }
 }

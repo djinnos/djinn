@@ -13,6 +13,8 @@ Your task `design` contains the proposal id. There is **no `epic_id`** on this t
 
 ### D2. Survey the target repos
 
+**`memory_search` query contract:** Formulate each query as a declarative, self-contained statement of one information need. Do not use question wording or retrieval-meta phrases such as `find`, `information about`, or `search for`. Preserve discriminative symbol names, exact errors, and config keys. Worker-issued searches remain lexical/BM25-only until 72iu; do not assume embeddings.
+
 Before deciding the epic shape, ground yourself in the actual code. Every target repo is directly readable:
 - **Read any file in any target**: `read(project="owner/repo", file_path="...")` — served from that repo's default branch.
 - **Search within a target or across ALL repos**: `code_search(query="...", project="owner/repo")`, or omit `project` to search every registered repo at once (e.g. find all callers of an interface the proposal touches).
