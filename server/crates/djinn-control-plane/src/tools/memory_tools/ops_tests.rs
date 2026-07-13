@@ -1075,6 +1075,72 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_health_reports_unavailable_process_snapshot_with_required_retrieval() {
+        let setup = setup_server().await;
+        setup.server.state.retrieval_metrics().poison_for_testing();
+
+        let response = ops::memory_health(
+            &setup.server,
+            HealthParams {
+                project: Some(setup.project),
+            },
+        )
+        .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert!(
+            serde_json::to_value(&response)
+                .expect("serialize health response")
+                .get("retrieval")
+                .is_some()
+        );
+        assert_eq!(response.retrieval.persisted.status, "available");
+        assert_eq!(response.retrieval.process.status, "unavailable");
+        assert_eq!(
+            response.retrieval.process.error_code.as_deref(),
+            Some("process_snapshot_unavailable")
+        );
+        assert!(response.retrieval.process.started_at.is_some());
+        assert!(response.retrieval.process.window_start.is_some());
+        assert!(response.retrieval.process.window_end.is_some());
+        assert!(response.retrieval.process.summaries.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_health_reports_unavailable_rollup_with_required_retrieval() {
+        let setup = setup_server().await;
+        sqlx::query("DROP TABLE retrieval_traces")
+            .execute(setup.server.state.db().pool())
+            .await
+            .expect("drop trace table to force rollup failure");
+
+        let response = ops::memory_health(
+            &setup.server,
+            HealthParams {
+                project: Some(setup.project),
+            },
+        )
+        .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert!(
+            serde_json::to_value(&response)
+                .expect("serialize health response")
+                .get("retrieval")
+                .is_some()
+        );
+        assert_eq!(response.retrieval.persisted.status, "unavailable");
+        assert_eq!(
+            response.retrieval.persisted.error_code.as_deref(),
+            Some("rollup_unavailable")
+        );
+        assert!(response.retrieval.persisted.window_start.is_some());
+        assert!(response.retrieval.persisted.window_end.is_some());
+        assert!(response.retrieval.persisted.summaries.is_empty());
+        assert_eq!(response.retrieval.process.status, "available");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_search_records_telemetry_once() {
         let setup = setup_server().await;
 
