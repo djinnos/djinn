@@ -7728,6 +7728,13 @@
               "description": "Entity type discriminator: `\"note\"` for note rows, `\"proposal\"` for\nproposal rows. Defaults to `\"note\"` so existing serialized responses\nremain backward-compatible.",
               "type": "string",
               "default": "note"
+            },
+            "created_at": {
+              "description": "Creation time (ISO-8601 UTC string, as stored). Drives the graph\ncanvas time axis; optional so older serialized responses stay valid.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [

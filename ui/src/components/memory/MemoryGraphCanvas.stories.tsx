@@ -18,6 +18,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { MemoryGraphCanvas } from "./MemoryGraphCanvas";
+import { createSeededRandom } from "@/lib/memoryGraphAdapter";
 import { setMcpToolResponder } from "@/storybook-mocks/mcpClient";
 
 // ── Seeded memory_graph payloads ─────────────────────────────────────────────
@@ -163,6 +164,42 @@ const largePayload = {
   ],
 };
 
+/**
+ * Prod-scale synthetic payload (~6.5k notes over five months, recency-heavy,
+ * ~55% orphans — the shape that broke the first cut of this canvas). Seeded so
+ * every render is identical.
+ */
+function densePayload(count = 6500) {
+  const rng = createSeededRandom(11);
+  const types = ["pitfall", "case", "adr", "pattern", "reference", "research", "entity", "claim"];
+  const start = ts("2026-02-15T00:00:00Z");
+  const end = ts("2026-07-13T00:00:00Z");
+  const nodes = [];
+  const edges = [];
+  for (let i = 0; i < count; i += 1) {
+    // Recency-heavy spread (prod memory grows over time), with day-level noise.
+    const t = start + Math.floor(Math.pow(rng(), 0.6) * (end - start));
+    const note_type = types[Math.floor(rng() * types.length)];
+    const is_orphan = rng() < 0.55;
+    const connection_count = is_orphan ? 0 : Math.floor(rng() * rng() * 12);
+    nodes.push({
+      id: `n${i}`,
+      permalink: `memory/${note_type}/n${i}`,
+      title: `Synthetic note ${i}`,
+      note_type,
+      folder: `memory/${note_type}`,
+      connection_count,
+      is_orphan,
+      broken_targets: [],
+      created_at: t,
+    });
+    if (i > 0 && !is_orphan && rng() < 0.6) {
+      edges.push({ source_id: `n${i}`, target_id: `n${Math.floor(rng() * i)}`, raw_text: `Synthetic note` });
+    }
+  }
+  return { nodes, edges, typed_edges: [] };
+}
+
 /** Same notes with `created_at` stripped — drives the ordinal-fallback path. */
 const undatedPayload = {
   ...smallPayload,
@@ -215,6 +252,13 @@ export const SmallGraph: Story = {
 export const LargeGraph: Story = {
   beforeEach: () => {
     setMcpToolResponder(graphResponder(largePayload));
+  },
+};
+
+/** ~6.5k dated notes (prod scale) — layout speed, density scaling, orphan dimming. */
+export const DenseGraph: Story = {
+  beforeEach: () => {
+    setMcpToolResponder(graphResponder(densePayload()));
   },
 };
 

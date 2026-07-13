@@ -1,7 +1,9 @@
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
+use djinn_core::auth_context::{
+    REVISION_CALLER_CONTEXT, SESSION_USER_ID, SESSION_USER_TOKEN, TrustedRevisionCallerContext,
+};
 use serde_json::Value;
 
 use super::AppState;
@@ -74,8 +76,11 @@ pub(super) async fn mcp_handler(State(state): State<AppState>, req: Request) -> 
         .scope(
             user_token,
             SESSION_USER_ID.scope(
-                user_id,
-                dispatch(state.clone(), worktree_root, payload.clone()),
+                user_id.clone(),
+                REVISION_CALLER_CONTEXT.scope(
+                    user_id.and_then(TrustedRevisionCallerContext::authenticated_human),
+                    dispatch(state.clone(), worktree_root, payload.clone()),
+                ),
             ),
         )
         .await;

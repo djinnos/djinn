@@ -5,10 +5,38 @@
 //! [`crate::host::SlotToolDispatcher`] trait.  No `djinn-agent` imports.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use crate::host::{SlotContext, SlotToolDispatcher};
 use djinn_provider::message::ContentBlock;
 use djinn_provider::provider::telemetry;
+
+use super::phase::SessionPhaseTracker;
+
+/// Balances the session phase around an entire outer tool dispatch, including
+/// retries and backoff. Nested and parallel calls share tracker depth.
+struct ToolPhaseGuard<'a> {
+    tracker: &'a Arc<Mutex<SessionPhaseTracker>>,
+}
+
+impl ToolPhaseGuard<'_> {
+    fn enter(tracker: &Arc<Mutex<SessionPhaseTracker>>) -> ToolPhaseGuard<'_> {
+        tracker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enter_tool_execution();
+        ToolPhaseGuard { tracker }
+    }
+}
+
+impl Drop for ToolPhaseGuard<'_> {
+    fn drop(&mut self) {
+        self.tracker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .exit_tool_execution();
+    }
+}
 
 /// Maximum number of concurrent-safe tools that can execute in parallel within
 /// a single batch (ADR-048 §1A).
@@ -139,6 +167,7 @@ pub(super) struct ToolDispatchContext<'a> {
     pub tool_metadata: &'a ToolRuntimeMetadataMap,
     pub tool_dispatcher: &'a dyn SlotToolDispatcher,
     pub otel_session: Option<&'a telemetry::SessionSpan>,
+    pub phase_tracker: Option<&'a Arc<Mutex<SessionPhaseTracker>>>,
 }
 
 /// Per-call fields passed into [`dispatch_single_tool`].
@@ -194,6 +223,9 @@ pub(super) async fn dispatch_single_tool<'a>(
     req: ToolDispatchRequest,
     ctx: &'a ToolDispatchContext<'a>,
 ) -> (usize, ContentBlock) {
+    // Enclose selection, dispatch, retry/backoff, result rendering, and every
+    // return. Drop also balances accounting if cancellation drops this future.
+    let _phase_guard = ctx.phase_tracker.map(ToolPhaseGuard::enter);
     let ToolDispatchRequest {
         idx,
         id,

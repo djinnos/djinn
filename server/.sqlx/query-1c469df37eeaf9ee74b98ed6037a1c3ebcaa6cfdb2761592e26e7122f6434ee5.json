@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT n.id AS \"id!\", n.permalink AS \"permalink!\",\n                    n.title AS \"title!\", n.note_type AS \"note_type!\",\n                    n.folder AS \"folder!\",\n                    (SELECT COUNT(*) FROM note_links WHERE source_id = n.id\n                       AND target_id IS NOT NULL)\n                    + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)\n                      AS \"connection_count!: i64\"\n             FROM notes n\n             WHERE n.project_id = $1\n             ORDER BY n.folder, n.title",
+  "query": "SELECT n.id AS \"id!\", n.permalink AS \"permalink!\",\n                    n.title AS \"title!\", n.note_type AS \"note_type!\",\n                    n.folder AS \"folder!\", n.created_at AS \"created_at!\",\n                    (SELECT COUNT(*) FROM note_links WHERE source_id = n.id\n                       AND target_id IS NOT NULL)\n                    + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)\n                      AS \"connection_count!: i64\"\n             FROM notes n\n             WHERE n.project_id = $1\n             ORDER BY n.folder, n.title",
   "describe": {
     "columns": [
       {
@@ -30,6 +30,11 @@
       },
       {
         "ordinal": 5,
+        "name": "created_at!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
         "name": "connection_count!: i64",
         "type_info": "Int8"
       }
@@ -45,8 +50,9 @@
       false,
       false,
       false,
+      false,
       null
     ]
   },
-  "hash": "550787895b0dc09a072863220cacf58b1f72bc0897b9c3875d95af0861f54c40"
+  "hash": "1c469df37eeaf9ee74b98ed6037a1c3ebcaa6cfdb2761592e26e7122f6434ee5"
 }
