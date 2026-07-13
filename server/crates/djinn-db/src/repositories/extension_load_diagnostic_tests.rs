@@ -157,6 +157,9 @@ async fn identity_retry_and_ordering_contract() {
     let mut mcp_alpha = input(&fixture, "ordered");
     mcp_alpha.source_key = "alpha".to_owned();
     mcp_alpha.summary_fingerprint = "c".repeat(64);
+    let mut mcp_alpha_tie = input(&fixture, "ordered");
+    mcp_alpha_tie.source_key = "alpha".to_owned();
+    mcp_alpha_tie.summary_fingerprint = "h".repeat(64);
     let mut mcp_alpha_handshake = input(&fixture, "ordered");
     mcp_alpha_handshake.source_key = "alpha".to_owned();
     mcp_alpha_handshake.phase = ExtensionLoadPhase::Handshake;
@@ -173,13 +176,9 @@ async fn identity_retry_and_ordering_contract() {
     warning.severity = ExtensionLoadSeverity::Warning;
     warning.source_key = "aaa".to_owned();
     warning.summary_fingerprint = "g".repeat(64);
-    for diagnostic in [
-        mcp_alpha,
-        mcp_alpha_handshake,
-        mcp_beta,
-        skill_alpha,
-        warning,
-    ] {
+    let mcp_alpha = repo.insert_or_increment(mcp_alpha).await.unwrap();
+    let mcp_alpha_tie = repo.insert_or_increment(mcp_alpha_tie).await.unwrap();
+    for diagnostic in [mcp_alpha_handshake, mcp_beta, skill_alpha, warning] {
         repo.insert_or_increment(diagnostic).await.unwrap();
     }
 
@@ -187,19 +186,37 @@ async fn identity_retry_and_ordering_contract() {
         .list_for_load_attempt(&fixture.project_id, "ordered")
         .await
         .unwrap();
-    assert_eq!(ordered.len(), 5);
+    assert_eq!(ordered.len(), 6);
     assert_eq!(ordered[0].severity, ExtensionLoadSeverity::Error);
     assert_eq!(ordered[0].source_kind, ExtensionLoadSourceKind::ProjectMcp);
     assert_eq!(ordered[0].source_key, "alpha");
     assert_eq!(ordered[0].phase, ExtensionLoadPhase::Handshake);
-    assert_eq!(ordered[1].source_key, "alpha");
-    assert_eq!(ordered[1].phase, ExtensionLoadPhase::ToolsList);
-    assert_eq!(ordered[2].source_key, "beta");
+    let mut expected_alpha_tools_list_ids =
+        vec![mcp_alpha.diagnostic_id, mcp_alpha_tie.diagnostic_id];
+    expected_alpha_tools_list_ids.sort();
     assert_eq!(
-        ordered[3].source_kind,
+        ordered[1..3]
+            .iter()
+            .map(|diagnostic| diagnostic.diagnostic_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_alpha_tools_list_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        "diagnostics with all earlier ordering fields equal use diagnostic ID ascending"
+    );
+    assert!(ordered[1..3].iter().all(|diagnostic| {
+        diagnostic.severity == ExtensionLoadSeverity::Error
+            && diagnostic.source_kind == ExtensionLoadSourceKind::ProjectMcp
+            && diagnostic.source_key == "alpha"
+            && diagnostic.phase == ExtensionLoadPhase::ToolsList
+    }));
+    assert_eq!(ordered[3].source_key, "beta");
+    assert_eq!(
+        ordered[4].source_kind,
         ExtensionLoadSourceKind::ProjectSkill
     );
-    assert_eq!(ordered[4].severity, ExtensionLoadSeverity::Warning);
+    assert_eq!(ordered[5].severity, ExtensionLoadSeverity::Warning);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
