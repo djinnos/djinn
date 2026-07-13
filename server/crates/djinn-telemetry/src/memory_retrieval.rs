@@ -136,7 +136,9 @@ impl Default for MemoryRetrievalMetrics {
 }
 
 impl MemoryRetrievalMetrics {
-    /// Create an empty process-owned metrics object.
+    /// Create an empty process-owned metrics object, recording the wall-clock
+    /// construction time once.
+    #[allow(clippy::disallowed_methods)] // approved boundary: this constructor captures the process construction wall-clock; callers do not read time directly.
     pub fn new() -> Self {
         Self {
             started_at: SystemTime::now(),
@@ -257,10 +259,42 @@ mod tests {
             .unwrap()
             .aggregate(RetrievalEntryPoint::Dispatch, RetrievalOutcome::Success);
         let rendered = crate::render().unwrap();
-        assert_eq!(aggregate.count as f64, sample_value(&rendered, "djinn_memory_retrieval_duration_seconds_count", "dispatch", "success"));
-        assert_eq!(aggregate.duration_sum_seconds, sample_value(&rendered, "djinn_memory_retrieval_duration_seconds_sum", "dispatch", "success"));
-        assert_eq!(aggregate.count as f64, sample_value(&rendered, "djinn_memory_retrieval_candidates_count", "dispatch", "success"));
-        assert_eq!(aggregate.candidate_sum, sample_value(&rendered, "djinn_memory_retrieval_candidates_sum", "dispatch", "success"));
+        assert_eq!(
+            aggregate.count as f64,
+            sample_value(
+                &rendered,
+                "djinn_memory_retrieval_duration_seconds_count",
+                "dispatch",
+                "success"
+            )
+        );
+        assert_eq!(
+            aggregate.duration_sum_seconds,
+            sample_value(
+                &rendered,
+                "djinn_memory_retrieval_duration_seconds_sum",
+                "dispatch",
+                "success"
+            )
+        );
+        assert_eq!(
+            aggregate.count as f64,
+            sample_value(
+                &rendered,
+                "djinn_memory_retrieval_candidates_count",
+                "dispatch",
+                "success"
+            )
+        );
+        assert_eq!(
+            aggregate.candidate_sum,
+            sample_value(
+                &rendered,
+                "djinn_memory_retrieval_candidates_sum",
+                "dispatch",
+                "success"
+            )
+        );
     }
 
     #[test]
@@ -306,7 +340,10 @@ mod tests {
         })
         .join();
 
-        assert_eq!(metrics.snapshot(), Err(MemoryRetrievalMetricsError::Poisoned));
+        assert_eq!(
+            metrics.snapshot(),
+            Err(MemoryRetrievalMetricsError::Poisoned)
+        );
         assert_eq!(
             metrics.observe(
                 RetrievalEntryPoint::Dispatch,
@@ -342,16 +379,12 @@ mod tests {
         let reader = Arc::clone(&metrics);
         let reader_handle = thread::spawn(move || {
             for _ in 0..1_000 {
-                let aggregate = reader
-                    .snapshot()
-                    .unwrap()
-                    .aggregate(
-                        RetrievalEntryPoint::LoadKnowledgeContext,
-                        RetrievalOutcome::Success,
-                    );
+                let aggregate = reader.snapshot().unwrap().aggregate(
+                    RetrievalEntryPoint::LoadKnowledgeContext,
+                    RetrievalOutcome::Success,
+                );
                 assert!(
-                    (aggregate.duration_sum_seconds - aggregate.count as f64 * 0.001).abs()
-                        < 1e-12
+                    (aggregate.duration_sum_seconds - aggregate.count as f64 * 0.001).abs() < 1e-12
                 );
                 assert_eq!(aggregate.candidate_sum, aggregate.count as f64 * 2.0);
             }
@@ -360,13 +393,10 @@ mod tests {
             handle.join().unwrap();
         }
         reader_handle.join().unwrap();
-        let aggregate = metrics
-            .snapshot()
-            .unwrap()
-            .aggregate(
-                RetrievalEntryPoint::LoadKnowledgeContext,
-                RetrievalOutcome::Success,
-            );
+        let aggregate = metrics.snapshot().unwrap().aggregate(
+            RetrievalEntryPoint::LoadKnowledgeContext,
+            RetrievalOutcome::Success,
+        );
         assert_eq!(aggregate.count, (writers * per_writer) as u64);
         assert_eq!(aggregate.candidate_sum, (writers * per_writer * 2) as f64);
     }
