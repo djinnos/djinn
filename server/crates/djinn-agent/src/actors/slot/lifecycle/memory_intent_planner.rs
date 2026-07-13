@@ -178,9 +178,34 @@ pub fn validate_query(query: &str) -> Result<(), &'static str> {
     }
 
     // Rules 1 & 4: declarative statement, omit retrieval-meta wording.
+    // The Phase 1 contract calls its examples "such as", rather than defining a
+    // closed vocabulary. Request-form verbs are consequently invalid even when
+    // they are not one of the three quoted examples: "Explain migration timeout
+    // policy" asks for retrieval; "Migration timeout policy" is declarative.
+    const REQUEST_FORM_PREFIXES: &[&str] = &[
+        "explain ",
+        "describe ",
+        "summarize ",
+        "summarise ",
+        "outline ",
+        "detail ",
+        "discuss ",
+        "identify ",
+        "clarify ",
+        "demonstrate ",
+        "enumerate ",
+        "recommend ",
+        "suggest ",
+    ];
+    if REQUEST_FORM_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+    {
+        return Err("query contains retrieval-meta wording");
+    }
+
     // The explicit Phase 1 contract examples are: `find`, `information about`,
-    // and `search for`. Imperative/request forms ("tell me about", "give me",
-    // etc.) are also non-declarative and therefore rejected here.
+    // and `search for`. Additional request forms are also retrieval-meta wording.
     const RETRIEVAL_META_PHRASES: &[&str] = &[
         "find",
         "information about",
@@ -411,6 +436,19 @@ mod tests {
     }
 
     #[test]
+    fn parser_rejects_imperative_explain() {
+        let raw = payload_with_first_query("Explain migration timeout policy");
+        let err = parse_planned_queries(&raw).unwrap_err();
+        assert!(matches!(
+            err,
+            PlannerError::InvalidQuery {
+                index: 0,
+                reason: "query contains retrieval-meta wording"
+            }
+        ));
+    }
+
+    #[test]
     fn parser_rejects_unknown_note_type() {
         let raw = r#"{"queries":[{"type":"unknown","query":"Valid statement"},{"type":"case","query":"Another valid statement"}]}"#;
         assert!(parse_planned_queries(raw).is_err());
@@ -593,6 +631,23 @@ mod tests {
                 assert!(
                     SOURCE.contains(required),
                     "source contract should mention `{required}`"
+                );
+            }
+        }
+
+        #[test]
+        fn source_declarative_rule_rejects_unlisted_request_forms() {
+            // "Such as" in the source contract makes the quoted retrieval-meta
+            // phrases examples, not an exhaustive allow-list. These forms would
+            // otherwise pass the interrogative and exact-example checks while
+            // violating its required declarative statement form.
+            for request in [
+                "Tell me about migration timeout policy",
+                "Explain migration timeout policy",
+            ] {
+                assert!(
+                    validate_query(request).is_err(),
+                    "request-form query should violate the source declarative rule: {request}"
                 );
             }
         }
