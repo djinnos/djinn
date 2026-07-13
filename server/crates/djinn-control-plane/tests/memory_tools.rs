@@ -1,4 +1,5 @@
 //! Contract tests for `memory_*` MCP tools (worktree-free).
+// djinn:allow-oversize — comprehensive memory MCP contract coverage is intentionally colocated.
 //!
 //! Migrated from `server/src/mcp_contract_tests/memory_tools/contract_tests.rs`.
 //! Four worktree-header tests (`mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops`,

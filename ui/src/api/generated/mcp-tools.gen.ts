@@ -3681,7 +3681,10 @@ export namespace MemoryDeleteInputSchema {
   export interface MemoryDeleteInput {
   identifier: string
   project: string
-  [k: string]: any
+  /**
+   * Non-blank explanation recorded in the immutable revision ledger.
+   */
+  reason: string
   }
 
 }
@@ -3721,6 +3724,10 @@ export namespace MemoryEditInputSchema {
   export interface MemoryEditInput {
   content: string
   /**
+   * Non-blank explanation recorded in the immutable revision ledger.
+   */
+  reason: string
+  /**
    * Required for find_replace: exact text to search for.
    */
   find_text?: string
@@ -3747,7 +3754,6 @@ export namespace MemoryEditInputSchema {
    * type's folder. Allowed values same as memory_write type.
    */
   type?: string
-  [k: string]: any
   }
 
 }
@@ -4646,6 +4652,10 @@ export namespace MemoryWriteInputSchema {
   export interface MemoryWriteInput {
   content: string
   /**
+   * Non-blank explanation recorded in the immutable revision ledger.
+   */
+  reason: string
+  /**
    * Absolute path to the project directory.
    */
   project: string
@@ -4671,7 +4681,6 @@ export namespace MemoryWriteInputSchema {
    * competitive, tech_spike, brief (singleton), roadmap (singleton).
    */
   type: string
-  [k: string]: any
   }
 
 }
