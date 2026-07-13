@@ -22531,6 +22531,38 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "LaneMaxSessionsPayload": {
+          "description": "Per-user concurrency ceilings for each role lane.",
+          "properties": {
+            "implement": {
+              "description": "Concurrent worker sessions.",
+              "format": "int64",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "plan": {
+              "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
+              "format": "int64",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "review": {
+              "description": "Concurrent reviewer sessions.",
+              "format": "int64",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "plan",
+            "implement",
+            "review"
+          ],
+          "type": "object"
+        },
         "ModelLanesPayload": {
           "description": "Per-user, per-ROLE ordered model selection over the wire. Each lane is an\nordered fallback list (highest priority first) of full `provider/model` ids.\nA task's base role maps to one lane: `plan` (planner/architect/chat),\n`implement` (worker), `review` (reviewer).",
           "properties": {
@@ -22586,6 +22618,17 @@ expression: signatures
           "description": "True when the org AI policy locks lane assignment: the member may not\nedit lanes (UI disables the controls; the server rejects lane writes).",
           "type": "boolean"
         },
+        "lane_max_sessions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LaneMaxSessionsPayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-lane concurrency ceilings. `None` means this user has no\nlane-specific ceiling (legacy/unbounded behavior)."
+        },
         "lanes": {
           "$ref": "#/$defs/ModelLanesPayload",
           "description": "This user's per-ROLE ordered model lanes (each highest priority first),\nfull `provider/model` ids. All-empty when the user has no explicit\nselection (callers then fall back to the global deployment model list).\nWhen the org lane policy is `locked`, this echoes the org default\n(member edits are ignored)."
@@ -22595,7 +22638,7 @@ expression: signatures
             "format": "int64",
             "type": "integer"
           },
-          "description": "This user's per-model concurrency caps (`{ \"provider/model\": cap }`).\nThe sole admission control at dispatch; empty ⇒ default 1 per model.",
+          "description": "This user's per-model concurrency caps (`{ \"provider/model\": cap }`).\nPer-model admission ceilings at dispatch, composed with any per-lane\nceiling; empty ⇒ default 1 per model.",
           "type": "object"
         },
         "ok": {
@@ -22630,6 +22673,38 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$defs": {
+        "LaneMaxSessionsPayload": {
+          "description": "Per-user concurrency ceilings for each role lane.",
+          "properties": {
+            "implement": {
+              "description": "Concurrent worker sessions.",
+              "format": "int64",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "plan": {
+              "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
+              "format": "int64",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "review": {
+              "description": "Concurrent reviewer sessions.",
+              "format": "int64",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "plan",
+            "implement",
+            "review"
+          ],
+          "type": "object"
+        },
         "ModelLanesPayload": {
           "description": "Per-user, per-ROLE ordered model selection over the wire. Each lane is an\nordered fallback list (highest priority first) of full `provider/model` ids.\nA task's base role maps to one lane: `plan` (planner/architect/chat),\n`implement` (worker), `review` (reviewer).",
           "properties": {
@@ -22684,6 +22759,17 @@ expression: signatures
             "null"
           ]
         },
+        "lane_max_sessions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LaneMaxSessionsPayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-lane concurrency ceilings for THIS user. Every value must be in\n1..=10. Omit to keep the current value."
+        },
         "lanes": {
           "anyOf": [
             {
@@ -22700,7 +22786,7 @@ expression: signatures
             "format": "int64",
             "type": "integer"
           },
-          "description": "Per-model concurrency caps for THIS user (`{ \"provider/model\": cap }`).\nHow many sessions of each model may run concurrently for this user — the\nsole admission control (no global ceiling). Pass `{}` to clear (→ default\n1 per model). Omit to keep the current value.",
+          "description": "Per-model concurrency caps for THIS user (`{ \"provider/model\": cap }`).\nHow many sessions of each model may run concurrently for this user — the\nper-model admission ceiling (there is no global ceiling), composed with\nany per-lane ceiling. Pass `{}` to clear (→ default 1 per model). Omit to\nkeep the current value.",
           "type": [
             "object",
             "null"
@@ -22719,6 +22805,38 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "LaneMaxSessionsPayload": {
+          "description": "Per-user concurrency ceilings for each role lane.",
+          "properties": {
+            "implement": {
+              "description": "Concurrent worker sessions.",
+              "format": "int64",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "plan": {
+              "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
+              "format": "int64",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "review": {
+              "description": "Concurrent reviewer sessions.",
+              "format": "int64",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "plan",
+            "implement",
+            "review"
+          ],
+          "type": "object"
+        },
         "ModelLanesPayload": {
           "description": "Per-user, per-ROLE ordered model selection over the wire. Each lane is an\nordered fallback list (highest priority first) of full `provider/model` ids.\nA task's base role maps to one lane: `plan` (planner/architect/chat),\n`implement` (worker), `review` (reviewer).",
           "properties": {
@@ -22780,6 +22898,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "lane_max_sessions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LaneMaxSessionsPayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The resulting per-lane concurrency ceilings after the patch. `None`\nmeans no lane-specific ceiling."
         },
         "lanes": {
           "anyOf": [

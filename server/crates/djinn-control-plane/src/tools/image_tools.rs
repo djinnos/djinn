@@ -431,13 +431,18 @@ impl DjinnMcpServer {
         }
 
         // Ensure the shared image is built (idempotent — no-op if already
-        // ready) so this project can dispatch against it.
+        // ready) so this project can dispatch against it. The assignment is
+        // already durable at this point, so an enqueue failure is not an
+        // assignment failure: the periodic catalog reconciler will retry it.
+        // Returning an error here used to make clients retry a mutation that
+        // had in fact succeeded.
         if let Err(e) = self.state.enqueue_image_build(image_id).await {
-            return Json(ImageMutateResponse {
-                status: "error".into(),
-                error: Some(format!("enqueue image build: {e}")),
-                id: None,
-            });
+            tracing::warn!(
+                image_id,
+                project_id,
+                error = %e,
+                "project_set_image: assignment persisted but build enqueue failed; reconcile will retry"
+            );
         }
         // Warm this project's canonical graph against the (shared) image. If
         // the image isn't ready yet this no-ops; the build watcher re-fires

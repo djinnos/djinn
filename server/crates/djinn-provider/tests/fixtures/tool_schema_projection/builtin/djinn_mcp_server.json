@@ -22723,6 +22723,38 @@
               "default": []
             }
           }
+        },
+        "LaneMaxSessionsPayload": {
+          "description": "Per-user concurrency ceilings for each role lane.",
+          "type": "object",
+          "properties": {
+            "plan": {
+              "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "implement": {
+              "description": "Concurrent worker sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "review": {
+              "description": "Concurrent reviewer sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            }
+          },
+          "required": [
+            "plan",
+            "implement",
+            "review"
+          ]
         }
       },
       "type": "object",
@@ -22750,12 +22782,23 @@
           "type": "boolean"
         },
         "max_sessions": {
-          "description": "This user's per-model concurrency caps (`{ \"provider/model\": cap }`).\nThe sole admission control at dispatch; empty ⇒ default 1 per model.",
+          "description": "This user's per-model concurrency caps (`{ \"provider/model\": cap }`).\nPer-model admission ceilings at dispatch, composed with any per-lane\nceiling; empty ⇒ default 1 per model.",
           "type": "object",
           "additionalProperties": {
             "type": "integer",
             "format": "int64"
           }
+        },
+        "lane_max_sessions": {
+          "description": "Per-lane concurrency ceilings. `None` means this user has no\nlane-specific ceiling (legacy/unbounded behavior).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LaneMaxSessionsPayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "diverse_review": {
           "description": "Cross-model (\"Thorough\") review. When true (the default), a task\ndispatched to the reviewer role prefers a model id different from the one\nthat implemented it. A degenerate single-model selection falls back to\nsame-model review.",
@@ -22823,6 +22866,38 @@
               "default": []
             }
           }
+        },
+        "LaneMaxSessionsPayload": {
+          "description": "Per-user concurrency ceilings for each role lane.",
+          "type": "object",
+          "properties": {
+            "plan": {
+              "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "implement": {
+              "description": "Concurrent worker sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "review": {
+              "description": "Concurrent reviewer sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            }
+          },
+          "required": [
+            "plan",
+            "implement",
+            "review"
+          ]
         }
       },
       "type": "object",
@@ -22846,7 +22921,7 @@
           ]
         },
         "max_sessions": {
-          "description": "Per-model concurrency caps for THIS user (`{ \"provider/model\": cap }`).\nHow many sessions of each model may run concurrently for this user — the\nsole admission control (no global ceiling). Pass `{}` to clear (→ default\n1 per model). Omit to keep the current value.",
+          "description": "Per-model concurrency caps for THIS user (`{ \"provider/model\": cap }`).\nHow many sessions of each model may run concurrently for this user — the\nper-model admission ceiling (there is no global ceiling), composed with\nany per-lane ceiling. Pass `{}` to clear (→ default 1 per model). Omit to\nkeep the current value.",
           "type": [
             "object",
             "null"
@@ -22855,6 +22930,17 @@
             "type": "integer",
             "format": "int64"
           }
+        },
+        "lane_max_sessions": {
+          "description": "Per-lane concurrency ceilings for THIS user. Every value must be in\n1..=10. Omit to keep the current value.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LaneMaxSessionsPayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "diverse_review": {
           "description": "Enable or disable cross-model (\"Thorough\") review for THIS user. When on\n(the default), the reviewer prefers a model id different from the\nimplementer's. Omit to keep the current value.",
@@ -22912,6 +22998,38 @@
               "default": []
             }
           }
+        },
+        "LaneMaxSessionsPayload": {
+          "description": "Per-user concurrency ceilings for each role lane.",
+          "type": "object",
+          "properties": {
+            "plan": {
+              "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "implement": {
+              "description": "Concurrent worker sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "review": {
+              "description": "Concurrent reviewer sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            }
+          },
+          "required": [
+            "plan",
+            "implement",
+            "review"
+          ]
         }
       },
       "type": "object",
@@ -22949,6 +23067,17 @@
             "type": "integer",
             "format": "int64"
           }
+        },
+        "lane_max_sessions": {
+          "description": "The resulting per-lane concurrency ceilings after the patch. `None`\nmeans no lane-specific ceiling.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LaneMaxSessionsPayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "diverse_review": {
           "description": "The resulting cross-model review toggle after the patch.",
