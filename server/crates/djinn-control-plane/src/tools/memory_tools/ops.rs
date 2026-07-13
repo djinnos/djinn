@@ -351,7 +351,10 @@ pub async fn memory_search(
     let limit = p.limit.unwrap_or(10).clamp(1, 100) as usize;
 
     let embed_start = SystemClock::new().now_instant();
-    let semantic_scores = match server.state.embed_memory_query(&p.query).await {
+    let embedding = server.state.embed_memory_query(&p.query).await;
+    let embed_duration = embed_start.elapsed();
+    observer.observe_embedding(embed_duration);
+    let semantic_scores = match embedding {
         Ok(Some(embedding)) => repo
             .semantic_candidate_scores(
                 &project_id,
@@ -365,7 +368,6 @@ pub async fn memory_search(
             .ok(),
         Ok(None) | Err(_) => None,
     };
-    observer.observe_embedding(embed_start.elapsed());
 
     match repo
         .search_with_stats(NoteSearchParams {
@@ -498,26 +500,39 @@ pub async fn memory_build_context(
         } else {
             Some(folder)
         };
-        let all = repo
-            .list(&project_id, folder_filter)
-            .await
-            .unwrap_or_default();
-        let response = MemoryBuildContextResponse {
-            primary: all.into_iter().map(|n| note_to_view(&n)).collect(),
-            related_l1: vec![],
-            related_l0: vec![],
-            supersedes: vec![],
-            contradicts: vec![],
-            proposals: vec![],
-            error: None,
-        };
-        let outcome = if response.primary.is_empty() {
-            RetrievalOutcome::Empty
-        } else {
-            RetrievalOutcome::Success
-        };
-        observer.finish(outcome, response.primary.len() as u64);
-        return response;
+        match repo.list(&project_id, folder_filter).await {
+            Ok(all) => {
+                let response = MemoryBuildContextResponse {
+                    primary: all.into_iter().map(|n| note_to_view(&n)).collect(),
+                    related_l1: vec![],
+                    related_l0: vec![],
+                    supersedes: vec![],
+                    contradicts: vec![],
+                    proposals: vec![],
+                    error: None,
+                };
+                let outcome = if response.primary.is_empty() {
+                    RetrievalOutcome::Empty
+                } else {
+                    RetrievalOutcome::Success
+                };
+                observer.finish(outcome, response.primary.len() as u64);
+                return response;
+            }
+            Err(error) => {
+                let response = MemoryBuildContextResponse {
+                    primary: vec![],
+                    related_l1: vec![],
+                    related_l0: vec![],
+                    supersedes: vec![],
+                    contradicts: vec![],
+                    proposals: vec![],
+                    error: Some(format!("build_context failed: {error}")),
+                };
+                observer.finish(RetrievalOutcome::Error, 0);
+                return response;
+            }
+        }
     }
 
     match repo

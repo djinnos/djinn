@@ -23,8 +23,10 @@ mod tests {
         state::stubs::test_mcp_state,
         tools::memory_tools::{
             BrokenLinksParams, EditParams, ListParams, ReadParams, WriteParams, ops,
+            write_dedup_types::{MemoryWriteDedupDecider, MemoryWriteDedupDecision},
         },
     };
+    use djinn_telemetry::memory_retrieval::{RetrievalEntryPoint, RetrievalOutcome};
 
     async fn create_project(db: &Database, _root: &std::path::Path) -> djinn_core::models::Project {
         // Unique owner/repo per test — `memory_write` derives canonical
@@ -836,6 +838,172 @@ mod tests {
         assert_eq!(
             after.updated_at, before_updated_at,
             "updated_at must not change on no-op find_replace"
+        );
+    }
+
+    struct StaticDecider {
+        decision: MemoryWriteDedupDecision,
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryWriteDedupDecider for StaticDecider {
+        async fn decide(
+            &self,
+            _input: super::super::write_dedup_types::MemoryWriteDedupDecisionInput<'_>,
+        ) -> Result<MemoryWriteDedupDecision, String> {
+            Ok(self.decision.clone())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_write_dedup_records_success_on_reuse() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let Json(first) = server
+            .memory_write(Parameters(WriteParams {
+                project: project.slug(),
+                title: "Error Handling Pattern".to_string(),
+                content: "Use Result types and ? for error handling in Rust.".to_string(),
+                note_type: "pattern".to_string(),
+                status: None,
+                tags: None,
+                scope_paths: None,
+                retrieval_anchor: None,
+            }))
+            .await;
+        assert!(first.error.is_none());
+        let note_id = first.id.unwrap();
+
+        sleep(Duration::from_millis(100)).await;
+
+        let decider = StaticDecider {
+            decision: MemoryWriteDedupDecision::ReuseExisting {
+                candidate_id: note_id.clone(),
+            },
+        };
+        let Json(second) = server
+            .memory_write_with_decider(
+                Parameters(WriteParams {
+                    project: project.slug(),
+                    title: "Error Handling Pattern".to_string(),
+                    content: "Use Result types and ? for error handling in Rust. (v2)".to_string(),
+                    note_type: "pattern".to_string(),
+                    status: None,
+                    tags: None,
+                    scope_paths: None,
+                    retrieval_anchor: None,
+                }),
+                &decider,
+            )
+            .await;
+        assert!(
+            second.error.is_none(),
+            "unexpected error: {:?}",
+            second.error
+        );
+        assert_eq!(second.id, Some(note_id));
+
+        let metrics = server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let success =
+            snapshot.aggregate(RetrievalEntryPoint::JitPitfalls, RetrievalOutcome::Success);
+        assert_eq!(
+            success.count, 1,
+            "reuse path should record exactly one success"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_write_dedup_records_empty_on_create_new() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let Json(created) = server
+            .memory_write(Parameters(WriteParams {
+                project: project.slug(),
+                title: "Unique Pattern".to_string(),
+                content: "A completely unique pattern that has no dedup candidates.".to_string(),
+                note_type: "pattern".to_string(),
+                status: None,
+                tags: None,
+                scope_paths: None,
+                retrieval_anchor: None,
+            }))
+            .await;
+        assert!(created.error.is_none());
+        assert!(created.id.is_some());
+
+        let metrics = server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let empty = snapshot.aggregate(RetrievalEntryPoint::JitPitfalls, RetrievalOutcome::Empty);
+        assert_eq!(
+            empty.count, 1,
+            "create-new path should record exactly one empty"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_write_dedup_records_error_on_missing_candidate() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let Json(first) = server
+            .memory_write(Parameters(WriteParams {
+                project: project.slug(),
+                title: "Error Handling Pattern".to_string(),
+                content: "Use Result types and ? for error handling in Rust.".to_string(),
+                note_type: "pattern".to_string(),
+                status: None,
+                tags: None,
+                scope_paths: None,
+                retrieval_anchor: None,
+            }))
+            .await;
+        assert!(first.error.is_none());
+
+        sleep(Duration::from_millis(100)).await;
+
+        let decider = StaticDecider {
+            decision: MemoryWriteDedupDecision::ReuseExisting {
+                candidate_id: "nonexistent-candidate-id".to_string(),
+            },
+        };
+        let Json(second) = server
+            .memory_write_with_decider(
+                Parameters(WriteParams {
+                    project: project.slug(),
+                    title: "Error Handling Pattern".to_string(),
+                    content: "Use Result types and ? for error handling in Rust. (v2)".to_string(),
+                    note_type: "pattern".to_string(),
+                    status: None,
+                    tags: None,
+                    scope_paths: None,
+                    retrieval_anchor: None,
+                }),
+                &decider,
+            )
+            .await;
+        assert!(
+            second.error.is_some(),
+            "missing candidate should produce an error"
+        );
+
+        let metrics = server.state.retrieval_metrics();
+        let snapshot = metrics.snapshot().expect("metrics snapshot");
+        let error = snapshot.aggregate(RetrievalEntryPoint::JitPitfalls, RetrievalOutcome::Error);
+        assert_eq!(
+            error.count, 1,
+            "missing candidate should record exactly one error"
         );
     }
 }
