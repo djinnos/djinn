@@ -132,14 +132,16 @@ export function parseMemoryGraphResponse(raw: unknown): MemoryGraphOutput | null
             : 0,
         is_orphan: n.is_orphan === true,
         broken_targets: brokenTargets,
-        // Optional wire fields passed through untouched: the graph canvas
-        // reads `entity_type` (note vs proposal glyph) and `created_at`
-        // (epoch seconds or ISO string) when the backend provides them.
+        // Optional wire fields the graph canvas reads: `entity_type` (note vs
+        // proposal glyph) and `created_at`. The wire type is an ISO-8601
+        // string; numeric epoch seconds (accepted for fixtures) normalize to
+        // ISO so the parsed shape always matches `GraphNode`.
         ...(typeof n.entity_type === "string" ? { entity_type: n.entity_type } : {}),
-        ...(typeof n.created_at === "string" ||
-        (typeof n.created_at === "number" && Number.isFinite(n.created_at))
+        ...(typeof n.created_at === "string"
           ? { created_at: n.created_at }
-          : {}),
+          : typeof n.created_at === "number" && Number.isFinite(n.created_at)
+            ? { created_at: new Date(n.created_at * 1000).toISOString() }
+            : {}),
       };
     })
     .filter((n) => n.id.length > 0);
