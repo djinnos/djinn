@@ -2224,6 +2224,20 @@ expression: signatures
               "description": "Persisted finding id (from `doctor_findings.id`).",
               "type": "string"
             },
+            "recommended_action": {
+              "description": "Recommended action for closed-parent orphan findings (e.g. \"close\",\n\"park\", \"retain\"). Omitted for checks that do not produce a recommendation.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "recommended_reason": {
+              "description": "Reason for the recommended action (e.g. \"parent_closed\",\n\"external_open_dependent\"). Omitted for checks that do not produce a recommendation.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "severity": {
               "type": "string"
             }
