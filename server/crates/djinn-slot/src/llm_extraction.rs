@@ -1448,6 +1448,25 @@ async fn process_extracted_note(
                         "boost_fallback",
                     )
                     .await;
+                    extraction_quality.boost_fallback += 1;
+                    tracing::debug!(
+                        session_id = %extraction_context.session_id,
+                        note_type = %note_type,
+                        title = %note.title,
+                        existing_note_id = %candidate_id,
+                        outcome = "boost_fallback",
+                        "llm_extraction: already-known decision completed with confidence-only fallback"
+                    );
+                } else {
+                    extraction_quality.evidence_merged += 1;
+                    tracing::debug!(
+                        session_id = %extraction_context.session_id,
+                        note_type = %note_type,
+                        title = %note.title,
+                        existing_note_id = %candidate_id,
+                        outcome = "evidence_merged",
+                        "llm_extraction: already-known decision completed with evidence merge"
+                    );
                 }
                 extraction_quality.novelty_skipped += 1;
                 extraction_quality.merged += 1;
@@ -3326,6 +3345,93 @@ mod evidence_merge_regression_tests {
             updated_content.matches(footer).count(),
             1,
             "the existing provenance footer must be preserved exactly once"
+        );
+        assert_eq!(quality.evidence_merged, 1);
+        assert_eq!(quality.boost_fallback, 0);
+    }
+
+    #[tokio::test]
+    async fn malformed_merge_response_falls_back_without_aborting_extraction() {
+        let provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
+            "not valid merge json".to_string(),
+        ]);
+        let repo = RecordingExtractionRepository::with_existing(test_existing_note());
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "\n\n---\n*Extracted from session new. Confidence: 0.5 (session-extracted).*",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let mut quality = ExtractionQuality::default();
+        process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+
+        assert_eq!(quality.evidence_merged, 0);
+        assert_eq!(quality.boost_fallback, 1);
+        assert_eq!(
+            quality.novelty_skipped, 1,
+            "fallback remains a successful terminal path"
+        );
+        assert!(
+            repo.ops()
+                .iter()
+                .any(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+        );
+        assert!(
+            !repo
+                .ops()
+                .iter()
+                .any(|op| matches!(op, RepoOp::Update { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_high_confidence_note_is_classified_as_boost_fallback() {
+        let provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
+        ]);
+        let mut protected = test_existing_note();
+        protected.confidence = EVIDENCE_MERGE_MAX_CONFIDENCE;
+        let repo = RecordingExtractionRepository::with_existing(protected);
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "footer",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let mut quality = ExtractionQuality::default();
+        process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+
+        assert_eq!(quality.evidence_merged, 0);
+        assert_eq!(quality.boost_fallback, 1);
+        assert!(
+            repo.ops()
+                .iter()
+                .any(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+        );
+        assert!(
+            !repo
+                .ops()
+                .iter()
+                .any(|op| matches!(op, RepoOp::Update { .. }))
         );
     }
 }

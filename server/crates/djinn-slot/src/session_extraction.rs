@@ -174,6 +174,14 @@ pub struct ExtractionQuality {
     pub written: u32,
     #[serde(default)]
     pub merged: u32,
+    /// `AlreadyKnown` decisions whose attributed evidence content was persisted
+    /// before applying the duplicate confidence signal.
+    #[serde(default)]
+    pub evidence_merged: u32,
+    /// `AlreadyKnown` decisions that retained the historical confidence-only
+    /// behavior because evidence merging was ineligible or degraded.
+    #[serde(default)]
+    pub boost_fallback: u32,
     #[serde(default)]
     pub downgraded: u32,
     #[serde(default)]
@@ -1384,6 +1392,8 @@ mod tests {
                 novelty_skipped: 0,
                 written: 1,
                 merged: 0,
+                evidence_merged: 0,
+                boost_fallback: 0,
                 downgraded: 0,
                 discarded: 0,
                 admission_dropped: 0,
