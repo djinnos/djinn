@@ -691,8 +691,7 @@ fn persisted_retrieval_summaries(
         RetrievalEntryPointHealthSummary {
             entry_point: name.to_string(),
             total_queries: evidence.map_or(0, |value| value.trace_count),
-            zero_result_queries: evidence
-                .map_or(0, |value| (value.trace_count - value.injected_count).max(0)),
+            zero_result_queries: evidence.map_or(0, |value| value.zero_result_trace_count),
             error_queries: 0,
             candidate_count: evidence.map_or(0, |value| value.candidate_count),
             injected_count: evidence.map_or(0, |value| value.injected_count),
