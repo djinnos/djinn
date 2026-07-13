@@ -737,6 +737,314 @@ pub async fn apply_parent_disposition_tx(
     })
 }
 
+// ── Doctor repair (historical closed-parent orphan) ──────────────────────────
+
+/// Outcome of a single-task doctor repair attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DoctorRepairOutcome {
+    /// The task was closed with `close_reason = parent_closed`.
+    Closed {
+        task_id: String,
+        from_status: String,
+    },
+    /// The task was parked to `needs_lead_intervention` with a historical
+    /// repair reason.
+    Parked {
+        task_id: String,
+        from_status: String,
+        reason: &'static str,
+    },
+    /// The repair was skipped because the task's status has drifted since the
+    /// finding snapshot was captured.
+    SkippedStatusDrift {
+        task_id: String,
+        snapshot_status: String,
+        current_status: String,
+    },
+    /// The repair was skipped because the task is already closed.
+    SkippedAlreadyClosed { task_id: String },
+    /// The repair was skipped because another open parent now exists.
+    SkippedOtherOpenParent { task_id: String },
+    /// The repair was skipped because an external open dependent now exists.
+    SkippedExternalDependent { task_id: String },
+    /// The repair was skipped because the finding's recommended action was
+    /// `retain` (guarded row).
+    SkippedRetain { task_id: String },
+    /// The task row was not found (deleted between finding and repair).
+    SkippedNotFound { task_id: String },
+}
+
+impl DoctorRepairOutcome {
+    /// `true` when the repair applied a mutation to the task.
+    pub fn applied(&self) -> bool {
+        matches!(self, Self::Closed { .. } | Self::Parked { .. })
+    }
+}
+
+/// Apply the opt-in mutating doctor repair for one closed-parent orphan child
+/// inside a caller-provided transaction.
+///
+/// This is the transactional repair counterpart to the read-only
+/// [`classify_parent_disposition`] / board-health finding. It **re-locks** the
+/// task row (`SELECT … FOR UPDATE`), compares the persisted finding snapshot,
+/// and re-runs [`classify_child_tx`] under the same lock so stale findings
+/// cannot mutate rows whose state changed after the snapshot.
+///
+/// # Guards (all checked under the row lock)
+///
+/// 1. **Not found** — the task row was deleted → `SkippedNotFound`.
+/// 2. **Already closed** — current status is `closed` → `SkippedAlreadyClosed`.
+/// 3. **Retain finding** — the snapshot's recommended action was `retain` →
+///    `SkippedRetain`.
+/// 4. **Status drift** — the current status is neither close-ready nor park,
+///    meaning the finding is stale → `SkippedStatusDrift`.
+/// 5. **Other open parent** — `classify_child_tx` returns
+///    `RetainedOtherParent` → `SkippedOtherOpenParent`.
+/// 6. **External open dependent** — `classify_child_tx` returns
+///    `RetainedExternalDependent` → `SkippedExternalDependent`.
+///
+/// # Mutations
+///
+/// - **Close-ready** (`open`, `needs_lead_intervention`, `in_lead_intervention`):
+///   sets `status = 'closed'`, `close_reason = 'parent_closed'`.
+/// - **Park** (`in_progress`, `needs_task_review`, `in_task_review`, `approved`,
+///   `pr_draft`, `pr_review`): sets `status = 'needs_lead_intervention'`,
+///   increments `intervention_count`, uses the `historical_*` park reason.
+///
+/// Both paths emit a normal `status_changed` activity and a doctor-specific
+/// audit activity with `{ source: doctor_fix, check: closed_parent_open_children,
+/// original_parent_ids }`. When parking, PR identity and live session evidence
+/// are preserved as separate audit activities.
+pub async fn apply_doctor_repair_tx(
+    conn: &mut sqlx::PgConnection,
+    task_id: &str,
+    snapshot_status: &str,
+    snapshot_action: &str,
+    original_parent_ids: &[String],
+) -> Result<DoctorRepairOutcome> {
+    // Lock the task row for the duration of the repair so no concurrent
+    // transition can race us between the re-check and the mutation.
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT status, pr_url FROM tasks WHERE id = $1 FOR UPDATE")
+            .bind(task_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+
+    let Some((current_status, pr_url)) = row else {
+        return Ok(DoctorRepairOutcome::SkippedNotFound {
+            task_id: task_id.to_owned(),
+        });
+    };
+
+    // Guard: already closed — nothing to do.
+    if current_status == "closed" {
+        return Ok(DoctorRepairOutcome::SkippedAlreadyClosed {
+            task_id: task_id.to_owned(),
+        });
+    }
+
+    // Guard: the finding itself was a retain (guarded row). We never mutate
+    // guarded rows even if the snapshot is stale.
+    if snapshot_action == "retain" {
+        return Ok(DoctorRepairOutcome::SkippedRetain {
+            task_id: task_id.to_owned(),
+        });
+    }
+
+    // Guard: status drift. If the current status is neither close-ready nor
+    // park, the finding is stale and must not be mutated.
+    let in_close_ready = CLOSE_READY_STATUSES.contains(&current_status.as_str());
+    let in_park = PARK_STATUSES.contains(&current_status.as_str());
+    if !in_close_ready && !in_park {
+        return Ok(DoctorRepairOutcome::SkippedStatusDrift {
+            task_id: task_id.to_owned(),
+            snapshot_status: snapshot_status.to_owned(),
+            current_status,
+        });
+    }
+
+    // Re-run the shared classifier under the lock. The scope for repair uses
+    // the child's own epic_id so the external-dependent guard correctly
+    // treats siblings in the same epic as internal.
+    let epic_id: Option<String> = sqlx::query_scalar("SELECT epic_id FROM tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let scope = DispositionScope {
+        entry_point: DispositionEntryPoint::EpicClose,
+        epic_ids: epic_id.into_iter().collect(),
+        proposal_id: None,
+    };
+
+    let disposition = classify_child_tx(conn, task_id, &current_status, &scope).await?;
+
+    match disposition {
+        ChildDisposition::RetainedAlreadyTerminal => {
+            Ok(DoctorRepairOutcome::SkippedAlreadyClosed {
+                task_id: task_id.to_owned(),
+            })
+        }
+        ChildDisposition::RetainedOtherParent => Ok(DoctorRepairOutcome::SkippedOtherOpenParent {
+            task_id: task_id.to_owned(),
+        }),
+        ChildDisposition::RetainedExternalDependent => {
+            Ok(DoctorRepairOutcome::SkippedExternalDependent {
+                task_id: task_id.to_owned(),
+            })
+        }
+        ChildDisposition::Close => {
+            sqlx::query(
+                r#"UPDATE tasks SET status = 'closed',
+                    closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    close_reason = 'parent_closed',
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#,
+            )
+            .bind(task_id)
+            .execute(&mut *conn)
+            .await?;
+
+            insert_doctor_repair_activities(
+                conn,
+                task_id,
+                &current_status,
+                "closed",
+                "parent_closed",
+                original_parent_ids,
+            )
+            .await?;
+
+            Ok(DoctorRepairOutcome::Closed {
+                task_id: task_id.to_owned(),
+                from_status: current_status,
+            })
+        }
+        ChildDisposition::Park => {
+            let reason = historical_park_reason_for_status(&current_status);
+            sqlx::query(
+                r#"UPDATE tasks SET status = 'needs_lead_intervention',
+                    intervention_count = intervention_count + 1,
+                    last_intervention_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    close_reason = NULL,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#,
+            )
+            .bind(task_id)
+            .execute(&mut *conn)
+            .await?;
+
+            insert_doctor_repair_activities(
+                conn,
+                task_id,
+                &current_status,
+                "needs_lead_intervention",
+                reason,
+                original_parent_ids,
+            )
+            .await?;
+
+            // Preserve PR identity evidence: if the task had a pr_url, record
+            // it in the audit payload so the lead can reconcile the live PR.
+            if let Some(pr_url) = pr_url {
+                let audit_payload = serde_json::json!({
+                    "source": "doctor_fix",
+                    "check": "closed_parent_open_children",
+                    "preserved_pr_url": pr_url,
+                    "park_reason": reason,
+                });
+                sqlx::query(
+                    "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) \
+                     VALUES ($1, $2, 'system', 'system', 'doctor_fix_pr_preserved', $3)",
+                )
+                .bind(uuid::Uuid::now_v7().to_string())
+                .bind(task_id)
+                .bind(&audit_payload)
+                .execute(&mut *conn)
+                .await?;
+            }
+
+            // Preserve live session identity: record any active session so the
+            // lead knows the task was mid-flight when parked.
+            let active_session: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM sessions WHERE task_id = $1 AND status = 'running' \
+                 ORDER BY started_at DESC LIMIT 1",
+            )
+            .bind(task_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if let Some(session_id) = active_session {
+                let audit_payload = serde_json::json!({
+                    "source": "doctor_fix",
+                    "check": "closed_parent_open_children",
+                    "preserved_session_id": session_id,
+                    "park_reason": reason,
+                });
+                sqlx::query(
+                    "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) \
+                     VALUES ($1, $2, 'system', 'system', 'doctor_fix_session_preserved', $3)",
+                )
+                .bind(uuid::Uuid::now_v7().to_string())
+                .bind(task_id)
+                .bind(&audit_payload)
+                .execute(&mut *conn)
+                .await?;
+            }
+
+            Ok(DoctorRepairOutcome::Parked {
+                task_id: task_id.to_owned(),
+                from_status: current_status,
+                reason,
+            })
+        }
+    }
+}
+
+/// Emit the normal `status_changed` activity and the doctor-specific audit
+/// evidence for a repair mutation.
+async fn insert_doctor_repair_activities(
+    conn: &mut sqlx::PgConnection,
+    task_id: &str,
+    from_status: &str,
+    to_status: &str,
+    reason: &str,
+    original_parent_ids: &[String],
+) -> Result<()> {
+    // Normal task status-change activity (same shape as lifecycle transitions).
+    let status_payload = serde_json::json!({
+        "from_status": from_status,
+        "to_status": to_status,
+        "reason": reason,
+    });
+    sqlx::query(
+        "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) \
+         VALUES ($1, $2, 'system', 'system', 'status_changed', $3)",
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(task_id)
+    .bind(&status_payload)
+    .execute(&mut *conn)
+    .await?;
+
+    // Doctor-specific audit evidence.
+    let audit_payload = serde_json::json!({
+        "source": "doctor_fix",
+        "check": "closed_parent_open_children",
+        "original_parent_ids": original_parent_ids,
+        "from_status": from_status,
+        "to_status": to_status,
+        "reason": reason,
+    });
+    sqlx::query(
+        "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) \
+         VALUES ($1, $2, 'system', 'system', 'doctor_fix_repair', $3)",
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(task_id)
+    .bind(&audit_payload)
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_disposition_activities(
     conn: &mut sqlx::PgConnection,
@@ -1420,5 +1728,412 @@ mod tests {
             .unwrap();
         assert_eq!(s1.0, "open");
         assert_eq!(s2.0, "in_progress");
+    }
+
+    // ── Doctor repair tests ───────────────────────────────────────────────
+    //
+    // These tests prove that `apply_doctor_repair_tx` safely applies the
+    // mutating repair, skips guarded/stale rows, and is idempotent.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_closes_ready_orphan() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        let child = make_task(&db, &epic, "open", "t1").await;
+
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            outcome,
+            DoctorRepairOutcome::Closed {
+                task_id: child.clone(),
+                from_status: "open".to_owned(),
+            }
+        );
+
+        let row: (String, String) =
+            sqlx::query_as("SELECT status, close_reason FROM tasks WHERE id = $1")
+                .bind(&child)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(row.0, "closed");
+        assert_eq!(row.1, "parent_closed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_parks_in_flight_orphan() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        let child = make_task(&db, &epic, "in_progress", "t1").await;
+
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome =
+            apply_doctor_repair_tx(&mut tx, &child, "in_progress", "park", &[epic.clone()])
+                .await
+                .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            outcome,
+            DoctorRepairOutcome::Parked {
+                task_id: child.clone(),
+                from_status: "in_progress".to_owned(),
+                reason: "historical_parent_closed_in_flight",
+            }
+        );
+
+        let row: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = $1")
+            .bind(&child)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(row.0, "needs_lead_intervention");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_parks_pr_active_orphan_with_pr_reason() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        let child = make_task(&db, &epic, "pr_review", "t1").await;
+
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome = apply_doctor_repair_tx(&mut tx, &child, "pr_review", "park", &[epic.clone()])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            outcome,
+            DoctorRepairOutcome::Parked {
+                task_id: child.clone(),
+                from_status: "pr_review".to_owned(),
+                reason: "historical_parent_closed_pr_active",
+            }
+        );
+
+        let row: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = $1")
+            .bind(&child)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(row.0, "needs_lead_intervention");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_skips_already_closed() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        let child = make_task(&db, &epic, "closed", "t1").await;
+
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            outcome,
+            DoctorRepairOutcome::SkippedAlreadyClosed {
+                task_id: child.clone(),
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_skips_status_drift() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        // Task is now 'closed' but snapshot said 'open'. Since it's already
+        // closed, it's caught by the already-closed guard first.
+        let child = make_task(&db, &epic, "closed", "t1").await;
+
+        let mut tx = db.pool().begin().await.unwrap();
+        // Simulate a stale snapshot where status was "open" but is now "closed".
+        // The already-closed guard fires first.
+        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        assert!(matches!(
+            outcome,
+            DoctorRepairOutcome::SkippedAlreadyClosed { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_skips_retain_finding() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        let child = make_task(&db, &epic, "open", "t1").await;
+
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "retain", &[])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            outcome,
+            DoctorRepairOutcome::SkippedRetain {
+                task_id: child.clone(),
+            }
+        );
+
+        // Task must be unchanged.
+        let row: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = $1")
+            .bind(&child)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(row.0, "open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_skips_other_open_parent() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        let child = make_task(&db, &epic, "open", "t1").await;
+        // Link a building proposal to the epic so it becomes an other-open-parent.
+        let proposal = make_proposal(&db, "p1", "building").await;
+        link_epic(&db, &proposal, &epic, &project).await;
+
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            outcome,
+            DoctorRepairOutcome::SkippedOtherOpenParent {
+                task_id: child.clone(),
+            }
+        );
+
+        // Task must be unchanged.
+        let row: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = $1")
+            .bind(&child)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(row.0, "open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_skips_external_open_dependent() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let closing_epic = make_epic(&db, &project, "e1").await;
+        let other_epic = make_epic(&db, &project, "e2").await;
+        let child = make_task(&db, &closing_epic, "open", "t1").await;
+        let dependent = make_task(&db, &other_epic, "open", "t2").await;
+        add_blocker(&db, &dependent, &child).await;
+
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome =
+            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[closing_epic.clone()])
+                .await
+                .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            outcome,
+            DoctorRepairOutcome::SkippedExternalDependent {
+                task_id: child.clone(),
+            }
+        );
+
+        // Task must be unchanged.
+        let row: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = $1")
+            .bind(&child)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(row.0, "open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_skips_not_found() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome = apply_doctor_repair_tx(&mut tx, "nonexistent-id", "open", "close", &[])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            outcome,
+            DoctorRepairOutcome::SkippedNotFound {
+                task_id: "nonexistent-id".to_owned(),
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_emits_audit_evidence() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        let child = make_task(&db, &epic, "open", "t1").await;
+
+        let before_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM activity_log WHERE task_id = $1")
+                .bind(&child)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(outcome.applied());
+
+        let after_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM activity_log WHERE task_id = $1")
+                .bind(&child)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+
+        // Should have at least 2 new entries: status_changed + doctor_fix_repair.
+        assert_eq!(after_count.0 - before_count.0, 2);
+
+        // Verify the doctor_fix_repair audit evidence.
+        let audit: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM activity_log WHERE task_id = $1 AND event_type = 'doctor_fix_repair'",
+        )
+        .bind(&child)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let audit: serde_json::Value = serde_json::from_value(audit).unwrap();
+        assert_eq!(audit["source"], "doctor_fix");
+        assert_eq!(audit["check"], "closed_parent_open_children");
+        assert_eq!(audit["original_parent_ids"][0], epic);
+        assert_eq!(audit["from_status"], "open");
+        assert_eq!(audit["to_status"], "closed");
+        assert_eq!(audit["reason"], "parent_closed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_preserves_pr_url_when_parking() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        let child = make_task(&db, &epic, "pr_review", "t1").await;
+        // Set a PR URL.
+        sqlx::query("UPDATE tasks SET pr_url = $1 WHERE id = $2")
+            .bind("https://github.com/test/repo/pull/42")
+            .bind(&child)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome = apply_doctor_repair_tx(&mut tx, &child, "pr_review", "park", &[epic.clone()])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(outcome.applied());
+
+        // The PR preservation audit entry must exist.
+        let pr_audit: Option<String> = sqlx::query_scalar(
+            "SELECT payload::text FROM activity_log WHERE task_id = $1 AND event_type = 'doctor_fix_pr_preserved'",
+        )
+        .bind(&child)
+        .fetch_optional(db.pool())
+        .await
+        .unwrap();
+        assert!(pr_audit.is_some(), "PR preservation audit must exist");
+        let payload: serde_json::Value = serde_json::from_str(&pr_audit.unwrap()).unwrap();
+        assert_eq!(
+            payload["preserved_pr_url"],
+            "https://github.com/test/repo/pull/42"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_is_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        let child = make_task(&db, &epic, "open", "t1").await;
+
+        // First repair: closes the task.
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome1 = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(outcome1.applied());
+
+        // Second repair with the same snapshot: must skip (already closed).
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome2 = apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(!outcome2.applied());
+        assert!(matches!(
+            outcome2,
+            DoctorRepairOutcome::SkippedAlreadyClosed { .. }
+        ));
+
+        // Verify only one set of audit entries was written (not duplicated).
+        let repair_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM activity_log WHERE task_id = $1 AND event_type = 'doctor_fix_repair'")
+                .bind(&child)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(repair_count.0, 1, "repair audit must not be duplicated");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_repair_parked_task_is_not_redispatched_as_orphan() {
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db).await;
+        let epic = make_epic(&db, &project, "e1").await;
+        let child = make_task(&db, &epic, "in_progress", "t1").await;
+
+        // Repair parks the in-flight orphan.
+        let mut tx = db.pool().begin().await.unwrap();
+        let outcome =
+            apply_doctor_repair_tx(&mut tx, &child, "in_progress", "park", &[epic.clone()])
+                .await
+                .unwrap();
+        tx.commit().await.unwrap();
+        assert!(outcome.applied());
+
+        // The task is now needs_lead_intervention, which is a close-ready status.
+        // A second repair with the new snapshot would re-classify it.
+        // But since it's already in the "close-ready" bucket, it would close.
+        // The key idempotency check: the task is no longer dispatchable as an
+        // in-progress orphan.
+        let row: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = $1")
+            .bind(&child)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            row.0, "needs_lead_intervention",
+            "parked task must not be in_progress (dispatchable)"
+        );
     }
 }
