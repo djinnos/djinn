@@ -1,5 +1,8 @@
 UI_DIR := $(CURDIR)/ui
 SERVER_DIR := $(CURDIR)/server
+SQLX_SCRATCH_ROOT ?= $(or $(TMPDIR),/var/tmp)
+SQLX_PREPARE_DIR := $(SQLX_SCRATCH_ROOT)/djinn-sqlx-prepare
+SQLX_VERIFY_DIR := $(SQLX_SCRATCH_ROOT)/djinn-sqlx-check
 
 # Local-dev inner loop: `tilt up` at the repo root. It bootstraps the kind
 # cluster + local registry, compiles djinn-server + djinn-agent-worker once
@@ -51,22 +54,22 @@ sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test Postgres on :
 	@# Use `cargo check --all-targets --all-features` instead of `cargo sqlx prepare --workspace`:
 	@# the latter (as of sqlx-cli 0.8.6) skips test targets, so queries inside
 	@# `#[cfg(test)]` blocks silently miss the cache and break CI's offline build.
-	@rm -rf /tmp/sqlx-prepare && mkdir -p /tmp/sqlx-prepare
+	@rm -rf $(SQLX_PREPARE_DIR) && mkdir -p $(SQLX_PREPARE_DIR)
 	@# Force macro re-execution: touch every file with a sqlx::query call so
 	@# cargo re-runs the proc-macro. A plain `cargo check` after a clean build
 	@# would be a no-op and leave SQLX_OFFLINE_DIR empty.
 	@grep -rl --include='*.rs' 'sqlx::query' $(SERVER_DIR)/crates/ 2>/dev/null | xargs -r touch
-	@cd $(SERVER_DIR) && SQLX_OFFLINE=false SQLX_OFFLINE_DIR=/tmp/sqlx-prepare cargo check --workspace --all-targets --all-features
-	@if [ -z "$$(ls -A /tmp/sqlx-prepare 2>/dev/null)" ]; then \
-		echo "ERROR: /tmp/sqlx-prepare is empty — refusing to replace .sqlx/."; \
+	@cd $(SERVER_DIR) && SQLX_OFFLINE=false SQLX_OFFLINE_DIR=$(SQLX_PREPARE_DIR) cargo check --workspace --all-targets --all-features
+	@if [ -z "$$(ls -A $(SQLX_PREPARE_DIR) 2>/dev/null)" ]; then \
+		echo "ERROR: $(SQLX_PREPARE_DIR) is empty — refusing to replace .sqlx/."; \
 		echo "       Try 'cargo clean -p djinn-db' and rerun."; \
 		exit 1; \
 	fi
 	@# Replace only the query-*.json files; preserve README.md and anything
 	@# else a human committed into .sqlx/.
 	@find $(SERVER_DIR)/.sqlx -maxdepth 1 -name 'query-*.json' -delete
-	@mv /tmp/sqlx-prepare/query-*.json $(SERVER_DIR)/.sqlx/
-	@rm -rf /tmp/sqlx-prepare
+	@mv $(SQLX_PREPARE_DIR)/query-*.json $(SERVER_DIR)/.sqlx/
+	@rm -rf $(SQLX_PREPARE_DIR)
 	@echo "server/.sqlx/ regenerated ($$(ls $(SERVER_DIR)/.sqlx/query-*.json | wc -l) entries) — run 'git add server/.sqlx' and commit."
 
 sqlx-check: ## Fail if server/.sqlx/ is stale vs. current queries (local)
@@ -89,10 +92,10 @@ sqlx-verify: ## Verify server/.sqlx/ freshness; assumes schema already applied +
 	@# undetected. That exact gap silently dropped 71 `#[cfg(test)]` entries
 	@# (commit ed6f954d5) which then only failed in the push-only Warm Cache
 	@# (Test) job. Mirroring the generator here closes it.
-	@rm -rf /tmp/sqlx-check && mkdir -p /tmp/sqlx-check
+	@rm -rf $(SQLX_VERIFY_DIR) && mkdir -p $(SQLX_VERIFY_DIR)
 	@grep -rl --include='*.rs' 'sqlx::query' $(SERVER_DIR)/crates/ 2>/dev/null | xargs -r touch
-	@cd $(SERVER_DIR) && SQLX_OFFLINE=false SQLX_OFFLINE_DIR=/tmp/sqlx-check cargo check --workspace --all-targets --all-features
-	@if [ -z "$$(ls -A /tmp/sqlx-check 2>/dev/null)" ]; then \
+	@cd $(SERVER_DIR) && SQLX_OFFLINE=false SQLX_OFFLINE_DIR=$(SQLX_VERIFY_DIR) cargo check --workspace --all-targets --all-features
+	@if [ -z "$$(ls -A $(SQLX_VERIFY_DIR) 2>/dev/null)" ]; then \
 		echo "ERROR: regeneration produced no query files — cannot validate .sqlx/."; \
 		echo "       Try 'cargo clean -p djinn-db' and rerun."; \
 		exit 1; \
@@ -100,7 +103,7 @@ sqlx-verify: ## Verify server/.sqlx/ freshness; assumes schema already applied +
 	@# The freshly generated set must match the committed cache exactly
 	@# (same query hashes AND same type info). Any difference => stale cache.
 	@stale=0; \
-	for f in /tmp/sqlx-check/query-*.json; do \
+	for f in $(SQLX_VERIFY_DIR)/query-*.json; do \
 		b=$$(basename $$f); \
 		if [ ! -f "$(SERVER_DIR)/.sqlx/$$b" ]; then \
 			echo "::error::missing committed .sqlx entry: $$b"; stale=1; \
@@ -110,11 +113,11 @@ sqlx-verify: ## Verify server/.sqlx/ freshness; assumes schema already applied +
 	done; \
 	for f in $(SERVER_DIR)/.sqlx/query-*.json; do \
 		b=$$(basename $$f); \
-		if [ ! -f "/tmp/sqlx-check/$$b" ]; then \
+		if [ ! -f "$(SQLX_VERIFY_DIR)/$$b" ]; then \
 			echo "::error::stale committed .sqlx entry (no longer used): $$b"; stale=1; \
 		fi; \
 	done; \
-	rm -rf /tmp/sqlx-check; \
+	rm -rf $(SQLX_VERIFY_DIR); \
 	if [ "$$stale" = "1" ]; then \
 		echo "server/.sqlx/ is out of date — run 'make sqlx-prepare' and commit server/.sqlx/."; \
 		exit 1; \
