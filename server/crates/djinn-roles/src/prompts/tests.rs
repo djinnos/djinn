@@ -1864,3 +1864,81 @@ fn reviewer_config_finalize_tools_include_request_planner_not_request_lead() {
         REVIEWER_CONFIG.finalize_tool_names
     );
 }
+
+// ── Phase 1 c4r6: memory_search query-style contract regression ─────────────
+
+/// Assert that the shared `memory_search` query-formulation contract is present
+/// in a prompt. This pins the Phase 1 text-only contract: declarative (not
+/// question/interrogative), one self-contained information need per query, no
+/// retrieval-meta phrases (`find`, `information about`, `search for`), preserve
+/// discriminative symbol names / exact errors / config keys, and the
+/// lexical/BM25-until-72iu caveat.
+fn assert_memory_search_contract(prompt: &str, source: &str) {
+    let header = "**`memory_search` query contract:**";
+    assert!(
+        prompt.contains(header),
+        "{source} must declare the memory_search query contract header"
+    );
+
+    // Require complete directive-bearing clauses rather than loose keywords:
+    // this catches reversed prohibitions such as "use question wording".
+    for required in [
+        "Formulate each query as a declarative, self-contained statement of one information need.",
+        "Do not use question wording or retrieval-meta phrases such as `find`, `information about`, or `search for`.",
+        "Preserve discriminative symbol names, exact errors, and config keys.",
+        "Worker-issued searches remain lexical/BM25-only until 72iu; do not assume embeddings.",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "{source} memory_search contract must mention `{required}`"
+        );
+    }
+}
+
+/// Every prompt that operationally instructs `memory_search` usage must carry
+/// the same query-style contract and lexical/BM25-until-72iu caveat. This test
+/// covers both rendered role prompts (tool schemas are empty so this is
+/// text-only) and the source `proposal_address.md` chat prompt.
+#[test]
+fn memory_search_contract_present_in_all_operational_prompts() {
+    let task = make_task();
+    let ctx = make_ctx();
+
+    assert_memory_search_contract(
+        &render_prompt(AgentType::Worker, &task, &ctx),
+        "dev.md (worker default)",
+    );
+
+    let mut research_task = make_task();
+    research_task.issue_type = "research".into();
+    assert_memory_search_contract(
+        &render_prompt(AgentType::Worker, &research_task, &ctx),
+        "worker/research.md",
+    );
+
+    assert_memory_search_contract(
+        &render_prompt(AgentType::Architect, &task, &ctx),
+        "architect.md",
+    );
+
+    assert_memory_search_contract(
+        &render_prompt(AgentType::Reviewer, &task, &ctx),
+        "task-reviewer.md",
+    );
+
+    let mut planning_task = make_task();
+    planning_task.issue_type = "planning".into();
+    assert_memory_search_contract(
+        &render_prompt(AgentType::Planner, &planning_task, &ctx),
+        "planner/decomposition.md",
+    );
+
+    let mut proposal_task = make_task();
+    proposal_task.issue_type = "epic_breakdown".into();
+    assert_memory_search_contract(
+        &render_prompt(AgentType::Planner, &proposal_task, &ctx),
+        "planner/proposal.md",
+    );
+
+    assert_memory_search_contract(include_str!("proposal_address.md"), "proposal_address.md");
+}
