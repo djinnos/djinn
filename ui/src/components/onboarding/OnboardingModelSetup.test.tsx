@@ -6,7 +6,7 @@ import {
   type UserModel,
   type UserModelSelection,
 } from "@/api/userConfig";
-import { render, screen, userEvent, waitFor } from "@/test/test-utils";
+import { render, screen, userEvent, waitFor, within } from "@/test/test-utils";
 
 import { OnboardingModelSetup } from "./OnboardingModelSetup";
 
@@ -74,9 +74,11 @@ describe("OnboardingModelSetup", () => {
     expect(
       await screen.findByText(/selected it for all three roles/i),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Plan model")).toHaveValue(onlyModel.id);
-    expect(screen.getByLabelText("Code model")).toHaveValue(onlyModel.id);
-    expect(screen.getByLabelText("Review model")).toHaveValue(onlyModel.id);
+    expect(getModelTrigger("Plan")).toHaveAccessibleName(
+      /Plan model: GPT-5\.3 Codex · OpenAI/i,
+    );
+    expect(getModelTrigger("Code")).toHaveTextContent(onlyModel.name);
+    expect(getModelTrigger("Review")).toHaveTextContent(onlyModel.name);
 
     await user.click(
       screen.getByRole("button", { name: "Save models and continue" }),
@@ -125,7 +127,7 @@ describe("OnboardingModelSetup", () => {
     expect(save).toBeDisabled();
 
     for (const role of ["Plan", "Code", "Review"]) {
-      await user.selectOptions(screen.getByLabelText(`${role} model`), models[0]!.id);
+      await chooseModel(user, role, "gpt-5.5", models[0]!.name);
     }
     expect(save).toBeEnabled();
     await user.click(save);
@@ -170,12 +172,16 @@ describe("OnboardingModelSetup", () => {
       />,
     );
 
-    expect(await screen.findByLabelText("Plan model")).toHaveValue(models[0]!.id);
-    expect(screen.getByLabelText("Code model")).toHaveValue(models[1]!.id);
+    expect(await findModelTrigger("Plan")).toHaveTextContent(
+      models[0]!.name,
+    );
+    expect(getModelTrigger("Code")).toHaveTextContent(
+      models[1]!.name,
+    );
     expect(screen.queryByText(/fallback/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/sessions/i)).not.toBeInTheDocument();
 
-    await user.selectOptions(screen.getByLabelText("Plan model"), models[1]!.id);
+    await chooseModel(user, "Plan", "gpt-5.3", models[1]!.name);
     await user.click(
       screen.getByRole("button", { name: "Save models and continue" }),
     );
@@ -197,4 +203,125 @@ describe("OnboardingModelSetup", () => {
       ),
     );
   });
+
+  it("searches the full catalog in the same height-capped picker used by Model Roles", async () => {
+    const recommended = model("acme/zeta", "Zeta", true);
+    const hidden = model(
+      "acme/accounts/acme/models/legacy.v2.5",
+      "Legacy v2.5",
+    );
+    const existing = selection({
+      plan: [],
+      implement: [recommended.id],
+      review: [recommended.id],
+    });
+    vi.mocked(fetchUserConnectedModels).mockResolvedValue([
+      recommended,
+      hidden,
+    ]);
+    vi.mocked(saveUserModelSelection).mockResolvedValue(
+      selection({
+        plan: [hidden.id],
+        implement: [recommended.id],
+        review: [recommended.id],
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <OnboardingModelSetup
+        targetId="__self__"
+        selection={existing}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    await user.click(await findModelTrigger("Plan"));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Select plan model",
+    });
+    const list = dialog.querySelector('[data-slot="command-list"]');
+    expect(list).toHaveClass("max-h-[300px]", "overflow-y-auto");
+    expect(within(dialog).queryByText(hidden.name)).not.toBeInTheDocument();
+
+    await user.type(
+      within(dialog).getByPlaceholderText("Search models…"),
+      "   legacy.v2.5   ",
+    );
+    const hiddenResult = await within(dialog).findByText(hidden.name);
+    await user.click(hiddenResult.closest('[data-slot="command-item"]')!);
+
+    expect(getModelTrigger("Plan")).toHaveTextContent(
+      `${hidden.name} · Acme`,
+    );
+    expect(getModelTrigger("Plan")).toHaveAccessibleName(
+      `Plan model: ${hidden.name} · Acme`,
+    );
+
+    await user.click(getModelTrigger("Plan"));
+    const reopenedDialog = await screen.findByRole("dialog", {
+      name: "Select plan model",
+    });
+    await user.type(
+      within(reopenedDialog).getByPlaceholderText("Search models…"),
+      "legacy.v2.5",
+    );
+    const selectedResult = await within(reopenedDialog).findByText(hidden.name);
+    expect(selectedResult.closest('[data-slot="command-item"]')).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    await user.click(
+      within(reopenedDialog).getByRole("button", { name: "Close" }),
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Save models and continue" }),
+    );
+
+    await waitFor(() =>
+      expect(saveUserModelSelection).toHaveBeenCalledWith(
+        "__self__",
+        {
+          plan: [hidden.id],
+          implement: [recommended.id],
+          review: [recommended.id],
+        },
+        {
+          [hidden.id]: 1,
+          [recommended.id]: 1,
+        },
+      ),
+    );
+  });
 });
+
+async function chooseModel(
+  user: ReturnType<typeof userEvent.setup>,
+  role: string,
+  query: string,
+  name: string,
+) {
+  await user.click(getModelTrigger(role));
+  const dialog = await screen.findByRole("dialog", {
+    name: `Select ${role.toLowerCase()} model`,
+  });
+  await user.type(
+    within(dialog).getByPlaceholderText("Search models…"),
+    query,
+  );
+  const result = await within(dialog).findByText(name);
+  await user.click(result.closest('[data-slot="command-item"]')!);
+}
+
+function getModelTrigger(role: string): HTMLElement {
+  return screen.getByRole("button", {
+    name: new RegExp(`^${role} model:`, "i"),
+  });
+}
+
+function findModelTrigger(role: string): Promise<HTMLElement> {
+  return screen.findByRole("button", {
+    name: new RegExp(`^${role} model:`, "i"),
+  });
+}

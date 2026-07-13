@@ -9,19 +9,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { InlineError } from "@/components/InlineError";
 import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorEmpty,
-  ModelSelectorGroup,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorLogo,
-  ModelSelectorName,
-  ModelSelectorSeparator,
-  ModelSelectorTrigger,
-} from "@/components/ai-elements/model-selector";
-import {
   type UserModel,
   fetchUserConnectedModels,
   fetchUserModelSelection,
@@ -38,11 +25,10 @@ import { showToast } from "@/lib/toast";
 import { userConfigKeys } from "./userConfigKeys";
 import { formatProvider } from "./providerDisplay";
 import {
-  formatModelMetadata,
-  groupModelsByProvider,
   providerDefaultModels,
   stripProviderPrefix,
 } from "./modelPicker";
+import { ConnectedModelPicker } from "./ConnectedModelPicker";
 import { cn } from "@/lib/utils";
 
 /**
@@ -487,7 +473,7 @@ function LaneEditor({
           <h4 className="text-sm font-semibold text-foreground">{meta.title}</h4>
           <p className="text-xs text-muted-foreground/70">{meta.roles}</p>
         </div>
-        <AddModelButton
+        <ConnectedModelPicker
           models={availableToAdd}
           allModels={allAvailableToAdd}
           onSelect={onAdd}
@@ -595,126 +581,4 @@ export function ModelRow({
       </div>
     </Reorder.Item>
   );
-}
-
-export function AddModelButton({
-  models,
-  allModels,
-  onSelect,
-}: {
-  models: UserModel[];
-  allModels?: UserModel[];
-  onSelect: (model: UserModel) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(() => new Set());
-
-  const defaultModelIds = useMemo(
-    () => new Set(models.map((model) => model.id)),
-    [models],
-  );
-  const searchableModels = allModels ?? models;
-  const normalizedSearch = search.trim().toLowerCase();
-
-  const groups = useMemo(() => {
-    const source = normalizedSearch
-      ? searchableModels.filter((model) => modelMatchesSearch(model, normalizedSearch))
-      : searchableModels;
-
-    return groupModelsByProvider(source)
-      .map((group) => {
-        const hiddenCount = group.models.filter(
-          (model) => !defaultModelIds.has(model.id),
-        ).length;
-        const expanded = expandedProviders.has(group.providerId);
-        const items = normalizedSearch || expanded
-          ? group.models
-          : group.models.filter((model) => defaultModelIds.has(model.id));
-        return { ...group, hiddenCount, items };
-      })
-      .filter((group) => group.items.length > 0 || group.hiddenCount > 0);
-  }, [defaultModelIds, expandedProviders, normalizedSearch, searchableModels]);
-
-  return (
-    <ModelSelector
-      open={open}
-      onOpenChange={(nextOpen) => {
-        setOpen(nextOpen);
-        if (!nextOpen) {
-          setSearch("");
-          setExpandedProviders(new Set());
-        }
-      }}
-    >
-      <ModelSelectorTrigger render={<Button variant="default" size="sm" />}>
-        Add model
-      </ModelSelectorTrigger>
-      <ModelSelectorContent title="Add a model">
-        <ModelSelectorInput
-          placeholder="Search models…"
-          onInputCapture={(event) => setSearch(event.currentTarget.value)}
-        />
-        <ModelSelectorList>
-          <ModelSelectorEmpty>No connected models available.</ModelSelectorEmpty>
-          {groups.map((group, index) => (
-            <ModelSelectorGroup key={group.providerId} heading={formatProvider(group.providerId)}>
-              {group.items.map((model) => (
-                <ModelSelectorItem
-                  key={model.id}
-                  searchValue={modelSearchValue(model)}
-                  onSelect={() => {
-                    onSelect(model);
-                    setOpen(false);
-                    setSearch("");
-                    setExpandedProviders(new Set());
-                  }}
-                >
-                  <ModelSelectorLogo provider={group.providerId} />
-                  <ModelSelectorName>{model.name || stripProviderPrefix(model.id)}</ModelSelectorName>
-                  {model.recommended && (
-                    <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                      Recommended
-                    </span>
-                  )}
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    {formatModelMetadata(model)}
-                  </span>
-                </ModelSelectorItem>
-              ))}
-              {!normalizedSearch &&
-                !expandedProviders.has(group.providerId) &&
-                group.hiddenCount > 0 && (
-                  <button
-                    type="button"
-                    className="w-full rounded-sm px-2 py-1.5 text-left text-xs font-medium text-primary hover:bg-accent"
-                    onClick={() =>
-                      setExpandedProviders((prev) => {
-                        const next = new Set(prev);
-                        next.add(group.providerId);
-                        return next;
-                      })
-                    }
-                  >
-                    Browse all {formatProvider(group.providerId)} models ({group.hiddenCount} more)
-                  </button>
-                )}
-              {index < groups.length - 1 && <ModelSelectorSeparator />}
-            </ModelSelectorGroup>
-          ))}
-        </ModelSelectorList>
-      </ModelSelectorContent>
-    </ModelSelector>
-  );
-}
-
-function modelSearchValue(model: UserModel): string {
-  const providerId = model.provider_id ?? "unknown";
-  return [model.name, model.id, stripProviderPrefix(model.id), providerId, formatProvider(providerId)]
-    .filter(Boolean)
-    .join(" ");
-}
-
-function modelMatchesSearch(model: UserModel, normalizedSearch: string): boolean {
-  return modelSearchValue(model).toLowerCase().includes(normalizedSearch);
 }

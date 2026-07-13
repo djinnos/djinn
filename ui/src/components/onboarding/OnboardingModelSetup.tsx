@@ -1,6 +1,9 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckmarkCircle04Icon } from "@hugeicons/core-free-icons";
+import {
+  ArrowDown01Icon,
+  CheckmarkCircle04Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
 import {
@@ -16,9 +19,11 @@ import {
 } from "@/api/userSettings";
 import { InlineError } from "@/components/InlineError";
 import { Button } from "@/components/ui/button";
+import { ConnectedModelPicker } from "@/components/userConfig/ConnectedModelPicker";
 import { userConfigKeys } from "@/components/userConfig/userConfigKeys";
 import { formatProvider } from "@/components/userConfig/providerDisplay";
 import {
+  providerDefaultModels,
   sortModels,
   stripProviderPrefix,
 } from "@/components/userConfig/modelPicker";
@@ -69,6 +74,10 @@ export function OnboardingModelSetup({
   const models = useMemo(
     () => sortModels(connectedModels.data ?? []),
     [connectedModels.data],
+  );
+  const defaultModels = useMemo(
+    () => providerDefaultModels(models),
+    [models],
   );
   const modelIds = useMemo(
     () => new Set(models.map((model) => model.id)),
@@ -165,40 +174,57 @@ export function OnboardingModelSetup({
       <div className="grid gap-3 md:grid-cols-3">
         {MODEL_LANE_KEYS.map((lane) => {
           const meta = ROLE_META[lane];
-          const inputId = `onboarding-${lane}-model`;
+          const selectedModel = models.find(
+            (model) => model.id === choices[lane],
+          );
+          const selectedModelLabel = selectedModel
+            ? `${modelName(selectedModel)} · ${formatProvider(
+                selectedModel.provider_id ?? "unknown",
+              )}`
+            : "Select a model";
           return (
             <div
               key={lane}
               className="flex min-w-0 flex-col gap-3 rounded-xl border bg-card/40 p-4"
             >
               <div>
-                <label htmlFor={inputId} className="text-sm font-semibold">
-                  {meta.label}
-                </label>
+                <p className="text-sm font-semibold">{meta.label}</p>
                 <p className="mt-1 text-xs text-muted-foreground">
                   {meta.description}
                 </p>
               </div>
-              <select
-                id={inputId}
-                aria-label={`${meta.label} model`}
-                value={choices[lane]}
+              <ConnectedModelPicker
+                models={defaultModels}
+                allModels={models}
+                title={`Select ${meta.label.toLowerCase()} model`}
+                emptyMessage="No models found."
+                triggerAriaLabel={`${meta.label} model: ${
+                  selectedModel ? selectedModelLabel : "not selected"
+                }`}
+                triggerVariant="outline"
+                triggerSize="lg"
+                triggerClassName="h-10 w-full min-w-0 justify-between px-3 font-normal"
                 disabled={saveMutation.isPending}
-                onChange={(event) =>
+                selectedModelId={selectedModel?.id}
+                triggerLabel={
+                  <>
+                    <span className="min-w-0 truncate">
+                      {selectedModelLabel}
+                    </span>
+                    <HugeiconsIcon
+                      icon={ArrowDown01Icon}
+                      size={16}
+                      className="shrink-0 text-muted-foreground"
+                    />
+                  </>
+                }
+                onSelect={(model) =>
                   setOverrides((current) => ({
                     ...current,
-                    [lane]: event.target.value,
+                    [lane]: model.id,
                   }))
                 }
-                className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <option value="">Select a model</option>
-                {models.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {modelName(model)} · {formatProvider(model.provider_id ?? "unknown")}
-                  </option>
-                ))}
-              </select>
+              />
             </div>
           );
         })}
