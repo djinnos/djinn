@@ -1,0 +1,137 @@
+//! Integration coverage for the production retrieval zero-result Doctor check.
+
+#[path = "common/mod.rs"]
+mod common;
+
+use djinn_control_plane::test_support::McpTestHarness;
+use djinn_core::doctor::RETRIEVAL_ZERO_RESULT_NAME;
+use djinn_db::repositories::retrieval_trace::{
+    CreateRetrievalTraceParams, DEFAULT_CANDIDATE_CAP, RetrievalTraceEntryPoint,
+    RetrievalTraceRepository,
+};
+use djinn_db::{DoctorFindingRepository, RecentDoctorFindings};
+use serde_json::json;
+
+async fn harness() -> McpTestHarness {
+    let harness = McpTestHarness::new().await;
+    djinn_db::test_support::ensure_doctor_findings_schema(harness.db()).await;
+    harness
+}
+
+async fn insert_traces(
+    repo: &RetrievalTraceRepository,
+    project_id: &str,
+    zero_results: usize,
+    non_zero_results: usize,
+) {
+    let zero_candidates = json!([]);
+    let candidates = json!([{"note_id":"note-1","outcome":"injected","rank":1}]);
+    for (count, candidates) in [
+        (zero_results, &zero_candidates),
+        (non_zero_results, &candidates),
+    ] {
+        for _ in 0..count {
+            repo.insert(CreateRetrievalTraceParams {
+                project_id,
+                session_id: None,
+                task_run_id: None,
+                task_id: None,
+                entry_point: RetrievalTraceEntryPoint::Dispatch,
+                trigger: None,
+                candidates,
+                candidate_cap: DEFAULT_CANDIDATE_CAP,
+                candidate_cap_exceeded: false,
+                sampling_metadata: None,
+                durations_ms: &json!({}),
+                estimated_injected_tokens: 0,
+            })
+            .await
+            .expect("insert retrieval trace");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_run_retrieval_check_persists_only_strictly_above_threshold() {
+    let harness = harness().await;
+    let db = harness.db().clone();
+    let above = common::create_test_project(&db).await;
+    let equal = common::create_test_project(&db).await;
+    let traces = RetrievalTraceRepository::new(db.clone());
+
+    // Both projects meet the default floor (20). 12/22 is above 0.50; 10/20
+    // equals it and therefore must be suppressed.
+    insert_traces(&traces, &above.id, 12, 10).await;
+    insert_traces(&traces, &equal.id, 10, 10).await;
+
+    let response = harness
+        .call_tool(
+            "doctor_run",
+            json!({"check_names": [RETRIEVAL_ZERO_RESULT_NAME]}),
+        )
+        .await
+        .expect("dispatch doctor_run");
+    assert_eq!(response["ok"], true);
+    assert!(
+        response["registered_checks"]
+            .as_array()
+            .expect("registered checks")
+            .iter()
+            .any(|check| check["name"] == RETRIEVAL_ZERO_RESULT_NAME)
+    );
+
+    // An explicit retrieval-only request must not accidentally execute every
+    // ordinary globally registered check.
+    let results = response["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["check"]["name"], RETRIEVAL_ZERO_RESULT_NAME);
+    assert_eq!(results[0]["ran"], true);
+    let entries = results[0]["findings"].as_array().expect("finding entries");
+    assert_eq!(entries.len(), 1);
+
+    let finding_id = entries[0]["finding_id"].as_str().expect("persisted id");
+    let findings = DoctorFindingRepository::new(db);
+    let persisted = findings
+        .get(finding_id)
+        .await
+        .expect("read persisted finding")
+        .expect("finding exists");
+    assert_eq!(persisted.check_name, RETRIEVAL_ZERO_RESULT_NAME);
+    assert_eq!(
+        persisted.entity_ids["project_id"].as_str(),
+        Some(above.id.as_str())
+    );
+
+    // The persisted evidence is the complete, immutable prefetched snapshot.
+    let evidence = &persisted.evidence;
+    assert_eq!(evidence["project_id"].as_str(), Some(above.id.as_str()));
+    assert!(evidence["window"]["start"].as_str().is_some());
+    assert!(evidence["window"]["end"].as_str().is_some());
+    assert_eq!(evidence["threshold"].as_f64(), Some(0.5));
+    assert_eq!(evidence["floor"].as_i64(), Some(20));
+    assert_eq!(evidence["numerator"].as_i64(), Some(12));
+    assert_eq!(evidence["denominator"].as_i64(), Some(22));
+    assert_eq!(evidence["rate"].as_f64(), Some(12.0 / 22.0));
+    assert_eq!(
+        evidence["per_entry_point_counts"]["dispatch"]["total_queries"],
+        22
+    );
+    assert_eq!(
+        evidence["per_entry_point_counts"]["dispatch"]["zero_result_queries"],
+        12
+    );
+
+    let retrieval_findings = findings
+        .list_recent(RecentDoctorFindings {
+            check_name: Some(RETRIEVAL_ZERO_RESULT_NAME.to_owned()),
+            ..Default::default()
+        })
+        .await
+        .expect("list retrieval findings");
+    assert!(
+        retrieval_findings.iter().all(|finding| {
+            finding.entity_ids["project_id"].as_str() != Some(equal.id.as_str())
+        }),
+        "equality at the threshold must not emit a finding"
+    );
+}
