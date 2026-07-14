@@ -88,7 +88,14 @@ pub struct CargoTargetRunsInventory {
     pub total_allocated_bytes: u64,
     pub top_level_directory_count: usize,
     pub candidates: Vec<RunDirInventoryCandidate>,
+    /// Bytes held by non-directory entries anywhere in the root. This is
+    /// accounting-only: files nested in a removable run disappear with it and
+    /// therefore do not themselves block trimming.
     pub non_directory_allocated_bytes: u64,
+    /// Bytes held by non-directory entries directly under the runs root. These
+    /// entries cannot be removal candidates, so they can independently prevent
+    /// satisfying a byte budget.
+    pub top_level_non_directory_allocated_bytes: u64,
     pub protected: Vec<InventoryIssue>,
     pub errors: Vec<InventoryIssue>,
 }
@@ -131,7 +138,7 @@ pub fn inventory_cargo_target_runs(
     let root_entries = fs::read_dir(root).map_err(CargoTargetRunsInventoryError::RootRead)?;
     let mut inventory = CargoTargetRunsInventory::default();
     let mut seen = HashSet::new();
-    account_metadata(&root_metadata, false, &mut seen, &mut inventory)?;
+    account_metadata(&root_metadata, false, false, &mut seen, &mut inventory)?;
     for entry in root_entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -154,7 +161,13 @@ pub fn inventory_cargo_target_runs(
                 continue;
             }
         };
-        account_metadata(&metadata, !metadata.is_dir(), &mut seen, &mut inventory)?;
+        account_metadata(
+            &metadata,
+            !metadata.is_dir(),
+            !metadata.is_dir(),
+            &mut seen,
+            &mut inventory,
+        )?;
         if metadata.file_type().is_symlink() {
             inventory.protected.push(InventoryIssue {
                 top_level_name: Some(raw_name),
@@ -252,7 +265,7 @@ fn inventory_directory(
                 continue;
             }
         };
-        account_metadata(&metadata, !metadata.is_dir(), seen, inventory)?;
+        account_metadata(&metadata, !metadata.is_dir(), false, seen, inventory)?;
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             inventory_directory(&entry.path(), top_level_name.clone(), seen, inventory)?;
         }
@@ -264,6 +277,7 @@ fn inventory_directory(
 fn account_metadata(
     metadata: &fs::Metadata,
     non_directory: bool,
+    top_level_non_directory: bool,
     seen: &mut HashSet<(u64, u64)>,
     inventory: &mut CargoTargetRunsInventory,
 ) -> Result<(), CargoTargetRunsInventoryError> {
@@ -281,6 +295,12 @@ fn account_metadata(
     if non_directory {
         inventory.non_directory_allocated_bytes = inventory
             .non_directory_allocated_bytes
+            .checked_add(bytes)
+            .ok_or(CargoTargetRunsInventoryError::ByteOverflow)?;
+    }
+    if top_level_non_directory {
+        inventory.top_level_non_directory_allocated_bytes = inventory
+            .top_level_non_directory_allocated_bytes
             .checked_add(bytes)
             .ok_or(CargoTargetRunsInventoryError::ByteOverflow)?;
     }
@@ -652,8 +672,8 @@ pub fn trim_cargo_target_runs_with_fs(
     loop {
         let inventory = inventory_cargo_target_runs(root)?;
         let errors = operation_errors.saturating_add(inventory.errors.len());
-        let mut protected =
-            inventory.protected.len() + usize::from(inventory.non_directory_allocated_bytes > 0);
+        let mut protected = inventory.protected.len()
+            + usize::from(inventory.top_level_non_directory_allocated_bytes > 0);
         let within = (caps.max_dirs == 0 || inventory.top_level_directory_count <= caps.max_dirs)
             && (caps.max_bytes == 0 || inventory.total_allocated_bytes <= caps.max_bytes);
         if within {
@@ -1212,9 +1232,7 @@ mod tests {
 
     /// When the sole candidate cannot be removed (deterministic removal failure
     /// via the mock seam), the engine records an operation error and, with no
-    /// remaining candidates, returns `over_budget_error`. A bare empty directory
-    /// is used so `non_directory_allocated_bytes` stays zero and does not inflate
-    /// the protected count.
+    /// remaining candidates, returns `over_budget_error`.
     #[cfg(unix)]
     #[test]
     fn joint_trim_reports_over_budget_error_when_removal_fails() {
@@ -1235,6 +1253,35 @@ mod tests {
         assert!(result.errors > 0);
         assert_eq!(result.outcome, CargoTargetRunsTrimOutcome::OverBudgetError);
         assert!(tmp.path().join("only").exists());
+    }
+
+    /// Files within a removable run contribute allocated bytes, but do not make
+    /// that run protected. If removal fails, the remaining overage is caused by
+    /// the operation error alone rather than a nested ordinary artifact.
+    #[cfg(unix)]
+    #[test]
+    fn joint_trim_nested_file_removal_failure_is_error_not_protection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact = tmp.path().join("only/debug/deps/lib.rlib");
+        fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        fs::write(&artifact, vec![0_u8; 4096]).unwrap();
+        let fs = FailingRemoveFilesystem;
+        let result = trim_cargo_target_runs_with_fs(
+            tmp.path(),
+            &HashSet::new(),
+            CargoTargetRunsCaps {
+                max_dirs: 0,
+                max_bytes: 1,
+            },
+            &fs,
+        )
+        .unwrap();
+
+        assert_eq!(result.deleted, 0);
+        assert!(result.errors > 0);
+        assert_eq!(result.protected, 0);
+        assert_eq!(result.outcome, CargoTargetRunsTrimOutcome::OverBudgetError);
+        assert!(artifact.exists());
     }
 
     /// A protected (active) candidate and a candidate whose removal fails coexist,
