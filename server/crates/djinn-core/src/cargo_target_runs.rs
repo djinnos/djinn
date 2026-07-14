@@ -96,6 +96,10 @@ pub struct CargoTargetRunsInventory {
     /// entries cannot be removal candidates, so they can independently prevent
     /// satisfying a byte budget.
     pub top_level_non_directory_allocated_bytes: u64,
+    /// Number of non-directory entries directly under the runs root. Unlike
+    /// allocated bytes, this is not inode-deduplicated: every such top-level
+    /// entry is independently non-removable and therefore protected.
+    pub top_level_non_directory_count: usize,
     pub protected: Vec<InventoryIssue>,
     pub errors: Vec<InventoryIssue>,
 }
@@ -168,6 +172,10 @@ pub fn inventory_cargo_target_runs(
             &mut seen,
             &mut inventory,
         )?;
+        if !metadata.is_dir() {
+            inventory.top_level_non_directory_count =
+                inventory.top_level_non_directory_count.saturating_add(1);
+        }
         if metadata.file_type().is_symlink() {
             inventory.protected.push(InventoryIssue {
                 top_level_name: Some(raw_name),
@@ -675,8 +683,7 @@ pub fn trim_cargo_target_runs_with_fs(
     loop {
         let inventory = inventory_cargo_target_runs(root)?;
         let errors = operation_errors.saturating_add(inventory.errors.len());
-        let mut protected = inventory.protected.len()
-            + usize::from(inventory.top_level_non_directory_allocated_bytes > 0);
+        let mut protected = protected_entry_count(&inventory);
         let within = (caps.max_dirs == 0 || inventory.top_level_directory_count <= caps.max_dirs)
             && (caps.max_bytes == 0 || inventory.total_allocated_bytes <= caps.max_bytes);
         if within {
@@ -767,6 +774,23 @@ fn over_budget_outcome(protected: bool, errors: bool) -> CargoTargetRunsTrimOutc
         (true, false) => CargoTargetRunsTrimOutcome::OverBudgetProtected,
         (false, _) => CargoTargetRunsTrimOutcome::OverBudgetError,
     }
+}
+
+/// Count protected top-level entries exactly. Top-level symlinks are represented
+/// both in `protected` and in the non-directory entry count, so subtract their
+/// issue records before adding all non-directory entries to avoid double-counting.
+#[cfg(unix)]
+fn protected_entry_count(inventory: &CargoTargetRunsInventory) -> usize {
+    let top_level_symlinks = inventory
+        .protected
+        .iter()
+        .filter(|issue| issue.kind == InventoryIssueKind::TopLevelSymlink)
+        .count();
+    inventory
+        .protected
+        .len()
+        .saturating_sub(top_level_symlinks)
+        .saturating_add(inventory.top_level_non_directory_count)
 }
 
 #[cfg(test)]
@@ -1036,6 +1060,37 @@ mod tests {
             CargoTargetRunsTrimOutcome::OverBudgetProtected
         );
         assert!(tmp.path().join(" ").is_dir());
+    }
+
+    /// Every ordinary top-level entry is separately protected, even when its
+    /// blocks are deduplicated or zero. Their exact count must be surfaced
+    /// when they are the sole cause of an unsatisfiable byte cap.
+    #[cfg(unix)]
+    #[test]
+    fn joint_trim_counts_each_top_level_non_directory_as_protected() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("first"), b"first").unwrap();
+        fs::write(tmp.path().join("second"), b"second").unwrap();
+
+        let inventory = inventory_cargo_target_runs(tmp.path()).unwrap();
+        assert_eq!(inventory.top_level_non_directory_count, 2);
+        let result = trim_cargo_target_runs(
+            tmp.path(),
+            &HashSet::new(),
+            CargoTargetRunsCaps {
+                max_dirs: 0,
+                max_bytes: 1,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.deleted, 0);
+        assert_eq!(result.errors, 0);
+        assert_eq!(result.protected, 2);
+        assert_eq!(
+            result.outcome,
+            CargoTargetRunsTrimOutcome::OverBudgetProtected
+        );
     }
 
     #[cfg(unix)]
