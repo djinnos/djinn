@@ -20868,7 +20868,7 @@
   },
   {
     "name": "session_show",
-    "description": "session_show(id) returns session details: id, task_id, model_id, agent_type, started_at, ended_at, status, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens",
+    "description": "session_show(id) returns session details and canonical session-associated extension_load_diagnostics: id, task_id, model_id, agent_type, started_at, ended_at, status, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "required": [
@@ -20889,6 +20889,10 @@
     },
     "outputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "AnyJson": {}
+      },
+      "type": "object",
       "properties": {
         "id": {
           "type": "string"
@@ -20955,14 +20959,23 @@
             "null"
           ]
         },
+        "extension_load_diagnostics": {
+          "description": "Canonical extension-load failures associated with this session. Present\non successful lookups, including as an empty array.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          }
+        },
         "error": {
           "type": [
             "string",
             "null"
           ]
         }
-      },
-      "type": "object"
+      }
     },
     "readOnly": false,
     "destructive": true,
