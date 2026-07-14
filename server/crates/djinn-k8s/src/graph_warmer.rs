@@ -224,9 +224,8 @@ impl WarmJobDispatcher for KubeClientDispatcher {
 /// unchanged and no convergence is needed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WarmTerminalOutcome {
-    /// The warm Job reported `.status.succeeded > 0` (or completed and was
-    /// reaped before we observed it — see the 404 branch), meaning a fresh
-    /// blob was persisted.
+    /// The warm Job reported `.status.succeeded > 0`, meaning a fresh blob was
+    /// persisted.
     Succeeded,
     /// The warm Job reported `.status.failed > 0`, or the watcher gave up at
     /// its deadline without observing success. No fresh blob was persisted.
@@ -258,52 +257,90 @@ impl KubeClientJobWatcher {
     }
 }
 
+/// One result from a watcher poll, reduced to only the terminal facts needed
+/// by the lifecycle decision. Keeping this decision independent of kube types
+/// gives tests deterministic control over both observations and deadline
+/// progression without requiring an apiserver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WarmJobObservation {
+    Running,
+    Succeeded,
+    Failed,
+    /// The Job was not found. This can be TTL cleanup, but can equally be an
+    /// operator deletion or eviction, so it is never evidence of a completed
+    /// warm unless success was observed before disappearance.
+    Disappeared,
+    /// A non-404 API error. Retry while the bounded watcher deadline remains.
+    ApiError,
+}
+
+/// Return a terminal outcome when an observation proves one, or when the
+/// bounded watcher deadline has elapsed. In particular, disappearance is
+/// fail-closed: only an observed `.status.succeeded > 0` can prove persistence.
+fn terminal_outcome_after_poll(
+    observation: WarmJobObservation,
+    deadline_expired: bool,
+) -> Option<WarmTerminalOutcome> {
+    match observation {
+        WarmJobObservation::Succeeded => Some(WarmTerminalOutcome::Succeeded),
+        WarmJobObservation::Failed | WarmJobObservation::Disappeared => {
+            Some(WarmTerminalOutcome::Failed)
+        }
+        WarmJobObservation::Running | WarmJobObservation::ApiError if deadline_expired => {
+            Some(WarmTerminalOutcome::Failed)
+        }
+        WarmJobObservation::Running | WarmJobObservation::ApiError => None,
+    }
+}
+
 #[async_trait]
 impl WarmJobWatcher for KubeClientJobWatcher {
     async fn wait_terminal(&self, namespace: &str, job_name: &str) -> WarmTerminalOutcome {
         let api: Api<Job> = Api::namespaced(self.client.clone(), namespace);
         let deadline = SystemClock::new().now_instant() + WATCH_DEADLINE;
         loop {
-            match api.get(job_name).await {
+            let observation = match api.get(job_name).await {
                 Ok(job) => {
                     if let Some(status) = job.status.as_ref() {
                         if status.succeeded.unwrap_or(0) > 0 {
-                            debug!(job = %job_name, "K8sGraphWarmer watcher: succeeded");
-                            return WarmTerminalOutcome::Succeeded;
+                            WarmJobObservation::Succeeded
+                        } else if status.failed.unwrap_or(0) > 0 {
+                            WarmJobObservation::Failed
+                        } else {
+                            WarmJobObservation::Running
                         }
-                        if status.failed.unwrap_or(0) > 0 {
-                            warn!(job = %job_name, "K8sGraphWarmer watcher: failed");
-                            return WarmTerminalOutcome::Failed;
-                        }
+                    } else {
+                        WarmJobObservation::Running
                     }
                 }
-                Err(kube::Error::Api(resp)) if resp.code == 404 => {
-                    // The Job is gone. `ttlSecondsAfterFinished` only reaps
-                    // *finished* Jobs, and a Job that ran to completion so fast
-                    // it was reaped before our first poll is overwhelmingly a
-                    // success, so we treat "gone" as Succeeded and let the
-                    // server converge its RAM slot. A needless reload on the
-                    // rare reaped-failure is harmless (it re-reads the same
-                    // latest persisted row).
-                    debug!(job = %job_name, "K8sGraphWarmer watcher: job gone (treating as succeeded)");
-                    return WarmTerminalOutcome::Succeeded;
-                }
+                Err(kube::Error::Api(resp)) if resp.code == 404 => WarmJobObservation::Disappeared,
                 Err(e) => {
                     warn!(
                         job = %job_name,
                         error = %e,
                         "K8sGraphWarmer watcher: api get failed (continuing)"
                     );
+                    WarmJobObservation::ApiError
                 }
-            }
-            if SystemClock::new().now_instant() >= deadline {
-                warn!(
-                    job = %job_name,
-                    "K8sGraphWarmer watcher: deadline exceeded, notifying anyway"
-                );
-                // Unknown terminal state → treat as Failed so we don't churn
-                // the cache; the read-path revalidation TTL still converges.
-                return WarmTerminalOutcome::Failed;
+            };
+
+            let deadline_expired = SystemClock::new().now_instant() >= deadline;
+            if let Some(outcome) = terminal_outcome_after_poll(observation, deadline_expired) {
+                match outcome {
+                    WarmTerminalOutcome::Succeeded => {
+                        debug!(job = %job_name, "K8sGraphWarmer watcher: succeeded");
+                    }
+                    WarmTerminalOutcome::Failed if observation == WarmJobObservation::Failed => {
+                        warn!(job = %job_name, "K8sGraphWarmer watcher: failed");
+                    }
+                    WarmTerminalOutcome::Failed if observation == WarmJobObservation::Disappeared => {
+                        warn!(job = %job_name, "K8sGraphWarmer watcher: job disappeared without observed success");
+                    }
+                    WarmTerminalOutcome::Failed => {
+                        warn!(job = %job_name, "K8sGraphWarmer watcher: deadline exceeded");
+                    }
+                }
+                return outcome;
             }
             tokio::time::sleep(WATCH_POLL_INTERVAL).await;
         }

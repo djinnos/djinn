@@ -77,6 +77,25 @@ impl WarmJobWatcher for ImmediateWatcher {
     }
 }
 
+/// Test watcher that applies the same private polling decision seam as the
+/// production watcher. It lets completion-sink tests model a 404 deletion
+/// without a Kubernetes API server.
+struct ObservationWatcher {
+    observations: Vec<(WarmJobObservation, bool)>,
+}
+
+#[async_trait]
+impl WarmJobWatcher for ObservationWatcher {
+    async fn wait_terminal(&self, _namespace: &str, _job_name: &str) -> WarmTerminalOutcome {
+        self.observations
+            .iter()
+            .find_map(|(observation, deadline_expired)| {
+                terminal_outcome_after_poll(*observation, *deadline_expired)
+            })
+            .unwrap_or(WarmTerminalOutcome::Failed)
+    }
+}
+
 /// Recording [`WarmCompletionSink`] that captures the `project_id`s it was
 /// invoked with, so tests can assert the event-driven invalidation hook fired
 /// exactly on warm-Job success.
@@ -101,6 +120,49 @@ impl WarmCompletionSink for RecordingSink {
     async fn on_warm_succeeded(&self, project_id: &str) {
         self.calls.lock().await.push(project_id.to_string());
     }
+}
+
+#[test]
+fn watcher_poll_observations_have_conservative_terminal_semantics() {
+    assert_eq!(
+        terminal_outcome_after_poll(WarmJobObservation::Succeeded, false),
+        Some(WarmTerminalOutcome::Succeeded),
+        "only observed success proves the graph was persisted"
+    );
+    assert_eq!(
+        terminal_outcome_after_poll(WarmJobObservation::Failed, false),
+        Some(WarmTerminalOutcome::Failed),
+        "including active-deadline Job failures"
+    );
+    assert_eq!(
+        terminal_outcome_after_poll(WarmJobObservation::Disappeared, false),
+        Some(WarmTerminalOutcome::Failed),
+        "operator deletion or eviction cannot be treated as TTL-cleaned success"
+    );
+}
+
+#[test]
+fn watcher_poll_retries_transient_errors_and_respects_deadline() {
+    let eventual_success = [(WarmJobObservation::ApiError, false), (WarmJobObservation::Succeeded, false)]
+        .into_iter()
+        .find_map(|(observation, deadline_expired)| {
+            terminal_outcome_after_poll(observation, deadline_expired)
+        });
+    assert_eq!(
+        eventual_success,
+        Some(WarmTerminalOutcome::Succeeded),
+        "a transient API error is retried until a later success is observed"
+    );
+    assert_eq!(
+        terminal_outcome_after_poll(WarmJobObservation::Running, true),
+        Some(WarmTerminalOutcome::Failed),
+        "a watcher deadline expiry fails conservatively"
+    );
+    assert_eq!(
+        terminal_outcome_after_poll(WarmJobObservation::ApiError, true),
+        Some(WarmTerminalOutcome::Failed),
+        "persistent API errors cannot extend polling past the deadline"
+    );
 }
 
 /// Seed a project assigned a READY catalog image; returns the DB-assigned
@@ -943,10 +1005,10 @@ async fn trigger_fires_completion_sink_on_warm_success() {
     );
 }
 
-/// The completion sink must NOT fire when the warm Job ends in failure —
-/// no fresh blob was persisted, so there is nothing to converge to.
+/// The completion sink must NOT fire when a Job disappears before success is
+/// observed: deletion or eviction must not fabricate graph convergence.
 #[tokio::test]
-async fn trigger_skips_completion_sink_on_warm_failure() {
+async fn trigger_skips_completion_sink_when_job_disappears() {
     let db = Database::open_in_memory().expect("in-memory db");
     let project_id = seed_project_with_ready_image(&db, "proj-sink-failure").await;
 
@@ -957,8 +1019,8 @@ async fn trigger_skips_completion_sink_on_warm_failure() {
         test_config(),
         db,
         Arc::new(dispatcher),
-        Arc::new(ImmediateWatcher {
-            outcome: WarmTerminalOutcome::Failed,
+        Arc::new(ObservationWatcher {
+            observations: vec![(WarmJobObservation::Disappeared, false)],
         }),
     )
     .with_completion_sink(Arc::new(sink));
@@ -969,6 +1031,6 @@ async fn trigger_skips_completion_sink_on_warm_failure() {
 
     assert!(
         calls.lock().await.is_empty(),
-        "completion sink must not fire on warm-Job failure"
+        "completion sink must not fire when deletion or eviction makes the Job disappear"
     );
 }
