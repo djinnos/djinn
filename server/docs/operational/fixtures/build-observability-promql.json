@@ -1,0 +1,43 @@
+{
+  "window_seconds": 900,
+  "histograms": {
+    "cargo_check": [
+      {
+        "labels": {"kind": "check", "exit": "ok"},
+        "buckets": [
+          {"le": 1.0, "start": 100, "end": 105},
+          {"le": 2.0, "start": 100, "end": 110},
+          {"le": "+Inf", "start": 100, "end": 110}
+        ]
+      }
+    ],
+    "admitted_queue_wait": [
+      {
+        "labels": {"outcome": "admitted"},
+        "buckets": [
+          {"le": 0.25, "start": 40, "end": 40},
+          {"le": 0.5, "start": 40, "end": 48},
+          {"le": 1.0, "start": 40, "end": 50},
+          {"le": "+Inf", "start": 40, "end": 50}
+        ]
+      }
+    ]
+  },
+  "phase_counters": [
+    {"labels": {"phase": "provider_wait", "role": "worker"}, "start": 100, "end": 130},
+    {"labels": {"phase": "tool_execution", "role": "worker"}, "start": 100, "end": 170},
+    {"labels": {"phase": "provider_wait", "role": "reviewer"}, "start": 50, "end": 60},
+    {"labels": {"phase": "tool_execution", "role": "reviewer"}, "start": 20, "end": 30},
+    {"labels": {"phase": "provider_wait", "role": "planner"}, "start": 5, "end": 5},
+    {"labels": {"phase": "tool_execution", "role": "planner"}, "start": 9, "end": 9},
+    {"labels": {"phase": "provider_wait", "role": "refinement"}, "start": 0, "end": 0},
+    {"labels": {"phase": "tool_execution", "role": "refinement"}, "start": 0, "end": 0}
+  ],
+  "expected": {
+    "cargo_check_p50_seconds": 1.0,
+    "cargo_check_p95_seconds": 1.9,
+    "admitted_queue_wait_p95_seconds": 0.875,
+    "provider_wait_share_by_role": {"worker": 0.3, "reviewer": 0.5},
+    "provider_wait_share_absent_roles": ["planner", "refinement"]
+  }
+}
