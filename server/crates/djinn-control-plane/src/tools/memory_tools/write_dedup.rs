@@ -179,7 +179,7 @@ pub(crate) async fn apply_dedup_decision(
         }
         MemoryWriteDedupDecision::MergeIntoExisting {
             candidate_id,
-            merged_title: _,
+            merged_title,
             merged_content,
         } => {
             let existing = canonical_candidate(repo, pending.project_id, &candidate_id).await?;
@@ -188,8 +188,10 @@ pub(crate) async fn apply_dedup_decision(
                     project_id: pending.project_id.to_owned(),
                     note_id: Some(candidate_id),
                     event_kind: NoteRevisionEventKind::Updated,
-                    desired: NoteRevisionDesiredState::Existing {
+                    desired: NoteRevisionDesiredState::MergeExisting {
+                        title: merged_title,
                         content: merged_content,
+                        tags: pending.tags_json.to_owned(),
                         confidence: existing.confidence,
                     },
                     attribution: TrustedNoteRevisionAttribution::system(

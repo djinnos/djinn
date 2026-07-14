@@ -88,6 +88,7 @@ impl DjinnMcpServer {
                 content: &p.content,
                 note_type: &p.note_type,
                 status: p.status.as_deref(),
+                tags_json: &tags_json,
             },
         )
         .await

@@ -425,7 +425,8 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
                 "project": project.slug(),
                 "identifier": "roadmap",
                 "operation": "append",
-                "content": "next wave"
+                "content": "next wave",
+                "reason": "advance project roadmap"
             })
             .as_object()
             .expect("memory_edit args object")
@@ -527,7 +528,8 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
                 "project": project.slug(),
                 "identifier": "brief",
                 "operation": "append",
-                "content": "next wave"
+                "content": "next wave",
+                "reason": "advance project roadmap"
             })
             .as_object()
             .expect("memory_edit args object")

@@ -3403,6 +3403,9 @@ mod evidence_merge_regression_tests {
                     }
                     NoteRevisionDesiredState::ExtractionSkipped => (None, None, true, None),
                     NoteRevisionDesiredState::Delete => unreachable!("not used by extraction"),
+                    NoteRevisionDesiredState::MergeExisting { .. } => {
+                        unreachable!("not used by extraction")
+                    }
                     NoteRevisionDesiredState::Supersede { .. } => {
                         unreachable!("not used by extraction")
                     }

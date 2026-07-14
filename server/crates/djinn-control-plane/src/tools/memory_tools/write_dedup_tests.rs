@@ -176,6 +176,7 @@ mod tests {
                 content: "  Alpha\nBeta  ",
                 note_type: "research",
                 status: None,
+                tags_json: "[]",
             },
         )
         .await;
@@ -208,11 +209,12 @@ mod tests {
                 content: "tokio spawn joinset",
                 note_type: "pattern",
                 status: None,
+                tags_json: r#"["rust"]"#,
             },
             MemoryWriteDedupDecision::MergeIntoExisting {
                 candidate_id: existing.id.clone(),
-                merged_title: "Async Pattern".to_string(),
-                merged_content: "tokio spawn\njoinset".to_string(),
+                merged_title: "Async Pattern Updated".to_string(),
+                merged_content: "tokio spawn".to_string(),
             },
         )
         .await
@@ -223,8 +225,9 @@ mod tests {
 
         let updated = repo.get(&existing.id).await.unwrap().unwrap();
         assert_eq!(response.id.as_deref(), Some(existing.id.as_str()));
-        assert_eq!(updated.content, "tokio spawn\njoinset");
-        assert_eq!(updated.title, "Async Pattern");
+        assert_eq!(updated.content, "tokio spawn");
+        assert_eq!(updated.title, "Async Pattern Updated");
+        assert_eq!(updated.tags, r#"["rust"]"#);
 
         let revisions = repo.revision_events_for_test(&project.id).await.unwrap();
         assert_eq!(revisions.len(), 1);
@@ -232,10 +235,7 @@ mod tests {
         assert_eq!(revisions[0].subsystem.as_deref(), Some("dedup"));
         assert_eq!(revisions[0].event_kind, "updated");
         assert_eq!(revisions[0].content_before.as_deref(), Some("tokio spawn"));
-        assert_eq!(
-            revisions[0].content_after.as_deref(),
-            Some("tokio spawn\njoinset")
-        );
+        assert_eq!(revisions[0].content_after.as_deref(), Some("tokio spawn"));
         assert_eq!(revisions[0].confidence_before, Some(existing.confidence));
         assert_eq!(revisions[0].confidence_after, Some(existing.confidence));
         assert_eq!(revisions[0].reason, "dedup:merge_into_existing");
@@ -264,6 +264,7 @@ mod tests {
             content: "unchanged content",
             note_type: "pattern",
             status: None,
+            tags_json: "[]",
         };
 
         let merged = apply_dedup_decision(
@@ -271,7 +272,7 @@ mod tests {
             pending,
             MemoryWriteDedupDecision::MergeIntoExisting {
                 candidate_id: existing.id.clone(),
-                merged_title: "Ignored merged title".to_owned(),
+                merged_title: "Canonical".to_owned(),
                 merged_content: "unchanged content".to_owned(),
             },
         )
@@ -313,6 +314,7 @@ mod tests {
                 content: "existing content",
                 note_type: "pattern",
                 status: None,
+                tags_json: "[]",
             },
             MemoryWriteDedupDecision::ReuseExisting {
                 candidate_id: existing.id.clone(),
@@ -347,6 +349,7 @@ mod tests {
                 content: "new content",
                 note_type: "pattern",
                 status: None,
+                tags_json: "[]",
             },
             MemoryWriteDedupDecision::CreateNew,
         )
@@ -493,6 +496,7 @@ mod tests {
                 content: "Use channels to coordinate background workers and shutdown.",
                 note_type: "pattern",
                 status: None,
+                tags_json: "[]",
             },
         )
         .await;

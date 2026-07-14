@@ -60,6 +60,13 @@ pub enum NoteRevisionDesiredState {
         content: String,
         confidence: f64,
     },
+    /// Dedup merge state, including fields historically replaced by merge.
+    MergeExisting {
+        title: String,
+        content: String,
+        tags: String,
+        confidence: f64,
+    },
     /// Deprecate this note and atomically attach its `supersedes` association
     /// to the incoming canonical note.
     Supersede {
@@ -210,13 +217,35 @@ impl NoteRepository {
     ) -> Result<NoteRevisionMutationResult> {
         let note_id = command.note_id.as_deref().expect("validated note identity");
         let before = locked_note(tx, note_id, &command.project_id).await?;
-        let (content, confidence, status, canonical_note_id) = match &command.desired {
+        let (title, content, tags, confidence, status, canonical_note_id) = match &command.desired {
             NoteRevisionDesiredState::Existing {
                 content,
                 confidence,
-            } => (content.as_str(), *confidence, before.status.as_str(), None),
+            } => (
+                before.title.as_str(),
+                content.as_str(),
+                before.tags.as_str(),
+                *confidence,
+                before.status.as_str(),
+                None,
+            ),
+            NoteRevisionDesiredState::MergeExisting {
+                title,
+                content,
+                tags,
+                confidence,
+            } => (
+                title.as_str(),
+                content.as_str(),
+                tags.as_str(),
+                *confidence,
+                before.status.as_str(),
+                None,
+            ),
             NoteRevisionDesiredState::Supersede { canonical_note_id } => (
+                before.title.as_str(),
                 before.content.as_str(),
+                before.tags.as_str(),
                 before.confidence,
                 // Only active candidates are deprecated. Stale terminal
                 // candidates still record their supersedes association, but
@@ -236,7 +265,9 @@ impl NoteRepository {
         } else {
             false
         };
-        if before.content == content
+        if before.title == title
+            && before.content == content
+            && before.tags == tags
             && before.confidence == confidence
             && before.status == status
             && !association_changed
@@ -255,7 +286,9 @@ impl NoteRepository {
                 "confidence_changed must not alter content".to_owned(),
             ));
         }
-        sqlx::query("UPDATE notes SET content = $1, confidence = $2, content_hash = $3, status = $4, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $5").bind(content).bind(confidence).bind(note_content_hash(content)).bind(status).bind(note_id).execute(&mut **tx).await?;
+        let tags_json: serde_json::Value = serde_json::from_str(tags)
+            .map_err(|e| Error::InvalidData(format!("invalid json for notes.tags: {e}")))?;
+        sqlx::query("UPDATE notes SET title = $1, content = $2, tags = $3, confidence = $4, content_hash = $5, status = $6, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $7").bind(title).bind(content).bind(tags_json).bind(confidence).bind(note_content_hash(content)).bind(status).bind(note_id).execute(&mut **tx).await?;
         if let Some(canonical_note_id) = canonical_note_id {
             let (note_a_id, note_b_id) = canonical_pair(canonical_note_id, note_id);
             sqlx::query("DELETE FROM note_associations WHERE note_a_id = $1 AND note_b_id = $2 AND kind = 'co_access' AND source = 'session_co_access'").bind(note_a_id).bind(note_b_id).execute(&mut **tx).await?;
@@ -420,6 +453,9 @@ fn validate_command(command: &NoteRevisionMutation) -> Result<()> {
         ) | (
             NoteRevisionEventKind::Updated | NoteRevisionEventKind::ConfidenceChanged,
             NoteRevisionDesiredState::Existing { .. }
+        ) | (
+            NoteRevisionEventKind::Updated,
+            NoteRevisionDesiredState::MergeExisting { .. }
         ) | (
             NoteRevisionEventKind::Updated,
             NoteRevisionDesiredState::Supersede { .. }
