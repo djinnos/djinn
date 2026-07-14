@@ -1118,6 +1118,37 @@ mod created_by_tests {
         assert!(creator_exists, "fixture creator must be a persisted user");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_support_creator_setter_only_assigns_a_persisted_fixture_user() {
+        let db = Database::open_in_memory().unwrap();
+        let (project_id, _) = seed_project_and_epic(&db).await;
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let task = repo
+            .create_with_short_id(
+                &uuid::Uuid::now_v7().to_string(),
+                &project_id,
+                "Fixture task",
+                "open",
+                "fixture02",
+            )
+            .await
+            .unwrap();
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(10_003, "dispatch-fixture-user", None, None)
+            .await
+            .unwrap();
+
+        repo.set_created_by_user_id(&task.id, &user.id)
+            .await
+            .unwrap();
+
+        let stamped = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            stamped.created_by_user_id.as_deref(),
+            Some(user.id.as_str())
+        );
+    }
+
     /// A background/agent caller (no SESSION_USER_ID) creating a task under an
     /// epic that *does* have a creator must inherit the epic's creator, so
     /// Planner-spawned tasks belong to the human who owns the epic rather than
