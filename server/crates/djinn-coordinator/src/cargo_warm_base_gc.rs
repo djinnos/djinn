@@ -23,9 +23,14 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod fingerprint_inventory;
+mod three_rung_plan;
 
 pub use fingerprint_inventory::{
     FINGERPRINT_DIR, FingerprintUnitEntry, FingerprintUnitInventory, inventory_fingerprint_units,
+};
+pub use three_rung_plan::{
+    PressureBaseSnapshot, PressurePlanDisposition, PressurePlanRetainReason, PressurePlanUnit,
+    PressureRung, ThreeRungPressurePlan, build_three_rung_pressure_plan,
 };
 
 pub const CARGO_WARM_BASE_ROOT: &str = "/cache/cargo-target";

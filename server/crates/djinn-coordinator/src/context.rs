@@ -170,6 +170,12 @@ pub struct CacheCleanupConfig {
     /// Env: `DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS` (default `14`).
     pub warm_base_idle_retention_days: u64,
 
+    /// Project-idle time before an individual Cargo profile bundle is eligible
+    /// for pressure reclamation. Artifact mtimes do not establish staleness.
+    /// Env: `DJINN_CACHE_CLEANUP_WARM_PROFILE_MIN_IDLE_HOURS` (default `24`).
+    /// Zero is valid and makes a profile immediately eligible.
+    pub warm_profile_min_idle_hours: u64,
+
     /// Grace period before a newly-created or freshly-active warm base can be
     /// considered idle, even if the recorded DB activity falls outside the
     /// retention window. Protects warm bases that are mid-warm or about to be
@@ -197,6 +203,7 @@ impl Default for CacheCleanupConfig {
             cargo_debris_enabled: true,
             cargo_debris_max_age_days: 7,
             warm_base_idle_retention_days: 14,
+            warm_profile_min_idle_hours: 24,
             warm_base_grace_period: Duration::from_secs(300),
             warm_base_low_free_ratio: 0.15,
             warm_base_high_free_ratio: 0.25,
@@ -236,6 +243,12 @@ impl CacheCleanupConfig {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(14);
 
+        let warm_profile_min_idle_hours =
+            std::env::var("DJINN_CACHE_CLEANUP_WARM_PROFILE_MIN_IDLE_HOURS")
+                .ok()
+                .and_then(|value| parse_unsigned_decimal(&value))
+                .unwrap_or(24);
+
         let warm_base_grace_period_secs =
             std::env::var("DJINN_CACHE_CLEANUP_WARM_BASE_GRACE_PERIOD_SECS")
                 .ok()
@@ -265,6 +278,7 @@ impl CacheCleanupConfig {
             cargo_debris_enabled,
             cargo_debris_max_age_days,
             warm_base_idle_retention_days,
+            warm_profile_min_idle_hours,
             warm_base_grace_period: Duration::from_secs(warm_base_grace_period_secs),
             warm_base_low_free_ratio,
             warm_base_high_free_ratio,
@@ -294,6 +308,14 @@ impl CacheCleanupConfig {
         }
         Ok(())
     }
+}
+
+/// Parse only an ASCII unsigned decimal. In particular, `+1`, whitespace,
+/// suffixes, and overflowing values are invalid rather than silently accepted.
+fn parse_unsigned_decimal(value: &str) -> Option<u64> {
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse().ok())
+        .flatten()
 }
 
 /// Subset of application state required by the coordinator actor, doctor
