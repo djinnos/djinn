@@ -886,6 +886,12 @@ impl CoordinatorActor {
             );
         }
 
+        // Publish Linux PSI (CPU/memory/IO pressure) through the bounded
+        // telemetry helpers. Each resource is published independently, so a
+        // partially supported kernel still reports the resources it exposes, and
+        // read/parse failures never stop repeated monitor sampling.
+        crate::resource_monitor::sample_and_publish_psi();
+
         // Check memory pressure before dispatching.
         let memory_throttled = if let Some(mem) = crate::resource_monitor::MemoryStatus::read() {
             if mem.is_critical() {
