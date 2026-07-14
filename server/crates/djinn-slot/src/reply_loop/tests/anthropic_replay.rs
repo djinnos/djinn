@@ -1,13 +1,13 @@
 //! Persistence-backed Anthropic replay fixtures using the real provider wire path.
 
-use super::{ReplyLoopHarness, count_persisted_assistant_messages};
+use super::{count_persisted_assistant_messages, ReplyLoopHarness};
 use crate::reply_loop::persistence::persist_session_message;
 use axum::{
-    Json, Router,
     extract::State,
-    http::{HeaderValue, header},
+    http::{header, HeaderValue},
     response::Response,
     routing::post,
+    Json, Router,
 };
 use djinn_db::SessionMessageRepository;
 use djinn_provider::{
@@ -15,7 +15,7 @@ use djinn_provider::{
     provider::format::anthropic::AnthropicProvider,
     provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig},
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 const FIRST_RESPONSE: &str = concat!(

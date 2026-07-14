@@ -5331,8 +5331,14 @@ async fn provider_phase_scenario_counts_empty_assistant_backoff_not_local_time()
         _ = &mut run => panic!("empty-assistant provider unexpectedly finished"),
         _ = &mut polled => {}
     }
+    assert!(
+        futures::poll!(&mut run).is_pending(),
+        "empty-assistant retry backoff must be pending"
+    );
     // Advance the complete production empty-assistant provider-loop backoff on
-    // both clocks only after canonical consumption has entered the retry path.
+    // both clocks only after canonical consumption has registered the retry
+    // sleep. Polling the reply-loop future above is essential: yielding this
+    // task alone would not poll `run` into the provider-owned backoff.
     // The phase stays provider-owned for this real sleep, so the exact delta
     // below includes all three backoff seconds.
     let backoff = empty_turn_backoff(1);
@@ -5470,7 +5476,9 @@ async fn provider_phase_scenario_cancellation_and_drop_flush_active_interval_onc
 async fn provider_phase_scripted_reply_loop_scenarios() {
     // Keep every database-backed harness and process-global refinement-role
     // collector snapshot in one CI-shard unit. The scenarios must remain
-    // sequential: each one measures an exact before/after counter delta.
+    // sequential: each one measures an exact before/after counter delta. The
+    // dedicated refinement label also isolates these snapshots from the
+    // worker-role dispatcher phase metric tests running in parallel.
     let _lock = PHASE_METRIC_LOCK.lock().unwrap();
     djinn_telemetry::init().expect("telemetry init");
 
