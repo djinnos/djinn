@@ -422,4 +422,25 @@ pub trait SupervisorServices: Send + Sync + 'static {
             error_message: None,
         }
     }
+
+    /// Dedicated host-side attributed memory-intent planner LLM call.
+    ///
+    /// The host resolves credentials under the caller-scoped policy, owns a
+    /// bounded timeout around the provider stream, retains the latest observed
+    /// usage across a late stream error, and persists one append-only
+    /// `llm_call_attempts` row with the selected model, prompt id, catalog
+    /// price snapshots, computed cost, and terminal outcome
+    /// (`success|timeout|invalid_payload|provider_error`).
+    ///
+    /// The caller supplies explicit project/task/task-run/session/creator
+    /// attribution and the JSON-encoded conversation/tools. The host
+    /// validates the completed payload before finalizing `success` vs
+    /// `invalid_payload`, and returns a fail-open result on all terminal
+    /// failures.
+    async fn plan_memory_intents(
+        &self,
+        _request: wire::AttributedPlannerRequest,
+    ) -> Result<wire::PlannerAttemptResult, String> {
+        Err("plan_memory_intents is not implemented by this SupervisorServices impl".to_string())
+    }
 }

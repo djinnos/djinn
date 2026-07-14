@@ -88,6 +88,10 @@ pub use repositories::{
     liveness::{
         ClaimExtensionRecord, CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository,
     },
+    llm_call_attempt::{
+        CreateLlmCallAttemptParams, FinalizeLlmCallAttemptParams, LlmCallAttemptRecord,
+        LlmCallAttemptRepository, LlmCallOutcome,
+    },
     models::ModelsRepository,
     note::{
         AnchorProposerKind, BackfillRetrievalAnchorOptions, BackfillRetrievalAnchorReport,
