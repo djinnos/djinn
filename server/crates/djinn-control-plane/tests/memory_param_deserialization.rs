@@ -10,6 +10,14 @@ use djinn_control_plane::tools::memory_tools::{
     GraphParams, HealthParams, HistoryParams, ListParams, MoveParams, OrphansParams, ReadParams,
     RecentParams, SearchParams, TaskRefsParams, WriteParams,
 };
+use serde::de::DeserializeOwned;
+
+fn deserialization_error<T: DeserializeOwned>(value: serde_json::Value) -> String {
+    match serde_json::from_value::<T>(value) {
+        Ok(_) => panic!("payload unexpectedly deserialized"),
+        Err(error) => error.to_string(),
+    }
+}
 
 // ── Param deserialization ─────────────────────────────────────────────────
 
@@ -100,69 +108,78 @@ fn delete_params_deserialize() {
 
 #[test]
 fn write_params_require_reason_and_reject_unknown_attribution() {
+    let missing_reason = deserialization_error::<WriteParams>(serde_json::json!({
+        "project": "/tmp/p",
+        "title": "T",
+        "content": "C",
+        "type": "adr"
+    }));
     assert!(
-        serde_json::from_value::<WriteParams>(serde_json::json!({
-            "project": "/tmp/p",
-            "title": "T",
-            "content": "C",
-            "type": "adr"
-        }))
-        .is_err()
+        missing_reason.contains("missing field `reason`"),
+        "{missing_reason}"
     );
+
+    let spoofed_actor = deserialization_error::<WriteParams>(serde_json::json!({
+        "project": "/tmp/p",
+        "title": "T",
+        "content": "C",
+        "reason": "record architecture decision",
+        "type": "adr",
+        "actor_id": "spoofed"
+    }));
     assert!(
-        serde_json::from_value::<WriteParams>(serde_json::json!({
-            "project": "/tmp/p",
-            "title": "T",
-            "content": "C",
-            "reason": "record architecture decision",
-            "type": "adr",
-            "actor_id": "spoofed"
-        }))
-        .is_err()
+        spoofed_actor.contains("unknown field `actor_id`"),
+        "{spoofed_actor}"
     );
 }
 
 #[test]
 fn edit_params_require_reason_and_reject_unknown_provenance() {
+    let missing_reason = deserialization_error::<EditParams>(serde_json::json!({
+        "project": "/tmp/p",
+        "identifier": "a",
+        "operation": "append",
+        "content": "x"
+    }));
     assert!(
-        serde_json::from_value::<EditParams>(serde_json::json!({
-            "project": "/tmp/p",
-            "identifier": "a",
-            "operation": "append",
-            "content": "x"
-        }))
-        .is_err()
+        missing_reason.contains("missing field `reason`"),
+        "{missing_reason}"
     );
+
+    let spoofed_provenance = deserialization_error::<EditParams>(serde_json::json!({
+        "project": "/tmp/p",
+        "identifier": "a",
+        "operation": "append",
+        "content": "x",
+        "reason": "append supporting detail",
+        "provenance": "spoofed"
+    }));
     assert!(
-        serde_json::from_value::<EditParams>(serde_json::json!({
-            "project": "/tmp/p",
-            "identifier": "a",
-            "operation": "append",
-            "content": "x",
-            "reason": "append supporting detail",
-            "provenance": "spoofed"
-        }))
-        .is_err()
+        spoofed_provenance.contains("unknown field `provenance`"),
+        "{spoofed_provenance}"
     );
 }
 
 #[test]
 fn delete_params_require_reason_and_reject_unknown_session() {
+    let missing_reason = deserialization_error::<DeleteParams>(serde_json::json!({
+        "project": "/tmp/p",
+        "identifier": "a"
+    }));
     assert!(
-        serde_json::from_value::<DeleteParams>(serde_json::json!({
-            "project": "/tmp/p",
-            "identifier": "a"
-        }))
-        .is_err()
+        missing_reason.contains("missing field `reason`"),
+        "{missing_reason}"
     );
+
+    let spoofed_session = deserialization_error::<DeleteParams>(serde_json::json!({
+        "project": "/tmp/p",
+        "identifier": "a",
+        "reason": "remove obsolete note",
+        "session_id": "spoofed"
+    }));
     assert!(
-        serde_json::from_value::<DeleteParams>(serde_json::json!({
-            "project": "/tmp/p",
-            "identifier": "a",
-            "reason": "remove obsolete note",
-            "session_id": "spoofed"
-        }))
-        .is_err()
+        spoofed_session.contains("unknown field `session_id`"),
+        "{spoofed_session}"
     );
 }
 
