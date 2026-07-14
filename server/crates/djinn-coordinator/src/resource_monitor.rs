@@ -144,6 +144,39 @@ pub fn sample_psi() -> PsiSamples {
     sample_psi_with(|_| Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
 }
 
+/// Publish one independent PSI sampling pass through the telemetry helpers.
+///
+/// Each successful resource publishes its `some avg10` kernel percentage as a
+/// ratio gauge (availability 1). Each failed resource sets availability to 0,
+/// replaces its stale pressure value with NaN, and increments exactly one
+/// bounded error counter. Resources are published independently, so a partially
+/// supported kernel still reports the resources it does expose.
+///
+/// This function is best-effort and synchronous: it never returns an error and
+/// never panics, so a read/parse failure cannot stop repeated monitor sampling.
+pub fn publish_psi(samples: &PsiSamples) {
+    publish_psi_resource(djinn_telemetry::psi::RESOURCE_CPU, &samples.cpu);
+    publish_psi_resource(djinn_telemetry::psi::RESOURCE_MEMORY, &samples.memory);
+    publish_psi_resource(djinn_telemetry::psi::RESOURCE_IO, &samples.io);
+}
+
+fn publish_psi_resource(resource: &'static str, result: &Result<f64, &'static str>) {
+    match result {
+        Ok(percent) => djinn_telemetry::psi::record_success(resource, *percent),
+        Err(reason) => djinn_telemetry::psi::record_failure(resource, reason),
+    }
+}
+
+/// Sample PSI from procfs and publish the results through telemetry helpers.
+///
+/// Called once per coordinator resource-sampling pass. Combines
+/// [`sample_psi`] and [`publish_psi`] so the live monitor path is a single
+/// non-failing call.
+pub fn sample_and_publish_psi() {
+    let samples = sample_psi();
+    publish_psi(&samples);
+}
+
 fn sample_psi_resource(
     read_file: &mut impl FnMut(&str) -> std::io::Result<String>,
     path: &str,
@@ -425,5 +458,209 @@ full avg10=0.00 avg60=0.00 avg300=0.00 total=0
             Some(12.34)
         );
         assert_eq!(extract_avg10("no match here"), None);
+    }
+
+    // ─── PSI publication (live monitor wiring) tests ────────────────────────
+
+    /// Metric names are private to djinn_telemetry, so these mirror the
+    /// documented exported Prometheus names.
+    const PSI_RATIO_METRIC: &str = "node_psi_some_avg10_ratio";
+    const PSI_AVAILABLE_METRIC: &str = "node_psi_available";
+    const PSI_ERRORS_METRIC: &str = "node_psi_read_errors_total";
+
+    /// Serializes telemetry-rendering PSI tests so their before/after deltas
+    /// are not perturbed by a parallel test mutating the process-global
+    /// registry. Mirrors the global `TEST_MUTEX` pattern in djinn-telemetry.
+    static PSI_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn psi_rendered_sample<'a>(
+        rendered: &'a str,
+        metric: &str,
+        labels: &[(&str, &str)],
+    ) -> &'a str {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with(metric)
+                    && labels
+                        .iter()
+                        .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")))
+            })
+            .unwrap_or_else(|| panic!("missing sample {metric}{labels:?} in:\n{rendered}"))
+    }
+
+    fn psi_labeled_value(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> f64 {
+        let line = psi_rendered_sample(rendered, metric, labels);
+        line.rsplit_once(' ')
+            .and_then(|(_, v)| v.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("labeled sample should end with a number: {line}"))
+    }
+
+    #[test]
+    fn publish_psi_partial_support_publishes_independent_resources() {
+        let _guard = PSI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        djinn_telemetry::init().unwrap();
+
+        // CPU succeeds, memory fails (parse), IO succeeds.
+        let samples = PsiSamples {
+            cpu: Ok(12.5),
+            memory: Err(djinn_telemetry::psi::REASON_PARSE),
+            io: Ok(0.5),
+        };
+        let errors_before = psi_labeled_value(
+            &djinn_telemetry::render().unwrap(),
+            PSI_ERRORS_METRIC,
+            &[("resource", "memory"), ("reason", "parse")],
+        );
+        publish_psi(&samples);
+        let rendered = djinn_telemetry::render().unwrap();
+
+        // Successful resources publish the ratio and availability 1.
+        assert_eq!(
+            psi_labeled_value(&rendered, PSI_RATIO_METRIC, &[("resource", "cpu")]),
+            0.125
+        );
+        assert_eq!(
+            psi_labeled_value(&rendered, PSI_AVAILABLE_METRIC, &[("resource", "cpu")]),
+            1.0
+        );
+        assert_eq!(
+            psi_labeled_value(&rendered, PSI_RATIO_METRIC, &[("resource", "io")]),
+            0.005
+        );
+        assert_eq!(
+            psi_labeled_value(&rendered, PSI_AVAILABLE_METRIC, &[("resource", "io")]),
+            1.0
+        );
+
+        // Failed resource: availability 0, stale ratio replaced with NaN.
+        assert_eq!(
+            psi_labeled_value(&rendered, PSI_AVAILABLE_METRIC, &[("resource", "memory")]),
+            0.0
+        );
+        let mem_ratio = psi_rendered_sample(&rendered, PSI_RATIO_METRIC, &[("resource", "memory")]);
+        assert!(
+            mem_ratio.ends_with(" NaN"),
+            "PSI failure must replace stale value with NaN: {mem_ratio}"
+        );
+
+        // Exactly one bounded error counter increment for the failed resource.
+        assert_eq!(
+            psi_labeled_value(
+                &rendered,
+                PSI_ERRORS_METRIC,
+                &[("resource", "memory"), ("reason", "parse")]
+            ),
+            errors_before + 1.0
+        );
+
+        // The failed resource did not perturb successful resources.
+        assert_eq!(
+            psi_labeled_value(&rendered, PSI_RATIO_METRIC, &[("resource", "cpu")]),
+            0.125
+        );
+    }
+
+    #[test]
+    fn publish_psi_recovers_from_failure_to_valid_sample() {
+        let _guard = PSI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        djinn_telemetry::init().unwrap();
+
+        // First pass: CPU fails.
+        publish_psi(&PsiSamples {
+            cpu: Err(djinn_telemetry::psi::REASON_MISSING),
+            memory: Ok(40.0),
+            io: Ok(0.0),
+        });
+        let after_failure = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            psi_labeled_value(&after_failure, PSI_AVAILABLE_METRIC, &[("resource", "cpu")]),
+            0.0
+        );
+
+        // Second pass: CPU recovers with a valid sample.
+        publish_psi(&PsiSamples {
+            cpu: Ok(25.0),
+            memory: Ok(40.0),
+            io: Ok(0.0),
+        });
+        let after_recovery = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            psi_labeled_value(&after_recovery, PSI_RATIO_METRIC, &[("resource", "cpu")]),
+            0.25
+        );
+        assert_eq!(
+            psi_labeled_value(
+                &after_recovery,
+                PSI_AVAILABLE_METRIC,
+                &[("resource", "cpu")]
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn publish_psi_repeated_failures_do_not_panic_or_suppress_recovery() {
+        let _guard = PSI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        djinn_telemetry::init().unwrap();
+
+        // Repeated sampling with all resources failing must not panic and must
+        // be safe to call many times (the monitor loop runs on every tick).
+        for _ in 0..3 {
+            publish_psi(&PsiSamples {
+                cpu: Err(djinn_telemetry::psi::REASON_MISSING),
+                memory: Err(djinn_telemetry::psi::REASON_PERMISSION),
+                io: Err(djinn_telemetry::psi::REASON_IO),
+            });
+        }
+
+        // A later valid sample must restore availability and the ratio.
+        publish_psi(&PsiSamples {
+            cpu: Ok(10.0),
+            memory: Ok(20.0),
+            io: Ok(5.0),
+        });
+        let rendered = djinn_telemetry::render().unwrap();
+        for resource in ["cpu", "memory", "io"] {
+            assert_eq!(
+                psi_labeled_value(&rendered, PSI_AVAILABLE_METRIC, &[("resource", resource)]),
+                1.0
+            );
+        }
+        assert_eq!(
+            psi_labeled_value(&rendered, PSI_RATIO_METRIC, &[("resource", "io")]),
+            0.05
+        );
+    }
+
+    #[test]
+    fn publish_psi_does_not_break_memory_status_consumer_path() {
+        let _guard = PSI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        djinn_telemetry::init().unwrap();
+
+        // Publishing a failed PSI pass must not panic or affect the
+        // MemoryStatus-based throttling path: a MemoryStatus constructed from
+        // its fields still reports correct throttle/critical decisions.
+        publish_psi(&PsiSamples {
+            cpu: Err(djinn_telemetry::psi::REASON_PARSE),
+            memory: Err(djinn_telemetry::psi::REASON_MISSING),
+            io: Err(djinn_telemetry::psi::REASON_IO),
+        });
+
+        let status = MemoryStatus {
+            total_bytes: 64 * 1024 * 1024 * 1024,
+            available_bytes: 50 * 1024 * 1024 * 1024,
+            effective_limit_bytes: 64 * 1024 * 1024 * 1024,
+            psi_some_avg10: 5.0,
+            psi_full_avg10: 1.0,
+        };
+        assert!(!status.should_throttle());
+        assert!(!status.is_critical());
+
+        let throttled = MemoryStatus {
+            psi_some_avg10: 20.0,
+            ..status
+        };
+        assert!(throttled.should_throttle());
     }
 }
