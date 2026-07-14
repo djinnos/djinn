@@ -10,6 +10,7 @@ mod common;
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_db::LivenessEvidenceSnapshot;
 use djinn_db::LivenessRepository;
+use djinn_db::repositories::user::UserRepository;
 use djinn_db::{EpicRepository, ProposalCreateInput, ProposalRepository, TaskRepository};
 use serde_json::json;
 
@@ -441,6 +442,18 @@ async fn board_health_stranded_ready_matches_seeded_task() {
     let project = common::create_test_project(harness.db()).await;
     let epic = common::create_test_epic(harness.db(), &project.id).await;
     let task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
+
+    // This fixture exercises the genuinely stranded path, not the nullable-era
+    // attribution diagnostic. Give it a real creator so `legacy_null_creator`
+    // does not correctly classify it as blocked.
+    let creator = UserRepository::new(harness.db().clone())
+        .upsert_from_github(999_003, "board-health-stranded-ready-test", None, None)
+        .await
+        .expect("create stranded-ready task creator");
+    TaskRepository::new(harness.db().clone(), common::test_events())
+        .set_created_by_user_id(&task.id, &creator.id)
+        .await
+        .expect("attribute stranded-ready task");
 
     // Backdate the task's updated_at well past the 30-minute threshold.
     djinn_db::test_support::backdate_task_updated_at(harness.db(), &task.id, "90 minutes").await;
