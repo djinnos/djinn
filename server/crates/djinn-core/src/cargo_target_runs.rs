@@ -27,8 +27,9 @@ use std::time::SystemTime;
 #[cfg(unix)]
 use std::collections::HashSet;
 #[cfg(unix)]
-#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
@@ -87,7 +88,18 @@ pub struct CargoTargetRunsInventory {
     pub total_allocated_bytes: u64,
     pub top_level_directory_count: usize,
     pub candidates: Vec<RunDirInventoryCandidate>,
+    /// Bytes held by non-directory entries anywhere in the root. This is
+    /// accounting-only: files nested in a removable run disappear with it and
+    /// therefore do not themselves block trimming.
     pub non_directory_allocated_bytes: u64,
+    /// Bytes held by non-directory entries directly under the runs root. These
+    /// entries cannot be removal candidates, so they can independently prevent
+    /// satisfying a byte budget.
+    pub top_level_non_directory_allocated_bytes: u64,
+    /// Number of non-directory entries directly under the runs root. Unlike
+    /// allocated bytes, this is not inode-deduplicated: every such top-level
+    /// entry is independently non-removable and therefore protected.
+    pub top_level_non_directory_count: usize,
     pub protected: Vec<InventoryIssue>,
     pub errors: Vec<InventoryIssue>,
 }
@@ -130,7 +142,7 @@ pub fn inventory_cargo_target_runs(
     let root_entries = fs::read_dir(root).map_err(CargoTargetRunsInventoryError::RootRead)?;
     let mut inventory = CargoTargetRunsInventory::default();
     let mut seen = HashSet::new();
-    account_metadata(&root_metadata, false, &mut seen, &mut inventory)?;
+    account_metadata(&root_metadata, false, false, &mut seen, &mut inventory)?;
     for entry in root_entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -153,7 +165,17 @@ pub fn inventory_cargo_target_runs(
                 continue;
             }
         };
-        account_metadata(&metadata, !metadata.is_dir(), &mut seen, &mut inventory)?;
+        account_metadata(
+            &metadata,
+            !metadata.is_dir(),
+            !metadata.is_dir(),
+            &mut seen,
+            &mut inventory,
+        )?;
+        if !metadata.is_dir() {
+            inventory.top_level_non_directory_count =
+                inventory.top_level_non_directory_count.saturating_add(1);
+        }
         if metadata.file_type().is_symlink() {
             inventory.protected.push(InventoryIssue {
                 top_level_name: Some(raw_name),
@@ -161,17 +183,41 @@ pub fn inventory_cargo_target_runs(
             });
         } else if metadata.is_dir() {
             inventory.top_level_directory_count += 1;
-            if entry.file_name().is_empty() || entry.file_name().to_str().is_none() {
+            let valid_contained_name = entry.file_name().to_str().is_some_and(|name| {
+                run_dir_within(root, name).as_deref() == Some(entry.path().as_path())
+            });
+            if !valid_contained_name {
                 inventory.protected.push(InventoryIssue {
                     top_level_name: Some(raw_name.clone()),
                     kind: InventoryIssueKind::MalformedTopLevelName,
                 });
             } else {
-                inventory.candidates.push(RunDirInventoryCandidate {
+                let candidate = RunDirInventoryCandidate {
                     name: raw_name.clone(),
                     modified: metadata.modified().ok(),
                     created: metadata.created().ok(),
-                });
+                };
+                // Recursive failures make the entire run unmeasurable, so it
+                // must not remain a removal candidate.
+                let errors_before = inventory.errors.len();
+                inventory_directory(
+                    &entry.path(),
+                    Some(raw_name.clone()),
+                    &mut seen,
+                    &mut inventory,
+                )?;
+                if inventory.errors[errors_before..]
+                    .iter()
+                    .any(|issue| issue.top_level_name.as_deref() == Some(raw_name.as_slice()))
+                {
+                    inventory.protected.push(InventoryIssue {
+                        top_level_name: Some(raw_name),
+                        kind: InventoryIssueKind::ReadDirectory,
+                    });
+                } else {
+                    inventory.candidates.push(candidate);
+                }
+                continue;
             }
             inventory_directory(&entry.path(), Some(raw_name), &mut seen, &mut inventory)?;
         }
@@ -230,7 +276,7 @@ fn inventory_directory(
                 continue;
             }
         };
-        account_metadata(&metadata, !metadata.is_dir(), seen, inventory)?;
+        account_metadata(&metadata, !metadata.is_dir(), false, seen, inventory)?;
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             inventory_directory(&entry.path(), top_level_name.clone(), seen, inventory)?;
         }
@@ -242,6 +288,7 @@ fn inventory_directory(
 fn account_metadata(
     metadata: &fs::Metadata,
     non_directory: bool,
+    top_level_non_directory: bool,
     seen: &mut HashSet<(u64, u64)>,
     inventory: &mut CargoTargetRunsInventory,
 ) -> Result<(), CargoTargetRunsInventoryError> {
@@ -259,6 +306,12 @@ fn account_metadata(
     if non_directory {
         inventory.non_directory_allocated_bytes = inventory
             .non_directory_allocated_bytes
+            .checked_add(bytes)
+            .ok_or(CargoTargetRunsInventoryError::ByteOverflow)?;
+    }
+    if top_level_non_directory {
+        inventory.top_level_non_directory_allocated_bytes = inventory
+            .top_level_non_directory_allocated_bytes
             .checked_add(bytes)
             .ok_or(CargoTargetRunsInventoryError::ByteOverflow)?;
     }
@@ -535,262 +588,211 @@ pub fn trim_run_dirs_to_cap(root: &Path, max_dirs: usize) -> io::Result<HardCapT
     Ok(stats)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::thread::sleep;
-    use std::time::Duration;
-    #[cfg(unix)]
-    use std::{
-        collections::HashSet,
-        ffi::OsString,
-        os::unix::{ffi::OsStringExt, fs::symlink},
-    };
-
-    fn mkdir(root: &Path, name: &str) -> PathBuf {
-        let dir = root.join(name);
-        fs::create_dir_all(dir.join("debug/deps")).unwrap();
-        fs::write(dir.join("debug/deps/lib.rlib"), b"artifact").unwrap();
-        dir
-    }
-
-    #[test]
-    fn teardown_removes_existing_and_ignores_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let id = "11111111-1111-1111-1111-111111111111";
-        mkdir(tmp.path(), id);
-
-        let removed = teardown_run_dir(tmp.path(), id).unwrap();
-        assert_eq!(removed.outcome(), "removed");
-        assert_eq!(removed.removed_count(), 1);
-        assert!(!tmp.path().join(id).exists());
-
-        let again = teardown_run_dir(tmp.path(), id).unwrap();
-        assert_eq!(again.outcome(), "already_absent");
-        assert_eq!(again.removed_count(), 0);
-    }
-
-    #[test]
-    fn teardown_rejects_path_traversal_ids() {
-        let tmp = tempfile::tempdir().unwrap();
-        let sibling = tmp.path().join("sibling");
-        fs::create_dir_all(&sibling).unwrap();
-
-        // An id that tries to escape the root is a no-op and never touches the
-        // sibling dir.
-        let result = teardown_run_dir(&tmp.path().join("runs"), "../sibling").unwrap();
-        assert!(!result.removed);
-        assert!(sibling.exists());
-
-        assert!(!teardown_run_dir(tmp.path(), "").unwrap().removed);
-        assert!(!teardown_run_dir(tmp.path(), "a/b").unwrap().removed);
-    }
-
-    #[test]
-    fn trim_keeps_newest_and_removes_oldest_beyond_cap() {
-        let tmp = tempfile::tempdir().unwrap();
-
-        // Create dirs oldest→newest so mtimes are strictly ordered.
-        let mut names = Vec::new();
-        for i in 0..5 {
-            let name = format!("run-{i}");
-            mkdir(tmp.path(), &name);
-            names.push(name);
-            sleep(Duration::from_millis(20));
+/// Bounded result labels for [`trim_cargo_target_runs`].
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CargoTargetRunsTrimOutcome {
+    WithinBudget,
+    TrimmedWithinBudget,
+    OverBudgetProtected,
+    OverBudgetError,
+    OverBudgetProtectedAndError,
+}
+impl CargoTargetRunsTrimOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WithinBudget => "within_budget",
+            Self::TrimmedWithinBudget => "trimmed_within_budget",
+            Self::OverBudgetProtected => "over_budget_protected",
+            Self::OverBudgetError => "over_budget_error",
+            Self::OverBudgetProtectedAndError => "over_budget_protected_and_error",
         }
-
-        let stats = trim_run_dirs_to_cap(tmp.path(), 2).unwrap();
-        assert_eq!(stats.scanned, 5);
-        assert_eq!(stats.trimmed, 3);
-        assert_eq!(stats.retained, 2);
-        assert_eq!(stats.errors, 0);
-
-        // Oldest three gone, newest two retained.
-        assert!(!tmp.path().join("run-0").exists());
-        assert!(!tmp.path().join("run-1").exists());
-        assert!(!tmp.path().join("run-2").exists());
-        assert!(tmp.path().join("run-3").exists());
-        assert!(tmp.path().join("run-4").exists());
-    }
-
-    #[test]
-    fn trim_is_noop_within_cap_and_when_disabled() {
-        let tmp = tempfile::tempdir().unwrap();
-        mkdir(tmp.path(), "run-a");
-        mkdir(tmp.path(), "run-b");
-
-        let within = trim_run_dirs_to_cap(tmp.path(), 8).unwrap();
-        assert_eq!(within.trimmed, 0);
-        assert_eq!(within.retained, 2);
-        assert!(tmp.path().join("run-a").exists());
-
-        let disabled = trim_run_dirs_to_cap(tmp.path(), 0).unwrap();
-        assert_eq!(disabled.trimmed, 0);
-        assert!(tmp.path().join("run-a").exists());
-    }
-
-    #[test]
-    fn trim_missing_root_is_noop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("does-not-exist");
-        let stats = trim_run_dirs_to_cap(&missing, 4).unwrap();
-        assert_eq!(stats, HardCapTrimStats::default());
-    }
-
-    #[test]
-    fn caps_resolver_accepts_decimal_and_zero_and_rejects_invalid_values() {
-        assert_eq!(DEFAULT_HARD_CAP_DIRS, 64);
-        assert_eq!(DEFAULT_HARD_CAP_BYTES, 8_589_934_592);
-        assert_eq!(
-            resolve_cargo_target_runs_caps(None, None),
-            (
-                CargoTargetRunsCaps::default(),
-                CapResolutionDiagnostics::default()
-            )
-        );
-        assert_eq!(
-            resolve_cargo_target_runs_caps(Some("0"), Some("0")),
-            (
-                CargoTargetRunsCaps {
-                    max_dirs: 0,
-                    max_bytes: 0,
-                },
-                CapResolutionDiagnostics::default(),
-            )
-        );
-        let (caps, diagnostics) = resolve_cargo_target_runs_caps(Some("12"), Some("34"));
-        assert_eq!(
-            caps,
-            CargoTargetRunsCaps {
-                max_dirs: 12,
-                max_bytes: 34
-            }
-        );
-        assert_eq!(diagnostics, CapResolutionDiagnostics::default());
-
-        for invalid in ["", "-1", "+1", " 1", "1 ", "1K", "18446744073709551616"] {
-            let (caps, diagnostics) = resolve_cargo_target_runs_caps(Some(invalid), Some(invalid));
-            assert_eq!(caps, CargoTargetRunsCaps::default(), "{invalid:?}");
-            assert_eq!(
-                diagnostics,
-                CapResolutionDiagnostics {
-                    invalid_max_dirs: true,
-                    invalid_max_bytes: true,
-                },
-                "{invalid:?}"
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn non_unicode_environment_values_are_invalid_not_unset() {
-        let non_unicode = || std::env::VarError::NotUnicode(OsString::from_vec(vec![0xff]));
-        let (caps, diagnostics, dirs, bytes) =
-            resolve_caps_from_env_results(Err(non_unicode()), Err(non_unicode()));
-        assert_eq!(caps, CargoTargetRunsCaps::default());
-        assert_eq!(dirs, None);
-        assert_eq!(bytes, None);
-        assert_eq!(
-            diagnostics,
-            CapResolutionDiagnostics {
-                invalid_max_dirs: true,
-                invalid_max_bytes: true,
-            }
-        );
-    }
-
-    #[cfg(unix)]
-    fn allocated_bytes(path: &Path) -> u64 {
-        fs::symlink_metadata(path).unwrap().blocks() * 512
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn inventory_accounts_sparse_hardlinked_and_symlink_entries_without_following() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run = tmp.path().join("run");
-        fs::create_dir(&run).unwrap();
-        let sparse = run.join("sparse");
-        fs::File::create(&sparse)
-            .unwrap()
-            .set_len(8 * 1024 * 1024)
-            .unwrap();
-        fs::hard_link(&sparse, run.join("hardlink")).unwrap();
-        symlink(&sparse, tmp.path().join("run-link")).unwrap();
-
-        let inventory = inventory_cargo_target_runs(tmp.path()).unwrap();
-        let expected = allocated_bytes(tmp.path())
-            + allocated_bytes(&run)
-            + allocated_bytes(&sparse)
-            + allocated_bytes(&tmp.path().join("run-link"));
-        assert_eq!(inventory.total_allocated_bytes, expected);
-        assert_eq!(
-            inventory.non_directory_allocated_bytes,
-            allocated_bytes(&sparse) + allocated_bytes(&tmp.path().join("run-link"))
-        );
-        assert!(allocated_bytes(&sparse) < 8 * 1024 * 1024);
-        assert_eq!(inventory.top_level_directory_count, 1);
-        assert_eq!(inventory.candidates[0].name, b"run");
-        assert_eq!(
-            inventory.protected,
-            vec![InventoryIssue {
-                top_level_name: Some(b"run-link".to_vec()),
-                kind: InventoryIssueKind::TopLevelSymlink,
-            }]
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn inventory_protects_malformed_names_and_rejects_symlink_roots() {
-        let tmp = tempfile::tempdir().unwrap();
-        let malformed = tmp.path().join(OsString::from_vec(vec![b'x', 0xff]));
-        fs::create_dir(&malformed).unwrap();
-        let inventory = inventory_cargo_target_runs(tmp.path()).unwrap();
-        assert_eq!(inventory.top_level_directory_count, 1);
-        assert!(inventory.candidates.is_empty());
-        assert_eq!(
-            inventory.protected[0].kind,
-            InventoryIssueKind::MalformedTopLevelName
-        );
-        assert_eq!(
-            inventory.protected[0].top_level_name,
-            Some(vec![b'x', 0xff])
-        );
-
-        let link = tmp.path().join("root-link");
-        symlink(tmp.path(), &link).unwrap();
-        assert!(matches!(
-            inventory_cargo_target_runs(&link),
-            Err(CargoTargetRunsInventoryError::RootRead(error))
-                if error.kind() == io::ErrorKind::InvalidInput
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn inventory_reports_fatal_root_and_per_directory_read_errors() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            inventory_cargo_target_runs(&tmp.path().join("missing")),
-            Err(CargoTargetRunsInventoryError::RootRead(_))
-        ));
-
-        let mut inventory = CargoTargetRunsInventory::default();
-        inventory_directory(
-            &tmp.path().join("missing"),
-            Some(b"run".to_vec()),
-            &mut HashSet::new(),
-            &mut inventory,
-        )
-        .unwrap();
-        assert_eq!(
-            inventory.errors,
-            vec![InventoryIssue {
-                top_level_name: Some(b"run".to_vec()),
-                kind: InventoryIssueKind::ReadDirectory,
-            }]
-        );
     }
 }
+
+/// Exact postcondition and bounded safety accounting from a joint-cap trim.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct CargoTargetRunsTrimResult {
+    pub final_allocated_bytes: u64,
+    pub final_top_level_directory_count: usize,
+    pub deleted: usize,
+    pub errors: usize,
+    pub protected: usize,
+    pub outcome: CargoTargetRunsTrimOutcome,
+}
+
+/// Injected filesystem operation seam for [`trim_cargo_target_runs_with_fs`]. The
+/// default implementation delegates to `std::fs`; tests override
+/// [`Filesystem::remove_dir_all`] and [`Filesystem::symlink_metadata`] to
+/// deterministically simulate removal failure and TOCTOU revalidation races
+/// without depending on ambient permissions.
+#[cfg(unix)]
+pub trait Filesystem {
+    /// Return `symlink_metadata` without following the link (lstat).
+    fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata>;
+
+    /// Recursively remove a directory, mirroring `std::fs::remove_dir_all`.
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
+}
+
+/// Production filesystem seam: delegates to `std::fs`.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StdFilesystem;
+
+#[cfg(unix)]
+impl Filesystem for StdFilesystem {
+    fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+        fs::symlink_metadata(path)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        fs::remove_dir_all(path)
+    }
+}
+
+/// Enforce enabled count and allocated-byte caps conjunctively, re-inventorying
+/// after every attempt. Delegates to [`trim_cargo_target_runs_with_fs`] with the
+/// production [`StdFilesystem`] seam.
+#[cfg(unix)]
+pub fn trim_cargo_target_runs(
+    root: &Path,
+    active_ids: &HashSet<String>,
+    caps: CargoTargetRunsCaps,
+) -> Result<CargoTargetRunsTrimResult, CargoTargetRunsInventoryError> {
+    trim_cargo_target_runs_with_fs(root, active_ids, caps, &StdFilesystem)
+}
+
+/// Trim engine core. Candidates are selected from the inventory in sorted order
+/// (mtime ascending, then creation time, then raw name bytes), excluding any name
+/// present in `inventory.errors` so an error-affected run is never removed. Before
+/// each removal the name is revalidated as a contained single component, the path
+/// is confirmed to still be a non-symlink directory, and the ID is confirmed still
+/// inactive. The whole root is re-inventoried after every deletion attempt so
+/// hardlink release and races produce exact totals. The loop continues until both
+/// enabled caps hold or candidates exhaust, including deleting an oversized newest
+/// inactive directory when required.
+#[cfg(unix)]
+pub fn trim_cargo_target_runs_with_fs(
+    root: &Path,
+    active_ids: &HashSet<String>,
+    caps: CargoTargetRunsCaps,
+    fs: &dyn Filesystem,
+) -> Result<CargoTargetRunsTrimResult, CargoTargetRunsInventoryError> {
+    let (mut deleted, mut operation_errors) = (0_usize, 0_usize);
+    let mut attempted = HashSet::<Vec<u8>>::new();
+    loop {
+        let inventory = inventory_cargo_target_runs(root)?;
+        let errors = operation_errors.saturating_add(inventory.errors.len());
+        let mut protected = protected_entry_count(&inventory);
+        let within = (caps.max_dirs == 0 || inventory.top_level_directory_count <= caps.max_dirs)
+            && (caps.max_bytes == 0 || inventory.total_allocated_bytes <= caps.max_bytes);
+        if within {
+            return Ok(CargoTargetRunsTrimResult {
+                final_allocated_bytes: inventory.total_allocated_bytes,
+                final_top_level_directory_count: inventory.top_level_directory_count,
+                deleted,
+                errors,
+                protected,
+                outcome: if deleted == 0 {
+                    CargoTargetRunsTrimOutcome::WithinBudget
+                } else {
+                    CargoTargetRunsTrimOutcome::TrimmedWithinBudget
+                },
+            });
+        }
+        let candidate = inventory.candidates.iter().find(|candidate| {
+            std::str::from_utf8(&candidate.name)
+                .ok()
+                .is_some_and(|id| !active_ids.contains(id))
+                && !inventory
+                    .errors
+                    .iter()
+                    .any(|issue| issue.top_level_name.as_deref() == Some(candidate.name.as_slice()))
+                && !attempted.contains(&candidate.name)
+        });
+        let Some(candidate) = candidate else {
+            protected = protected.saturating_add(
+                inventory
+                    .candidates
+                    .iter()
+                    .filter(|candidate| {
+                        std::str::from_utf8(&candidate.name)
+                            .ok()
+                            .is_some_and(|id| active_ids.contains(id))
+                    })
+                    .count(),
+            );
+            return Ok(CargoTargetRunsTrimResult {
+                final_allocated_bytes: inventory.total_allocated_bytes,
+                final_top_level_directory_count: inventory.top_level_directory_count,
+                deleted,
+                errors,
+                protected,
+                outcome: over_budget_outcome(protected > 0, errors > 0),
+            });
+        };
+        let name = candidate.name.clone();
+        attempted.insert(name.clone());
+        let path = root.join(std::ffi::OsString::from_vec(name.clone()));
+        let id = std::str::from_utf8(&name).expect("inventory candidates are UTF-8");
+        // Revalidate immediately before removal: the name must be a contained
+        // single component, the ID must still be inactive, and the path must
+        // still be a non-symlink directory. A race between the scan and removal
+        // (TOCTOU) is fail-closed: a now-symlink or now-active entry is skipped.
+        let removable = run_dir_within(root, id).as_deref() == Some(path.as_path())
+            && !active_ids.contains(id)
+            && fs
+                .symlink_metadata(&path)
+                .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+                .unwrap_or_else(|_| {
+                    operation_errors = operation_errors.saturating_add(1);
+                    false
+                });
+        if !removable {
+            // Revalidation failure is fail-closed; the next full scan records
+            // the current protection/error state.
+            continue;
+        }
+        match fs.remove_dir_all(&path) {
+            Ok(()) => deleted += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => deleted += 1,
+            Err(_) => operation_errors = operation_errors.saturating_add(1),
+        }
+    }
+}
+#[cfg(not(unix))]
+pub fn trim_cargo_target_runs(
+    _root: &Path,
+    _active_ids: &std::collections::HashSet<String>,
+    _caps: CargoTargetRunsCaps,
+) -> Result<CargoTargetRunsTrimResult, CargoTargetRunsInventoryError> {
+    Err(CargoTargetRunsInventoryError::UnsupportedPlatform)
+}
+fn over_budget_outcome(protected: bool, errors: bool) -> CargoTargetRunsTrimOutcome {
+    match (protected, errors) {
+        (true, true) => CargoTargetRunsTrimOutcome::OverBudgetProtectedAndError,
+        (true, false) => CargoTargetRunsTrimOutcome::OverBudgetProtected,
+        (false, _) => CargoTargetRunsTrimOutcome::OverBudgetError,
+    }
+}
+
+/// Count protected top-level entries exactly. Top-level symlinks are represented
+/// both in `protected` and in the non-directory entry count, so subtract their
+/// issue records before adding all non-directory entries to avoid double-counting.
+#[cfg(unix)]
+fn protected_entry_count(inventory: &CargoTargetRunsInventory) -> usize {
+    let top_level_symlinks = inventory
+        .protected
+        .iter()
+        .filter(|issue| issue.kind == InventoryIssueKind::TopLevelSymlink)
+        .count();
+    inventory
+        .protected
+        .len()
+        .saturating_sub(top_level_symlinks)
+        .saturating_add(inventory.top_level_non_directory_count)
+}
+
+#[cfg(test)]
+#[path = "cargo_target_runs_tests.rs"]
+mod tests;
