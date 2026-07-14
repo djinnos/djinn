@@ -214,7 +214,7 @@ pub use graph_warmer_lifecycle::{
     KubeClientJobWatcher, NoopJobWatcher, WarmJobWatcher, WarmTerminalOutcome,
 };
 #[cfg(test)]
-use graph_warmer_lifecycle::{terminal_outcome_after_poll, WarmJobObservation};
+use graph_warmer_lifecycle::{WarmJobObservation, terminal_outcome_after_poll};
 
 /// In-process convergence hook invoked when a warm Job reaches terminal
 /// success. The canonical-graph warm runs in a *separate* K8s Job pod that
