@@ -5258,10 +5258,7 @@ fn phase_side_tool(
     Ok(serde_json::json!({"side":"done"}))
 }
 
-#[tokio::test]
-async fn provider_phase_script_counts_stream_init_consumption_and_errors() {
-    let _lock = PHASE_METRIC_LOCK.lock().unwrap();
-    djinn_telemetry::init().expect("telemetry init");
+async fn provider_phase_scenario_counts_stream_init_consumption_and_errors() {
     let before = render().expect("render phase metrics");
     assert!(run_phase_script(vec![final_turn(2, 3)]).await.is_ok());
     let after = render().expect("render phase metrics");
@@ -5305,10 +5302,7 @@ async fn provider_phase_script_counts_stream_init_consumption_and_errors() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn provider_phase_script_counts_empty_assistant_backoff_not_local_time() {
-    let _lock = PHASE_METRIC_LOCK.lock().unwrap();
-    djinn_telemetry::init().expect("telemetry init");
+async fn provider_phase_scenario_counts_empty_assistant_backoff_not_local_time() {
     let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
     let empty_assistant_polled = Arc::new(tokio::sync::Notify::new());
     let provider = PhaseScriptedProvider::new(
@@ -5357,10 +5351,7 @@ async fn provider_phase_script_counts_empty_assistant_backoff_not_local_time() {
     );
 }
 
-#[tokio::test]
-async fn provider_phase_script_hands_streaming_side_tool_back_to_provider() {
-    let _lock = PHASE_METRIC_LOCK.lock().unwrap();
-    djinn_telemetry::init().expect("telemetry init");
+async fn provider_phase_scenario_hands_streaming_side_tool_back_to_provider() {
     let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
     *PHASE_TOOL_CLOCK.lock().unwrap() = Some(Arc::clone(&clock));
     let provider = PhaseScriptedProvider::new(
@@ -5417,10 +5408,7 @@ async fn provider_phase_script_hands_streaming_side_tool_back_to_provider() {
     );
 }
 
-#[tokio::test]
-async fn provider_phase_script_cancellation_and_drop_flush_active_interval_once() {
-    let _lock = PHASE_METRIC_LOCK.lock().unwrap();
-    djinn_telemetry::init().expect("telemetry init");
+async fn provider_phase_scenario_cancellation_and_drop_flush_active_interval_once() {
     let tools = vec![dummy_tool_schema("submit_work")];
     let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
     let stream_polled = Arc::new(tokio::sync::Notify::new());
@@ -5476,4 +5464,18 @@ async fn provider_phase_script_cancellation_and_drop_flush_active_interval_once(
         phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
         11
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn provider_phase_scripted_reply_loop_scenarios() {
+    // Keep every database-backed harness and process-global refinement-role
+    // collector snapshot in one CI-shard unit. The scenarios must remain
+    // sequential: each one measures an exact before/after counter delta.
+    let _lock = PHASE_METRIC_LOCK.lock().unwrap();
+    djinn_telemetry::init().expect("telemetry init");
+
+    provider_phase_scenario_counts_stream_init_consumption_and_errors().await;
+    provider_phase_scenario_counts_empty_assistant_backoff_not_local_time().await;
+    provider_phase_scenario_hands_streaming_side_tool_back_to_provider().await;
+    provider_phase_scenario_cancellation_and_drop_flush_active_interval_once().await;
 }
