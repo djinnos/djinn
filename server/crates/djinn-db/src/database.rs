@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgPoolOptions};
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{DbError, DbResult};
@@ -27,6 +27,41 @@ const DEFAULT_BG_SEARCH_CONCURRENCY: usize = 3;
 /// concurrency (coordinator, mirror-fetcher, KB watcher, MCP tools, PR poller).
 /// Tunable via `DJINN_DB_MAX_CONNECTIONS` for ops headroom on larger nodes.
 const DEFAULT_MAX_CONNECTIONS: u32 = 32;
+
+/// Acquire a two-part session advisory lock on a dedicated Postgres connection.
+///
+/// Callers that need singleton process leadership retain the connection for the
+/// lifetime of the lock; keeping the SQL here preserves the database boundary.
+pub async fn try_acquire_session_advisory_lock(
+    conn: &mut PgConnection,
+    classid: i32,
+    objid: i32,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1, $2)")
+        .bind(classid)
+        .bind(objid)
+        .fetch_one(conn)
+        .await
+}
+
+/// Release a two-part session advisory lock held by `conn`.
+pub async fn release_session_advisory_lock(
+    conn: &mut PgConnection,
+    classid: i32,
+    objid: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+        .bind(classid)
+        .bind(objid)
+        .execute(conn)
+        .await
+        .map(|_| ())
+}
+
+/// Verify that a dedicated Postgres connection remains usable.
+pub async fn ping_connection(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT 1").execute(conn).await.map(|_| ())
+}
 
 fn resolve_max_connections(default: u32) -> u32 {
     match std::env::var("DJINN_DB_MAX_CONNECTIONS") {

@@ -27,7 +27,8 @@ pub mod test_support {
 pub use database::{
     Database, DatabaseBackendCapabilities, DatabaseBackendKind, DatabaseBootstrapInfo,
     DatabaseConnectConfig, NoteSearchBackend, NoteVectorBackend, PostgresDatabaseConfig,
-    SqliteVecStatus, default_db_path,
+    SqliteVecStatus, default_db_path, ping_connection, release_session_advisory_lock,
+    try_acquire_session_advisory_lock,
 };
 pub use error::{DbError as Error, DbResult as Result};
 pub use repositories::tool_call_evaluator::{
