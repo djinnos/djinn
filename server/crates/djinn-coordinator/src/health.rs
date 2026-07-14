@@ -1681,6 +1681,10 @@ pub(super) struct CargoTargetRunDirSweepStats {
     pub(super) cap_trimmed: usize,
     /// Per-entry errors during the hard-cap trim.
     pub(super) cap_errors: usize,
+    pub(super) cap_final_allocated_bytes: Option<u64>,
+    pub(super) cap_final_directory_count: Option<usize>,
+    pub(super) cap_protected: usize,
+    pub(super) cap_outcome: Option<&'static str>,
     // ── Debris / age-sweep counters (n5cp) ──────────────────────────────
     /// Non-UUID directories older than the retention window that were
     /// deleted (or counted as dry-run candidates).
@@ -2060,53 +2064,51 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
         }
     }
 
-    // Hard backstop: LRU-trim the runs root below an absolute count cap,
-    // independent of task-run state. Even if both the deterministic teardown
-    // and the orphan sweep above regress (e.g. the protected-ids query starts
-    // over-protecting, or a new keying bug leaves rows "running"), this still
-    // bounds worst-case disk so a reaping regression can't refill the PVC and
-    // re-trigger node DiskPressure eviction. Runs in `spawn_blocking` since the
-    // trim is synchronous `std::fs`.
-    let cap = djinn_core::cargo_target_runs::hard_cap_dirs_from_env();
+    // Joint count-and-byte cap. The active-id snapshot above is mandatory.
+    let caps = djinn_core::cargo_target_runs::cargo_target_runs_caps_from_env();
     let trim_root = root.to_path_buf();
+    let trim_protected = protected;
     match tokio::task::spawn_blocking(move || {
-        djinn_core::cargo_target_runs::trim_run_dirs_to_cap(&trim_root, cap)
+        djinn_core::cargo_target_runs::trim_cargo_target_runs(&trim_root, &trim_protected, caps)
     })
     .await
     {
         Ok(Ok(trim)) => {
-            stats.cap_trimmed = trim.trimmed;
+            stats.cap_trimmed = trim.deleted;
             stats.cap_errors = trim.errors;
-            if trim.trimmed > 0 || trim.errors > 0 {
-                tracing::warn!(
-                    root = %root.display(),
-                    cap,
-                    scanned = trim.scanned,
-                    trimmed = trim.trimmed,
-                    retained = trim.retained,
-                    errors = trim.errors,
-                    "CoordinatorActor: cargo target run-dir hard cap trimmed dirs \
-                     (orphan sweep is not keeping the runs root bounded)"
-                );
-            }
+            stats.cap_final_allocated_bytes = Some(trim.final_allocated_bytes);
+            stats.cap_final_directory_count = Some(trim.final_top_level_directory_count);
+            stats.cap_protected = trim.protected;
+            stats.cap_outcome = Some(trim.outcome.as_str());
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                trim.outcome.as_str(),
+                mode_label,
+            );
+            tracing::info!(root = %root.display(), max_dirs = caps.max_dirs, max_bytes = caps.max_bytes,
+                final_allocated_bytes = trim.final_allocated_bytes, final_top_level_directory_count = trim.final_top_level_directory_count,
+                removed = trim.deleted, protected = trim.protected, errors = trim.errors, cap_outcome = trim.outcome.as_str(),
+                "CoordinatorActor: cargo target run-dir joint cap completed");
         }
         Ok(Err(e)) => {
             stats.cap_errors += 1;
-            tracing::warn!(
-                error = %e,
-                root = %root.display(),
-                cap,
-                "CoordinatorActor: cargo target run-dir hard cap trim failed"
+            stats.cap_outcome = Some("error");
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+                mode_label,
             );
+            tracing::warn!(error = %e, root = %root.display(), max_dirs = caps.max_dirs, max_bytes = caps.max_bytes, "CoordinatorActor: cargo target run-dir joint cap failed");
         }
         Err(e) => {
             stats.cap_errors += 1;
-            tracing::warn!(
-                error = %e,
-                root = %root.display(),
-                cap,
-                "CoordinatorActor: cargo target run-dir hard cap trim task join failed"
+            stats.cap_outcome = Some("error");
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+                mode_label,
             );
+            tracing::warn!(error = %e, root = %root.display(), max_dirs = caps.max_dirs, max_bytes = caps.max_bytes, "CoordinatorActor: cargo target run-dir joint cap task join failed");
         }
     }
 
@@ -2118,6 +2120,12 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
         errors = stats.errors,
         cap_trimmed = stats.cap_trimmed,
         cap_errors = stats.cap_errors,
+        cap_final_allocated_bytes = ?stats.cap_final_allocated_bytes,
+        cap_final_directory_count = ?stats.cap_final_directory_count,
+        cap_protected = stats.cap_protected,
+        cap_outcome = ?stats.cap_outcome,
+        cap_max_dirs = caps.max_dirs,
+        cap_max_bytes = caps.max_bytes,
         malformed_dir_deleted = stats.malformed_dir_deleted,
         loose_file_deleted = stats.loose_file_deleted,
         retained_fresh_malformed = stats.retained_fresh_malformed,
@@ -2126,11 +2134,11 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
         mode = %config.mode.as_metric_label(),
         cargo_debris_enabled = config.cargo_debris_enabled,
         cargo_debris_max_age_days = config.cargo_debris_max_age_days,
-        cleanup_outcome = if stats.errors == 0 && stats.cap_errors == 0 {
+        cleanup_outcome = stats.cap_outcome.unwrap_or(if stats.errors == 0 {
             "completed"
         } else {
-            "completed_with_errors"
-        },
+            "error"
+        }),
         "CoordinatorActor: cargo target run-dir sweep completed"
     );
 
