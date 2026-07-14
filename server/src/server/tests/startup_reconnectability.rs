@@ -60,8 +60,15 @@ async fn seed_running_session_with_task_run(
         .await
         .expect("create test epic");
 
+    // Keep creator identity local to this seeded run. Several tests exercise this
+    // helper concurrently, and sharing one fixed GitHub identity makes otherwise
+    // isolated session fixtures contend on the same user upsert.
+    let fixture_github_id = task_run_id.bytes().fold(9_999_998_i64, |id, byte| {
+        id.wrapping_mul(31) + i64::from(byte)
+    });
+    let fixture_login = format!("reconnectability-{fixture_github_id}");
     let user = UserRepository::new(db.clone())
-        .upsert_from_github(9_999_998, "reconnectability-fixture", None, None)
+        .upsert_from_github(fixture_github_id, &fixture_login, None, None)
         .await
         .expect("create reconnectability fixture user");
     let task_repo = TaskRepository::new(db.clone(), events.clone());
@@ -352,11 +359,9 @@ async fn duplicate_running_sessions_for_one_task_run_count_once() {
         "one connected task_run_id must only contribute one reconnectable identity"
     );
     assert_eq!(measurement.reconnectable_task_run_ids().len(), 1);
-    assert!(
-        measurement
-            .reconnectable_task_run_ids()
-            .contains(task_run_id)
-    );
+    assert!(measurement
+        .reconnectable_task_run_ids()
+        .contains(task_run_id));
 }
 
 /// Verify the measurement returns zero counts when no running sessions exist.
