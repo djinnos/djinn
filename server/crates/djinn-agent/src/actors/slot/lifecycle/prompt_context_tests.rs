@@ -56,9 +56,8 @@ async fn planner_host_disabled_scope_only_real_path_is_byte_identical() {
         .expect("scope result");
     let observer = Arc::new(PlannedSearchObserver {
         entered: AtomicUsize::new(0),
-        barrier: Arc::new(tokio::sync::Barrier::new(1)),
-        ready: Arc::new(tokio::sync::Notify::new()),
-        release: Arc::new(tokio::sync::Notify::new()),
+        ready: Arc::new(tokio::sync::Barrier::new(1)),
+        release: Arc::new(tokio::sync::Barrier::new(1)),
     });
     let disabled = PLANNED_SEARCH_OBSERVER
         .scope(observer.clone(), async {
@@ -130,18 +129,17 @@ async fn planner_host_enabled_real_path_preserves_query_order_and_rank() {
     ];
     let observer = Arc::new(PlannedSearchObserver {
         entered: AtomicUsize::new(0),
-        barrier: Arc::new(tokio::sync::Barrier::new(queries.len())),
-        ready: Arc::new(tokio::sync::Notify::new()),
-        release: Arc::new(tokio::sync::Notify::new()),
+        ready: Arc::new(tokio::sync::Barrier::new(queries.len() + 1)),
+        release: Arc::new(tokio::sync::Barrier::new(queries.len() + 1)),
     });
     let release = async {
-        observer.ready.notified().await;
+        observer.ready.wait().await;
         assert_eq!(
             observer.entered.load(Ordering::SeqCst),
             queries.len(),
             "every typed query reached the real repository boundary together"
         );
-        observer.release.notify_waiters();
+        observer.release.wait().await;
     };
     let planned_load = PLANNED_SEARCH_OBSERVER.scope(observer.clone(), async {
         load_knowledge_context(&task, None, &app_state, None, Some(&queries)).await
@@ -197,9 +195,8 @@ async fn planned_real_path_full_scope_budget_retains_scope_bytes() {
     )];
     let observer = Arc::new(PlannedSearchObserver {
         entered: AtomicUsize::new(0),
-        barrier: Arc::new(tokio::sync::Barrier::new(1)),
-        ready: Arc::new(tokio::sync::Notify::new()),
-        release: Arc::new(tokio::sync::Notify::new()),
+        ready: Arc::new(tokio::sync::Barrier::new(1)),
+        release: Arc::new(tokio::sync::Barrier::new(1)),
     });
     let planned = PLANNED_SEARCH_OBSERVER
         .scope(observer.clone(), async {

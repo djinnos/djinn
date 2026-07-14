@@ -25,9 +25,8 @@ use tracing::Instrument;
 #[cfg(test)]
 pub(super) struct PlannedSearchObserver {
     pub entered: std::sync::atomic::AtomicUsize,
-    pub barrier: std::sync::Arc<tokio::sync::Barrier>,
-    pub ready: std::sync::Arc<tokio::sync::Notify>,
-    pub release: std::sync::Arc<tokio::sync::Notify>,
+    pub ready: std::sync::Arc<tokio::sync::Barrier>,
+    pub release: std::sync::Arc<tokio::sync::Barrier>,
 }
 
 #[cfg(test)]
@@ -365,9 +364,8 @@ async fn load_planned_knowledge(
                 observer
                     .entered
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                observer.barrier.wait().await;
-                observer.ready.notify_waiters();
-                observer.release.notified().await;
+                observer.ready.wait().await;
+                observer.release.wait().await;
             }
             note_repo
                 .search(djinn_db::NoteSearchParams {
