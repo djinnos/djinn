@@ -161,4 +161,3 @@ impl WarmJobWatcher for NoopJobWatcher {
         WarmTerminalOutcome::Succeeded
     }
 }
-

@@ -821,16 +821,17 @@ expression: tool_schemas_architect()
   },
   {
     "name": "ci_job_log",
-    "description": "Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.",
+    "description": "Fetch the failing GitHub Actions CI log for this task's PR. Call with NO arguments to auto-discover the currently-failing jobs from the task's recorded CI state — it checks the PR-head lane first, then falls back to the merge-queue (merge_group) lane, so it stays accurate even after a new push makes old job ids stale. When several jobs fail it returns the first job's log with a header listing the others (name + job_id); pass `job_id` to fetch a specific one, and `step` to narrow to a single failed step. `pr_number` targets another PR in the same project's repo (e.g. planner escalation tasks whose description names the source PR). If the output is large, use output_view or output_grep to navigate it.",
     "inputSchema": {
       "type": "object",
-      "required": [
-        "job_id"
-      ],
       "properties": {
         "job_id": {
           "type": "integer",
-          "description": "The GitHub Actions job ID from the CI failure activity"
+          "description": "Optional. A specific GitHub Actions job ID to fetch directly. Omit to auto-discover the failing jobs."
+        },
+        "pr_number": {
+          "type": "integer",
+          "description": "Optional. Target this PR number in the same project's repo instead of the task's own PR (for escalation tasks that reference a source PR)."
         },
         "step": {
           "type": "string",
