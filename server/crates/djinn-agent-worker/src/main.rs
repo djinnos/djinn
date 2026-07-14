@@ -799,7 +799,22 @@ async fn warm_cargo_target_base(
             return;
         }
     };
-    match cargo_incremental_prune::prune_warm_incremental(project_id) {
+    #[cfg(test)]
+    let prune_result = match WARM_CARGO_TEST_ROOT
+        .lock()
+        .expect("warm test root poisoned")
+        .clone()
+    {
+        Some(root) => cargo_incremental_prune::prune_warm_incremental_for_root(
+            project_id,
+            Path::new(&std::env::var_os(CARGO_TARGET_DIR_ENV).unwrap_or_default()),
+            &root,
+        ),
+        None => cargo_incremental_prune::prune_warm_incremental(project_id),
+    };
+    #[cfg(not(test))]
+    let prune_result = cargo_incremental_prune::prune_warm_incremental(project_id);
+    match prune_result {
         Ok(result) => {
             warm_cargo_test_phase(result.outcome.as_str());
             record_warm_incremental_prune_success(project_id, result)
@@ -963,6 +978,10 @@ static WARM_CARGO_INJECTED_LOCK_FAILURE: std::sync::Mutex<
 > = std::sync::Mutex::new(None);
 
 #[cfg(test)]
+static WARM_CARGO_TEST_ROOT: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
 fn warm_cargo_test_phase(phase: &'static str) {
     WARM_CARGO_PHASES
         .lock()
@@ -993,6 +1012,19 @@ fn acquire_warm_base_lock(
         return cargo_incremental_prune::WarmBaseLock::acquire_with_operation_failure_and_record(
             project_id,
             failure,
+            |error| record_warm_incremental_prune_failure(project_id, error.kind),
+        );
+    }
+    #[cfg(test)]
+    if let Some(root) = WARM_CARGO_TEST_ROOT
+        .lock()
+        .expect("warm test root poisoned")
+        .clone()
+    {
+        return cargo_incremental_prune::WarmBaseLock::acquire_and_record_failure_with_attempt_observer_at_root(
+            project_id,
+            &root,
+            || {},
             |error| record_warm_incremental_prune_failure(project_id, error.kind),
         );
     }
@@ -3943,22 +3975,16 @@ warning: something
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&cargo, permissions).expect("fake cargo executable");
-        // Separate CI shard containers may have the same PID and share /cache.
-        // Namespace this production-derived warm path with tempfile's unique
-        // component to prevent cross-shard ownership and cleanup races.
-        let fixture_id = fixture
-            .path()
-            .file_name()
-            .expect("fixture component")
-            .to_string_lossy();
-        let project = format!("warm-ordering-ok-{}-{fixture_id}", std::process::id());
-        let target = warm_base_dir(&project);
+        let project = format!("warm-ordering-ok-{}", std::process::id());
+        let warm_root = fixture.path().join("warm-base");
+        let target = warm_root.join(&project);
         std::fs::create_dir_all(target.join("debug/incremental")).expect("warm target");
         std::fs::write(target.join("debug/incremental/stale"), b"stale")
             .expect("incremental fixture");
         let previous_target = std::env::var_os(CARGO_TARGET_DIR_ENV);
         let previous_path = std::env::var_os("PATH").expect("PATH");
         unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, &target) };
+        *WARM_CARGO_TEST_ROOT.lock().expect("warm test root") = Some(warm_root);
         unsafe {
             std::env::set_var(
                 "PATH",
@@ -3985,6 +4011,7 @@ warning: something
             .build()
             .expect("runtime")
             .block_on(warm_cargo_target_base(&project, fixture.path(), &policy));
+        *WARM_CARGO_TEST_ROOT.lock().expect("warm test root") = None;
         unsafe { std::env::set_var("PATH", previous_path) };
         match previous_target {
             Some(value) => unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, value) },

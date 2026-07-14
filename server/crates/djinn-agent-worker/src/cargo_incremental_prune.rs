@@ -279,6 +279,7 @@ mod tests {
     fn injected_lock_errors_are_classified() {
         let lock_open = WarmBaseLock::acquire_with_operations(
             "project",
+            Path::new(WARM_BASE_ROOT),
             |_| Err(io::Error::other("cannot create lock directory")),
             |_| Ok(()),
             |_| -> io::Result<File> { unreachable!("lock file should not be opened") },
@@ -291,6 +292,7 @@ mod tests {
 
         let lock_probe = WarmBaseLock::acquire_with_operations(
             "project",
+            Path::new(WARM_BASE_ROOT),
             |_| Ok(()),
             |_| Err(io::Error::other("locking unsupported")),
             |_| -> io::Result<File> { unreachable!("lock file should not be opened") },
@@ -305,6 +307,7 @@ mod tests {
         let lock_file = File::create(temp.path().join("lock")).unwrap();
         let lock_acquire = WarmBaseLock::acquire_with_operations(
             "project",
+            Path::new(WARM_BASE_ROOT),
             |_| Ok(()),
             |_| Ok(()),
             |_| Ok(lock_file),
@@ -389,12 +392,14 @@ mod tests {
         };
         let project = std::env::var("DJINN_LOCK_CONTRACT_PROJECT").expect("project");
         let fixture = PathBuf::from(std::env::var("DJINN_LOCK_CONTRACT_FIXTURE").expect("fixture"));
+        let warm_root = fixture.join("cache");
         // This is the same returned-error recorder boundary the warm flow uses.
         // A SIGKILL while flock is blocked cannot reach this terminal callback.
         let terminal = fixture.join(format!("{role}-terminal"));
         let lock_attempt = fixture.join(format!("{role}-lock-attempt"));
-        let guard = WarmBaseLock::acquire_and_record_failure_with_attempt_observer(
+        let guard = WarmBaseLock::acquire_and_record_failure_with_attempt_observer_at_root(
             &project,
+            &warm_root,
             || fs::write(&lock_attempt, b"attempting").expect("lock-attempt observation"),
             |error| fs::write(&terminal, error.kind.as_str()).expect("terminal observation"),
         )
@@ -432,7 +437,7 @@ mod tests {
             .env("DJINN_LOCK_CONTRACT_PROJECT", project)
             .env("DJINN_LOCK_CONTRACT_FIXTURE", fixture)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("spawn lock-contract process")
     }
@@ -504,6 +509,7 @@ impl WarmBaseLock {
     pub fn acquire(project_id: &str) -> Result<Self, PruneError> {
         Self::acquire_with_operations(
             project_id,
+            Path::new(WARM_BASE_ROOT),
             |lock_dir| fs::create_dir_all(lock_dir),
             probe_advisory_lock,
             |path| {
@@ -538,8 +544,9 @@ impl WarmBaseLock {
     /// It runs immediately before the blocking filesystem acquisition, proving
     /// a killed subprocess reached the actual wait rather than merely starting.
     #[cfg(test)]
-    pub(crate) fn acquire_and_record_failure_with_attempt_observer<Record, Observe>(
+    pub(crate) fn acquire_and_record_failure_with_attempt_observer_at_root<Record, Observe>(
         project_id: &str,
+        warm_root: &Path,
         observe_attempt: Observe,
         record_failure: Record,
     ) -> Result<Self, PruneError>
@@ -549,6 +556,7 @@ impl WarmBaseLock {
     {
         let result = Self::acquire_with_operations(
             project_id,
+            warm_root,
             |lock_dir| fs::create_dir_all(lock_dir),
             probe_advisory_lock,
             |path| {
@@ -581,6 +589,7 @@ impl WarmBaseLock {
     {
         let result = Self::acquire_with_operations(
             project_id,
+            Path::new(WARM_BASE_ROOT),
             |lock_dir| fs::create_dir_all(lock_dir),
             |lock_dir| match failure {
                 WarmLockOperationFailure::Probe => {
@@ -613,6 +622,7 @@ impl WarmBaseLock {
     /// deterministic without allowing callers to choose a lock path.
     fn acquire_with_operations<Create, Probe, Open, Acquire>(
         project_id: &str,
+        warm_root: &Path,
         create_lock_dir: Create,
         probe: Probe,
         open_lock: Open,
@@ -626,7 +636,7 @@ impl WarmBaseLock {
         Acquire: FnOnce(&File) -> io::Result<()>,
     {
         validate_project_id(project_id)?;
-        let lock_dir = Path::new(WARM_BASE_ROOT).join(LOCK_DIRECTORY);
+        let lock_dir = warm_root.join(LOCK_DIRECTORY);
         create_lock_dir(&lock_dir)
             .map_err(|error| PruneError::new(PruneErrorKind::LockOpen, error))?;
         probe(&lock_dir).map_err(|error| PruneError::new(PruneErrorKind::LockProbe, error))?;
@@ -679,6 +689,27 @@ pub(crate) fn prune_warm_incremental_for_target(
         ));
     }
     prune_derived_base(&base, Path::new(WARM_BASE_ROOT))
+}
+
+#[cfg(test)]
+pub(crate) fn prune_warm_incremental_for_root(
+    project_id: &str,
+    configured_target: &Path,
+    warm_root: &Path,
+) -> Result<PruneResult, PruneError> {
+    validate_project_id(project_id)?;
+    let base = warm_root.join(project_id);
+    if configured_target != base {
+        return Err(PruneError::new(
+            PruneErrorKind::TargetMismatch,
+            format!(
+                "configured {} does not exactly match {}",
+                configured_target.display(),
+                base.display()
+            ),
+        ));
+    }
+    prune_derived_base(&base, warm_root)
 }
 
 fn validate_project_id(project_id: &str) -> Result<(), PruneError> {
