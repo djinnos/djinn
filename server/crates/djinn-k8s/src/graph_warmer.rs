@@ -227,8 +227,9 @@ pub enum WarmTerminalOutcome {
     /// The warm Job reported `.status.succeeded > 0`, meaning a fresh blob was
     /// persisted.
     Succeeded,
-    /// The warm Job reported `.status.failed > 0`, or the watcher gave up at
-    /// its deadline without observing success. No fresh blob was persisted.
+    /// The warm Job reported `.status.failed > 0`, disappeared before success
+    /// was observed, or the watcher gave up at its deadline. No fresh blob was
+    /// persisted.
     Failed,
 }
 
@@ -333,7 +334,9 @@ impl WarmJobWatcher for KubeClientJobWatcher {
                     WarmTerminalOutcome::Failed if observation == WarmJobObservation::Failed => {
                         warn!(job = %job_name, "K8sGraphWarmer watcher: failed");
                     }
-                    WarmTerminalOutcome::Failed if observation == WarmJobObservation::Disappeared => {
+                    WarmTerminalOutcome::Failed
+                        if observation == WarmJobObservation::Disappeared =>
+                    {
                         warn!(job = %job_name, "K8sGraphWarmer watcher: job disappeared without observed success");
                     }
                     WarmTerminalOutcome::Failed => {

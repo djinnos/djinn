@@ -130,6 +130,11 @@ fn watcher_poll_observations_have_conservative_terminal_semantics() {
         "only observed success proves the graph was persisted"
     );
     assert_eq!(
+        terminal_outcome_after_poll(WarmJobObservation::Succeeded, true),
+        Some(WarmTerminalOutcome::Succeeded),
+        "an observed success remains authoritative even at the watcher deadline"
+    );
+    assert_eq!(
         terminal_outcome_after_poll(WarmJobObservation::Failed, false),
         Some(WarmTerminalOutcome::Failed),
         "including active-deadline Job failures"
@@ -143,11 +148,14 @@ fn watcher_poll_observations_have_conservative_terminal_semantics() {
 
 #[test]
 fn watcher_poll_retries_transient_errors_and_respects_deadline() {
-    let eventual_success = [(WarmJobObservation::ApiError, false), (WarmJobObservation::Succeeded, false)]
-        .into_iter()
-        .find_map(|(observation, deadline_expired)| {
-            terminal_outcome_after_poll(observation, deadline_expired)
-        });
+    let eventual_success = [
+        (WarmJobObservation::ApiError, false),
+        (WarmJobObservation::Succeeded, false),
+    ]
+    .into_iter()
+    .find_map(|(observation, deadline_expired)| {
+        terminal_outcome_after_poll(observation, deadline_expired)
+    });
     assert_eq!(
         eventual_success,
         Some(WarmTerminalOutcome::Succeeded),
