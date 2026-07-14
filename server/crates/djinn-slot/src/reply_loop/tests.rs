@@ -5380,7 +5380,11 @@ async fn provider_phase_script_hands_streaming_side_tool_back_to_provider() {
     assert!(harness.run(&provider, &tools).await.0.is_ok());
     *PHASE_TOOL_CLOCK.lock().unwrap() = None;
     let after = render().expect("render phase metrics");
-    assert_eq!(phase_delta(&before, &after, "provider_wait"), 12);
+    // The tool-use delta ends the first stream. Its later scripted `Done`
+    // event is intentionally not consumed: dispatch resumes with the second
+    // provider turn. Provider time is therefore 2 + 1 before the handoff and
+    // 4 + 2 after it, with the five tool seconds kept disjoint.
+    assert_eq!(phase_delta(&before, &after, "provider_wait"), 9);
     assert_eq!(phase_delta(&before, &after, "tool_execution"), 5);
 }
 
