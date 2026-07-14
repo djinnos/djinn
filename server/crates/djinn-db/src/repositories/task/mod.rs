@@ -19,6 +19,8 @@ mod reads;
 mod status;
 mod writes;
 
+pub use writes::EffectiveCreatorProvenance;
+
 // Re-export parent-disposition types so `EpicRepository::close` can
 // construct the scope and inspect the classification plan.
 pub use parent_disposition::{

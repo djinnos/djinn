@@ -119,6 +119,9 @@ async fn resolve_effective_creator(
 }
 
 impl TaskRepository {
+    /// Test-only compatibility helper. Production callers must use a
+    /// provenance-requiring creation boundary.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
@@ -145,6 +148,9 @@ impl TaskRepository {
         .await
     }
 
+    /// Test-only compatibility helper. Production callers must use a
+    /// provenance-requiring creation boundary.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn create_with_ac(
         &self,
@@ -352,10 +358,27 @@ impl TaskRepository {
         status: Option<&str>,
         acceptance_criteria: Option<&str>,
     ) -> Result<Task> {
+        // Fixture callers must never exercise the production NULL-creator
+        // path. Preserve an explicitly scoped fixture user when one exists;
+        // otherwise create a durable fixture user for this test database.
+        let fixture_creator = if djinn_core::auth_context::current_user_id().is_some() {
+            None
+        } else {
+            Some(
+                crate::repositories::user::UserRepository::new(self.db.clone())
+                    .upsert_from_github(9_999_999, "task-fixture-creator", None, None)
+                    .await?
+                    .id,
+            )
+        };
         self.create_in_project_with_blockers(
             project_id,
             epic_id,
-            EffectiveCreatorProvenance::default(),
+            EffectiveCreatorProvenance {
+                explicit_user_id: fixture_creator.as_deref(),
+                source_task_id: None,
+                proposal_id: None,
+            },
             title,
             description,
             design,

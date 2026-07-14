@@ -741,7 +741,7 @@ impl DjinnMcpServer {
                 None, // no epic parent
                 EffectiveCreatorProvenance {
                     explicit_user_id: None,
-                    source_task_id: judge_task_id.as_deref(),
+                    source_task_id: Some(judge_task_id.as_str()),
                     proposal_id: Some(&proposal.id),
                 },
                 &spike_title,
