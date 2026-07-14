@@ -90,6 +90,9 @@ impl DatabaseRuntimeManager {
             target,
             ..
         } = bootstrap;
+        let target = match backend_kind {
+            DatabaseBackendKind::Postgres => redact_postgres_target(&target),
+        };
         DatabaseRuntimeHealth {
             backend_kind,
             backend_label,
@@ -152,9 +155,32 @@ pub enum DatabaseRuntimeError {
 }
 
 fn redact_postgres_target(url: &str) -> String {
-    match url.rsplit('@').next() {
-        Some(host_part) if host_part != url => format!("postgres://<redacted>@{host_part}"),
-        _ => "postgres://<configured>".to_owned(),
+    // Query parameters may contain credentials (for example `password=`),
+    // and fragments are never useful in health output. Drop both before
+    // inspecting the authority so an `@` in either suffix cannot be mistaken
+    // for the userinfo delimiter.
+    let target = url.split(['?', '#']).next().unwrap_or_default();
+    let Some((scheme, remainder)) = target.split_once("://") else {
+        return "postgres://<configured>".to_owned();
+    };
+    if !scheme.eq_ignore_ascii_case("postgres") && !scheme.eq_ignore_ascii_case("postgresql") {
+        return "postgres://<configured>".to_owned();
+    }
+
+    let (authority, path) = remainder
+        .split_once('/')
+        .map_or((remainder, ""), |(authority, path)| (authority, path));
+    let Some((_, host)) = authority.rsplit_once('@') else {
+        return "postgres://<configured>".to_owned();
+    };
+    if host.is_empty() {
+        return "postgres://<configured>".to_owned();
+    }
+
+    if path.is_empty() {
+        format!("postgres://<redacted>@{host}")
+    } else {
+        format!("postgres://<redacted>@{host}/{path}")
     }
 }
 
@@ -194,5 +220,44 @@ mod tests {
     fn postgres_target_is_redacted_for_health_output() {
         let target = redact_postgres_target("postgres://user:secret@127.0.0.1:5432/djinn");
         assert_eq!(target, "postgres://<redacted>@127.0.0.1:5432/djinn");
+    }
+
+    #[test]
+    fn postgres_target_drops_query_and_fragment_credentials() {
+        let target = redact_postgres_target(
+            "postgres://user:userinfo-secret@db.internal:5432/djinn?sslmode=require&password=query-secret#fragment-secret",
+        );
+        assert_eq!(target, "postgres://<redacted>@db.internal:5432/djinn");
+        for secret in ["userinfo-secret", "query-secret", "fragment-secret"] {
+            assert!(!target.contains(secret));
+        }
+    }
+
+    #[test]
+    fn postgres_target_only_treats_authority_at_sign_as_userinfo() {
+        assert_eq!(
+            redact_postgres_target("postgres://user:p@ss@db.internal/djinn"),
+            "postgres://<redacted>@db.internal/djinn"
+        );
+        assert_eq!(
+            redact_postgres_target("postgres://db.internal/djinn?contact=ops@example.com"),
+            "postgres://<configured>"
+        );
+    }
+
+    #[test]
+    fn postgres_target_handles_postgresql_scheme_and_rejects_malformed_targets() {
+        assert_eq!(
+            redact_postgres_target("postgresql://user:secret@[::1]:5432/djinn"),
+            "postgres://<redacted>@[::1]:5432/djinn"
+        );
+        assert_eq!(
+            redact_postgres_target("user:secret@db.internal/djinn"),
+            "postgres://<configured>"
+        );
+        assert_eq!(
+            redact_postgres_target("https://user:secret@db.internal/djinn"),
+            "postgres://<configured>"
+        );
     }
 }
