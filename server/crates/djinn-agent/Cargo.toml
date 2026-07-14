@@ -68,6 +68,7 @@ tempfile = { version = "3", optional = true }
 workspace-hack.workspace = true
 
 [dev-dependencies]
+djinn-db = { path = "../djinn-db", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }

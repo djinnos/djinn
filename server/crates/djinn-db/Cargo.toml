@@ -34,6 +34,9 @@ uuid = { version = "1", features = ["v7"] }
 workspace-hack.workspace = true
 
 [dev-dependencies]
+# Integration tests compile this crate as an external dependency, so enable
+# its fixture-only task constructors explicitly.
+djinn-db = { path = ".", features = ["test-support"] }
 futures = "0.3"
 proptest = "1"
 rstest = "0.24"

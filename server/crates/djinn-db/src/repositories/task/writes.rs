@@ -121,7 +121,7 @@ async fn resolve_effective_creator(
 impl TaskRepository {
     /// Test-only compatibility helper. Production callers must use a
     /// provenance-requiring creation boundary.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
@@ -150,7 +150,7 @@ impl TaskRepository {
 
     /// Test-only compatibility helper. Production callers must use a
     /// provenance-requiring creation boundary.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn create_with_ac(
         &self,
@@ -343,7 +343,7 @@ impl TaskRepository {
 
     /// Create a task with no blocker edges (the common path). See
     /// [`Self::create_in_project_with_blockers`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn create_in_project(
         &self,
@@ -427,7 +427,7 @@ impl TaskRepository {
 
     /// Test helper: create a task with a specific short_id.
     /// This bypasses the normal short_id generation for testing collision scenarios.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn create_with_short_id(
         &self,
         id: &str,
@@ -1035,7 +1035,7 @@ mod created_by_tests {
         );
 
         // Unresolvable provenance must fail before INSERT instead of committing NULL.
-        let before: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM tasks")
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -1056,7 +1056,7 @@ mod created_by_tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains(EFFECTIVE_CREATOR_UNAVAILABLE));
-        let after: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM tasks")
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
             .fetch_one(db.pool())
             .await
             .unwrap();
