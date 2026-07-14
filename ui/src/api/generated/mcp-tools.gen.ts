@@ -10172,6 +10172,8 @@ export namespace SessionShowInputSchema {
 }
 export type SessionShowInput = SessionShowInputSchema.SessionShowInput;
 export namespace SessionShowOutputSchema {
+  export type AnyJson = any
+
   export interface SessionShowOutput {
   agent_type?: string
   /**
@@ -10181,6 +10183,11 @@ export namespace SessionShowOutputSchema {
   cache_write_tokens?: number
   ended_at?: string
   error?: string
+  /**
+   * Canonical extension-load failures associated with this session. Present
+   * on successful lookups, including as an empty array.
+   */
+  extension_load_diagnostics?: AnyJson[]
   id?: string
   model_id?: string
   /**
