@@ -1,11 +1,19 @@
 use super::*;
 
-// Regression evidence for the direct agent-side mutation callers that previously
-// failed in CI with `memory_write dispatch should succeed: "missing field
-// `reason`"` or `memory_edit dispatch should succeed: "missing field
-// `reason`"`. Keep the explicit non-blank reasons in the roadmap, brief, and
-// requirement-worktree fixtures below: they exercise the same extension bridge
-// as live MCP calls and must not rely on a compatibility default.
+// Source CI failure inventory (head ad505d4be):
+// - job 87178596271, Server Test shard-3:
+//   `call_tool_memory_brief_singleton_targets_canonical_project_root_from_worktree`
+//   failed at the `memory_write` call with
+//   `memory_write dispatch should succeed: "missing field `reason`"`.
+// - job 87178596296, Server Test shard-1:
+//   `call_tool_memory_current_requirement_targets_canonical_project_root_from_worktree`
+//   failed at the `memory_edit` call with
+//   `memory_edit dispatch should succeed: "missing field `reason`"`.
+//
+// The audit also found the equivalent roadmap singleton caller below. Keep the
+// explicit non-blank reasons in all three fixtures: they exercise the same
+// extension bridge as live MCP calls and must not rely on a compatibility
+// default.
 
 #[tokio::test]
 async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
