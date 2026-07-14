@@ -381,6 +381,12 @@ async fn handle_rpc(
                 "worker must call the provider locally; invoke_llm RPC is a Phase 7b regression"
             );
         }
+        ServiceRpcRequest::PlanMemoryIntents { .. } => {
+            panic!(
+                "worker dispatched memory planning in the in-pod path — \
+                 planning must remain disabled before stage execution"
+            );
+        }
         ServiceRpcRequest::OpenPr { .. } => {
             audit.lock().await.open_pr += 1;
             ServiceRpcResponse::OpenPr(TaskRunOutcome::Closed {
