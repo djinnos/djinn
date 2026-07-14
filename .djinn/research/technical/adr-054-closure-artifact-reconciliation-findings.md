@@ -1,8 +1,7 @@
 ---
 title: ADR-054 closure artifact reconciliation findings
 type: tech_spike
-<<<<<<< HEAD
-tags: ["adr-054","memory","closure","reconciliation"]
+tags: ["adr-054","spike","memory","memory-refs","closure","reconciliation"]
 ---
 
 # ADR-054 closure artifact reconciliation findings
@@ -34,11 +33,8 @@ The remaining closure blocker is a narrow memory-surface/index reconciliation de
 ## Relations
 - [[design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy]]
 - [[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]]
-=======
-tags: ["adr-054","spike","memory-refs","closure"]
----
 
-# Spike findings: ADR-054 closure artifact reconciliation
+## Supplemental evidence from the original reconciliation spike
 
 Originated from task `019d89de-7e6b-7651-954f-cc325a0fcf22` to reconcile ADR-054 closure artifacts and canonical memory refs for epic `3ch7` after corpus-cleanup verification.
 
@@ -71,4 +67,3 @@ This is no longer a missing-file problem. It is a canonical memory-resolution/in
 
 ## Recommended next action
 Treat this as a memory-surface/index reconciliation issue, not another ADR-054 content cleanup. Re-run canonical memory ingestion/indexing or equivalent planner-maintenance step, then verify the three permalinks above with `memory_read()` before closing epic `3ch7`.
->>>>>>> origin/main
