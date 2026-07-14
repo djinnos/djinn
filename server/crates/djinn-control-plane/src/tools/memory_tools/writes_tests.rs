@@ -25,7 +25,8 @@ mod tests {
         server::DjinnMcpServer,
         state::stubs::test_mcp_state,
         tools::memory_tools::{
-            BrokenLinksParams, EditParams, ListParams, MemoryNoteResponse, ReadParams, WriteParams, ops,
+            BrokenLinksParams, EditParams, ListParams, MemoryNoteResponse, ReadParams, WriteParams,
+            ops,
             write_dedup_types::{MemoryWriteDedupDecider, MemoryWriteDedupDecision},
         },
     };
@@ -46,17 +47,39 @@ mod tests {
 
     #[async_trait::async_trait]
     trait ScopedMemoryToolCalls {
-        async fn test_memory_write(&self, params: Parameters<WriteParams>) -> Json<MemoryNoteResponse>;
-        async fn test_memory_edit(&self, params: Parameters<EditParams>) -> Json<MemoryNoteResponse>;
+        async fn test_memory_write(
+            &self,
+            params: Parameters<WriteParams>,
+        ) -> Json<MemoryNoteResponse>;
+        async fn test_memory_edit(
+            &self,
+            params: Parameters<EditParams>,
+        ) -> Json<MemoryNoteResponse>;
     }
 
     #[async_trait::async_trait]
     impl ScopedMemoryToolCalls for DjinnMcpServer {
-        async fn test_memory_write(&self, params: Parameters<WriteParams>) -> Json<MemoryNoteResponse> {
-            REVISION_CALLER_CONTEXT.scope(TrustedRevisionCallerContext::authenticated_human("memory-tools-test"), self.memory_write(params)).await
+        async fn test_memory_write(
+            &self,
+            params: Parameters<WriteParams>,
+        ) -> Json<MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT
+                .scope(
+                    TrustedRevisionCallerContext::authenticated_human("memory-tools-test"),
+                    self.memory_write(params),
+                )
+                .await
         }
-        async fn test_memory_edit(&self, params: Parameters<EditParams>) -> Json<MemoryNoteResponse> {
-            REVISION_CALLER_CONTEXT.scope(TrustedRevisionCallerContext::authenticated_human("memory-tools-test"), self.memory_edit(params)).await
+        async fn test_memory_edit(
+            &self,
+            params: Parameters<EditParams>,
+        ) -> Json<MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT
+                .scope(
+                    TrustedRevisionCallerContext::authenticated_human("memory-tools-test"),
+                    self.memory_edit(params),
+                )
+                .await
         }
     }
 
@@ -127,6 +150,7 @@ mod tests {
                 title: "Async Pattern".to_string(),
                 content: "Use tokio::spawn for concurrent task execution in Rust async code."
                     .to_string(),
+                reason: "test mutation".to_string(),
                 note_type: "pattern".to_string(),
                 status: None,
                 tags: None,
@@ -256,6 +280,7 @@ mod tests {
                 content:
                     "This content is completely unique and should not match anything. XYZ123ABC"
                         .to_string(),
+                reason: "test mutation".to_string(),
                 note_type: "pattern".to_string(),
                 status: None,
                 tags: None,
@@ -1016,20 +1041,23 @@ mod tests {
         // The second note uses a strict subset of the first note's content terms
         // so the lexical dedup search deterministically finds the first note, the
         // decider is invoked, and the missing candidate produces an error outcome.
-        let Json(second) = server
-            .memory_write_with_decider(
-                Parameters(WriteParams {
-                    project: project.slug(),
-                    title: "Telemetry Error Pattern".to_string(),
-                    content: "apple banana cherry date".to_string(),
-                    reason: "test mutation".to_string(),
-                    note_type: "pattern".to_string(),
-                    status: None,
-                    tags: None,
-                    scope_paths: None,
-                    retrieval_anchor: None,
-                }),
-                &decider,
+        let Json(second) = REVISION_CALLER_CONTEXT
+            .scope(
+                TrustedRevisionCallerContext::authenticated_human("memory-tools-test"),
+                server.memory_write_with_decider(
+                    Parameters(WriteParams {
+                        project: project.slug(),
+                        title: "Telemetry Error Pattern".to_string(),
+                        content: "apple banana cherry date".to_string(),
+                        reason: "test mutation".to_string(),
+                        note_type: "pattern".to_string(),
+                        status: None,
+                        tags: None,
+                        scope_paths: None,
+                        retrieval_anchor: None,
+                    }),
+                    &decider,
+                ),
             )
             .await;
         assert!(

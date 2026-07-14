@@ -3,11 +3,11 @@
 mod tests {
     use std::{sync::Arc, time::Duration};
 
+    use djinn_core::models::DispatchPause;
     use djinn_core::{
         auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
         events::{DjinnEventEnvelope, EventBus},
     };
-    use djinn_core::models::DispatchPause;
     use djinn_db::repositories::dispatch_pause::{DispatchPauseRepository, DispatchPauseTarget};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use rmcp::{Json, ServerHandler, handler::server::wrapper::Parameters};
@@ -93,17 +93,39 @@ mod tests {
 
     #[async_trait::async_trait]
     trait ScopedMemoryToolCalls {
-        async fn test_memory_write(&self, params: Parameters<WriteParams>) -> Json<MemoryNoteResponse>;
-        async fn test_memory_edit(&self, params: Parameters<EditParams>) -> Json<MemoryNoteResponse>;
+        async fn test_memory_write(
+            &self,
+            params: Parameters<WriteParams>,
+        ) -> Json<MemoryNoteResponse>;
+        async fn test_memory_edit(
+            &self,
+            params: Parameters<EditParams>,
+        ) -> Json<MemoryNoteResponse>;
     }
 
     #[async_trait::async_trait]
     impl ScopedMemoryToolCalls for DjinnMcpServer {
-        async fn test_memory_write(&self, params: Parameters<WriteParams>) -> Json<MemoryNoteResponse> {
-            REVISION_CALLER_CONTEXT.scope(TrustedRevisionCallerContext::authenticated_human("server-test"), self.memory_write(params)).await
+        async fn test_memory_write(
+            &self,
+            params: Parameters<WriteParams>,
+        ) -> Json<MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT
+                .scope(
+                    TrustedRevisionCallerContext::authenticated_human("server-test"),
+                    self.memory_write(params),
+                )
+                .await
         }
-        async fn test_memory_edit(&self, params: Parameters<EditParams>) -> Json<MemoryNoteResponse> {
-            REVISION_CALLER_CONTEXT.scope(TrustedRevisionCallerContext::authenticated_human("server-test"), self.memory_edit(params)).await
+        async fn test_memory_edit(
+            &self,
+            params: Parameters<EditParams>,
+        ) -> Json<MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT
+                .scope(
+                    TrustedRevisionCallerContext::authenticated_human("server-test"),
+                    self.memory_edit(params),
+                )
+                .await
         }
     }
 

@@ -85,9 +85,13 @@ fn decode_args<T: DeserializeOwned>(tool: &str, args: Value) -> Result<T, String
         // Omitted and null reasons fail schema decoding before the mutation
         // handler can apply its non-blank validation. Keep that boundary
         // envelope identical to the handler's whitespace rejection.
-        if matches!(tool, "memory_write" | "memory_edit" | "memory_delete") && msg.contains("reason") {
+        if matches!(tool, "memory_write" | "memory_edit" | "memory_delete")
+            && msg.contains("reason")
+        {
             "invalid parameters: field: reason, message: reason must be non-blank".to_owned()
-        } else if (tool == "task_create" || tool == "task_update") && msg.contains("acceptance_criter") {
+        } else if (tool == "task_create" || tool == "task_update")
+            && msg.contains("acceptance_criter")
+        {
             format!(
                 "invalid arguments for tool '{tool}': {msg}. \
                  Hint: acceptance_criteria must be an array of strings, \

@@ -8,6 +8,7 @@ use super::write_dedup_types::{MemoryWriteDedupDecider, PendingWriteDedup};
 use super::write_services::{create_note, maybe_update_singleton_note, note_repository};
 use super::{
     DeleteParams, EditParams, MemoryDeleteResponse, MemoryNoteResponse, MoveParams, WriteParams,
+    revision_context,
 };
 use djinn_telemetry::memory_retrieval::RetrievalOutcome;
 
@@ -127,7 +128,7 @@ impl DjinnMcpServer {
             }
             WriteDedupOutcome::SupersedeExisting {
                 candidate_id,
-                reason,
+                reason: decision_reason,
             } => {
                 observer.finish(RetrievalOutcome::Success, 1);
                 // Keep incoming creation exactly on the ordinary memory_write path.
@@ -144,9 +145,13 @@ impl DjinnMcpServer {
                 .await;
                 if let Some(new_note_id) = response.id.as_deref()
                     && response.error.is_none()
-                    && let Err(error) =
-                        apply_created_note_supersede(&repo, new_note_id, &candidate_id, &reason)
-                            .await
+                    && let Err(error) = apply_created_note_supersede(
+                        &repo,
+                        new_note_id,
+                        &candidate_id,
+                        &decision_reason,
+                    )
+                    .await
                 {
                     // The new note has already been durably created. Keep its normal
                     // public creation response while making incomplete association

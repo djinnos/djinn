@@ -14,7 +14,9 @@ use djinn_db::{
 use serde_json::{Value, json};
 
 async fn harness_and_project() -> (McpTestHarness, String, String) {
-    let db = Database::ephemeral().await.expect("PostgreSQL test database");
+    let db = Database::ephemeral()
+        .await
+        .expect("PostgreSQL test database");
     let harness = McpTestHarness::from_db(db.clone());
     let project = ProjectRepository::new(db, EventBus::noop())
         .create("revision-contract", "test", "revision-contract")
@@ -50,11 +52,12 @@ async fn persisted_counts(db: &Database, project_id: &str) -> (i64, i64) {
         .fetch_one(db.pool())
         .await
         .unwrap();
-    let revisions = sqlx::query_scalar("SELECT COUNT(*) FROM note_revision_events WHERE project_id = $1")
-        .bind(project_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+    let revisions =
+        sqlx::query_scalar("SELECT COUNT(*) FROM note_revision_events WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
     (notes, revisions)
 }
 
@@ -105,7 +108,9 @@ async fn dispatch_rejects_invalid_or_spoofed_reason_inputs_before_durable_mutati
         "task_run_id",
     ] {
         let mut args = write(&project, "Spoofed", "initial", "reference", json!("valid"));
-        args.as_object_mut().unwrap().insert(key.into(), json!("spoofed"));
+        args.as_object_mut()
+            .unwrap()
+            .insert(key.into(), json!("spoofed"));
         let error = REVISION_CALLER_CONTEXT
             .scope(caller.clone(), harness.call_tool("memory_write", args))
             .await
@@ -131,7 +136,13 @@ async fn dispatch_persists_trimmed_reason_event_kind_and_trusted_provenance() {
             Some(caller),
             harness.call_tool(
                 "memory_write",
-                write(&project, "Revision Contract", "initial", "brief", json!("  create brief  ")),
+                write(
+                    &project,
+                    "Revision Contract",
+                    "initial",
+                    "brief",
+                    json!("  create brief  "),
+                ),
             ),
         )
         .await
@@ -141,7 +152,13 @@ async fn dispatch_persists_trimmed_reason_event_kind_and_trusted_provenance() {
             TrustedRevisionCallerContext::authenticated_human("human-contract"),
             harness.call_tool(
                 "memory_write",
-                write(&project, "ignored singleton title", "singleton content", "brief", json!(" singleton update ")),
+                write(
+                    &project,
+                    "ignored singleton title",
+                    "singleton content",
+                    "brief",
+                    json!(" singleton update "),
+                ),
             ),
         )
         .await
@@ -152,10 +169,54 @@ async fn dispatch_persists_trimmed_reason_event_kind_and_trusted_provenance() {
 
     let rows = revision_rows(harness.db(), &project_id).await;
     assert_eq!(rows.len(), 4);
-    assert_eq!(rows[0], ("created".into(), "create brief".into(), "agent".into(), Some("agent-contract".into()), Some("session-contract".into()), Some("task-contract".into()), "run-contract".into()));
-    assert_eq!(rows[1], ("updated".into(), "singleton update".into(), "human".into(), Some("human-contract".into()), None, None, "".into()));
-    assert_eq!(rows[2], ("updated".into(), "edit brief".into(), "human".into(), Some("human-contract".into()), None, None, "".into()));
-    assert_eq!(rows[3], ("deleted".into(), "delete brief".into(), "human".into(), Some("human-contract".into()), None, None, "".into()));
+    assert_eq!(
+        rows[0],
+        (
+            "created".into(),
+            "create brief".into(),
+            "agent".into(),
+            Some("agent-contract".into()),
+            Some("session-contract".into()),
+            Some("task-contract".into()),
+            "run-contract".into()
+        )
+    );
+    assert_eq!(
+        rows[1],
+        (
+            "updated".into(),
+            "singleton update".into(),
+            "human".into(),
+            Some("human-contract".into()),
+            None,
+            None,
+            "".into()
+        )
+    );
+    assert_eq!(
+        rows[2],
+        (
+            "updated".into(),
+            "edit brief".into(),
+            "human".into(),
+            Some("human-contract".into()),
+            None,
+            None,
+            "".into()
+        )
+    );
+    assert_eq!(
+        rows[3],
+        (
+            "deleted".into(),
+            "delete brief".into(),
+            "human".into(),
+            Some("human-contract".into()),
+            None,
+            None,
+            "".into()
+        )
+    );
 }
 
 #[tokio::test]
@@ -164,19 +225,28 @@ async fn repository_failure_rolls_back_note_and_revision_together() {
     let repo = NoteRepository::new(harness.db().clone(), EventBus::noop());
     let note_id = uuid::Uuid::now_v7().to_string();
     repo.set_revision_event_insertion_failure_for_test(true);
-    let result = repo.mutate_with_revision(NoteRevisionMutation {
-        project_id: project_id.clone(),
-        note_id: Some(note_id.clone()),
-        event_kind: NoteRevisionEventKind::Created,
-        desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
-            title: "rollback".into(), permalink: "reference/rollback".into(), content: "must not persist".into(),
-            note_type: "reference".into(), folder: "reference".into(), status: "active".into(), tags: "[]".into(),
-            retrieval_anchor: None, scope_paths: "[]".into(), confidence: 0.5,
-        }),
-        attribution: TrustedNoteRevisionAttribution::human("human-contract").unwrap(),
-        provenance: TrustedNoteRevisionProvenance::default(),
-        reason: NoteRevisionReason::new("prove rollback").unwrap(),
-    }).await;
+    let result = repo
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project_id.clone(),
+            note_id: Some(note_id.clone()),
+            event_kind: NoteRevisionEventKind::Created,
+            desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
+                title: "rollback".into(),
+                permalink: "reference/rollback".into(),
+                content: "must not persist".into(),
+                note_type: "reference".into(),
+                folder: "reference".into(),
+                status: "active".into(),
+                tags: "[]".into(),
+                retrieval_anchor: None,
+                scope_paths: "[]".into(),
+                confidence: 0.5,
+            }),
+            attribution: TrustedNoteRevisionAttribution::human("human-contract").unwrap(),
+            provenance: TrustedNoteRevisionProvenance::default(),
+            reason: NoteRevisionReason::new("prove rollback").unwrap(),
+        })
+        .await;
     repo.set_revision_event_insertion_failure_for_test(false);
     assert!(result.is_err());
     assert!(repo.get(&note_id).await.unwrap().is_none());
@@ -187,10 +257,58 @@ async fn repository_failure_rolls_back_note_and_revision_together() {
 async fn singleton_noop_emits_no_revision_or_retrieval_side_effect() {
     let (harness, project, project_id) = harness_and_project().await;
     let caller = TrustedRevisionCallerContext::authenticated_human("human-contract");
-    REVISION_CALLER_CONTEXT.scope(caller.clone(), harness.call_tool("memory_write", write(&project, "Brief", "same", "brief", json!("create singleton")))).await.expect("create singleton");
+    REVISION_CALLER_CONTEXT
+        .scope(
+            caller.clone(),
+            harness.call_tool(
+                "memory_write",
+                write(
+                    &project,
+                    "Brief",
+                    "same",
+                    "brief",
+                    json!("create singleton"),
+                ),
+            ),
+        )
+        .await
+        .expect("create singleton");
     let metrics = harness.state().retrieval_metrics();
-    let before = metrics.snapshot().unwrap().aggregate(djinn_telemetry::memory_retrieval::RetrievalEntryPoint::JitPitfalls, djinn_telemetry::memory_retrieval::RetrievalOutcome::Empty).count;
-    REVISION_CALLER_CONTEXT.scope(caller, harness.call_tool("memory_write", write(&project, "ignored", "same", "brief", json!("unchanged singleton")))).await.expect("no-op singleton response");
+    let before = metrics
+        .snapshot()
+        .unwrap()
+        .aggregate(
+            djinn_telemetry::memory_retrieval::RetrievalEntryPoint::JitPitfalls,
+            djinn_telemetry::memory_retrieval::RetrievalOutcome::Empty,
+        )
+        .count;
+    REVISION_CALLER_CONTEXT
+        .scope(
+            caller,
+            harness.call_tool(
+                "memory_write",
+                write(
+                    &project,
+                    "ignored",
+                    "same",
+                    "brief",
+                    json!("unchanged singleton"),
+                ),
+            ),
+        )
+        .await
+        .expect("no-op singleton response");
     assert_eq!(persisted_counts(harness.db(), &project_id).await, (1, 1));
-    assert_eq!(metrics.snapshot().unwrap().aggregate(djinn_telemetry::memory_retrieval::RetrievalEntryPoint::JitPitfalls, djinn_telemetry::memory_retrieval::RetrievalOutcome::Empty).count, before, "unchanged singleton must not emit a retrieval observation");
+    assert_eq!(
+        metrics
+            .snapshot()
+            .unwrap()
+            .aggregate(
+                djinn_telemetry::memory_retrieval::RetrievalEntryPoint::JitPitfalls,
+                djinn_telemetry::memory_retrieval::RetrievalOutcome::Empty
+            )
+            .count,
+        before,
+        "unchanged singleton must not emit a retrieval observation"
+    );
 }
