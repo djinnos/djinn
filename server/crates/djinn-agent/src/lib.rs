@@ -23,6 +23,7 @@ pub mod direct_services;
 pub mod environment;
 pub(crate) mod extension;
 pub(crate) mod extension_diagnostics;
+pub mod extension_diagnostics_probe;
 pub mod file_time;
 pub(crate) mod github_error_render;
 pub(crate) mod knowledge_promotion;

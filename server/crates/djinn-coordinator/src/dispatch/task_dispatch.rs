@@ -2848,6 +2848,14 @@ mod inflight_ledger_tests {
             ci_github_head_sha: None,
             ci_heads_diverged: None,
             ci_head_observation_error: None,
+            ci_mq_state: None,
+            ci_mq_run_id: None,
+            ci_mq_head_sha: None,
+            ci_mq_failed_check_names: None,
+            ci_mq_failure_fingerprint: None,
+            ci_mq_same_signature_count: None,
+            ci_mq_first_seen_at: None,
+            ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
         }
     }
@@ -5380,6 +5388,14 @@ mod failover_chain_tests {
             ci_github_head_sha: None,
             ci_heads_diverged: None,
             ci_head_observation_error: None,
+            ci_mq_state: None,
+            ci_mq_run_id: None,
+            ci_mq_head_sha: None,
+            ci_mq_failed_check_names: None,
+            ci_mq_failure_fingerprint: None,
+            ci_mq_same_signature_count: None,
+            ci_mq_first_seen_at: None,
+            ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
         };
 
@@ -5566,6 +5582,14 @@ mod failover_chain_tests {
             ci_github_head_sha: None,
             ci_heads_diverged: None,
             ci_head_observation_error: None,
+            ci_mq_state: None,
+            ci_mq_run_id: None,
+            ci_mq_head_sha: None,
+            ci_mq_failed_check_names: None,
+            ci_mq_failure_fingerprint: None,
+            ci_mq_same_signature_count: None,
+            ci_mq_first_seen_at: None,
+            ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
         };
 
@@ -6120,6 +6144,14 @@ mod failover_chain_tests {
             ci_github_head_sha: None,
             ci_heads_diverged: None,
             ci_head_observation_error: None,
+            ci_mq_state: None,
+            ci_mq_run_id: None,
+            ci_mq_head_sha: None,
+            ci_mq_failed_check_names: None,
+            ci_mq_failure_fingerprint: None,
+            ci_mq_same_signature_count: None,
+            ci_mq_first_seen_at: None,
+            ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
         };
 

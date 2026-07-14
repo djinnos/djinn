@@ -949,6 +949,21 @@ impl SupervisorServices for RpcServices {
             },
         }
     }
+
+    async fn plan_memory_intents(
+        &self,
+        request: crate::services::wire::AttributedPlannerRequest,
+    ) -> Result<crate::services::wire::PlannerAttemptResult, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::PlanMemoryIntents { request })
+            .await
+        {
+            Ok(ServiceRpcResponse::PlanMemoryIntents(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -1333,6 +1348,15 @@ impl SupervisorServices for UnimplementedRpcServices {
     ) -> BranchPublicationResult {
         unimplemented!(
             "UnimplementedRpcServices::publish_branch_to_github — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn plan_memory_intents(
+        &self,
+        _request: crate::services::wire::AttributedPlannerRequest,
+    ) -> Result<crate::services::wire::PlannerAttemptResult, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::plan_memory_intents — construct RpcServices for real RPC"
         )
     }
 }
@@ -2085,6 +2109,14 @@ mod tests {
             ci_github_head_sha: None,
             ci_heads_diverged: None,
             ci_head_observation_error: None,
+            ci_mq_state: None,
+            ci_mq_run_id: None,
+            ci_mq_head_sha: None,
+            ci_mq_failed_check_names: None,
+            ci_mq_failure_fingerprint: None,
+            ci_mq_same_signature_count: None,
+            ci_mq_first_seen_at: None,
+            ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
         }
     }

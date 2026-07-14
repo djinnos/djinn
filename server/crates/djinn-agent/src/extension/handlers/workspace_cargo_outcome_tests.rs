@@ -33,6 +33,7 @@ fn make_output(code: i32, termination: ProcessTermination) -> ProcessOutput {
 
 /// Run `finish_shell` with a `TestClock` advanced by `elapsed`, returning
 /// the recorded calls.
+#[allow(clippy::disallowed_methods)]
 fn run_finish(
     classification: Option<&'static str>,
     result: &Result<ProcessOutput, ProcessRunError>,
@@ -208,6 +209,7 @@ fn cancellation_with_success_status_still_cancelled() {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)]
 fn duration_is_monotonic_not_wall_clock() {
     // Advancing wall-clock without advancing monotonic time must not
     // change the recorded duration.

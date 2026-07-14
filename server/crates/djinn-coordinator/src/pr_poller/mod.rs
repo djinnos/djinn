@@ -74,6 +74,13 @@ const PR_CI_FAILURE_THRESHOLD: u32 = 3;
 /// the blind cycle-count force-close kicks in.
 const SAME_CI_SIGNATURE_THRESHOLD: u32 = 2;
 
+/// Maximum consecutive identical merge-queue (`merge_group`) failure
+/// fingerprints before escalating to the Planner and parking the task, instead
+/// of reopening for another blind rework round. A PR that keeps getting
+/// dequeued with the same merge-group failure is not going to clear it by
+/// reopening; the Planner needs to intervene.
+const MQ_SAME_SIGNATURE_THRESHOLD: u32 = 3;
+
 /// Activity log event type for per-fingerprint tracking markers.
 const SAME_CI_SIGNATURE_EVENT: &str = "same_ci_signature";
 
@@ -81,6 +88,49 @@ const SAME_CI_SIGNATURE_EVENT: &str = "same_ci_signature";
 /// and an unchanged head SHA before the review-stuck trigger fires. Prevents
 /// escalating a PR that is mid-CI or has a pending check-run.
 const REVIEW_STUCK_WINDOW_MINUTES: i64 = 10;
+
+/// Whether a merge-queue (`merge_group`) rejection with the given consecutive
+/// same-signature count must be parked+escalated to the Planner rather than
+/// reopened for another blind rework round. Fires once the count reaches
+/// [`MQ_SAME_SIGNATURE_THRESHOLD`]. A non-positive/absent count never escalates.
+pub(crate) fn mq_rejection_requires_park(same_signature_count: i64) -> bool {
+    u32::try_from(same_signature_count)
+        .map(|n| n >= MQ_SAME_SIGNATURE_THRESHOLD)
+        .unwrap_or(false)
+}
+
+/// Render a compact merge-queue (`merge_group`) lane facts line for CI
+/// escalation text, when the task's promoted CI snapshot carries a merge-queue
+/// failure lane (`ci_mq_state` present). Surfaces the merge-group run id, the
+/// merge-group failing check names, and the consecutive same-signature
+/// rejection count so Planner-facing remediation dossiers show WHY the PR keeps
+/// getting dequeued (its own head checks are green). Returns `None` when no
+/// merge-queue lane is recorded.
+pub(crate) fn merge_queue_lane_escalation_section(
+    task: &djinn_core::models::Task,
+) -> Option<String> {
+    let state = task.ci_mq_state.as_deref()?;
+    let run_display = task
+        .ci_mq_run_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let checks: Vec<String> = task
+        .ci_mq_failed_check_names
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    let checks_display = if checks.is_empty() {
+        "unknown".to_string()
+    } else {
+        checks.join(", ")
+    };
+    let count = task.ci_mq_same_signature_count.unwrap_or(0);
+    Some(format!(
+        "**Merge-queue rejection** (state: {state}): merge-group run {run_display} \
+         failed checks: {checks_display}; {count} consecutive same-signature queue \
+         rejection(s)."
+    ))
+}
 mod ci_failure_analysis;
 mod ci_helpers;
 mod conversation_resolution;

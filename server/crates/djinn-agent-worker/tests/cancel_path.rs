@@ -81,6 +81,14 @@ fn fixture_task(task_id: &str, project_id: &str) -> Task {
         ci_github_head_sha: None,
         ci_heads_diverged: None,
         ci_head_observation_error: None,
+        ci_mq_state: None,
+        ci_mq_run_id: None,
+        ci_mq_head_sha: None,
+        ci_mq_failed_check_names: None,
+        ci_mq_failure_fingerprint: None,
+        ci_mq_same_signature_count: None,
+        ci_mq_first_seen_at: None,
+        ci_mq_last_seen_at: None,
         unresolved_blocker_count: 0,
     }
 }
@@ -306,6 +314,12 @@ async fn start_fake_server(
                             panic!(
                                 "worker dispatched invoke_llm via RPC — \
                                  provider must run locally even on the cancellation path"
+                            );
+                        }
+                        ServiceRpcRequest::PlanMemoryIntents { .. } => {
+                            panic!(
+                                "worker dispatched memory planning on the cancellation path — \
+                                 planning must remain disabled before stage execution"
                             );
                         }
                         ServiceRpcRequest::OpenPr { .. } => {
