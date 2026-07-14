@@ -498,3 +498,272 @@ async fn pressure_failure_telemetry_and_completion_log_are_bounded() {
     );
     assert!(event.values().all(|value| !value.contains(PROJECT_ID)));
 }
+
+struct RemovingCapacity {
+    target: PathBuf,
+    values: Mutex<std::collections::VecDeque<Result<CapacitySnapshot, String>>>,
+}
+impl FilesystemCapacity for RemovingCapacity {
+    fn capacity(&self, _: &Path) -> Result<CapacitySnapshot, String> {
+        std::fs::remove_dir_all(&self.target).unwrap();
+        self.values.lock().unwrap().pop_front().unwrap()
+    }
+}
+
+#[tokio::test]
+async fn three_rung_executor_external_reclamation_before_first_retains_suffix() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000030");
+    let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000031");
+    let first_unit = eligible_three_rung_unit(&first, &first, PressureRung::WholeBase);
+    let second_unit = eligible_three_rung_unit(&second, &second, PressureRung::WholeBase);
+    let locks = RecordingBaseLock {
+        attempts: Mutex::new(Vec::new()),
+        succeed: true,
+    };
+    let capacity = SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Ok(
+        CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 25,
+        },
+    )])));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![first_unit.clone(), second_unit.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &locks,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+
+    assert!(result.reached_high_watermark);
+    assert!(result.attempted.is_empty());
+    assert_eq!(result.retained, vec![first_unit, second_unit]);
+    assert_eq!(locks.attempts.lock().unwrap().len(), 1);
+    assert!(first.exists() && second.exists());
+}
+
+#[tokio::test]
+async fn three_rung_executor_external_reclamation_between_attempts_stops_before_next_remove() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000032");
+    let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000033");
+    std::fs::write(first.join("bytes"), b"bytes").unwrap();
+    let first_unit = eligible_three_rung_unit(&first, &first, PressureRung::WholeBase);
+    let second_unit = eligible_three_rung_unit(&second, &second, PressureRung::WholeBase);
+    let capacity = SequenceCapacity(Mutex::new(std::collections::VecDeque::from([
+        Ok(CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 10,
+        }),
+        Ok(CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 10,
+        }),
+        Ok(CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 25,
+        }),
+    ])));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![first_unit.clone(), second_unit.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+
+    assert_eq!(result.deleted, vec![first_unit]);
+    assert_eq!(result.retained, vec![second_unit]);
+    assert!(result.reached_high_watermark);
+    assert!(!first.exists() && second.exists());
+}
+
+struct HeldLock(Arc<std::sync::atomic::AtomicBool>);
+struct HeldGuard(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for HeldGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+impl LockGuard for HeldGuard {}
+impl BaseLock for HeldLock {
+    fn try_lock(&self, _: &Path) -> Result<Option<Box<dyn LockGuard>>, String> {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(Some(Box::new(HeldGuard(self.0.clone()))))
+    }
+}
+struct LockAssertingCapacity(Arc<std::sync::atomic::AtomicBool>);
+impl FilesystemCapacity for LockAssertingCapacity {
+    fn capacity(&self, _: &Path) -> Result<CapacitySnapshot, String> {
+        assert!(
+            self.0.load(std::sync::atomic::Ordering::SeqCst),
+            "capacity must run under lock"
+        );
+        Ok(CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 25,
+        })
+    }
+}
+
+#[tokio::test]
+async fn three_rung_executor_measures_immediately_under_held_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000034");
+    let unit = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
+    let held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![unit.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &HeldLock(held.clone()),
+        &LockAssertingCapacity(held.clone()),
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+    assert!(result.reached_high_watermark);
+    assert_eq!(result.retained, vec![unit]);
+    assert!(!held.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(base.exists());
+}
+
+#[tokio::test]
+async fn three_rung_executor_absent_during_removal_blocks_same_base_escalation() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000035");
+    let target = base.join("debug").join("incremental");
+    std::fs::create_dir_all(&target).unwrap();
+    let unit = eligible_three_rung_unit(&base, &target, PressureRung::Incremental);
+    let broader = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
+    let locks = RecordingBaseLock {
+        attempts: Mutex::new(Vec::new()),
+        succeed: true,
+    };
+    let capacity = RemovingCapacity {
+        target: target.clone(),
+        values: Mutex::new(std::collections::VecDeque::from([Ok(CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 10,
+        })])),
+    };
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![unit.clone(), broader.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &locks,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+    assert_eq!(result.attempted, vec![unit]);
+    assert!(result.deleted.is_empty());
+    assert_eq!(result.retained, vec![broader]);
+    assert_eq!(locks.attempts.lock().unwrap().len(), 1);
+    assert!(base.exists());
+}
+
+#[tokio::test]
+async fn three_rung_executor_removal_failure_blocks_same_base_escalation() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000036");
+    let target = base.join("debug").join("incremental");
+    std::fs::create_dir_all(&target).unwrap();
+    let unit = eligible_three_rung_unit(&base, &target, PressureRung::Incremental);
+    let broader = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
+    let capacity = SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Ok(
+        CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 10,
+        },
+    )])));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![unit.clone(), broader.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        Path::new("/outside-root"),
+    )
+    .await;
+    assert_eq!(result.attempted, vec![unit.clone()]);
+    assert_eq!(result.retained, vec![unit, broader]);
+    assert!(base.exists());
+}
+
+#[cfg(unix)]
+struct SwappingActivity {
+    target: PathBuf,
+    replacement: PathBuf,
+}
+#[cfg(unix)]
+#[async_trait]
+impl ActivityGuard for SwappingActivity {
+    async fn activity(&self, _: &str) -> Result<ActivitySnapshot, String> {
+        std::fs::remove_dir_all(&self.target).unwrap();
+        std::os::unix::fs::symlink(&self.replacement, &self.target).unwrap();
+        Ok(snapshot())
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn three_rung_executor_path_swap_to_symlink_is_retained_without_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000037");
+    let target = base.join("debug").join("incremental");
+    std::fs::create_dir_all(&target).unwrap();
+    let outside = temp.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("preserve"), b"safe").unwrap();
+    let unit = eligible_three_rung_unit(&base, &target, PressureRung::Incremental);
+    let capacity = SequenceCapacity(Mutex::new(std::collections::VecDeque::new()));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![unit.clone()],
+        },
+        &SwappingActivity {
+            target: target.clone(),
+            replacement: outside.clone(),
+        },
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+    assert!(result.attempted.is_empty());
+    assert_eq!(result.retained, vec![unit]);
+    assert!(target.is_symlink());
+    assert_eq!(std::fs::read(outside.join("preserve")).unwrap(), b"safe");
+}

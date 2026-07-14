@@ -151,6 +151,12 @@ pub async fn execute_three_rung_pressure_plan(
             drop(guard);
             continue;
         }
+        if !execution_target_is_still_canonical_directory(unit) {
+            blocked.insert(unit.project_id.clone());
+            result.retained.push(unit.clone());
+            drop(guard);
+            continue;
+        }
         let bytes = match allocated_tree_bytes_for_execution(&unit.canonical_target) {
             Ok(bytes) => bytes,
             Err(()) => {
@@ -206,7 +212,12 @@ pub async fn execute_three_rung_pressure_plan(
                     }
                 }
             }
-            Ok(Removal::Absent) => {}
+            // A concurrent remover may win after the guarded existence check.
+            // That no-op is idempotent, but it still makes this base's planned
+            // state stale, so never escalate to a broader rung this pass.
+            Ok(Removal::Absent) => {
+                blocked.insert(unit.project_id.clone());
+            }
             Err(()) => {
                 blocked.insert(unit.project_id.clone());
                 result.retained.push(unit.clone());
@@ -276,6 +287,15 @@ async fn recheck_three_rung_unit(
         return Err(());
     }
     Ok(())
+}
+
+fn execution_target_is_still_canonical_directory(unit: &PressurePlanUnit) -> bool {
+    matches!(
+        std::fs::symlink_metadata(&unit.canonical_target),
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink()
+    ) && std::fs::canonicalize(&unit.canonical_target).is_ok_and(|target| {
+        target == unit.canonical_target && target.starts_with(&unit.canonical_base)
+    })
 }
 
 fn allocated_tree_bytes_for_execution(root: &Path) -> Result<u64, ()> {
