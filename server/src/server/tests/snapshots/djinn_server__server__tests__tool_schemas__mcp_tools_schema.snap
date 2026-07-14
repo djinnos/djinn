@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 642
 expression: signatures
 ---
 [
@@ -7338,6 +7339,7 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "identifier": {
           "type": "string"
@@ -7434,12 +7436,9 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "content": {
-          "type": "string"
-        },
-        "reason": {
-          "description": "Non-blank explanation recorded in the immutable revision ledger.",
           "type": "string"
         },
         "find_text": {
@@ -7458,6 +7457,10 @@ expression: signatures
           "type": "string"
         },
         "project": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "Non-blank explanation recorded in the immutable revision ledger.",
           "type": "string"
         },
         "retrieval_anchor": {
@@ -9892,16 +9895,17 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "content": {
           "type": "string"
         },
-        "reason": {
-          "description": "Non-blank explanation recorded in the immutable revision ledger.",
-          "type": "string"
-        },
         "project": {
           "description": "Absolute path to the project directory.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Non-blank explanation recorded in the immutable revision ledger.",
           "type": "string"
         },
         "retrieval_anchor": {
@@ -9950,8 +9954,8 @@ expression: signatures
         "project",
         "title",
         "content",
-        "type",
-        "reason"
+        "reason",
+        "type"
       ],
       "type": "object"
     },
