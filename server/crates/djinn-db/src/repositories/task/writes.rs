@@ -1088,6 +1088,36 @@ mod created_by_tests {
         assert_eq!(before, after, "unresolvable creator must not commit a task");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_with_short_id_stamps_the_durable_fixture_creator() {
+        let db = Database::open_in_memory().unwrap();
+        let (project_id, _) = seed_project_and_epic(&db).await;
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+        let task = repo
+            .create_with_short_id(
+                &uuid::Uuid::now_v7().to_string(),
+                &project_id,
+                "Fixture task",
+                "open",
+                "fixture01",
+            )
+            .await
+            .unwrap();
+
+        let creator_id = task
+            .created_by_user_id
+            .as_deref()
+            .expect("fixture task must have a concrete creator");
+        let creator_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+                .bind(creator_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert!(creator_exists, "fixture creator must be a persisted user");
+    }
+
     /// A background/agent caller (no SESSION_USER_ID) creating a task under an
     /// epic that *does* have a creator must inherit the epic's creator, so
     /// Planner-spawned tasks belong to the human who owns the epic rather than
