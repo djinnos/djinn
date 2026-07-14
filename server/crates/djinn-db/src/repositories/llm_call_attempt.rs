@@ -309,6 +309,41 @@ mod tests {
         .unwrap();
     }
 
+    /// Seed the optional attribution parents used by the full round-trip test.
+    /// The ledger deliberately retains these foreign keys so durable attempts
+    /// cannot contain dangling task-run or session identifiers.
+    async fn seed_task_run_and_session(
+        db: &Database,
+        project_id: &str,
+        task_id: &str,
+        task_run_id: &str,
+        session_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) \
+             VALUES ($1, $2, $3, 'new_task', 'running')",
+        )
+        .bind(task_run_id)
+        .bind(project_id)
+        .bind(task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO sessions \
+             (id, project_id, task_id, task_run_id, model_id, agent_type, status) \
+             VALUES ($1, $2, $3, $4, 'test-model', 'worker', 'running')",
+        )
+        .bind(session_id)
+        .bind(project_id)
+        .bind(task_id)
+        .bind(task_run_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
     async fn seed_task(db: &Database, task_id: &str, project_id: &str) {
         db.ensure_initialized().await.unwrap();
         sqlx::query(
@@ -335,6 +370,7 @@ mod tests {
         let task_id = "019f4900-0000-7000-8000-000000000002";
         seed_project(&db, project_id).await;
         seed_task(&db, task_id, project_id).await;
+        seed_task_run_and_session(&db, project_id, task_id, "run-1", "session-1").await;
         let repo = LlmCallAttemptRepository::new(db, EventBus::noop());
 
         let created = repo
