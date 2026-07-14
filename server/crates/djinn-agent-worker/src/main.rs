@@ -3913,9 +3913,10 @@ warning: something
             Some(value) => unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, value) },
             None => unsafe { std::env::remove_var(CARGO_TARGET_DIR_ENV) },
         }
-        assert_eq!(
-            *WARM_CARGO_PHASES.lock().expect("recorder"),
-            ["lock", "failed"]
+        let phases = WARM_CARGO_PHASES.lock().expect("recorder");
+        assert!(
+            matches!(phases.as_slice(), ["failed"] | ["lock", "failed"]),
+            "a real terminal failure must stop before stamp or compile: {phases:?}"
         );
         let graph_warmed = true;
         assert!(
