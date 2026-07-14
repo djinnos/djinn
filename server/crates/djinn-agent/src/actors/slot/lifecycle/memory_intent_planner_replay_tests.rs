@@ -1,15 +1,15 @@
-//! Checked-in, network-free replay corpus for the default-off memory planner.
-//!
-//! This deliberately exercises the public fake planner/search seams rather than
-//! a provider or repository. It is a replay gate for rollout evidence, not a
-//! second implementation of retrieval scoring.
+//! Checked-in, network-free replay corpus for the session-start planner seam.
 
-use futures::future::join_all;
+use std::collections::HashMap;
+
+use async_trait::async_trait;
 use serde::Deserialize;
+use tokio::sync::Mutex;
 
 use super::memory_intent_planner::{
-    FakeMemoryIntentPlanner, FakePlannedNoteSearch, MemoryIntentPlanner, PlannedNoteSearch,
-    PlannerError, PlannerInput, parse_planned_queries, prepare_planner_request,
+    FakeMemoryIntentPlanner, PlannedContextNote, PlannedNoteSearch, PlannedQuery,
+    PlannerCallOutcome, PlannerError, PlannerInput, PlannerLedger, SessionStartPlannerResult,
+    run_session_start_memory_planner,
 };
 use crate::context::MemoryIntentPlannerConfig;
 
@@ -17,9 +17,6 @@ const FIXTURES: &str =
     include_str!("../../../../tests/fixtures/memory_intent_planner/replay_cases.json");
 const SCOPE_ONLY: &str = "scope-only";
 const AVAILABLE_ATTEMPTED_USAGE: u32 = 17;
-const PLANNER_BUDGET: usize = 2_000;
-const PER_QUERY_CAP: usize = 2;
-const GLOBAL_CAP: usize = 6;
 
 #[derive(Debug, Deserialize)]
 struct ReplayCase {
@@ -33,58 +30,64 @@ struct ReplayCase {
     #[serde(default)]
     full_scope_budget: bool,
     #[serde(default)]
+    bucket_mode: String,
+    #[serde(default)]
     resume_compaction_summary: Option<String>,
     expected_outcome: String,
     expected_context: String,
     expected_available_usage: u32,
+    expected_accounting_finalized: bool,
+    #[serde(default)]
+    expected_ledger_outcome: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct ReplayNote {
-    id: &'static str,
-    permalink: &'static str,
-    label: &'static str,
-    title: &'static str,
-    snippet: &'static str,
-}
-
-impl ReplayNote {
-    fn render(&self) -> String {
-        format!(
-            "- **[{}] {}**: {} (permalink: {})",
-            self.label, self.title, self.snippet, self.permalink
-        )
-    }
-}
-
-/// Final fake seam for the durable-attribution boundary. It intentionally
-/// models available attempted usage independently from final injection.
 #[derive(Default)]
-struct FakePlannerLedger {
-    outcomes: Vec<String>,
-    available_usage: u32,
+struct ReplayLedger {
+    records: Mutex<Vec<(PlannerCallOutcome, u32)>>,
     finalization_fails: bool,
 }
 
-impl FakePlannerLedger {
-    fn record_attempt(&mut self, outcome: &str) {
-        self.outcomes.push(outcome.to_string());
-        self.available_usage = AVAILABLE_ATTEMPTED_USAGE;
+#[async_trait]
+impl PlannerLedger for ReplayLedger {
+    async fn record(
+        &self,
+        outcome: PlannerCallOutcome,
+        available_usage: u32,
+    ) -> Result<(), PlannerError> {
+        self.records.lock().await.push((outcome, available_usage));
+        if self.finalization_fails {
+            return Err(PlannerError::Invocation(
+                "ledger finalization failed".into(),
+            ));
+        }
+        Ok(())
     }
-
-    fn finalize(&mut self) -> bool {
-        !self.finalization_fails
+}
+impl ReplayLedger {
+    async fn records(&self) -> Vec<(PlannerCallOutcome, u32)> {
+        self.records.lock().await.clone()
     }
 }
 
-struct ReplayResult {
-    context: String,
-    outcome: String,
-    available_usage: u32,
-    planner_calls: usize,
-    search_calls: usize,
-    ledger_outcomes: Vec<String>,
-    rendered_request: Option<String>,
+/// Query-keyed fake exercises the final `PlannedNoteSearch` seam without a database.
+#[derive(Default)]
+struct ReplaySearch {
+    buckets: HashMap<String, Vec<PlannedContextNote>>,
+    calls: Mutex<Vec<PlannedQuery>>,
+}
+#[async_trait]
+impl PlannedNoteSearch for ReplaySearch {
+    type Note = PlannedContextNote;
+    async fn search(&self, query: PlannedQuery) -> Result<Vec<Self::Note>, PlannerError> {
+        let notes = self.buckets.get(&query.query).cloned().unwrap_or_default();
+        self.calls.lock().await.push(query);
+        Ok(notes)
+    }
+}
+impl ReplaySearch {
+    async fn calls(&self) -> Vec<PlannedQuery> {
+        self.calls.lock().await.clone()
+    }
 }
 
 fn input(case: &ReplayCase) -> PlannerInput {
@@ -95,62 +98,100 @@ fn input(case: &ReplayCase) -> PlannerInput {
         resume_compaction_summary: case.resume_compaction_summary.clone(),
     }
 }
-
-fn buckets(case: &ReplayCase) -> Vec<Result<Vec<ReplayNote>, PlannerError>> {
-    let first = ReplayNote {
-        id: "planner-first",
-        permalink: "pitfall/first",
-        label: "Pitfall",
-        title: "first",
-        snippet: "ranked one",
-    };
-    let second = ReplayNote {
-        id: "planner-second",
-        permalink: "pattern/second",
-        label: "Pattern",
-        title: "second",
-        snippet: "ranked two",
-    };
-    if case.name == "duplicate_collapse" {
-        return vec![
-            Ok(vec![first.clone(), first]),
-            Ok(vec![ReplayNote {
-                id: "other-id",
-                permalink: "pitfall/first",
-                ..second
-            }]),
-        ];
+fn provider_result(case: &ReplayCase) -> Result<String, PlannerError> {
+    match case.provider.as_str() {
+        "success" => Ok(case.payload.clone().unwrap_or_default()),
+        "timeout" => Err(PlannerError::Invocation("timeout".into())),
+        "provider_error" => Err(PlannerError::Invocation("provider error".into())),
+        other => panic!("unknown fixture provider {other}"),
     }
-    vec![Ok(vec![first]), Ok(vec![second])]
 }
-
-fn render_planner_notes(
-    buckets: Vec<Vec<ReplayNote>>,
-    scope_used: usize,
-    scope_ids: &[&str],
-    scope_permalinks: &[&str],
-) -> String {
-    let mut ids: std::collections::HashSet<_> = scope_ids.iter().copied().collect();
-    let mut permalinks: std::collections::HashSet<_> = scope_permalinks.iter().copied().collect();
-    let mut used = scope_used;
-    let mut lines = Vec::new();
-    for bucket in buckets {
-        for note in bucket.into_iter().take(PER_QUERY_CAP) {
-            if !ids.insert(note.id) || !permalinks.insert(note.permalink) {
-                continue;
-            }
-            if lines.len() == GLOBAL_CAP {
-                return lines.join("\n");
-            }
-            let line = note.render();
-            if used + line.len() > PLANNER_BUDGET {
-                return lines.join("\n");
-            }
-            used += line.len() + 1;
-            lines.push(line);
-        }
+fn note(id: impl Into<String>, rendered: impl Into<String>) -> PlannedContextNote {
+    let id = id.into();
+    PlannedContextNote {
+        permalink: format!("memory/{id}"),
+        id,
+        rendered: rendered.into(),
     }
-    lines.join("\n")
+}
+fn normal_buckets() -> HashMap<String, Vec<PlannedContextNote>> {
+    HashMap::from([
+        (
+            "Database migration timeout E_CONNRESET".into(),
+            vec![note(
+                "planner-first",
+                "- **[Pitfall] first**: ranked one (permalink: pitfall/first)",
+            )],
+        ),
+        (
+            "Memory planner configuration injection".into(),
+            vec![note(
+                "planner-second",
+                "- **[Pattern] second**: ranked two (permalink: pattern/second)",
+            )],
+        ),
+    ])
+}
+fn buckets(case: &ReplayCase) -> HashMap<String, Vec<PlannedContextNote>> {
+    match case.bucket_mode.as_str() {
+        "duplicates" => HashMap::from([
+            (
+                "Database migration timeout E_CONNRESET".into(),
+                vec![note("scope-note", "planner duplicate by id")],
+            ),
+            (
+                "Memory planner configuration injection".into(),
+                vec![PlannedContextNote {
+                    id: "other-id".into(),
+                    permalink: "memory/scope-note".into(),
+                    rendered: "planner duplicate by permalink".into(),
+                }],
+            ),
+        ]),
+        "caps" => (1..=4)
+            .map(|query| {
+                (
+                    format!("Replay cap query {query}"),
+                    (1..=3)
+                        .map(|rank| note(format!("q{query}-r{rank}"), format!("q{query}-r{rank}")))
+                        .collect(),
+                )
+            })
+            .collect(),
+        _ => normal_buckets(),
+    }
+}
+fn scope_context(case: &ReplayCase) -> String {
+    if case.full_scope_budget {
+        "x".repeat(2_000)
+    } else {
+        SCOPE_ONLY.into()
+    }
+}
+fn outcome_name(outcome: Option<PlannerCallOutcome>) -> String {
+    match outcome {
+        None => "disabled".into(),
+        Some(PlannerCallOutcome::Success) => "success".into(),
+        Some(PlannerCallOutcome::Timeout) => "timeout".into(),
+        Some(PlannerCallOutcome::ProviderError) => "provider_error".into(),
+        Some(PlannerCallOutcome::InvalidPayload) => "invalid_payload".into(),
+    }
+}
+fn expected_outcome(name: &str) -> PlannerCallOutcome {
+    match name {
+        "success" => PlannerCallOutcome::Success,
+        "timeout" => PlannerCallOutcome::Timeout,
+        "provider_error" => PlannerCallOutcome::ProviderError,
+        "invalid_payload" => PlannerCallOutcome::InvalidPayload,
+        other => panic!("unknown expected ledger outcome {other}"),
+    }
+}
+struct ReplayResult {
+    result: SessionStartPlannerResult,
+    planner_calls: usize,
+    planner_inputs: Vec<PlannerInput>,
+    search_calls: Vec<PlannedQuery>,
+    ledger_records: Vec<(PlannerCallOutcome, u32)>,
 }
 
 async fn replay(case: &ReplayCase) -> ReplayResult {
@@ -158,190 +199,145 @@ async fn replay(case: &ReplayCase) -> ReplayResult {
         enabled: case.enabled,
         ..Default::default()
     };
-    let request = prepare_planner_request(&config, input(case));
-    let rendered_request = request.as_ref().map(|request| request.prompt.clone());
-    let planner_result = match case.provider.as_str() {
-        // Disabled fixtures intentionally omit a provider payload: the fake is
-        // constructed but never called after the default-off gate returns.
-        "success" => Ok(case.payload.clone().unwrap_or_default()),
-        "timeout" => Err(PlannerError::Invocation("timeout".into())),
-        "provider_error" => Err(PlannerError::Invocation("provider error".into())),
-        other => panic!("unknown fixture provider {other}"),
+    let planner = FakeMemoryIntentPlanner::new(provider_result(case));
+    let search = ReplaySearch {
+        buckets: buckets(case),
+        ..Default::default()
     };
-    let planner = FakeMemoryIntentPlanner::new(planner_result);
-    let search = FakePlannedNoteSearch::new(buckets(case));
-    let mut ledger = FakePlannerLedger {
+    let ledger = ReplayLedger {
         finalization_fails: case.finalization_fails,
         ..Default::default()
     };
-
-    let Some(request) = request else {
-        return ReplayResult {
-            context: SCOPE_ONLY.into(),
-            outcome: "disabled".into(),
-            available_usage: 0,
-            planner_calls: 0,
-            search_calls: 0,
-            ledger_outcomes: vec![],
-            rendered_request: None,
-        };
-    };
-
-    let raw = planner.plan(request.input).await;
-    let outcome = match (&case.provider[..], raw) {
-        ("timeout", _) => "timeout",
-        ("provider_error", _) => "provider_error",
-        ("success", Ok(raw)) if parse_planned_queries(&raw).is_err() => "invalid_payload",
-        ("success", Ok(_)) => "success",
-        _ => "provider_error",
-    };
-    ledger.record_attempt(outcome);
-    if !ledger.finalize() {
-        ledger
-            .outcomes
-            .push("accounting_finalization_failed".into());
-        return ReplayResult {
-            context: SCOPE_ONLY.into(),
-            outcome: "accounting_finalization_failed".into(),
-            available_usage: ledger.available_usage,
-            planner_calls: planner.calls().await.len(),
-            search_calls: search.calls().await.len(),
-            ledger_outcomes: ledger.outcomes,
-            rendered_request,
-        };
-    }
-    if outcome != "success" || case.full_scope_budget {
-        return ReplayResult {
-            context: SCOPE_ONLY.into(),
-            outcome: outcome.into(),
-            available_usage: ledger.available_usage,
-            planner_calls: planner.calls().await.len(),
-            search_calls: search.calls().await.len(),
-            ledger_outcomes: ledger.outcomes,
-            rendered_request,
-        };
-    }
-
-    let queries = parse_planned_queries(&case.payload.clone().expect("success payload"))
-        .expect("success fixture validates");
-    let found = join_all(queries.into_iter().map(|query| search.search(query))).await;
-    let notes = found
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect("fixture search succeeds");
-    let (scope_ids, scope_permalinks): (&[&str], &[&str]) = if case.name == "duplicate_collapse" {
-        // The first bucket duplicates scope by ID; the second then duplicates
-        // it by permalink. Neither may displace the scope-only baseline.
-        (&["planner-first"], &["pitfall/first"])
+    let (scope_ids, scope_permalinks) = if case.bucket_mode == "duplicates" {
+        (vec!["scope-note".into()], vec!["memory/scope-note".into()])
     } else {
-        (&[], &[])
+        (Vec::new(), Vec::new())
     };
-    let planner_context =
-        render_planner_notes(notes, SCOPE_ONLY.len() + 1, scope_ids, scope_permalinks);
-    let context = if planner_context.is_empty() {
-        SCOPE_ONLY.into()
-    } else {
-        format!("{SCOPE_ONLY}\n{planner_context}")
-    };
+    let result = run_session_start_memory_planner(
+        &config,
+        input(case),
+        scope_context(case),
+        &scope_ids,
+        &scope_permalinks,
+        &planner,
+        &search,
+        &ledger,
+        AVAILABLE_ATTEMPTED_USAGE,
+    )
+    .await;
+    let planner_inputs = planner.calls().await;
     ReplayResult {
-        context,
-        outcome: outcome.into(),
-        available_usage: ledger.available_usage,
-        planner_calls: planner.calls().await.len(),
-        search_calls: search.calls().await.len(),
-        ledger_outcomes: ledger.outcomes,
-        rendered_request,
+        result,
+        planner_calls: planner_inputs.len(),
+        planner_inputs,
+        search_calls: search.calls().await,
+        ledger_records: ledger.records().await,
     }
 }
 
 #[tokio::test]
-async fn checked_in_memory_intent_planner_replays_are_byte_stable() {
+async fn checked_in_memory_intent_planner_replays_use_final_injected_seams() {
     let cases: Vec<ReplayCase> = serde_json::from_str(FIXTURES).expect("checked-in replay corpus");
-    assert_eq!(cases.len(), 12, "keep the rollout matrix exhaustive");
-
+    assert_eq!(cases.len(), 13, "keep the rollout matrix exhaustive");
     for case in &cases {
         let first = replay(case).await;
         let second = replay(case).await;
         assert_eq!(
-            first.context, case.expected_context,
+            first.result.context, case.expected_context,
             "{} context",
             case.name
         );
         assert_eq!(
-            first.outcome, case.expected_outcome,
+            outcome_name(first.result.outcome),
+            case.expected_outcome,
             "{} outcome",
             case.name
         );
         assert_eq!(
-            first.available_usage, case.expected_available_usage,
+            first.result.available_usage, case.expected_available_usage,
             "{} usage",
             case.name
         );
         assert_eq!(
-            first.context, second.context,
-            "{} rendered bytes drifted",
+            first.result.accounting_finalized, case.expected_accounting_finalized,
+            "{} accounting finalization",
             case.name
         );
         assert_eq!(
-            first.outcome, second.outcome,
-            "{} outcome drifted",
+            first.result, second.result,
+            "{} replay bytes/outcome drifted",
             case.name
         );
         assert_eq!(
-            first.ledger_outcomes, second.ledger_outcomes,
-            "{} accounting drifted",
+            first.ledger_records, second.ledger_records,
+            "{} durable accounting drifted",
             case.name
         );
-
+        if let Some(expected) = &case.expected_ledger_outcome {
+            assert_eq!(
+                first.ledger_records,
+                vec![(expected_outcome(expected), case.expected_available_usage)],
+                "{} durable ledger outcome/usage",
+                case.name
+            );
+        } else {
+            assert!(
+                first.ledger_records.is_empty(),
+                "{} must not record",
+                case.name
+            );
+        }
         if !case.enabled {
             assert_eq!(
                 first.planner_calls, 0,
                 "disabled mode must not attempt planning"
             );
-            assert_eq!(
-                first.search_calls, 0,
-                "disabled mode must not search planner buckets"
-            );
             assert!(
-                first.ledger_outcomes.is_empty(),
-                "disabled mode must not account"
-            );
-            assert!(
-                first.rendered_request.is_none(),
-                "disabled mode must not render a prompt"
+                first.search_calls.is_empty(),
+                "disabled mode must not search"
             );
         } else {
             assert_eq!(first.planner_calls, 1, "{} planner attempt", case.name);
-            assert!(
-                first.ledger_outcomes.first().is_some(),
-                "{} attributed attempt",
-                case.name
-            );
         }
         if matches!(
             case.expected_outcome.as_str(),
-            "timeout" | "provider_error" | "invalid_payload" | "accounting_finalization_failed"
-        ) {
+            "timeout" | "provider_error" | "invalid_payload"
+        ) || case.finalization_fails
+        {
             assert_eq!(
-                first.context, SCOPE_ONLY,
-                "{} must fail open to scope baseline",
+                first.result.context, SCOPE_ONLY,
+                "{} must fail open",
+                case.name
+            );
+            assert!(
+                first.search_calls.is_empty(),
+                "{} must not search",
                 case.name
             );
         }
-        if case.full_scope_budget || case.finalization_fails {
+        if case.full_scope_budget {
             assert_eq!(
-                first.search_calls, 0,
-                "{} must suppress planner injection",
-                case.name
+                first.result.context.len(),
+                2_000,
+                "scope consumes full budget"
             );
+            assert_eq!(
+                first.search_calls.len(),
+                2,
+                "merge must calculate zero remainder after search"
+            );
+        }
+        if case.bucket_mode == "caps" {
+            assert_eq!(
+                first.result.context,
+                "scope-only\nq1-r1\nq1-r2\nq2-r1\nq2-r2\nq3-r1\nq3-r2"
+            );
+            assert_eq!(first.search_calls.len(), 4, "all ordered query buckets run");
         }
         if let Some(summary) = &case.resume_compaction_summary {
-            assert!(
-                first
-                    .rendered_request
-                    .expect("enabled request")
-                    .contains(summary),
-                "resume input must remain untruncated"
+            assert_eq!(
+                first.planner_inputs[0].resume_compaction_summary.as_deref(),
+                Some(summary.as_str())
             );
         }
     }
@@ -364,6 +360,7 @@ fn replay_corpus_includes_each_required_rollout_path() {
         "accounting_finalization_failure",
         "duplicate_collapse",
         "full_scope_budget",
+        "cap_limits",
         "resume_compaction_input",
     ] {
         assert!(

@@ -1,22 +1,146 @@
 [
-  {
-    "name": "enabled_success",
-    "enabled": true,
-    "provider": "success",
-    "payload": "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
-    "expected_outcome": "success",
-    "expected_context": "scope-only\n- **[Pitfall] first**: ranked one (permalink: pitfall/first)\n- **[Pattern] second**: ranked two (permalink: pattern/second)",
-    "expected_available_usage": 17
-  },
-  {"name":"disabled_no_work","enabled":false,"provider":"success","expected_outcome":"disabled","expected_context":"scope-only","expected_available_usage":0},
-  {"name":"timeout","enabled":true,"provider":"timeout","expected_outcome":"timeout","expected_context":"scope-only","expected_available_usage":17},
-  {"name":"provider_error","enabled":true,"provider":"provider_error","expected_outcome":"provider_error","expected_context":"scope-only","expected_available_usage":17},
-  {"name":"malformed_json","enabled":true,"provider":"success","payload":"not json","expected_outcome":"invalid_payload","expected_context":"scope-only","expected_available_usage":17},
-  {"name":"unknown_type","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"unknown\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"case\",\"query\":\"Memory planner configuration injection\"}]}","expected_outcome":"invalid_payload","expected_context":"scope-only","expected_available_usage":17},
-  {"name":"wrong_query_count","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"case\",\"query\":\"Only one query\"}]}","expected_outcome":"invalid_payload","expected_context":"scope-only","expected_available_usage":17},
-  {"name":"query_style_invalid","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"case\",\"query\":\"Find migration failures\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}","expected_outcome":"invalid_payload","expected_context":"scope-only","expected_available_usage":17},
-  {"name":"accounting_finalization_failure","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}","finalization_fails":true,"expected_outcome":"accounting_finalization_failed","expected_context":"scope-only","expected_available_usage":17},
-  {"name":"duplicate_collapse","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}","expected_outcome":"success","expected_context":"scope-only","expected_available_usage":17},
-  {"name":"full_scope_budget","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}","full_scope_budget":true,"expected_outcome":"success","expected_context":"scope-only","expected_available_usage":17},
-  {"name":"resume_compaction_input","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}","resume_compaction_summary":"UNTRUNCATED-RESUME-COMPACTION-SUMMARY: exact retained text","expected_outcome":"success","expected_context":"scope-only\n- **[Pitfall] first**: ranked one (permalink: pitfall/first)\n- **[Pattern] second**: ranked two (permalink: pattern/second)","expected_available_usage":17}
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "scope-only\n- **[Pitfall] first**: ranked one (permalink: pitfall/first)\n- **[Pattern] second**: ranked two (permalink: pattern/second)",
+      "expected_ledger_outcome" : "success",
+      "expected_outcome" : "success",
+      "name" : "enabled_success",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : false,
+      "expected_accounting_finalized" : false,
+      "expected_available_usage" : 0,
+      "expected_context" : "scope-only",
+      "expected_outcome" : "disabled",
+      "name" : "disabled_no_work",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "scope-only",
+      "expected_ledger_outcome" : "timeout",
+      "expected_outcome" : "timeout",
+      "name" : "timeout",
+      "provider" : "timeout"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "scope-only",
+      "expected_ledger_outcome" : "provider_error",
+      "expected_outcome" : "provider_error",
+      "name" : "provider_error",
+      "provider" : "provider_error"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "scope-only",
+      "expected_ledger_outcome" : "invalid_payload",
+      "expected_outcome" : "invalid_payload",
+      "name" : "malformed_json",
+      "payload" : "not json",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "scope-only",
+      "expected_ledger_outcome" : "invalid_payload",
+      "expected_outcome" : "invalid_payload",
+      "name" : "unknown_type",
+      "payload" : "{\"queries\":[{\"type\":\"unknown\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"case\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "scope-only",
+      "expected_ledger_outcome" : "invalid_payload",
+      "expected_outcome" : "invalid_payload",
+      "name" : "wrong_query_count",
+      "payload" : "{\"queries\":[{\"type\":\"case\",\"query\":\"Only one query\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "scope-only",
+      "expected_ledger_outcome" : "invalid_payload",
+      "expected_outcome" : "invalid_payload",
+      "name" : "query_style_invalid",
+      "payload" : "{\"queries\":[{\"query\":\"Find migration failures\",\"type\":\"case\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : false,
+      "expected_available_usage" : 17,
+      "expected_context" : "scope-only",
+      "expected_ledger_outcome" : "success",
+      "expected_outcome" : "success",
+      "finalization_fails" : true,
+      "name" : "accounting_finalization_failure",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "bucket_mode" : "duplicates",
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "scope-only",
+      "expected_ledger_outcome" : "success",
+      "expected_outcome" : "success",
+      "name" : "duplicate_collapse",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected_ledger_outcome" : "success",
+      "expected_outcome" : "success",
+      "full_scope_budget" : true,
+      "name" : "full_scope_budget",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "bucket_mode" : "caps",
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "scope-only\nq1-r1\nq1-r2\nq2-r1\nq2-r2\nq3-r1\nq3-r2",
+      "expected_ledger_outcome" : "success",
+      "expected_outcome" : "success",
+      "name" : "cap_limits",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Replay cap query 1\"},{\"query\":\"Replay cap query 2\",\"type\":\"pitfall\"},{\"query\":\"Replay cap query 3\",\"type\":\"pitfall\"},{\"query\":\"Replay cap query 4\",\"type\":\"pitfall\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "scope-only\n- **[Pitfall] first**: ranked one (permalink: pitfall/first)\n- **[Pattern] second**: ranked two (permalink: pattern/second)",
+      "expected_ledger_outcome" : "success",
+      "expected_outcome" : "success",
+      "name" : "resume_compaction_input",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success",
+      "resume_compaction_summary" : "UNTRUNCATED-RESUME-COMPACTION-SUMMARY: exact retained text"
+   }
 ]
