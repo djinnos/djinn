@@ -11,8 +11,13 @@ mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::events::EventBus;
-use djinn_db::SessionMessageRepository;
-use djinn_db::TaskRepository;
+use djinn_core::extension_diagnostics::{
+    ExtensionLoadPhase, ExtensionLoadRemedyCode, ExtensionLoadSeverity, ExtensionLoadSourceKind,
+};
+use djinn_db::{
+    ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic, SessionMessageRepository,
+    TaskRepository,
+};
 use serde_json::json;
 
 #[tokio::test]
@@ -174,6 +179,120 @@ async fn session_show_returns_full_shape_with_tokens() {
     ] {
         assert!(payload.get(key).is_some(), "missing key {key}");
     }
+    assert_eq!(
+        payload.get("extension_load_diagnostics"),
+        Some(&json!([])),
+        "successful session_show must expose an empty diagnostics array"
+    );
+}
+
+fn extension_diagnostic_input(
+    project_id: &str,
+    task_id: Option<&str>,
+    session_id: Option<&str>,
+    source_key: &str,
+) -> InsertExtensionLoadDiagnostic {
+    InsertExtensionLoadDiagnostic {
+        project_id: project_id.to_owned(),
+        task_id: task_id.map(str::to_owned),
+        session_id: session_id.map(str::to_owned),
+        load_attempt_id: uuid::Uuid::now_v7().to_string(),
+        source_kind: ExtensionLoadSourceKind::ProjectMcp,
+        source_key: source_key.to_owned(),
+        phase: ExtensionLoadPhase::ToolsList,
+        severity: ExtensionLoadSeverity::Error,
+        summary: "tools/list returned invalid JSON".to_owned(),
+        summary_fingerprint: format!("{source_key:0<64}"),
+        remedy_code: ExtensionLoadRemedyCode::CheckServer,
+        remedy: "Check the MCP server health and restart it.".to_owned(),
+        first_seen_at: "2026-07-14T12:00:00.000Z".to_owned(),
+        last_seen_at: "2026-07-14T12:00:00.000Z".to_owned(),
+        created_at: "2026-07-14T12:00:00.000Z".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn session_show_exposes_canonical_session_diagnostics_not_doctor_rows() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let project = common::create_test_project(db).await;
+    let epic = common::create_test_epic(db, &project.id).await;
+    let task = common::create_test_task(db, &project.id, &epic.id).await;
+    let session = common::create_test_session(db, &project.id, &task.id).await;
+    let diagnostics = ExtensionLoadDiagnosticRepository::new(db.clone());
+
+    let persisted = diagnostics
+        .insert_or_increment(extension_diagnostic_input(
+            &project.id,
+            Some(&task.id),
+            Some(&session.id),
+            "project-search",
+        ))
+        .await
+        .expect("insert session-associated diagnostic");
+    diagnostics
+        .insert_or_increment(extension_diagnostic_input(
+            &project.id,
+            None,
+            None,
+            "doctor-search",
+        ))
+        .await
+        .expect("insert doctor-only diagnostic");
+
+    let payload = harness
+        .call_tool(
+            "session_show",
+            json!({ "id": session.id, "project": project.slug() }),
+        )
+        .await
+        .expect("session_show should dispatch");
+
+    assert_eq!(payload.get("error"), None);
+    assert_eq!(
+        payload.get("extension_load_diagnostics"),
+        Some(&json!([
+            serde_json::to_value(persisted).expect("serialize canonical row")
+        ])),
+        "session_show must serialize the canonical repository row unchanged"
+    );
+}
+
+#[tokio::test]
+async fn session_show_wrong_project_cannot_expose_session_diagnostics() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let owning_project = common::create_test_project(db).await;
+    let epic = common::create_test_epic(db, &owning_project.id).await;
+    let task = common::create_test_task(db, &owning_project.id, &epic.id).await;
+    let session = common::create_test_session(db, &owning_project.id, &task.id).await;
+    ExtensionLoadDiagnosticRepository::new(db.clone())
+        .insert_or_increment(extension_diagnostic_input(
+            &owning_project.id,
+            Some(&task.id),
+            Some(&session.id),
+            "private-search",
+        ))
+        .await
+        .expect("insert owning-project diagnostic");
+    let other_project = common::create_test_project(db).await;
+
+    let payload = harness
+        .call_tool(
+            "session_show",
+            json!({ "id": session.id, "project": other_project.slug() }),
+        )
+        .await
+        .expect("session_show should dispatch");
+
+    assert!(
+        payload
+            .get("error")
+            .and_then(|value| value.as_str())
+            .is_some()
+    );
+    assert_eq!(payload.get("id"), None);
+    assert_eq!(payload.get("extension_load_diagnostics"), None);
 }
 
 #[tokio::test]
