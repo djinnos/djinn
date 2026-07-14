@@ -364,6 +364,7 @@ mod tests {
             last_seen_at: "now".to_string(),
             same_signature_count: 1,
             last_remediation_base_sha: baseline.map(str::to_string),
+            merge_queue: None,
         }
     }
 
