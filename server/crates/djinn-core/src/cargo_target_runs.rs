@@ -121,6 +121,12 @@ pub fn inventory_cargo_target_runs(
 ) -> Result<CargoTargetRunsInventory, CargoTargetRunsInventoryError> {
     let root_metadata =
         fs::symlink_metadata(root).map_err(CargoTargetRunsInventoryError::RootRead)?;
+    if root_metadata.file_type().is_symlink() {
+        return Err(CargoTargetRunsInventoryError::RootRead(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cargo target runs root must not be a symlink",
+        )));
+    }
     let root_entries = fs::read_dir(root).map_err(CargoTargetRunsInventoryError::RootRead)?;
     let mut inventory = CargoTargetRunsInventory::default();
     let mut seen = HashSet::new();
@@ -328,9 +334,10 @@ fn bounded_env_value(raw: &str) -> String {
 /// Resolve both caps from the process environment, logging only a bounded
 /// preview when an override is invalid.
 pub fn cargo_target_runs_caps_from_env() -> CargoTargetRunsCaps {
-    let dirs = std::env::var(HARD_CAP_ENV).ok();
-    let bytes = std::env::var(HARD_CAP_BYTES_ENV).ok();
-    let (caps, diagnostics) = resolve_cargo_target_runs_caps(dirs.as_deref(), bytes.as_deref());
+    let (caps, diagnostics, dirs, bytes) = resolve_caps_from_env_results(
+        std::env::var(HARD_CAP_ENV),
+        std::env::var(HARD_CAP_BYTES_ENV),
+    );
     if diagnostics.invalid_max_dirs {
         tracing::warn!(
             env = HARD_CAP_ENV,
@@ -354,6 +361,34 @@ pub fn cargo_target_runs_caps_from_env() -> CargoTargetRunsCaps {
         );
     }
     caps
+}
+
+/// Preserve `VarError::NotUnicode` as invalid configuration rather than
+/// treating it like an unset variable. The returned strings are only used for
+/// bounded diagnostic previews.
+fn resolve_caps_from_env_results(
+    dirs: Result<String, std::env::VarError>,
+    bytes: Result<String, std::env::VarError>,
+) -> (
+    CargoTargetRunsCaps,
+    CapResolutionDiagnostics,
+    Option<String>,
+    Option<String>,
+) {
+    let (dirs, dirs_not_unicode) = env_value_or_invalid(dirs);
+    let (bytes, bytes_not_unicode) = env_value_or_invalid(bytes);
+    let (caps, mut diagnostics) = resolve_cargo_target_runs_caps(dirs.as_deref(), bytes.as_deref());
+    diagnostics.invalid_max_dirs |= dirs_not_unicode;
+    diagnostics.invalid_max_bytes |= bytes_not_unicode;
+    (caps, diagnostics, dirs, bytes)
+}
+
+fn env_value_or_invalid(value: Result<String, std::env::VarError>) -> (Option<String>, bool) {
+    match value {
+        Ok(value) => (Some(value), false),
+        Err(std::env::VarError::NotPresent) => (None, false),
+        Err(std::env::VarError::NotUnicode(_)) => (None, true),
+    }
 }
 
 /// Outcome of a single per-run dir teardown.
@@ -505,6 +540,12 @@ mod tests {
     use super::*;
     use std::thread::sleep;
     use std::time::Duration;
+    #[cfg(unix)]
+    use std::{
+        collections::HashSet,
+        ffi::OsString,
+        os::unix::{ffi::OsStringExt, fs::symlink},
+    };
 
     fn mkdir(root: &Path, name: &str) -> PathBuf {
         let dir = root.join(name);
@@ -597,9 +638,159 @@ mod tests {
     }
 
     #[test]
-    fn hard_cap_env_parses_and_falls_back() {
-        // The default applies when unset/garbage; this asserts the pure parse
-        // path without mutating the process env under test parallelism.
+    fn caps_resolver_accepts_decimal_and_zero_and_rejects_invalid_values() {
         assert_eq!(DEFAULT_HARD_CAP_DIRS, 64);
+        assert_eq!(DEFAULT_HARD_CAP_BYTES, 8_589_934_592);
+        assert_eq!(
+            resolve_cargo_target_runs_caps(None, None),
+            (
+                CargoTargetRunsCaps::default(),
+                CapResolutionDiagnostics::default()
+            )
+        );
+        assert_eq!(
+            resolve_cargo_target_runs_caps(Some("0"), Some("0")),
+            (
+                CargoTargetRunsCaps {
+                    max_dirs: 0,
+                    max_bytes: 0,
+                },
+                CapResolutionDiagnostics::default(),
+            )
+        );
+        let (caps, diagnostics) = resolve_cargo_target_runs_caps(Some("12"), Some("34"));
+        assert_eq!(
+            caps,
+            CargoTargetRunsCaps {
+                max_dirs: 12,
+                max_bytes: 34
+            }
+        );
+        assert_eq!(diagnostics, CapResolutionDiagnostics::default());
+
+        for invalid in ["", "-1", "+1", " 1", "1 ", "1K", "18446744073709551616"] {
+            let (caps, diagnostics) = resolve_cargo_target_runs_caps(Some(invalid), Some(invalid));
+            assert_eq!(caps, CargoTargetRunsCaps::default(), "{invalid:?}");
+            assert_eq!(
+                diagnostics,
+                CapResolutionDiagnostics {
+                    invalid_max_dirs: true,
+                    invalid_max_bytes: true,
+                },
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_environment_values_are_invalid_not_unset() {
+        let non_unicode = || std::env::VarError::NotUnicode(OsString::from_vec(vec![0xff]));
+        let (caps, diagnostics, dirs, bytes) =
+            resolve_caps_from_env_results(Err(non_unicode()), Err(non_unicode()));
+        assert_eq!(caps, CargoTargetRunsCaps::default());
+        assert_eq!(dirs, None);
+        assert_eq!(bytes, None);
+        assert_eq!(
+            diagnostics,
+            CapResolutionDiagnostics {
+                invalid_max_dirs: true,
+                invalid_max_bytes: true,
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    fn allocated_bytes(path: &Path) -> u64 {
+        fs::symlink_metadata(path).unwrap().blocks() * 512
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_accounts_sparse_hardlinked_and_symlink_entries_without_following() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = tmp.path().join("run");
+        fs::create_dir(&run).unwrap();
+        let sparse = run.join("sparse");
+        fs::File::create(&sparse)
+            .unwrap()
+            .set_len(8 * 1024 * 1024)
+            .unwrap();
+        fs::hard_link(&sparse, run.join("hardlink")).unwrap();
+        symlink(&sparse, tmp.path().join("run-link")).unwrap();
+
+        let inventory = inventory_cargo_target_runs(tmp.path()).unwrap();
+        let expected = allocated_bytes(tmp.path())
+            + allocated_bytes(&run)
+            + allocated_bytes(&sparse)
+            + allocated_bytes(&tmp.path().join("run-link"));
+        assert_eq!(inventory.total_allocated_bytes, expected);
+        assert_eq!(
+            inventory.non_directory_allocated_bytes,
+            allocated_bytes(&sparse) + allocated_bytes(&tmp.path().join("run-link"))
+        );
+        assert!(allocated_bytes(&sparse) < 8 * 1024 * 1024);
+        assert_eq!(inventory.top_level_directory_count, 1);
+        assert_eq!(inventory.candidates[0].name, b"run");
+        assert_eq!(
+            inventory.protected,
+            vec![InventoryIssue {
+                top_level_name: Some(b"run-link".to_vec()),
+                kind: InventoryIssueKind::TopLevelSymlink,
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_protects_malformed_names_and_rejects_symlink_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let malformed = tmp.path().join(OsString::from_vec(vec![b'x', 0xff]));
+        fs::create_dir(&malformed).unwrap();
+        let inventory = inventory_cargo_target_runs(tmp.path()).unwrap();
+        assert_eq!(inventory.top_level_directory_count, 1);
+        assert!(inventory.candidates.is_empty());
+        assert_eq!(
+            inventory.protected[0].kind,
+            InventoryIssueKind::MalformedTopLevelName
+        );
+        assert_eq!(
+            inventory.protected[0].top_level_name,
+            Some(vec![b'x', 0xff])
+        );
+
+        let link = tmp.path().join("root-link");
+        symlink(tmp.path(), &link).unwrap();
+        assert!(matches!(
+            inventory_cargo_target_runs(&link),
+            Err(CargoTargetRunsInventoryError::RootRead(error))
+                if error.kind() == io::ErrorKind::InvalidInput
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_reports_fatal_root_and_per_directory_read_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            inventory_cargo_target_runs(&tmp.path().join("missing")),
+            Err(CargoTargetRunsInventoryError::RootRead(_))
+        ));
+
+        let mut inventory = CargoTargetRunsInventory::default();
+        inventory_directory(
+            &tmp.path().join("missing"),
+            Some(b"run".to_vec()),
+            &mut HashSet::new(),
+            &mut inventory,
+        )
+        .unwrap();
+        assert_eq!(
+            inventory.errors,
+            vec![InventoryIssue {
+                top_level_name: Some(b"run".to_vec()),
+                kind: InventoryIssueKind::ReadDirectory,
+            }]
+        );
     }
 }
