@@ -211,31 +211,29 @@ pub(crate) async fn apply_dedup_decision(
         MemoryWriteDedupDecision::SupersedeExisting {
             candidate_id,
             reason,
-        } => Ok(WriteDedupOutcome::SupersedeExisting {
-            candidate_id,
-            reason,
-        }),
+        } => {
+            let candidate = canonical_candidate(repo, pending.project_id, &candidate_id).await?;
+            Ok(WriteDedupOutcome::SupersedeExisting {
+                candidate_id: candidate.id,
+                reason,
+            })
+        }
     }
 }
 
 /// Complete a supersede after ordinary creation through a Dedup-attributed revision.
 pub(crate) async fn apply_created_note_supersede(
     repo: &NoteRepository,
+    project_id: &str,
     new_note_id: &str,
     candidate_id: &str,
     reason: &str,
 ) -> Result<(), String> {
-    let candidate = repo
-        .get(candidate_id)
-        .await
-        .map_err(|error| error.to_string())?;
-    let project_id = candidate
-        .ok_or_else(|| format!("dedup candidate not found: {candidate_id}"))?
-        .project_id;
+    let candidate = canonical_candidate(repo, project_id, candidate_id).await?;
     let result = repo
         .mutate_with_revision(NoteRevisionMutation {
-            project_id,
-            note_id: Some(candidate_id.to_owned()),
+            project_id: project_id.to_owned(),
+            note_id: Some(candidate.id),
             event_kind: NoteRevisionEventKind::Updated,
             desired: NoteRevisionDesiredState::Supersede {
                 canonical_note_id: new_note_id.to_owned(),

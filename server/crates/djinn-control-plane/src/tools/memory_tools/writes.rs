@@ -146,6 +146,7 @@ impl DjinnMcpServer {
                     && response.error.is_none()
                     && let Err(error) = apply_created_note_supersede(
                         &repo,
+                        &project_id,
                         new_note_id,
                         &candidate_id,
                         &dedup_reason,

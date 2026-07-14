@@ -121,8 +121,12 @@ mod tests {
     }
 
     async fn create_project(db: &Database, _root: &std::path::Path) -> djinn_core::models::Project {
+        create_project_named(db, "test-project").await
+    }
+
+    async fn create_project_named(db: &Database, name: &str) -> djinn_core::models::Project {
         ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", "test", "test-project")
+            .create(name, "test", name)
             .await
             .unwrap()
     }
@@ -500,6 +504,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_supersede_rejects_a_candidate_from_another_project() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let project_a = create_project_named(&db, "project-a").await;
+        let project_b = create_project_named(&db, "project-b").await;
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let local_candidate = repo
+            .create(
+                &project_a.id,
+                "Local isolation pattern",
+                "Keep memory writes isolated within the current tenant project.",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let foreign_candidate = repo
+            .create_with_status_and_retrieval_anchor(
+                &project_b.id,
+                "Foreign isolation pattern",
+                "Foreign tenant content must remain untouched.",
+                "pattern",
+                Some("active"),
+                "[]",
+                None,
+            )
+            .await
+            .unwrap();
+        let foreign_before = repo.get(&foreign_candidate.id).await.unwrap().unwrap();
+        let foreign_revision_count_before = repo
+            .revision_events_for_test(&project_b.id)
+            .await
+            .unwrap()
+            .len();
+        let server = DjinnMcpServer::new(test_mcp_state(db.clone()));
+        let caller =
+            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_human("caller-a")
+                .unwrap();
+
+        let Json(response) = djinn_core::auth_context::REVISION_CALLER_CONTEXT
+            .scope(
+                Some(caller),
+                server.memory_write_with_decider(
+                    Parameters(WriteParams {
+                        project: project_a.slug(),
+                        title: "Expanded isolation pattern".to_owned(),
+                        content:
+                            "Keep memory writes isolated within the current tenant project boundary."
+                                .to_owned(),
+                        reason: "document tenant isolation".to_owned(),
+                        note_type: "pattern".to_owned(),
+                        status: None,
+                        tags: None,
+                        scope_paths: None,
+                        retrieval_anchor: None,
+                    }),
+                    &StaticDecider {
+                        decision: MemoryWriteDedupDecision::SupersedeExisting {
+                            candidate_id: foreign_candidate.id.clone(),
+                            reason: "more complete".to_owned(),
+                        },
+                    },
+                ),
+            )
+            .await;
+
+        assert!(
+            response.error.is_some(),
+            "foreign candidate must be unavailable"
+        );
+        let foreign_after = repo.get(&foreign_candidate.id).await.unwrap().unwrap();
+        assert_eq!(foreign_after.status, foreign_before.status);
+        assert_eq!(foreign_after.content, foreign_before.content);
+        assert_eq!(foreign_after.confidence, foreign_before.confidence);
+        assert_eq!(
+            repo.revision_events_for_test(&project_b.id)
+                .await
+                .unwrap()
+                .len(),
+            foreign_revision_count_before
+        );
+        assert_eq!(
+            repo.get_association_kind(&local_candidate.id, &foreign_candidate.id)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            repo.get_association_kind(&foreign_candidate.id, &local_candidate.id)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let follow_up = apply_created_note_supersede(
+            &repo,
+            &project_a.id,
+            &local_candidate.id,
+            &foreign_candidate.id,
+            "unauthorized follow-up",
+        )
+        .await;
+        assert!(
+            follow_up.is_err(),
+            "follow-up must recheck project ownership"
+        );
+        assert_eq!(
+            repo.get_association_kind(&local_candidate.id, &foreign_candidate.id)
+                .await
+                .unwrap(),
+            None
+        );
+        let foreign_final = repo.get(&foreign_candidate.id).await.unwrap().unwrap();
+        assert_eq!(foreign_final.status, foreign_before.status);
+        assert_eq!(foreign_final.content, foreign_before.content);
+        assert_eq!(foreign_final.confidence, foreign_before.confidence);
+        assert_eq!(
+            repo.revision_events_for_test(&project_b.id)
+                .await
+                .unwrap()
+                .len(),
+            foreign_revision_count_before
+        );
+
+        drop(tmp);
+    }
+
+    #[tokio::test]
     async fn supersede_deprecates_active_target_and_is_benign_for_stale_targets() {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
@@ -530,13 +662,25 @@ mod tests {
                 .await
                 .unwrap();
 
-            apply_created_note_supersede(&repo, &incoming.id, &target.id, "replacement")
-                .await
-                .unwrap();
+            apply_created_note_supersede(
+                &repo,
+                &project.id,
+                &incoming.id,
+                &target.id,
+                "replacement",
+            )
+            .await
+            .unwrap();
             // A repeated decision is an association upsert and an inactive-status no-op.
-            apply_created_note_supersede(&repo, &incoming.id, &target.id, "replacement")
-                .await
-                .unwrap();
+            apply_created_note_supersede(
+                &repo,
+                &project.id,
+                &incoming.id,
+                &target.id,
+                "replacement",
+            )
+            .await
+            .unwrap();
 
             let stored = repo.get(&target.id).await.unwrap().unwrap();
             let expected = if status == "active" {
