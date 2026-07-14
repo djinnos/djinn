@@ -12,7 +12,7 @@ use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::IssueType;
 use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
 use djinn_db::repositories::proposal::TerminalLinkedEvidenceSpikeOutcome;
-use djinn_db::{EpicRepository, ProposalRepository};
+use djinn_db::{EffectiveCreatorProvenance, EpicRepository, ProposalRepository};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -458,9 +458,10 @@ impl CoordinatorActor {
         .to_string();
 
         match task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &home_project_id,
                 None,
+                EffectiveCreatorProvenance { explicit_user_id: proposal.build_owner_user_id.as_deref(), source_task_id: None, proposal_id: Some(&proposal.id) },
                 &title,
                 &design,
                 &design,
@@ -473,11 +474,6 @@ impl CoordinatorActor {
             .await
         {
             Ok(task) => {
-                // Attribute to the build owner so any new epics/commits resolve
-                // to a real account (mirrors graduation and proposal review).
-                if let Some(owner) = proposal.build_owner_user_id.as_deref() {
-                    let _ = task_repo.set_created_by_user_id(&task.id, owner).await;
-                }
                 tracing::info!(
                     proposal_id = %proposal.id,
                     proposal_short_id = %proposal.short_id,
@@ -679,9 +675,10 @@ impl CoordinatorActor {
         .to_string();
 
         match task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &home_project_id,
                 None,
+                EffectiveCreatorProvenance { explicit_user_id: proposal.build_owner_user_id.as_deref(), source_task_id: None, proposal_id: Some(&proposal.id) },
                 &title,
                 &design,
                 &design,
@@ -694,11 +691,6 @@ impl CoordinatorActor {
             .await
         {
             Ok(task) => {
-                // Attribute to the build owner so any new epics/commits resolve
-                // to a real account (mirrors graduation).
-                if let Some(owner) = proposal.build_owner_user_id.as_deref() {
-                    let _ = task_repo.set_created_by_user_id(&task.id, owner).await;
-                }
                 tracing::info!(
                     proposal_id = %proposal.id,
                     proposal_short_id = %proposal.short_id,
@@ -834,9 +826,14 @@ impl CoordinatorActor {
     ) {
         let title = format!("Plan next wave ({trigger})");
         match task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 project_id,
                 Some(epic_id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: None,
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 &title,
                 "Plan the next wave of work for this epic. Review completed work, update the roadmap, and create 3–5 tasks.",
                 "",

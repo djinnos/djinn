@@ -27,7 +27,8 @@ pub use crate::tools::refinement_helpers::{
 use crate::tools::refinement_helpers::{refinement_is_active, validate_demand_evidence};
 use djinn_core::models::{NeedsEvidenceClaim, TaskStatus, TransitionAction};
 use djinn_db::{
-    NeedsEvidenceClaimLink, ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository,
+    EffectiveCreatorProvenance, NeedsEvidenceClaimLink, ProposalDebateTrailCreateInput,
+    ProposalRepository, TaskRepository,
 };
 
 fn err_refinement_start(error: impl Into<String>) -> ProposalRefinementStartResponse {
@@ -735,9 +736,14 @@ impl DjinnMcpServer {
         ];
 
         let spike_task = match task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project_id,
                 None, // no epic parent
+                EffectiveCreatorProvenance {
+                    explicit_user_id: None,
+                    source_task_id: None,
+                    proposal_id: Some(&proposal.id),
+                },
                 &spike_title,
                 &spike_description,
                 "", // no design field

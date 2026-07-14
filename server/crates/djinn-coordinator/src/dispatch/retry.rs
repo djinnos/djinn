@@ -13,6 +13,7 @@ use djinn_db::repositories::task_arbitration::{
     UpdateDispatchLedgerParams,
 };
 use djinn_db::repositories::task_attempt::TaskAttemptRepository;
+use djinn_db::EffectiveCreatorProvenance;
 
 /// uv3p Part B: what the fleet actually did after the current intervention (or
 /// after a human released a prior hold), derived from `task_attempts` rows.
@@ -2588,21 +2589,23 @@ impl CoordinatorActor {
                  NOT escalate again and do NOT wait for a human.",
             ),
         };
-        let review_task = match djinn_core::auth_context::SESSION_USER_ID
-            .scope(
-                source_creator,
-                task_repo.create_in_project(
-                    project_id,
-                    None,
-                    &title,
-                    &description,
-                    instructions,
-                    "review",
-                    0,
-                    "system",
-                    Some("open"),
-                    None,
-                ),
+        let review_task = match task_repo
+            .create_in_project_with_provenance(
+                project_id,
+                None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: None,
+                    source_task_id: source_task.as_ref().map(|task| task.id.as_str()),
+                    proposal_id: None,
+                },
+                &title,
+                &description,
+                instructions,
+                "review",
+                0,
+                "system",
+                Some("open"),
+                None,
             )
             .await
         {

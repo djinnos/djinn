@@ -26,6 +26,9 @@ pub use parent_disposition::{
     DoctorRepairOutcome, apply_doctor_repair_tx, apply_parent_disposition_tx, classify_child_tx,
 };
 
+// Re-export the creator-attribution provenance type from the writes submodule.
+pub use writes::EffectiveCreatorProvenance;
+
 // ── Query / result types ──────────────────────────────────────────────────────
 
 /// Filters and pagination for [`TaskRepository::list_filtered`].
