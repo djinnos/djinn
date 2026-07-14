@@ -5068,6 +5068,11 @@ enum PhaseTurn {
         init_advance: Duration,
         events: Vec<PhaseEvent>,
     },
+    EmptyAssistant {
+        init_advance: Duration,
+        stream_advance: Duration,
+        stream_polled: Arc<tokio::sync::Notify>,
+    },
     Pending {
         init_advance: Duration,
         stream_polled: Arc<tokio::sync::Notify>,
@@ -5131,6 +5136,24 @@ impl LlmProvider for PhaseScriptedProvider {
                             clock.advance_mono(event.advance);
                             yield event.event;
                         }
+                    };
+                    Ok(Box::pin(stream)
+                        as Pin<
+                            Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                        >)
+                }
+                PhaseTurn::EmptyAssistant {
+                    init_advance,
+                    stream_advance,
+                    stream_polled,
+                } => {
+                    clock.advance_mono(init_advance);
+                    let stream = async_stream::stream! {
+                        // The empty-assistant retry begins only after canonical
+                        // stream consumption observes this terminal event.
+                        stream_polled.notify_one();
+                        clock.advance_mono(stream_advance);
+                        yield Ok(StreamEvent::Done);
                     };
                     Ok(Box::pin(stream)
                         as Pin<
@@ -5267,15 +5290,14 @@ async fn provider_phase_script_counts_empty_assistant_backoff_not_local_time() {
     let _lock = PHASE_METRIC_LOCK.lock().unwrap();
     djinn_telemetry::init().expect("telemetry init");
     let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    let empty_assistant_polled = Arc::new(tokio::sync::Notify::new());
     let provider = PhaseScriptedProvider::new(
         Arc::clone(&clock),
         vec![
-            PhaseTurn::Stream {
+            PhaseTurn::EmptyAssistant {
                 init_advance: Duration::from_secs(2),
-                events: vec![PhaseEvent {
-                    advance: Duration::from_secs(3),
-                    event: Ok(StreamEvent::Done),
-                }],
+                stream_advance: Duration::from_secs(3),
+                stream_polled: Arc::clone(&empty_assistant_polled),
             },
             final_turn(4, 2),
         ],
@@ -5289,10 +5311,16 @@ async fn provider_phase_script_counts_empty_assistant_backoff_not_local_time() {
     // proves the provider-owned backoff interval, rather than a terminal error.
     let run = harness.run_with_model(&provider, &tools, "openai/gpt-5.4");
     tokio::pin!(run);
-    tokio::task::yield_now().await;
+    let polled = empty_assistant_polled.notified();
+    tokio::pin!(polled);
+    tokio::select! {
+        _ = &mut run => panic!("empty-assistant provider unexpectedly finished"),
+        _ = &mut polled => {}
+    }
     // Advance the complete production empty-assistant provider-loop backoff on
-    // both clocks. The phase stays provider-owned for this real sleep, so the
-    // exact delta below includes all three backoff seconds.
+    // both clocks only after canonical consumption has entered the retry path.
+    // The phase stays provider-owned for this real sleep, so the exact delta
+    // below includes all three backoff seconds.
     let backoff = empty_turn_backoff(1);
     clock.advance_mono(backoff);
     tokio::time::advance(backoff).await;
