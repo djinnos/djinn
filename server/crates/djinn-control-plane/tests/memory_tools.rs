@@ -13,9 +13,26 @@
 mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
+use djinn_core::auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext};
 use djinn_core::events::EventBus;
 use djinn_db::{NoteRepository, ProjectRepository};
-use serde_json::json;
+use serde_json::{Value, json};
+
+/// Dispatch a memory mutation tool within a trusted revision caller scope so
+/// the handler's `revision_context` succeeds.  Callers still pass the mandatory
+/// `reason` field in the JSON args.
+async fn call_memory_tool(
+    harness: &McpTestHarness,
+    name: &str,
+    args: Value,
+) -> anyhow::Result<Value> {
+    REVISION_CALLER_CONTEXT
+        .scope(
+            TrustedRevisionCallerContext::authenticated_human("memory-tools-test"),
+            harness.call_tool(name, args),
+        )
+        .await
+}
 
 #[tokio::test]
 async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
@@ -24,18 +41,19 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     let (proj, _dir) = common::create_test_project_with_dir(&db).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Write Contract Note",
-                "content": "body",
-                "type": "adr"
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let created = call_memory_tool(
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Write Contract Note",
+            "content": "body",
+            "reason": "seed contract note",
+            "type": "adr"
+        }),
+    )
+    .await
+    .expect("memory_write should dispatch");
 
     assert!(created.get("id").and_then(|v| v.as_str()).is_some());
     assert_eq!(created["title"], "Write Contract Note");
@@ -57,20 +75,19 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     assert_eq!(note.storage, "db");
     assert_eq!(note.file_path, "");
 
-    let duplicate = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Write Contract Note",
-                "content": "body-2",
-                "type": "adr"
-            }),
-        )
-        .await
-        .expect("duplicate memory_write should dispatch");
-
-    assert!(duplicate.get("error").is_some());
+    let duplicate = call_memory_tool(
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Write Contract Note",
+            "content": "body-2",
+            "reason": "duplicate permalink",
+            "type": "adr"
+        }),
+    )
+    .await;
+    assert!(duplicate.is_err(), "duplicate memory_write should fail");
 }
 
 #[tokio::test]
@@ -79,18 +96,19 @@ async fn mcp_memory_write_and_move_accept_case_and_pitfall_types() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Recovered Incident",
-                "content": "body",
-                "type": "case"
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let created = call_memory_tool(
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Recovered Incident",
+            "content": "body",
+            "reason": "seed case note",
+            "type": "case"
+        }),
+    )
+    .await
+    .expect("memory_write should dispatch");
 
     assert_eq!(created["note_type"], "case");
     assert_eq!(created["folder"], "cases");
@@ -119,18 +137,19 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Read Contract Note",
-                "content": "read me",
-                "type": "reference"
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let created = call_memory_tool(
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Read Contract Note",
+            "content": "read me",
+            "reason": "seed read contract note",
+            "type": "reference"
+        }),
+    )
+    .await
+    .expect("memory_write should dispatch");
 
     let by_permalink = harness
         .call_tool(
@@ -166,25 +185,13 @@ async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Rust Alpha", "content": "rust rust rust memory", "type": "reference"}),
-        )
+    call_memory_tool(&harness, "memory_write", json!({"project": project, "title": "Rust Alpha", "content": "rust rust rust memory", "reason": "seed alpha", "type": "reference"}))
         .await
         .expect("memory_write alpha should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Rust Beta", "content": "rust memory", "type": "reference"}),
-        )
+    call_memory_tool(&harness, "memory_write", json!({"project": project, "title": "Rust Beta", "content": "rust memory", "reason": "seed beta", "type": "reference"}))
         .await
         .expect("memory_write beta should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "ADR Gamma", "content": "rust decision", "type": "adr"}),
-        )
+    call_memory_tool(&harness, "memory_write", json!({"project": project, "title": "ADR Gamma", "content": "rust decision", "reason": "seed gamma", "type": "adr"}))
         .await
         .expect("memory_write gamma should dispatch");
 
@@ -228,49 +235,28 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Edit Note", "content": "middle", "type": "reference"}),
-        )
+    call_memory_tool(&harness, "memory_write", json!({"project": project, "title": "Edit Note", "content": "middle", "reason": "seed edit note", "type": "reference"}))
         .await
         .expect("seed memory_write should dispatch");
 
-    let appended = harness
-        .call_tool(
-            "memory_edit",
-            json!({"project": project, "identifier": "Edit Note", "operation": "append", "content": "tail"}),
-        )
+    let appended = call_memory_tool(&harness, "memory_edit", json!({"project": project, "identifier": "Edit Note", "operation": "append", "content": "tail", "reason": "append tail"}))
         .await
         .expect("memory_edit append should dispatch");
     assert!(appended["content"].as_str().unwrap().contains("tail"));
 
-    let prepended = harness
-        .call_tool(
-            "memory_edit",
-            json!({"project": project, "identifier": "Edit Note", "operation": "prepend", "content": "head"}),
-        )
+    let prepended = call_memory_tool(&harness, "memory_edit", json!({"project": project, "identifier": "Edit Note", "operation": "prepend", "content": "head", "reason": "prepend head"}))
         .await
         .expect("memory_edit prepend should dispatch");
     assert!(prepended["content"].as_str().unwrap().starts_with("head"));
 
-    let replaced = harness
-        .call_tool(
-            "memory_edit",
-            json!({"project": project, "identifier": "Edit Note", "operation": "find_replace", "find_text": "middle", "content": "center"}),
-        )
+    let replaced = call_memory_tool(&harness, "memory_edit", json!({"project": project, "identifier": "Edit Note", "operation": "find_replace", "find_text": "middle", "content": "center", "reason": "replace middle"}))
         .await
         .expect("memory_edit find_replace should dispatch");
     assert!(replaced["content"].as_str().unwrap().contains("center"));
 
-    let missing = harness
-        .call_tool(
-            "memory_edit",
-            json!({"project": project, "identifier": "Missing", "operation": "append", "content": "x"}),
-        )
-        .await
-        .expect("memory_edit missing should dispatch");
-    assert!(missing.get("error").is_some());
+    let missing = call_memory_tool(&harness, "memory_edit", json!({"project": project, "identifier": "Missing", "operation": "append", "content": "x", "reason": "edit missing"}))
+        .await;
+    assert!(missing.is_err(), "memory_edit missing should fail");
 }
 
 #[tokio::test]
@@ -279,13 +265,13 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Move Me", "content": "content", "type": "reference"}),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let created = call_memory_tool(
+        &harness,
+        "memory_write",
+        json!({"project": project, "title": "Move Me", "content": "content", "reason": "seed move note", "type": "reference"}),
+    )
+    .await
+    .expect("memory_write should dispatch");
 
     let moved = harness
         .call_tool(
@@ -305,32 +291,26 @@ async fn mcp_memory_delete_success_and_missing_note_error() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Delete Me", "content": "bye", "type": "reference"}),
-        )
+    call_memory_tool(&harness, "memory_write", json!({"project": project, "title": "Delete Me", "content": "bye", "reason": "seed delete note", "type": "reference"}))
         .await
         .expect("seed memory_write should dispatch");
 
-    let deleted = harness
-        .call_tool(
-            "memory_delete",
-            json!({"project": project, "identifier": "Delete Me"}),
-        )
-        .await
-        .expect("memory_delete should dispatch");
+    let deleted = call_memory_tool(
+        &harness,
+        "memory_delete",
+        json!({"project": project, "identifier": "Delete Me", "reason": "delete note"}),
+    )
+    .await
+    .expect("memory_delete should dispatch");
     assert_eq!(deleted["ok"], true);
 
-    let missing = harness
-        .call_tool(
-            "memory_delete",
-            json!({"project": project, "identifier": "Delete Me"}),
-        )
-        .await
-        .expect("memory_delete missing should dispatch");
-    assert_eq!(missing["ok"], false);
-    assert!(missing.get("error").is_some());
+    let missing = call_memory_tool(
+        &harness,
+        "memory_delete",
+        json!({"project": project, "identifier": "Delete Me", "reason": "delete missing"}),
+    )
+    .await;
+    assert!(missing.is_err(), "memory_delete missing should fail");
 }
 
 #[tokio::test]
@@ -339,19 +319,17 @@ async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let adr = harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "A", "content": "x", "type": "adr"}),
-        )
-        .await
-        .expect("memory_write adr should dispatch");
+    let adr = call_memory_tool(
+        &harness,
+        "memory_write",
+        json!({"project": project, "title": "A", "content": "x", "type": "adr", "reason": "test"}),
+    )
+    .await
+    .expect("memory_write adr should dispatch");
     assert_eq!(adr["deduplicated"], false);
-    let reference = harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "B", "content": "different content", "type": "reference"}),
-        )
+    let reference = call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "B", "content": "different content", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write reference should dispatch");
     assert_eq!(reference["deduplicated"], false);
@@ -391,32 +369,24 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Node B", "content": "b", "type": "reference"}),
-        )
+    call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Node B", "content": "b", "type": "reference", "reason": "test"}))
         .await
         .expect("seed node B should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "type": "reference"}),
-        )
+    call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "type": "reference", "reason": "test"}))
         .await
         .expect("seed node A should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "type": "reference"}),
-        )
+    call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "type": "reference", "reason": "test"}))
         .await
         .expect("seed node C should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Node D", "content": "isolated", "type": "reference"}),
-        )
+    call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Node D", "content": "isolated", "type": "reference", "reason": "test"}))
         .await
         .expect("seed node D should dispatch");
 
@@ -453,11 +423,9 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Older", "content": "o", "type": "reference"}),
-        )
+    call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Older", "content": "o", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write older should dispatch");
     // `memory_recent` orders by `updated_at` (3ms precision); without a gap
@@ -466,11 +434,9 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
     // 100ms is tight — 500ms gives the DB a clear timestamp boundary while
     // still keeping total runtime sub-second.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Newer", "content": "n", "type": "reference"}),
-        )
+    call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Newer", "content": "n", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write newer should dispatch");
     harness
@@ -510,11 +476,9 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Catalog Item", "content": "c", "type": "reference"}),
-        )
+    call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Catalog Item", "content": "c", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write should dispatch");
     let catalog = harness
@@ -539,11 +503,9 @@ async fn mcp_memory_health_orphans_and_broken_links_shapes() {
     // No project seeded: memory_write resolves and errors silently; the test
     // only asserts the shape of the three health / orphans / broken_links
     // responses, so that's fine.
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "type": "reference"}),
-        )
+    call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write should dispatch");
 
@@ -575,20 +537,16 @@ async fn mcp_memory_history_and_diff_round_trip() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "History Diff", "content": "line one", "type": "reference"}),
-        )
+    let created = call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "History Diff", "content": "line one", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write should dispatch");
     let permalink = created["permalink"].as_str().unwrap().to_string();
 
-    let edited = harness
-        .call_tool(
-            "memory_edit",
-            json!({"project": project, "identifier": permalink, "operation": "append", "content": "line two"}),
-        )
+    let edited = call_memory_tool(&harness,
+        "memory_edit",
+        json!({"project": project, "identifier": permalink, "operation": "append", "content": "line two", "reason": "test"}))
         .await
         .expect("memory_edit should dispatch");
     assert!(edited.get("error").is_none() || edited["error"].is_null());
@@ -626,18 +584,14 @@ async fn mcp_memory_build_context_follows_wikilinks() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let target = harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Context Target", "content": "target body", "type": "reference"}),
-        )
+    let target = call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Context Target", "content": "target body", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write target should dispatch");
-    let seed = harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Context Seed", "content": "see [[Context Target]]", "type": "reference"}),
-        )
+    let seed = call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Context Seed", "content": "see [[Context Target]]", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write seed should dispatch");
 
@@ -674,11 +628,9 @@ async fn mcp_memory_task_refs_returns_tasks_for_permalink() {
     let epic = common::create_test_epic(db, &project_row.id).await;
     let project = project_row.slug();
 
-    let note = harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Task Ref Note", "content": "task refs seed", "type": "reference"}),
-        )
+    let note = call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Task Ref Note", "content": "task refs seed", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write should dispatch");
 
@@ -828,11 +780,9 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
     let project = project_row.slug();
 
     // Three notes: one on an epic, one on a task, one shared across both.
-    let epic_note = harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Epic Ref Note", "content": "epic level note", "type": "adr"}),
-        )
+    let epic_note = call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Epic Ref Note", "content": "epic level note", "type": "adr", "reason": "test"}))
         .await
         .expect("memory_write epic_note should dispatch");
     let epic_note_permalink = epic_note["permalink"]
@@ -840,11 +790,9 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
         .expect("epic note permalink")
         .to_string();
 
-    let task_note = harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Task Ref Note", "content": "task level note", "type": "pitfall"}),
-        )
+    let task_note = call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Task Ref Note", "content": "task level note", "type": "pitfall", "reason": "test"}))
         .await
         .expect("memory_write task_note should dispatch");
     let task_note_permalink = task_note["permalink"]
@@ -852,11 +800,9 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
         .expect("task note permalink")
         .to_string();
 
-    let shared_note = harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Shared Ref Note", "content": "shared across epic and task", "type": "reference"}),
-        )
+    let shared_note = call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Shared Ref Note", "content": "shared across epic and task", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write shared_note should dispatch");
     let shared_note_permalink = shared_note["permalink"]
@@ -1204,18 +1150,19 @@ async fn memory_read_regression_resolved_mentions_still_works() {
     // Use a fresh project so the note body mention resolution is clean.
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
-    let note = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Note Mentioning Proposal",
-                "content": format!("This pitfall relates to proposal {} which covers the design.", fixture.proposal_short_id),
-                "type": "pitfall",
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let note = call_memory_tool(
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Note Mentioning Proposal",
+            "content": format!("This pitfall relates to proposal {} which covers the design.", fixture.proposal_short_id),
+            "reason": "seed pitfall note mentioning proposal",
+            "type": "pitfall",
+        }),
+    )
+    .await
+    .expect("memory_write should dispatch");
     assert!(
         note.get("error").is_none() || note["error"].is_null(),
         "memory_write returned error: {note}"
@@ -1335,18 +1282,19 @@ async fn memory_read_resolves_short_id_mentions() {
     // Use a fresh project so the note body mention resolution is clean.
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
-    let note = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Note Mentioning Proposal",
-                "content": format!("This pitfall relates to proposal {} which covers the design.", fixture.proposal_short_id),
-                "type": "pitfall",
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let note = call_memory_tool(
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Note Mentioning Proposal",
+            "content": format!("This pitfall relates to proposal {} which covers the design.", fixture.proposal_short_id),
+            "reason": "seed pitfall note mentioning proposal",
+            "type": "pitfall",
+        }),
+    )
+    .await
+    .expect("memory_write should dispatch");
     assert!(
         note.get("error").is_none() || note["error"].is_null(),
         "memory_write returned error: {note}"
@@ -1422,11 +1370,9 @@ async fn no_regression_memory_refs_autolink() {
     let epic = common::create_test_epic(db, &project_row.id).await;
     let project = project_row.slug();
 
-    let note = harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Autolink Note", "content": "autolink seed", "type": "reference"}),
-        )
+    let note = call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Autolink Note", "content": "autolink seed", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write should dispatch");
 
@@ -1494,18 +1440,14 @@ async fn no_regression_memory_search_ranking_notes_only() {
     let _proposal_id = proposal["id"].as_str().expect("proposal id").to_string();
 
     // Create notes that should be searchable.
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Rust Note One", "content": "rust memory test", "type": "reference"}),
-        )
+    call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Rust Note One", "content": "rust memory test", "type": "reference", "reason": "test"}))
         .await
         .expect("memory_write one should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Rust Note Two", "content": "another rust note", "type": "adr"}),
-        )
+    call_memory_tool(&harness,
+        "memory_write",
+        json!({"project": project, "title": "Rust Note Two", "content": "another rust note", "type": "adr", "reason": "test"}))
         .await
         .expect("memory_write two should dispatch");
 

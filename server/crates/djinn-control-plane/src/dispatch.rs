@@ -116,6 +116,25 @@ fn map_json<T: Serialize>(tool: &str, out: Json<T>) -> Result<Value, String> {
         .map_err(|e| format!("failed to serialize tool result for '{tool}': {e}"))
 }
 
+/// Dispatch mapper for memory mutation tools (`memory_write`, `memory_edit`,
+/// `memory_delete`). These handlers embed failures as a non-null `error` field
+/// inside the success JSON (`MemoryNoteResponse` / `MemoryDeleteResponse`).
+/// Propagate that as a dispatch `Err` so the dispatch boundary uniformly rejects
+/// all invalid reasons and other handler-level failures before the caller can
+/// treat the result as a successful mutation. This matches the AC intent that
+/// rejection occurs without durable mutation — an `Err` guarantees the caller
+/// never sees a note-shaped payload on a rejected write.
+fn map_memory_mutation<T: Serialize>(tool: &str, out: Json<T>) -> Result<Value, String> {
+    let value = serde_json::to_value(&out.0)
+        .map_err(|e| format!("failed to serialize tool result for '{tool}': {e}"))?;
+    if let Some(error) = value.get("error").and_then(|v| v.as_str())
+        && !error.is_empty()
+    {
+        return Err(format!("tool '{tool}' failed: {error}"));
+    }
+    Ok(value)
+}
+
 /// Map a G3 structured-error `ToolOutcome<T>` to the dispatch `Result`. On the
 /// error arm we serialize the full [`ToolError`] envelope to JSON so the
 /// structure (`status`/`method`/`path`/`body`/`hint`) survives the flattened
@@ -768,17 +787,17 @@ impl DjinnMcpServer {
                 )?))
                 .await,
             ),
-            "memory_write" => map_json(
+            "memory_write" => map_memory_mutation(
                 name,
                 self.memory_write(Parameters(decode_args::<WriteParams>(name, args)?))
                     .await,
             ),
-            "memory_edit" => map_json(
+            "memory_edit" => map_memory_mutation(
                 name,
                 self.memory_edit(Parameters(decode_args::<EditParams>(name, args)?))
                     .await,
             ),
-            "memory_delete" => map_json(
+            "memory_delete" => map_memory_mutation(
                 name,
                 self.memory_delete(Parameters(decode_args::<DeleteParams>(name, args)?))
                     .await,

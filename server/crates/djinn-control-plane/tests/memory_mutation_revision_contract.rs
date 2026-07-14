@@ -70,6 +70,7 @@ async fn dispatch_rejects_invalid_or_spoofed_reason_inputs_before_durable_mutati
     let (harness, project, project_id) = harness_and_project().await;
     let caller = TrustedRevisionCallerContext::authenticated_human("human-contract");
 
+    let expected_envelope = "invalid parameters: field: reason, message: reason must be non-blank";
     for reason in [
         None,
         Some(Value::Null),
@@ -92,9 +93,9 @@ async fn dispatch_rejects_invalid_or_spoofed_reason_inputs_before_durable_mutati
             .await
             .expect_err("invalid reason must reject")
             .to_string();
-        assert_eq!(
-            error,
-            "call_tool(memory_write) failed: invalid parameters: field: reason, message: reason must be non-blank"
+        assert!(
+            error.contains(expected_envelope),
+            "expected reason rejection envelope `{expected_envelope}` in error: {error}"
         );
         assert_eq!(persisted_counts(harness.db(), &project_id).await, (0, 0));
     }
