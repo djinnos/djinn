@@ -321,7 +321,15 @@ mod tests {
     #[test]
     fn shared_filesystem_lock_contract() {
         let fixture = TempDir::new().expect("shared fixture");
-        let project = format!("lock-contract-{}", std::process::id());
+        // CI shards can run this binary with the same container-local PID while
+        // sharing /cache. Include tempfile's host-unique component so their
+        // production-derived lock paths cannot contend with each other.
+        let fixture_id = fixture
+            .path()
+            .file_name()
+            .expect("fixture component")
+            .to_string_lossy();
+        let project = format!("lock-contract-{}-{fixture_id}", std::process::id());
         let base = fixture.path().join("cache/project");
         let incremental = base.join("debug/incremental");
         fs::create_dir_all(&incremental).expect("incremental tree");

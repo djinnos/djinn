@@ -3943,7 +3943,15 @@ warning: something
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&cargo, permissions).expect("fake cargo executable");
-        let project = format!("warm-ordering-ok-{}", std::process::id());
+        // Separate CI shard containers may have the same PID and share /cache.
+        // Namespace this production-derived warm path with tempfile's unique
+        // component to prevent cross-shard ownership and cleanup races.
+        let fixture_id = fixture
+            .path()
+            .file_name()
+            .expect("fixture component")
+            .to_string_lossy();
+        let project = format!("warm-ordering-ok-{}-{fixture_id}", std::process::id());
         let target = warm_base_dir(&project);
         std::fs::create_dir_all(target.join("debug/incremental")).expect("warm target");
         std::fs::write(target.join("debug/incremental/stale"), b"stale")
