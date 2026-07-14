@@ -97,6 +97,7 @@ pub(crate) async fn assemble_for_role(
         worker_resume_note: None,
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
+        extension_diagnostics: &[],
     })
     .await
 }
@@ -128,6 +129,7 @@ pub(crate) async fn assemble_for_role_with_mcp_instructions(
         worker_resume_note: None,
         arbiter_directive: None,
         mcp_server_instructions,
+        extension_diagnostics: &[],
     })
     .await
 }
@@ -158,6 +160,7 @@ pub(crate) async fn assemble_for_role_with_resume(
         worker_resume_note,
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
+        extension_diagnostics: &[],
     })
     .await
 }
