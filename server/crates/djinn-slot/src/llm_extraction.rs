@@ -3244,7 +3244,9 @@ mod evidence_merge_regression_tests {
         ops: Arc<Mutex<Vec<RepoOp>>>,
         revisions: Arc<Mutex<Vec<RevisionRecord>>>,
         existing: Arc<Mutex<Option<djinn_memory::Note>>>,
-        fail_updates: bool,
+        /// Fail one canonical mutation before its fake state or ledger record
+        /// changes, while still allowing the later ExtractionSkipped mutation.
+        fail_next_kind: Arc<Mutex<Option<NoteRevisionEventKind>>>,
     }
 
     impl RecordingExtractionRepository {
@@ -3253,16 +3255,19 @@ mod evidence_merge_regression_tests {
                 ops: Arc::new(Mutex::new(Vec::new())),
                 revisions: Arc::new(Mutex::new(Vec::new())),
                 existing: Arc::new(Mutex::new(Some(existing))),
-                fail_updates: false,
+                fail_next_kind: Arc::new(Mutex::new(None)),
             }
         }
 
-        fn with_update_failure(existing: djinn_memory::Note) -> Self {
+        fn with_mutation_failure(
+            existing: djinn_memory::Note,
+            event_kind: NoteRevisionEventKind,
+        ) -> Self {
             Self {
                 ops: Arc::new(Mutex::new(Vec::new())),
                 revisions: Arc::new(Mutex::new(Vec::new())),
                 existing: Arc::new(Mutex::new(Some(existing))),
-                fail_updates: true,
+                fail_next_kind: Arc::new(Mutex::new(Some(event_kind))),
             }
         }
 
@@ -3291,55 +3296,31 @@ mod evidence_merge_regression_tests {
             &self,
             mutation: NoteRevisionMutation,
         ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
-            // Controlled failure happens before either fake state or the
-            // committed-revision log changes.
-            if self.fail_updates {
-                return Err(djinn_db::Error::Internal(
-                    "controlled revision update failure".to_owned(),
-                ));
+            if self.fail_next_kind.lock().unwrap().take_if(|kind| *kind == mutation.event_kind).is_some() {
+                return Err(djinn_db::Error::Internal("controlled revision mutation failure".to_owned()));
             }
             let mut existing = self.existing.lock().unwrap();
-            let before_content = existing.as_ref().map(|note| note.content.clone());
-            let before_confidence = existing.as_ref().map(|note| note.confidence);
-            let (changed, committed_note) = match &mutation.desired {
-                NoteRevisionDesiredState::Existing {
-                    content,
-                    confidence,
-                } => {
-                    let note = existing
-                        .as_mut()
-                        .ok_or_else(|| djinn_db::Error::Internal("missing test note".to_owned()))?;
+            let (before_content, before_confidence, changed, committed_note) = match &mutation.desired {
+                NoteRevisionDesiredState::Create(desired) => {
+                    let note = djinn_memory::Note {
+                        id: mutation.note_id.clone().expect("create has note id"), project_id: mutation.project_id.clone(), permalink: desired.permalink.clone(), title: desired.title.clone(), file_path: String::new(), storage: "db".to_owned(), note_type: desired.note_type.clone(), folder: desired.folder.clone(), status: desired.status.clone(), tags: desired.tags.clone(), content: desired.content.clone(), retrieval_anchor: desired.retrieval_anchor.clone(), created_at: "2026-01-01T00:00:00Z".to_owned(), updated_at: "2026-01-01T00:00:00Z".to_owned(), last_accessed: "2026-01-01T00:00:00Z".to_owned(), access_count: 0, confidence: desired.confidence, abstract_: None, overview: None, scope_paths: desired.scope_paths.clone(),
+                    };
+                    *existing = Some(note.clone());
+                    (None, None, true, Some(note))
+                }
+                NoteRevisionDesiredState::Existing { content, confidence } => {
+                    let note = existing.as_mut().ok_or_else(|| djinn_db::Error::Internal("missing test note".to_owned()))?;
+                    let before_content = note.content.clone(); let before_confidence = note.confidence;
                     let changed = note.content != *content || note.confidence != *confidence;
-                    if changed {
-                        note.content.clone_from(content);
-                        note.confidence = *confidence;
-                    }
-                    (changed, Some(note.clone()))
+                    if changed { note.content.clone_from(content); note.confidence = *confidence; }
+                    (Some(before_content), Some(before_confidence), changed, Some(note.clone()))
                 }
-                NoteRevisionDesiredState::ExtractionSkipped => (true, None),
-                _ => {
-                    return Err(djinn_db::Error::Internal(
-                        "unsupported test mutation".to_owned(),
-                    ));
-                }
+                NoteRevisionDesiredState::ExtractionSkipped => (None, None, true, None),
+                NoteRevisionDesiredState::Delete => unreachable!("not used by extraction"),
             };
             let revision_id = changed.then(|| "test-revision".to_owned());
-            self.revisions.lock().unwrap().push(RevisionRecord {
-                mutation,
-                before_content,
-                before_confidence,
-                after_content: committed_note.as_ref().map(|note| note.content.clone()),
-                after_confidence: committed_note.as_ref().map(|note| note.confidence),
-                changed,
-                committed_note_id: committed_note.as_ref().map(|note| note.id.clone()),
-                revision_id: revision_id.clone(),
-            });
-            Ok(djinn_db::NoteRevisionMutationResult {
-                changed,
-                note: committed_note,
-                note_seq: changed.then_some(1),
-                revision_id,
-            })
+            self.revisions.lock().unwrap().push(RevisionRecord { mutation, before_content, before_confidence, after_content: committed_note.as_ref().map(|note| note.content.clone()), after_confidence: committed_note.as_ref().map(|note| note.confidence), changed, committed_note_id: committed_note.as_ref().map(|note| note.id.clone()), revision_id: revision_id.clone() });
+            Ok(djinn_db::NoteRevisionMutationResult { changed, note: committed_note, note_seq: changed.then_some(1), revision_id })
         }
         async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
             self.ops.lock().unwrap().push(RepoOp::Get(id.to_string()));
@@ -3358,12 +3339,7 @@ mod evidence_merge_regression_tests {
                 content: content.to_string(),
                 tags: tags.to_string(),
             });
-            if self.fail_updates {
-                return Err(djinn_db::Error::Internal(
-                    "controlled content update failure".to_string(),
-                ));
-            }
-            let mut note = self.existing.lock().unwrap().clone().unwrap();
+                        let mut note = self.existing.lock().unwrap().clone().unwrap();
             note.title = title.to_string();
             note.content = content.to_string();
             note.tags = tags.to_string();
@@ -3695,7 +3671,7 @@ mod evidence_merge_regression_tests {
             r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
             r#"{"content":"Merged evidence that cannot be persisted because the controlled repository update fails."}"#.to_string(),
         ]);
-        let repo = RecordingExtractionRepository::with_update_failure(test_existing_note());
+        let repo = RecordingExtractionRepository::with_mutation_failure(test_existing_note(), NoteRevisionEventKind::Updated);
         let context = ExtractionContext {
             note_repo: &repo,
             provider: &provider,
