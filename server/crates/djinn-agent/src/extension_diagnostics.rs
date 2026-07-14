@@ -141,6 +141,31 @@ pub(crate) async fn persist_extension_diagnostic(
         .await
 }
 
+/// Persist a complete load pass and return its canonical attempt-scoped rows.
+///
+/// `continue_after_error` selects the caller's failure policy. The explicit
+/// doctor audit is strict, while session startup must retain its historical
+/// best-effort behavior: every remaining fact is attempted after a failed
+/// write, then the attempt is read canonically.
+pub(crate) async fn persist_extension_diagnostic_batch(
+    mut continue_after_error: impl FnMut(&djinn_db::Error) -> bool,
+    repository: &ExtensionLoadDiagnosticRepository,
+    associations: ExtensionDiagnosticAssociations,
+    facts: Vec<ExtensionDiagnosticFact>,
+) -> djinn_db::Result<Vec<ExtensionLoadDiagnosticV1>> {
+    for fact in facts {
+        if let Err(error) =
+            persist_extension_diagnostic(repository, associations.clone(), fact).await
+            && !continue_after_error(&error)
+        {
+            return Err(error);
+        }
+    }
+    repository
+        .list_for_load_attempt(&associations.project_id, &associations.load_attempt_id)
+        .await
+}
+
 /// Djinn-owned prose. Extension and detector text never selects this value.
 pub(crate) fn remedy_template(code: ExtensionLoadRemedyCode) -> &'static str {
     match code {

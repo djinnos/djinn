@@ -662,14 +662,12 @@ mod cargo_classify_tests {
 
     #[test]
     fn rejects_segment_overflow() {
-        let ok: String = std::iter::repeat("cargo check")
-            .take(64)
+        let ok: String = std::iter::repeat_n("cargo check", 64)
             .collect::<Vec<_>>()
             .join(" && ");
         assert_eq!(classify_cargo_command(&ok), Some(KIND_CHECK));
 
-        let over: String = std::iter::repeat("cargo check")
-            .take(65)
+        let over: String = std::iter::repeat_n("cargo check", 65)
             .collect::<Vec<_>>()
             .join(" && ");
         assert_eq!(classify_cargo_command(&over), None);

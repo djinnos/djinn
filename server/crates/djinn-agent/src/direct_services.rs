@@ -22,9 +22,14 @@ use djinn_core::models::SessionRecord;
 use djinn_core::models::{Task, TaskRunStatus};
 use djinn_db::SessionRepository;
 use djinn_db::TaskRunRepository;
+use djinn_db::repositories::llm_call_attempt::{
+    CreateLlmCallAttemptParams, FinalizeLlmCallAttemptParams, LlmCallAttemptRepository,
+    LlmCallOutcome,
+};
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
 use djinn_stack::environment::EnvironmentConfig;
+use djinn_supervisor::services::wire::{PlannerAttemptResult, PlannerOutcome};
 use djinn_supervisor::services::{
     CostBasisHint, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
     SerializableDjinnEvent,
@@ -36,6 +41,7 @@ use djinn_supervisor::{
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
 
+use crate::actors::slot::lifecycle::memory_intent_planner::parse_planned_queries;
 use crate::context::AgentContext;
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
 use djinn_provider::catalog::builtin::classify_provider;
@@ -55,6 +61,116 @@ pub struct DirectServices {
     /// dead code (the supervisor still calls `task_runs.create()` /
     /// `task_runs.update_status()` directly).
     task_runs: Arc<TaskRunRepository>,
+    #[cfg(test)]
+    planner_test_seam: Option<PlannerTestSeam>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct PlannerTestSeam {
+    provider: Arc<dyn LlmProvider>,
+    ledger: Arc<dyn PlannerAttemptLedger>,
+    model_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct PlannerLedgerCreate {
+    id: String,
+    project_id: String,
+    task_id: String,
+    task_run_id: String,
+    session_id: String,
+    created_by_user_id: String,
+    operation: String,
+    prompt_id: String,
+    model_id: String,
+    input_price: Option<f64>,
+    output_price: Option<f64>,
+    cache_read_price: Option<f64>,
+    cache_write_price: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+struct PlannerLedgerFinalize {
+    id: String,
+    tokens_in: i64,
+    tokens_out: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    diagnostic: Option<String>,
+    outcome: LlmCallOutcome,
+}
+
+#[derive(Clone, Debug)]
+struct PlannerLedgerFinalized {
+    tokens_in: i64,
+    tokens_out: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    cost_usd: Option<f64>,
+    diagnostic: Option<String>,
+}
+
+#[async_trait]
+trait PlannerAttemptLedger: Send + Sync {
+    async fn create(&self, params: PlannerLedgerCreate) -> Result<(), String>;
+    async fn finalize(
+        &self,
+        params: PlannerLedgerFinalize,
+    ) -> Result<PlannerLedgerFinalized, String>;
+}
+
+struct RepositoryPlannerAttemptLedger(LlmCallAttemptRepository);
+
+#[async_trait]
+impl PlannerAttemptLedger for RepositoryPlannerAttemptLedger {
+    async fn create(&self, params: PlannerLedgerCreate) -> Result<(), String> {
+        self.0
+            .create(CreateLlmCallAttemptParams {
+                id: &params.id,
+                project_id: &params.project_id,
+                task_id: &params.task_id,
+                task_run_id: Some(&params.task_run_id),
+                session_id: Some(&params.session_id),
+                created_by_user_id: Some(&params.created_by_user_id),
+                operation: &params.operation,
+                prompt_id: &params.prompt_id,
+                model_id: &params.model_id,
+                input_price_per_million_snapshot: params.input_price,
+                output_price_per_million_snapshot: params.output_price,
+                cache_read_price_per_million_snapshot: params.cache_read_price,
+                cache_write_price_per_million_snapshot: params.cache_write_price,
+            })
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn finalize(
+        &self,
+        params: PlannerLedgerFinalize,
+    ) -> Result<PlannerLedgerFinalized, String> {
+        self.0
+            .finalize(FinalizeLlmCallAttemptParams {
+                id: &params.id,
+                tokens_in: params.tokens_in,
+                tokens_out: params.tokens_out,
+                cache_read_tokens: params.cache_read_tokens,
+                cache_write_tokens: params.cache_write_tokens,
+                diagnostic: params.diagnostic.as_deref(),
+                outcome: params.outcome,
+            })
+            .await
+            .map(|record| PlannerLedgerFinalized {
+                tokens_in: record.tokens_in,
+                tokens_out: record.tokens_out,
+                cache_read_tokens: record.cache_read_tokens,
+                cache_write_tokens: record.cache_write_tokens,
+                cost_usd: record.cost_usd,
+                diagnostic: record.diagnostic,
+            })
+            .map_err(|e| e.to_string())
+    }
 }
 
 impl DirectServices {
@@ -81,7 +197,24 @@ impl DirectServices {
                 provider_override,
             },
             task_runs,
+            #[cfg(test)]
+            planner_test_seam: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_planner_test_seam(
+        agent_context: AgentContext,
+        provider: Arc<dyn LlmProvider>,
+        ledger: Arc<dyn PlannerAttemptLedger>,
+    ) -> Self {
+        let mut services = Self::new(agent_context, CancellationToken::new());
+        services.planner_test_seam = Some(PlannerTestSeam {
+            provider,
+            ledger,
+            model_id: "planner-test-model".into(),
+        });
+        services
     }
 
     /// Execute the arbiter park transaction: persist the decision and dossier
@@ -951,6 +1084,197 @@ impl SupervisorServices for DirectServices {
             }
         }
         Ok(response)
+    }
+
+    async fn plan_memory_intents(
+        &self,
+        request: djinn_supervisor::services::wire::AttributedPlannerRequest,
+    ) -> Result<PlannerAttemptResult, String> {
+        use djinn_provider::completion::resolve_memory_provider_config_for_user_db;
+        use djinn_provider::provider::create_provider;
+        use uuid::Uuid;
+
+        let ctx = &self.callbacks.agent_context;
+        let db = &ctx.db;
+        let repository_ledger: Arc<dyn PlannerAttemptLedger> =
+            Arc::new(RepositoryPlannerAttemptLedger(
+                LlmCallAttemptRepository::new(db.clone(), ctx.event_bus.clone()),
+            ));
+        #[cfg(test)]
+        let ledger = self
+            .planner_test_seam
+            .as_ref()
+            .map(|seam| seam.ledger.clone())
+            .unwrap_or(repository_ledger);
+        #[cfg(not(test))]
+        let ledger = repository_ledger;
+
+        // This primitive is deliberately attributed-only. Reject empty values
+        // before credential resolution or ledger insertion so an RPC caller
+        // cannot downgrade an enabled planner call into an anonymous attempt.
+        for (name, value) in [
+            ("project_id", request.project_id.as_str()),
+            ("task_id", request.task_id.as_str()),
+            ("task_run_id", request.task_run_id.as_str()),
+            ("session_id", request.session_id.as_str()),
+            ("created_by_user_id", request.created_by_user_id.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!(
+                    "attributed planner request requires non-empty {name}"
+                ));
+            }
+        }
+
+        let conversation: Conversation = serde_json::from_str(&request.conversation)
+            .map_err(|e| format!("decode planner conversation: {e}"))?;
+        let tools: Vec<serde_json::Value> = serde_json::from_str(&request.tools)
+            .map_err(|e| format!("decode planner tools: {e}"))?;
+
+        let call_id = Uuid::now_v7().to_string();
+
+        // Production always resolves model + credential under the caller-scoped
+        // policy. Tests replace only this boundary with a deterministic provider.
+        #[cfg(test)]
+        let provider_and_model = self
+            .planner_test_seam
+            .as_ref()
+            .map(|seam| (seam.provider.clone(), seam.model_id.clone()));
+        #[cfg(not(test))]
+        let provider_and_model: Option<(Arc<dyn LlmProvider>, String)> = None;
+
+        let (provider, model_id) = if let Some(pair) = provider_and_model {
+            pair
+        } else {
+            let (provider_config, model_id) =
+                resolve_memory_provider_config_for_user_db(db, Some(&request.created_by_user_id))
+                    .await
+                    .map_err(|e| format!("resolve memory provider for planner: {e}"))?;
+            (Arc::from(create_provider(provider_config)), model_id)
+        };
+
+        // Snapshot catalog pricing at the time of the call.
+        let catalog_model = ctx.catalog.find_model(&model_id);
+        let input_price = catalog_model.as_ref().map(|m| m.pricing.input_per_million);
+        let output_price = catalog_model.as_ref().map(|m| m.pricing.output_per_million);
+        let cache_read_price = catalog_model
+            .as_ref()
+            .map(|m| m.pricing.cache_read_per_million);
+        let cache_write_price = catalog_model
+            .as_ref()
+            .map(|m| m.pricing.cache_write_per_million);
+
+        // Insert pending attempt before provider I/O.
+        ledger
+            .create(PlannerLedgerCreate {
+                id: call_id.clone(),
+                project_id: request.project_id.clone(),
+                task_id: request.task_id.clone(),
+                task_run_id: request.task_run_id.clone(),
+                session_id: request.session_id.clone(),
+                created_by_user_id: request.created_by_user_id.clone(),
+                operation: request.operation.clone(),
+                prompt_id: request.prompt_id.clone(),
+                model_id,
+                input_price,
+                output_price,
+                cache_read_price,
+                cache_write_price,
+            })
+            .await
+            .map_err(|e| format!("persist planner attempt: {e}"))?;
+
+        let collected = collect_planner_stream(
+            provider.as_ref(),
+            &conversation,
+            &tools,
+            request.tool_choice,
+            request.timeout_ms,
+        )
+        .await;
+        let response = collected.response;
+        let mut outcome = match collected.outcome {
+            PlannerOutcome::Success => LlmCallOutcome::Success,
+            PlannerOutcome::Timeout => LlmCallOutcome::Timeout,
+            PlannerOutcome::InvalidPayload => LlmCallOutcome::InvalidPayload,
+            PlannerOutcome::ProviderError => LlmCallOutcome::ProviderError,
+        };
+        let mut diagnostic = collected.diagnostic;
+
+        let content_text = response
+            .content
+            .iter()
+            .map(|b| b.as_text().unwrap_or(""))
+            .collect::<String>();
+
+        if collected.completed {
+            // Validate the complete typed planner contract before terminal
+            // success persistence. This includes JSON shape, the closed note
+            // type set, query count, and the Phase-1 query style rules. This
+            // is a dedicated planner operation: wire attribution fields are
+            // not a caller-controlled opt-out from payload validation.
+            let valid =
+                !content_text.trim().is_empty() && parse_planned_queries(&content_text).is_ok();
+            if valid {
+                outcome = LlmCallOutcome::Success;
+            } else {
+                outcome = LlmCallOutcome::InvalidPayload;
+                diagnostic = Some("planner output failed payload validation".into());
+            }
+        }
+
+        // Finalize the ledger row with the latest usage.
+        let finalized = ledger
+            .finalize(PlannerLedgerFinalize {
+                id: call_id,
+                tokens_in: response.usage.input as i64,
+                tokens_out: response.usage.output as i64,
+                cache_read_tokens: response.usage.cache_read as i64,
+                cache_write_tokens: response.usage.cache_write as i64,
+                diagnostic: diagnostic.clone(),
+                outcome,
+            })
+            .await;
+
+        // If finalization itself fails, the pending row remains reconcilable
+        // and we must fail open (no injectable planner output).
+        let finalized = match finalized {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(PlannerAttemptResult {
+                    outcome: PlannerOutcome::ProviderError,
+                    content: None,
+                    tokens_in: response.usage.input as i64,
+                    tokens_out: response.usage.output as i64,
+                    cache_read_tokens: response.usage.cache_read as i64,
+                    cache_write_tokens: response.usage.cache_write as i64,
+                    cost_usd: None,
+                    diagnostic: Some(format!("ledger finalization failed: {e}")),
+                });
+            }
+        };
+
+        let planner_outcome = match outcome {
+            LlmCallOutcome::Success => PlannerOutcome::Success,
+            LlmCallOutcome::Timeout => PlannerOutcome::Timeout,
+            LlmCallOutcome::InvalidPayload => PlannerOutcome::InvalidPayload,
+            LlmCallOutcome::ProviderError => PlannerOutcome::ProviderError,
+        };
+
+        Ok(PlannerAttemptResult {
+            outcome: planner_outcome,
+            content: if planner_outcome == PlannerOutcome::Success {
+                Some(content_text)
+            } else {
+                None
+            },
+            tokens_in: finalized.tokens_in,
+            tokens_out: finalized.tokens_out,
+            cache_read_tokens: finalized.cache_read_tokens,
+            cache_write_tokens: finalized.cache_write_tokens,
+            cost_usd: finalized.cost_usd,
+            diagnostic: finalized.diagnostic.clone().or(diagnostic),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1953,6 +2277,75 @@ impl SupervisorServices for DirectServices {
     }
 }
 
+/// Result of collecting one attributed planner provider stream.  Keeping this
+/// boundary separate makes the host timeout contract testable without a live
+/// credential or network provider.
+struct CollectedPlannerStream {
+    response: LlmResponse,
+    outcome: PlannerOutcome,
+    diagnostic: Option<String>,
+    completed: bool,
+}
+
+/// Collect the entire provider stream under one deadline.  Usage is stored in
+/// the response as each event arrives, deliberately before awaiting the next
+/// event, so late errors and collection timeouts retain attempted usage.
+async fn collect_planner_stream(
+    provider: &dyn LlmProvider,
+    conversation: &Conversation,
+    tools: &[serde_json::Value],
+    tool_choice: Option<ToolChoice>,
+    timeout_ms: u64,
+) -> CollectedPlannerStream {
+    let mut response = LlmResponse {
+        content: Vec::new(),
+        thinking: String::new(),
+        usage: TokenUsage::default(),
+    };
+    let collection = async {
+        let mut stream = provider
+            .stream(conversation, tools, tool_choice)
+            .await
+            .map_err(|e| format!("provider stream init failed: {e}"))?;
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(StreamEvent::Delta(block)) => response.content.push(block),
+                Ok(StreamEvent::Thinking(thinking)) => response.thinking.push_str(&thinking),
+                Ok(StreamEvent::Usage(usage)) => response.usage = usage,
+                Ok(StreamEvent::Done) => break,
+                Err(error) => return Err(format!("provider stream error: {error}")),
+            }
+        }
+        Ok::<(), String>(())
+    };
+
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms.max(1)),
+        collection,
+    )
+    .await
+    {
+        Ok(Ok(())) => CollectedPlannerStream {
+            response,
+            outcome: PlannerOutcome::Success,
+            diagnostic: None,
+            completed: true,
+        },
+        Ok(Err(error)) => CollectedPlannerStream {
+            response,
+            outcome: PlannerOutcome::ProviderError,
+            diagnostic: Some(error),
+            completed: false,
+        },
+        Err(_) => CollectedPlannerStream {
+            response,
+            outcome: PlannerOutcome::Timeout,
+            diagnostic: Some(format!("planner call timed out after {timeout_ms}ms")),
+            completed: false,
+        },
+    }
+}
+
 /// Intern the wire form's `(entity_type, action)` back into the static-str
 /// shape `DjinnEventEnvelope` expects.
 ///
@@ -2055,8 +2448,17 @@ pub(crate) fn determine_cost_basis(
 
 #[cfg(test)]
 mod tests {
-    use super::{CostBasisHint, SerializableDjinnEvent, determine_cost_basis, intern_envelope};
+    use super::{
+        CostBasisHint, DirectServices, PlannerAttemptLedger, PlannerLedgerCreate,
+        PlannerLedgerFinalize, PlannerLedgerFinalized, SerializableDjinnEvent,
+        determine_cost_basis, intern_envelope,
+    };
+    use async_trait::async_trait;
     use djinn_core::models::Pricing;
+    use djinn_provider::message::{ContentBlock, Conversation};
+    use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage, ToolChoice};
+    use futures::StreamExt;
+    use std::pin::Pin;
 
     /// Helper: a non-zero pricing snapshot (used to represent a priced model).
     fn priced() -> Pricing {
@@ -2416,5 +2818,295 @@ mod tests {
             assert_eq!(err_et, et, "drift error entity_type must match input");
             assert_eq!(err_ac, ac, "drift error action must match input");
         }
+    }
+
+    struct PlannerStreamProvider {
+        events: Vec<Result<StreamEvent, String>>,
+        hang_after: bool,
+    }
+
+    impl LlmProvider for PlannerStreamProvider {
+        fn name(&self) -> &str {
+            "planner-stream-test"
+        }
+        fn stream<'a>(
+            &'a self,
+            _: &'a Conversation,
+            _: &'a [serde_json::Value],
+            _: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            Pin<
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let events = self
+                .events
+                .clone()
+                .into_iter()
+                .map(|event| event.map_err(anyhow::Error::msg))
+                .collect::<Vec<_>>();
+            let hang_after = self.hang_after;
+            Box::pin(async move {
+                let stream: Pin<
+                    Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                > = if hang_after {
+                    Box::pin(futures::stream::iter(events).chain(futures::stream::pending()))
+                } else {
+                    Box::pin(futures::stream::iter(events))
+                };
+                Ok(stream)
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct TestPlannerLedger {
+        created: std::sync::Mutex<Vec<PlannerLedgerCreate>>,
+        finalized: std::sync::Mutex<Vec<PlannerLedgerFinalize>>,
+        fail_finalize: bool,
+    }
+
+    #[async_trait]
+    impl PlannerAttemptLedger for TestPlannerLedger {
+        async fn create(&self, params: PlannerLedgerCreate) -> Result<(), String> {
+            self.created.lock().unwrap().push(params);
+            Ok(())
+        }
+        async fn finalize(
+            &self,
+            params: PlannerLedgerFinalize,
+        ) -> Result<PlannerLedgerFinalized, String> {
+            if self.fail_finalize {
+                return Err("forced finalization failure".into());
+            }
+            self.finalized.lock().unwrap().push(params.clone());
+            Ok(PlannerLedgerFinalized {
+                tokens_in: params.tokens_in,
+                tokens_out: params.tokens_out,
+                cache_read_tokens: params.cache_read_tokens,
+                cache_write_tokens: params.cache_write_tokens,
+                cost_usd: Some(0.001),
+                diagnostic: params.diagnostic,
+            })
+        }
+    }
+    fn request(timeout_ms: u64) -> djinn_supervisor::services::wire::AttributedPlannerRequest {
+        djinn_supervisor::services::wire::AttributedPlannerRequest {
+            project_id: "project-1".into(),
+            task_id: "task-1".into(),
+            task_run_id: "run-1".into(),
+            session_id: "session-1".into(),
+            created_by_user_id: "creator-1".into(),
+            operation: "memory_intent_planner".into(),
+            prompt_id: "memory-intent-planner-v1".into(),
+            conversation: serde_json::to_string(&Conversation::default()).unwrap(),
+            tools: "[]".into(),
+            tool_choice: None,
+            max_tokens: 100,
+            timeout_ms,
+        }
+    }
+    async fn run(
+        events: Vec<Result<StreamEvent, String>>,
+        hang_after: bool,
+        fail_finalize: bool,
+        timeout_ms: u64,
+    ) -> (
+        djinn_supervisor::services::wire::PlannerAttemptResult,
+        std::sync::Arc<TestPlannerLedger>,
+    ) {
+        use djinn_supervisor::SupervisorServices;
+        let provider = std::sync::Arc::new(PlannerStreamProvider { events, hang_after });
+        let ledger = std::sync::Arc::new(TestPlannerLedger {
+            fail_finalize,
+            ..Default::default()
+        });
+        let ctx = crate::test_helpers::agent_context_from_db(
+            crate::test_helpers::create_test_db(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let services = DirectServices::with_planner_test_seam(ctx, provider, ledger.clone());
+        (
+            SupervisorServices::plan_memory_intents(&services, request(timeout_ms))
+                .await
+                .unwrap(),
+            ledger,
+        )
+    }
+    fn usage() -> TokenUsage {
+        TokenUsage {
+            input: 11,
+            output: 7,
+            cache_read: 3,
+            cache_write: 2,
+            ..Default::default()
+        }
+    }
+    fn valid() -> ContentBlock {
+        ContentBlock::Text{text:r#"{"queries":[{"type":"pattern","query":"Retry backoff configuration prevents request storms"},{"type":"pitfall","query":"Session ownership errors leave attributed calls unfinalized"}]}"#.into()}
+    }
+    fn assert_final(l: &TestPlannerLedger, o: super::LlmCallOutcome) {
+        let f = l.finalized.lock().unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].outcome, o);
+        assert_eq!(
+            (
+                f[0].tokens_in,
+                f[0].tokens_out,
+                f[0].cache_read_tokens,
+                f[0].cache_write_tokens
+            ),
+            (11, 7, 3, 2)
+        );
+    }
+    #[tokio::test]
+    async fn planner_host_success_finalizes_usage_and_attribution() {
+        let (r, l) = run(
+            vec![
+                Ok(StreamEvent::Delta(valid())),
+                Ok(StreamEvent::Usage(usage())),
+                Ok(StreamEvent::Done),
+            ],
+            false,
+            false,
+            100,
+        )
+        .await;
+        assert_eq!(
+            r.outcome,
+            djinn_supervisor::services::wire::PlannerOutcome::Success
+        );
+        assert!(r.content.is_some());
+        let c = l.created.lock().unwrap();
+        assert_eq!(c.len(), 1);
+        assert_eq!(
+            (
+                &c[0].project_id.as_str(),
+                &c[0].task_id.as_str(),
+                &c[0].task_run_id.as_str(),
+                &c[0].session_id.as_str(),
+                &c[0].created_by_user_id.as_str()
+            ),
+            (
+                &"project-1",
+                &"task-1",
+                &"run-1",
+                &"session-1",
+                &"creator-1"
+            )
+        );
+        drop(c);
+        assert_final(&l, super::LlmCallOutcome::Success);
+    }
+    #[tokio::test]
+    async fn planner_host_timeout_finalizes_retained_usage() {
+        let (r, l) = run(vec![Ok(StreamEvent::Usage(usage()))], true, false, 5).await;
+        assert_eq!(
+            r.outcome,
+            djinn_supervisor::services::wire::PlannerOutcome::Timeout
+        );
+        assert!(r.content.is_none());
+        assert_final(&l, super::LlmCallOutcome::Timeout);
+    }
+    #[tokio::test]
+    async fn planner_host_invalid_payload_finalizes_retained_usage() {
+        let bad = ContentBlock::Text {
+            text: r#"{"queries":[{"type":"pattern","query":"Find information about retry configuration"},{"type":"reference","query":"Retry configuration controls exponential backoff limits"}]}"#.into(),
+        };
+        let (r, l) = run(
+            vec![
+                Ok(StreamEvent::Delta(bad)),
+                Ok(StreamEvent::Usage(usage())),
+                Ok(StreamEvent::Done),
+            ],
+            false,
+            false,
+            100,
+        )
+        .await;
+        assert_eq!(
+            r.outcome,
+            djinn_supervisor::services::wire::PlannerOutcome::InvalidPayload
+        );
+        assert!(r.content.is_none());
+        assert_final(&l, super::LlmCallOutcome::InvalidPayload);
+    }
+    #[tokio::test]
+    async fn planner_host_validates_completed_payload_despite_other_operation() {
+        use djinn_supervisor::SupervisorServices;
+
+        let provider = std::sync::Arc::new(PlannerStreamProvider {
+            events: vec![
+                Ok(StreamEvent::Delta(ContentBlock::Text {
+                    text: "not JSON".into(),
+                })),
+                Ok(StreamEvent::Usage(usage())),
+                Ok(StreamEvent::Done),
+            ],
+            hang_after: false,
+        });
+        let ledger = std::sync::Arc::new(TestPlannerLedger::default());
+        let ctx = crate::test_helpers::agent_context_from_db(
+            crate::test_helpers::create_test_db(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let services = DirectServices::with_planner_test_seam(ctx, provider, ledger.clone());
+        let mut attributed_request = request(100);
+        attributed_request.operation = "other".into();
+
+        let result = SupervisorServices::plan_memory_intents(&services, attributed_request)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.outcome,
+            djinn_supervisor::services::wire::PlannerOutcome::InvalidPayload
+        );
+        assert!(result.content.is_none());
+        assert_final(&ledger, super::LlmCallOutcome::InvalidPayload);
+    }
+    #[tokio::test]
+    async fn planner_host_late_oversized_error_finalizes_retained_usage() {
+        let (r, l) = run(
+            vec![Ok(StreamEvent::Usage(usage())), Err("x".repeat(2000))],
+            false,
+            false,
+            100,
+        )
+        .await;
+        assert_eq!(
+            r.outcome,
+            djinn_supervisor::services::wire::PlannerOutcome::ProviderError
+        );
+        assert!(r.content.is_none());
+        assert_final(&l, super::LlmCallOutcome::ProviderError);
+    }
+    #[tokio::test]
+    async fn planner_host_finalization_failure_suppresses_valid_content_and_leaves_pending() {
+        let (r, l) = run(
+            vec![
+                Ok(StreamEvent::Delta(valid())),
+                Ok(StreamEvent::Usage(usage())),
+                Ok(StreamEvent::Done),
+            ],
+            false,
+            true,
+            100,
+        )
+        .await;
+        assert_eq!(
+            r.outcome,
+            djinn_supervisor::services::wire::PlannerOutcome::ProviderError
+        );
+        assert!(r.content.is_none());
+        assert_eq!(l.created.lock().unwrap().len(), 1);
+        assert!(l.finalized.lock().unwrap().is_empty());
     }
 }

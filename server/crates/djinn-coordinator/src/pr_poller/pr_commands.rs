@@ -279,6 +279,12 @@ impl CoordinatorActor {
         // `actor_role="verification"` (CI failure logging) surfaced to the
         // worker via `recent_feedback`, naming the failed
         // workflow/job/step plus `ci_job_log` hints to read the real log.
+        //
+        // Captured from the mq-lane upsert below so the queue-loop strike can
+        // decide (after this enrichment) whether to park+escalate instead of
+        // reopening for another blind rework round.
+        let mut mq_strike_count: i64 = 0;
+        let mut mq_escalation_checks: Vec<String> = Vec::new();
         let pr_marker = format!("pr-{pull_number}-");
         match gh_client
             .list_workflow_runs_for_event(owner, repo, "merge_group", 50)
@@ -361,18 +367,20 @@ impl CoordinatorActor {
                                     })
                                     .await
                                 {
-                                    Ok(snap) => tracing::info!(
-                                        task_id = %task_short_id,
-                                        pr = pull_number,
-                                        run_id = run.id,
-                                        fingerprint = %mq_fingerprint,
-                                        mq_same_signature_count = snap
-                                            .merge_queue
-                                            .as_ref()
-                                            .map(|l| l.same_signature_count)
-                                            .unwrap_or(0),
-                                        "PR poller: recorded merge-queue failure lane on CI snapshot"
-                                    ),
+                                    Ok(snap) => {
+                                        if let Some(lane) = snap.merge_queue.as_ref() {
+                                            mq_strike_count = lane.same_signature_count;
+                                            mq_escalation_checks = lane.failed_check_names.clone();
+                                        }
+                                        tracing::info!(
+                                            task_id = %task_short_id,
+                                            pr = pull_number,
+                                            run_id = run.id,
+                                            fingerprint = %mq_fingerprint,
+                                            mq_same_signature_count = mq_strike_count,
+                                            "PR poller: recorded merge-queue failure lane on CI snapshot"
+                                        );
+                                    }
                                     Err(e) => tracing::warn!(
                                         task_id = %task_short_id,
                                         pr = pull_number,
@@ -403,6 +411,50 @@ impl CoordinatorActor {
                 error = %e,
                 "PR poller: failed to list merge_group runs for feedback enrichment"
             ),
+        }
+
+        // Queue-loop strike: once the SAME merge-group failure signature has
+        // been observed `MQ_SAME_SIGNATURE_THRESHOLD` times in a row, reopening
+        // for yet another blind rework round is demonstrably not clearing the
+        // queue rejection. Park the source and hand it to the Planner remediation
+        // ladder instead. Below the threshold the historical reopen behavior is
+        // unchanged. The Task is re-read AFTER the mq-lane upsert so its
+        // `ci_mq_*` projection carries the fresh lane facts that
+        // `escalate_ci_failure_and_park` surfaces in the escalation text.
+        if mq_rejection_requires_park(mq_strike_count) {
+            match self.task_repo().get(task_id).await {
+                Ok(Some(task)) => {
+                    let checks_display = if mq_escalation_checks.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        mq_escalation_checks.join(", ")
+                    };
+                    let escalation_reason = format!(
+                        "Merge queue repeatedly rejected PR #{pull_number}: \
+                         {mq_strike_count} consecutive same-signature queue rejections \
+                         (merge-group failing checks: {checks_display}). Parking for \
+                         Planner remediation instead of another blind reopen."
+                    );
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        pr = pull_number,
+                        mq_same_signature_count = mq_strike_count,
+                        "PR poller: merge-queue same-signature threshold reached → parking + escalating instead of reopening"
+                    );
+                    self.escalate_ci_failure_and_park(&task, pr_url, &escalation_reason, &[])
+                        .await;
+                    return;
+                }
+                Ok(None) => tracing::warn!(
+                    task_id = %task_short_id,
+                    "PR poller: task vanished before merge-queue escalation; falling back to reopen"
+                ),
+                Err(e) => tracing::warn!(
+                    task_id = %task_short_id,
+                    error = %e,
+                    "PR poller: failed to load task for merge-queue escalation; falling back to reopen"
+                ),
+            }
         }
 
         let transition_reason =

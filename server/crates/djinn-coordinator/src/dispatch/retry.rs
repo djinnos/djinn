@@ -1816,11 +1816,20 @@ impl CoordinatorActor {
         )
         .await;
 
-        let enriched_reason = match ci_failure_sections {
-            Some(sections) if !sections.is_empty() => {
-                format!("{reason}\n\n**CI Failure Details:**\n{sections}")
-            }
-            _ => reason.to_string(),
+        // Append the merge-queue lane facts (run id, failing checks,
+        // same-signature count) when the task's CI snapshot carries a
+        // merge-queue rejection, so the Planner dossier explains why a PR with a
+        // green head keeps getting dequeued.
+        let mq_section = crate::pr_poller::merge_queue_lane_escalation_section(task);
+        let combined_sections = match (ci_failure_sections, mq_section.as_deref()) {
+            (Some(sections), Some(mq)) if !sections.is_empty() => Some(format!("{sections}\n{mq}")),
+            (Some(sections), _) if !sections.is_empty() => Some(sections.to_string()),
+            (_, Some(mq)) => Some(mq.to_string()),
+            _ => None,
+        };
+        let enriched_reason = match combined_sections {
+            Some(sections) => format!("{reason}\n\n**CI Failure Details:**\n{sections}"),
+            None => reason.to_string(),
         };
         self.dispatch_planner_escalation(&task.id, &enriched_reason, &task.project_id)
             .await;

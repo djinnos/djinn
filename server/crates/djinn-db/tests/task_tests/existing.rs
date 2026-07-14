@@ -517,3 +517,66 @@ async fn delete_task_emits_event() {
     assert_eq!(envelope.action, "deleted");
     assert_eq!(envelope.payload["id"].as_str().unwrap(), task.id);
 }
+
+/// The task-read projection promotes the merge-queue (`mq_*`) columns of the
+/// current-head CI snapshot into the flat `Task.ci_mq_*` fields, so DTO
+/// builders can reconstruct the merge-queue lane. Guards PR-B's projection
+/// wiring in `queries.rs`/`reads.rs` end-to-end against Postgres.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_read_projection_surfaces_merge_queue_lane_columns() {
+    use djinn_core::models::TaskPrCiSnapshotMqLaneInput;
+
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db, event_bus_for(&tx));
+
+    let task = repo
+        .create(&epic.id, "MQ", "", "", "task", 0, "", Some("open"))
+        .await
+        .unwrap();
+
+    repo.upsert_ci_snapshot_mq_lane(TaskPrCiSnapshotMqLaneInput {
+        task_id: task.id.clone(),
+        pr_number: 7,
+        state: "dequeued_failure".to_string(),
+        run_id: Some(4242),
+        head_sha: Some("mq-head-777".to_string()),
+        failed_check_names: vec!["Integration Tests".to_string(), "Server Tests".to_string()],
+        failure_fingerprint: Some("mq-fp-777".to_string()),
+    })
+    .await
+    .unwrap();
+
+    // Read the task back through the single-task projection (task_show path).
+    let fetched = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(fetched.ci_mq_state.as_deref(), Some("dequeued_failure"));
+    assert_eq!(fetched.ci_mq_run_id, Some(4242));
+    assert_eq!(fetched.ci_mq_head_sha.as_deref(), Some("mq-head-777"));
+    assert_eq!(
+        fetched.ci_mq_failure_fingerprint.as_deref(),
+        Some("mq-fp-777")
+    );
+    assert_eq!(fetched.ci_mq_same_signature_count, Some(1));
+    assert!(fetched.ci_mq_first_seen_at.is_some());
+    assert!(fetched.ci_mq_last_seen_at.is_some());
+    let names: Vec<String> =
+        serde_json::from_str(fetched.ci_mq_failed_check_names.as_deref().unwrap()).unwrap();
+    assert_eq!(names, vec!["Integration Tests", "Server Tests"]);
+
+    // Read through the list projection (task_list path) too.
+    let listed = repo
+        .list_filtered(ListQuery {
+            project_id: Some(epic.project_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let listed_task = listed
+        .tasks
+        .iter()
+        .find(|t| t.id == task.id)
+        .expect("task present in list projection");
+    assert_eq!(listed_task.ci_mq_state.as_deref(), Some("dequeued_failure"));
+    assert_eq!(listed_task.ci_mq_run_id, Some(4242));
+}
