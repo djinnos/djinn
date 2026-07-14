@@ -1,4 +1,6 @@
-use super::error_handling::{supports_tool_choice_required, BudgetWindDownIgnored};
+use super::error_handling::{
+    empty_turn_backoff, supports_tool_choice_required, BudgetWindDownIgnored,
+};
 // djinn:allow-oversize — integration tests for the entire reply_loop module.
 // The file already exceeded the 1500-line / 51.2KB size-guard thresholds
 // before the rrdr soft-budget converge reminder tests were added; the marker
@@ -5277,12 +5279,15 @@ async fn provider_phase_script_counts_empty_assistant_backoff_not_local_time() {
     let run = harness.run_with_model(&provider, &tools, "openai/gpt-5.4");
     tokio::pin!(run);
     tokio::task::yield_now().await;
-    // Advance the real empty-assistant provider-loop backoff on both clocks.
-    clock.advance_mono(Duration::from_secs(1));
-    tokio::time::advance(Duration::from_secs(1)).await;
+    // Advance the complete production empty-assistant provider-loop backoff on
+    // both clocks. The phase stays provider-owned for this real sleep, so the
+    // exact delta below includes all three backoff seconds.
+    let backoff = empty_turn_backoff(1);
+    clock.advance_mono(backoff);
+    tokio::time::advance(backoff).await;
     assert!(run.await.0.is_ok());
     let after = render().expect("render phase metrics");
-    assert_eq!(phase_delta(&before, &after, "provider_wait"), 12);
+    assert_eq!(phase_delta(&before, &after, "provider_wait"), 14);
     assert_eq!(phase_delta(&before, &after, "tool_execution"), 0);
 }
 
