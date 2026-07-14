@@ -4,7 +4,7 @@
 mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
-use djinn_core::doctor::RETRIEVAL_ZERO_RESULT_NAME;
+use djinn_core::doctor::{RETRIEVAL_ZERO_RESULT_NAME, checks::retrieval::RetrievalHealthConfig};
 use djinn_db::repositories::retrieval_trace::{
     CreateRetrievalTraceParams, DEFAULT_CANDIDATE_CAP, RetrievalTraceEntryPoint,
     RetrievalTraceRepository,
@@ -133,5 +133,67 @@ async fn doctor_run_retrieval_check_persists_only_strictly_above_threshold() {
             finding.entity_ids["project_id"].as_str() != Some(equal.id.as_str())
         }),
         "equality at the threshold must not emit a finding"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn injected_retrieval_config_drives_memory_health_and_doctor_prefetch() {
+    // This deliberately differs from every default. The one config is injected
+    // through McpState::with_enrichment by the harness and both production MCP
+    // paths below must read that state-held value.
+    let config = RetrievalHealthConfig::new(72, 0.75, 7).expect("valid non-default config");
+    let db = djinn_db::Database::open_in_memory().expect("open test database");
+    let harness = McpTestHarness::from_db_with_retrieval_config(db, config);
+    djinn_db::test_support::ensure_doctor_findings_schema(harness.db()).await;
+    let project = common::create_test_project(harness.db()).await;
+    let at_threshold = common::create_test_project(harness.db()).await;
+    let traces = RetrievalTraceRepository::new(harness.db().clone());
+
+    // Eight queries clears the injected floor of seven but would be suppressed
+    // by the default floor. Its 7/8 zero-result rate clears the injected 0.75
+    // threshold. The second project's 6/8 rate equals 0.75 and is suppressed;
+    // it would be a finding under the default 0.50 threshold.
+    insert_traces(&traces, &project.id, 7, 1).await;
+    insert_traces(&traces, &at_threshold.id, 6, 2).await;
+
+    let health = harness
+        .call_tool("memory_health", json!({"project": project.slug()}))
+        .await
+        .expect("dispatch memory_health");
+    assert_eq!(health["retrieval"]["config_window_hours"], 72);
+    assert!(health["retrieval"]["persisted"]["window_start"].is_string());
+    assert!(health["retrieval"]["persisted"]["window_end"].is_string());
+
+    let response = harness
+        .call_tool(
+            "doctor_run",
+            json!({"check_names": [RETRIEVAL_ZERO_RESULT_NAME]}),
+        )
+        .await
+        .expect("dispatch doctor_run");
+    let findings = response["results"][0]["findings"]
+        .as_array()
+        .expect("retrieval finding entries");
+    assert_eq!(findings.len(), 1, "injected floor must permit the finding");
+
+    let finding_id = findings[0]["finding_id"]
+        .as_str()
+        .expect("persisted finding id");
+    let finding = DoctorFindingRepository::new(harness.db().clone())
+        .get(finding_id)
+        .await
+        .expect("read persisted finding")
+        .expect("finding exists");
+    let evidence = &finding.evidence;
+    assert_eq!(evidence["threshold"].as_f64(), Some(0.75));
+    assert_eq!(evidence["floor"].as_i64(), Some(7));
+    assert_eq!(evidence["numerator"].as_i64(), Some(7));
+    assert_eq!(evidence["denominator"].as_i64(), Some(8));
+    assert!(evidence["window"]["start"].is_string());
+    assert!(evidence["window"]["end"].is_string());
+    assert!(
+        finding.detail.contains("last 72 hours"),
+        "Doctor must build the check with the injected window: {}",
+        finding.detail
     );
 }
