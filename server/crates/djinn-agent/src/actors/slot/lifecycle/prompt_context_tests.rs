@@ -1429,11 +1429,14 @@ async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
             "## Related repositories (read-only)",
         ],
     );
+    // Role extensions are trusted platform instructions, so the diagnostics
+    // insertion boundary places them before the task context (which includes
+    // the resume section), followed by the existing skills/read-source tails.
     assert_ordered(
         &ctx.system_prompt,
         &[
-            "## Resume Context",
             "Custom extension.",
+            "## Resume Context",
             "## Available Skills",
             "## Related repositories (read-only)",
         ],
