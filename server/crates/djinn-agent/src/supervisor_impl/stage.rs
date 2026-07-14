@@ -835,6 +835,26 @@ pub(crate) async fn execute_stage(
         }
     };
 
+    let _ = services
+        .report_stage_step(djinn_runtime::stage_step::SESSION_CREATE)
+        .await;
+    let session_record = services
+        .create_session(
+            djinn_supervisor::services::SerializableCreateSessionParams {
+                project_id: task.project_id.clone(),
+                task_id: Some(task.id.clone()),
+                model: model_id.clone(),
+                agent_type: runtime_role_name.to_string(),
+                metadata_json: None,
+                task_run_id: Some(task_run_id.to_string()),
+                cost_basis_hint: None,
+                billing_source: None,
+            },
+        )
+        .await
+        .map_err(StageError::SessionCreate)?;
+    let session_id = session_record.id.clone();
+
     // ── MCP + skills ─────────────────────────────────────────────────────────
     // `runtime_role` drives resolution so specialists can override the base
     // role's MCP/skill defaults.  `role_mcp_servers` carries the DB row's
@@ -853,9 +873,13 @@ pub(crate) async fn execute_stage(
         resolved_skills,
         native_skill_names: _native_skill_names,
         mcp_server_instructions,
+        extension_diagnostics: _extension_diagnostics,
     } = resolve_mcp_and_skills(
         worktree_path,
         runtime_role.as_ref(),
+        &task.project_id,
+        &task.id,
+        &session_id,
         &task.short_id,
         role_mcp_servers.as_deref(),
         &role_skills,
@@ -970,47 +994,6 @@ pub(crate) async fn execute_stage(
     })
     .await;
 
-    // ── Create the session record linked to the task-run ─────────────────────
-    // Phase 6c routes session creation through `SupervisorServices` so the
-    // in-Pod worker never opens its own DB connection.  Host-side
-    // `DirectServices` delegates to `SessionRepository::create` verbatim.
-    //
-    // Derive the billing classification from the RESOLVED CREDENTIAL (not just
-    // model-id substrings) so `DirectServices::create_session` books
-    // `sessions.cost_basis` on explicit signal: a session on `openai/gpt-5.5`
-    // backed by a ChatGPT/Codex PLAN OAuth credential is a $0-spend plan even
-    // though its model id has no `codex` marker. OAuth transport ALONE does not
-    // imply a subscription — see `oauth_is_subscription_plan`. The catalog
-    // string rules stay as an additional signal (a `zai-coding-plan/...` model
-    // remains projected); the legacy fallback covers `hint = None`.
-    let billing_signal = resolved.as_ref().map(|r| {
-        let credential_is_oauth = matches!(
-            r.provider_credential,
-            Some(crate::actors::slot::helpers::ProviderCredential::OAuthConfig(_))
-        );
-        derive_billing_signal(&r.catalog_provider_id, &r.model_name, credential_is_oauth)
-    });
-    let cost_basis_hint = billing_signal.map(|(hint, _)| hint);
-    let billing_source = billing_signal.map(|(_, source)| source);
-    let _ = services
-        .report_stage_step(djinn_runtime::stage_step::SESSION_CREATE)
-        .await;
-    let session_record = services
-        .create_session(
-            djinn_supervisor::services::SerializableCreateSessionParams {
-                project_id: task.project_id.clone(),
-                task_id: Some(task.id.clone()),
-                model: model_id.clone(),
-                agent_type: runtime_role_name.to_string(),
-                metadata_json: None,
-                task_run_id: Some(task_run_id.to_string()),
-                cost_basis_hint,
-                billing_source,
-            },
-        )
-        .await
-        .map_err(StageError::SessionCreate)?;
-    let session_id = session_record.id.clone();
     // 7ry9: Emit session-start structured telemetry with the provider-facing
     // prompt hash. The hash is already computed from the final truncated
     // system prompt; no prompt contents are emitted.
