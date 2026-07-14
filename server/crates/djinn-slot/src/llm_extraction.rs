@@ -1610,6 +1610,12 @@ async fn process_extracted_note(
     match assessment.outcome {
         ExtractionOutcome::MergeIntoExisting => {
             if let Some(candidate_id) = novelty.existing_note_id.as_deref() {
+                // Quality accounting describes the semantic dedup decision, not
+                // whether its canonical content/confidence mutation committed.
+                // Keep these counters independent from the durable-output count
+                // returned below; terminal skipped routing uses only that count.
+                extraction_quality.novelty_skipped += 1;
+                extraction_quality.merged += 1;
                 let durable_outputs = merge_duplicate_evidence(
                     extraction_context,
                     note,
@@ -1646,8 +1652,6 @@ async fn process_extracted_note(
                         "llm_extraction: already-known decision completed with evidence merge"
                     );
                 }
-                extraction_quality.novelty_skipped += 1;
-                extraction_quality.merged += 1;
                 return durable_outputs;
             }
             return 0;
@@ -3670,7 +3674,10 @@ mod evidence_merge_regression_tests {
         }
     }
 
-    async fn finalize_test_output(repo: &dyn ExtractionNoteRepository, durable_output_count: usize) {
+    async fn finalize_test_output(
+        repo: &dyn ExtractionNoteRepository,
+        durable_output_count: usize,
+    ) {
         finalize_extraction_output(
             repo,
             "project-1",
@@ -3791,7 +3798,10 @@ mod evidence_merge_regression_tests {
         finalize_test_output(&repo, durable).await;
         let revisions = repo.revisions();
         assert_eq!(revisions.len(), 1);
-        assert_eq!(revisions[0].mutation.event_kind, NoteRevisionEventKind::ExtractionSkipped);
+        assert_eq!(
+            revisions[0].mutation.event_kind,
+            NoteRevisionEventKind::ExtractionSkipped
+        );
         assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
     }
 
@@ -3805,13 +3815,17 @@ mod evidence_merge_regression_tests {
         let repo = RecordingExtractionRepository::with_existing(existing);
         let context = test_context(&repo, &provider);
         let mut quality = ExtractionQuality::default();
-        let durable = process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+        let durable =
+            process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
         assert_eq!(durable, 0);
 
         finalize_test_output(&repo, durable).await;
         let revisions = repo.revisions();
         assert_eq!(revisions.len(), 1);
-        assert_eq!(revisions[0].mutation.event_kind, NoteRevisionEventKind::ExtractionSkipped);
+        assert_eq!(
+            revisions[0].mutation.event_kind,
+            NoteRevisionEventKind::ExtractionSkipped
+        );
         assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
     }
 
@@ -3823,30 +3837,51 @@ mod evidence_merge_regression_tests {
         assert!(persist_working_spec(&context, &test_extracted_case(), &["test reason"]).await);
         repo.clear_revisions(); // Models a later run whose working spec already exists.
 
-        let changed = persist_working_spec(&context, &test_extracted_case(), &["test reason"]).await;
+        let changed =
+            persist_working_spec(&context, &test_extracted_case(), &["test reason"]).await;
         assert!(!changed);
         finalize_test_output(&repo, usize::from(changed)).await;
         let revisions = repo.revisions();
-        assert_eq!(revisions.len(), 2, "the no-op mutation and terminal skip are recorded");
+        assert_eq!(
+            revisions.len(),
+            2,
+            "the no-op mutation and terminal skip are recorded"
+        );
         assert!(!revisions[0].changed);
-        assert_eq!(revisions[0].mutation.event_kind, NoteRevisionEventKind::Updated);
-        assert_eq!(revisions[1].mutation.event_kind, NoteRevisionEventKind::ExtractionSkipped);
+        assert_eq!(
+            revisions[0].mutation.event_kind,
+            NoteRevisionEventKind::Updated
+        );
+        assert_eq!(
+            revisions[1].mutation.event_kind,
+            NoteRevisionEventKind::ExtractionSkipped
+        );
         assert_extraction_identity(&revisions[1], EXTRACTION_SKIPPED_REASON);
     }
 
     #[tokio::test]
     async fn terminal_mutation_failure_does_not_fabricate_output_and_records_skip() {
         let provider = ScriptedProvider::new(vec![r#"{"decision":"novel"}"#.to_owned()]);
-        let repo = RecordingExtractionRepository::empty_with_mutation_failure(NoteRevisionEventKind::Created);
+        let repo = RecordingExtractionRepository::empty_with_mutation_failure(
+            NoteRevisionEventKind::Created,
+        );
         let context = test_context(&repo, &provider);
         let mut quality = ExtractionQuality::default();
-        let durable = process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+        let durable =
+            process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
         assert_eq!(durable, 0);
 
         finalize_test_output(&repo, durable).await;
         let revisions = repo.revisions();
-        assert_eq!(revisions.len(), 1, "failed create must not fabricate a revision");
-        assert_eq!(revisions[0].mutation.event_kind, NoteRevisionEventKind::ExtractionSkipped);
+        assert_eq!(
+            revisions.len(),
+            1,
+            "failed create must not fabricate a revision"
+        );
+        assert_eq!(
+            revisions[0].mutation.event_kind,
+            NoteRevisionEventKind::ExtractionSkipped
+        );
         assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
     }
 
@@ -3863,8 +3898,14 @@ mod evidence_merge_regression_tests {
 
         let revisions = repo.revisions();
         assert_eq!(revisions.len(), 1);
-        assert_eq!(revisions[0].mutation.event_kind, NoteRevisionEventKind::Created);
-        assert_extraction_identity(&revisions[0], "created note from completed session extraction");
+        assert_eq!(
+            revisions[0].mutation.event_kind,
+            NoteRevisionEventKind::Created
+        );
+        assert_extraction_identity(
+            &revisions[0],
+            "created note from completed session extraction",
+        );
     }
 
     #[tokio::test]
@@ -3989,8 +4030,8 @@ mod evidence_merge_regression_tests {
 
         assert_eq!(quality.evidence_merged, 0);
         assert_eq!(quality.boost_fallback, 1);
-        assert_eq!(quality.novelty_skipped, 0);
-        assert_eq!(quality.merged, 0);
+        assert_eq!(quality.novelty_skipped, 1);
+        assert_eq!(quality.merged, 1);
         let revisions = repo.revisions();
         assert_eq!(
             revisions
@@ -4041,8 +4082,8 @@ mod evidence_merge_regression_tests {
 
         assert_eq!(quality.evidence_merged, 0);
         assert_eq!(quality.boost_fallback, 1);
-        assert_eq!(quality.novelty_skipped, 0);
-        assert_eq!(quality.merged, 0);
+        assert_eq!(quality.novelty_skipped, 1);
+        assert_eq!(quality.merged, 1);
         let revisions = repo.revisions();
         assert_eq!(
             revisions
