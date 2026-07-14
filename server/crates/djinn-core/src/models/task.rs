@@ -176,6 +176,45 @@ pub struct TaskPrCiSnapshot {
     /// Base SHA of the last remediation attempt for this failing signature.
     /// `None` when no remediation has been attempted yet.
     pub last_remediation_base_sha: Option<String>,
+    /// Merge-queue (`merge_group`) failure lane. Written ONLY by the PR-poller
+    /// dequeue path — never by the PR-head writer — and cleared when a new PR
+    /// head is observed. `None` when no merge-queue failure has been recorded
+    /// for the current head. See [`MergeQueueLane`].
+    pub merge_queue: Option<MergeQueueLane>,
+}
+
+/// The merge-queue (`merge_group`) failure lane of a [`TaskPrCiSnapshot`].
+///
+/// GitHub's merge queue runs the heavy CI stages (unit/integration) on the
+/// ephemeral `merge_group` ref, not on the PR head. A PR head whose own checks
+/// are green can still be rejected by the queue. The PR poller discovers these
+/// rejections at dequeue time and records them here so the durable snapshot
+/// reflects the queue verdict and merge-group failures get their own failure
+/// fingerprint / same-signature counting (independent of the PR-head lane).
+///
+/// This lane is populated from the flat `mq_*` columns of
+/// `task_pr_ci_snapshots`; it is `Some` only when a merge-queue state has been
+/// recorded.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeQueueLane {
+    /// Lane state, e.g. `"dequeued_failure"`.
+    pub state: String,
+    /// The `merge_group` Actions run id that failed, when known.
+    pub run_id: Option<i64>,
+    /// The `head_sha` of the failed merge-group run (the ephemeral queue ref
+    /// head), when known.
+    pub head_sha: Option<String>,
+    /// Names of the merge-group check runs that failed.
+    pub failed_check_names: Vec<String>,
+    /// Stable fingerprint of the merge-group failure signature.
+    pub failure_fingerprint: Option<String>,
+    /// How many consecutive dequeue observations carried the same
+    /// `failure_fingerprint` in this lane.
+    pub same_signature_count: i64,
+    /// ISO-8601 timestamp when this merge-queue lane state was first observed.
+    pub first_seen_at: Option<String>,
+    /// ISO-8601 timestamp when this merge-queue lane state was last observed.
+    pub last_seen_at: Option<String>,
 }
 
 /// Input shape for creating or upserting a [`TaskPrCiSnapshot`].
@@ -193,6 +232,24 @@ pub struct TaskPrCiSnapshotInput {
     pub failure_fingerprint: Option<String>,
     pub same_signature_count: i64,
     pub last_remediation_base_sha: Option<String>,
+}
+
+/// Input shape for upserting ONLY the merge-queue lane of a
+/// [`TaskPrCiSnapshot`] (the `mq_*` columns).
+///
+/// Written exclusively by the PR-poller dequeue path. Per-lane same-signature
+/// counting and first/last-seen timestamps are resolved by the repository
+/// layer, so callers supply only the observed fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskPrCiSnapshotMqLaneInput {
+    pub task_id: String,
+    pub pr_number: i64,
+    /// Lane state, e.g. `"dequeued_failure"`.
+    pub state: String,
+    pub run_id: Option<i64>,
+    pub head_sha: Option<String>,
+    pub failed_check_names: Vec<String>,
+    pub failure_fingerprint: Option<String>,
 }
 
 impl TaskPrCiSnapshot {
@@ -213,6 +270,7 @@ impl TaskPrCiSnapshot {
             last_seen_at,
             same_signature_count: input.same_signature_count,
             last_remediation_base_sha: input.last_remediation_base_sha,
+            merge_queue: None,
         }
     }
 }
@@ -1877,6 +1935,7 @@ mod tests {
             last_seen_at: "2026-06-29T12:00:00Z".to_owned(),
             same_signature_count: 0,
             last_remediation_base_sha: None,
+            merge_queue: None,
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let parsed: TaskPrCiSnapshot = serde_json::from_str(&json).unwrap();

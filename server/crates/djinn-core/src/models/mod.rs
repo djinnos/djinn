@@ -32,9 +32,10 @@ pub use session::{CostBasis, SessionRecord, SessionStatus};
 pub use session_message::SessionMessage;
 pub use settings::{DispatchPause, DispatchPauseScope, DispatchPauseState, DjinnSettings, Setting};
 pub use task::{
-    ActivityEntry, CiStatus, IssueType, PRIORITY_CRITICAL, ReopenClass, ReopenLedgerEntry, Task,
-    TaskPrCiSnapshot, TaskPrCiSnapshotInput, TaskStatus, TransitionAction, TransitionApply,
-    compute_transition, compute_transition_for_issue_type,
+    ActivityEntry, CiStatus, IssueType, MergeQueueLane, PRIORITY_CRITICAL, ReopenClass,
+    ReopenLedgerEntry, Task, TaskPrCiSnapshot, TaskPrCiSnapshotInput, TaskPrCiSnapshotMqLaneInput,
+    TaskStatus, TransitionAction, TransitionApply, compute_transition,
+    compute_transition_for_issue_type,
 };
 pub use task_attempt::{
     GuardDecision, GuardReason, LogTailMeta, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN,
