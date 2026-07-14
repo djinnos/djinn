@@ -385,10 +385,22 @@ pub trait WarmCompletionSink: Send + Sync {
 /// Abstraction used by [`K8sGraphWarmer`] to discover warm Jobs that are
 /// already running in the cluster (any process, not just this one). The
 /// in-process `in_flight` map only serialises triggers within a single
-/// server process; this trait provides the cross-process source of truth
-/// so two near-simultaneous triggers — e.g. a main-tip-advance from
-/// `mirror_fetcher` and a post-build kick from `image_build_watcher` —
-/// can never both dispatch a warm Job.
+/// server process; this trait extends visibility to Jobs created by other
+/// processes — e.g. a main-tip-advance from `mirror_fetcher` and a
+/// post-build kick from `image_build_watcher`.
+///
+/// **Scheduling optimisation, not a writer mutex.** Cluster listing is a
+/// *best-effort* coalescing optimisation: it reduces redundant warm dispatches
+/// when observation happens to be consistent, but it is NOT a single-writer
+/// guarantee. Two independent warmer processes can both observe "no in-flight
+/// Job" — because the API list is racy (a list/create race window), transient
+/// errors fail open (see [`WarmDispatch::cluster_has_in_flight_warm`]), or the
+/// predecessor Job has been deleted/evicted and 404s while its Pod is still
+/// terminating. When two overlapping warm Jobs do run concurrently, correctness
+/// comes from the worker's per-project PVC advisory lock
+/// (`/cache/cargo-target/.warm-locks/<project-id>.lock`, merged in task `t6g0`)
+/// which serialises prune/stamp/compile across both Pods and is released on
+/// normal completion or process death — NOT from this scheduler-level dedupe.
 ///
 /// Production uses [`KubeClientWarmJobLister`]; tests pass a
 /// programmable mock that records queries and returns a pre-seeded
@@ -491,9 +503,11 @@ struct WarmDispatch {
     dispatcher: Arc<dyn WarmJobDispatcher>,
     watcher: Arc<dyn WarmJobWatcher>,
     /// Cluster-side dedupe: lists non-terminal warm Jobs for a project so
-    /// triggers from any process see the in-flight Jobs created by any
-    /// other process (rolling update overlap, server restart mid-warm,
-    /// parallel pod). `None` only under the test/mock path that injects
+    /// triggers from any process can coalesce against in-flight Jobs created
+    /// by any other process (rolling update overlap, server restart mid-warm,
+    /// parallel pod). This is a *best-effort scheduling optimisation*, not a
+    /// single-writer guarantee — overlap is handled by the worker's PVC
+    /// advisory lock. `None` only under the test/mock path that injects
     /// a dispatcher without a live apiserver.
     lister: Option<Arc<dyn WarmJobLister>>,
     /// In-process hook fired after a warm Job succeeds so the server can
@@ -593,6 +607,17 @@ impl WarmDispatch {
     /// (test/mock path) — the in-process `in_flight` map remains the
     /// per-process backstop, and tests that need the cluster check
     /// inject a lister explicitly.
+    ///
+    /// **Optimisation, not a correctness mechanism.** This is a best-effort
+    /// coalescing check: it reduces redundant warm dispatches but does NOT
+    /// guarantee single-writer exclusivity. Two failure modes are inherent:
+    /// (1) a list/create race — both processes observe "empty" and both
+    /// dispatch; (2) the lister `Err` arm fails open (returns `false`) so the
+    /// cluster is never wedged by an apiserver hiccup. When overlap does
+    /// occur, the worker's per-project PVC advisory lock
+    /// (`/cache/cargo-target/.warm-locks/<project-id>.lock`, task `t6g0`)
+    /// serialises prune/stamp/compile across the overlapping Pods; this check
+    /// is never the correctness boundary.
     async fn cluster_has_in_flight_warm(&self, project_id: &str) -> bool {
         match self.lister.as_ref() {
             Some(lister) => match lister
@@ -618,6 +643,19 @@ impl WarmDispatch {
     /// image-readiness, in-process single-flight, cluster dedupe). This is the
     /// pre-debounce `trigger` body verbatim; the temporal debounce lives one
     /// level up in [`K8sGraphWarmer::trigger`].
+    ///
+    /// **Coalescing is an optimisation, not a writer mutex.** The in-process
+    /// `in_flight` map and the cluster-side lister reduce redundant dispatches,
+    /// but neither guarantees that at most one warm Job runs concurrently for a
+    /// project. Two independent warmer processes with separate `in_flight`
+    /// maps can both pass every gate (list/create race, lister fail-open, or
+    /// a deleted/evicted predecessor whose Pod is still terminating). Correct
+    /// behaviour under object-level overlap is guaranteed downstream by the
+    /// worker's per-project PVC advisory lock
+    /// (`/cache/cargo-target/.warm-locks/<project-id>.lock`, task `t6g0`),
+    /// which serialises prune/stamp/compile and is released on normal
+    /// completion or process death. This function does not — and must not —
+    /// attempt to provide single-writer semantics.
     async fn dispatch_warm_now(&self, project_id: &str) {
         {
             let guard = self.in_flight.lock().await;
@@ -657,14 +695,17 @@ impl WarmDispatch {
             return;
         };
 
-        // Cluster-side dedupe (cross-process source of truth). The in-process
-        // `in_flight` map above only serialises triggers within THIS server
-        // process; a Job running from a previous process incarnation (e.g.
-        // `kubectl rollout` overlap, server restart mid-warm) is invisible to
-        // the per-process map and would otherwise produce a duplicate Job —
-        // and the duplicate then lock-contends with the survivor on
-        // `/cache/cargo-target/<project>`, the exact symptom this check
-        // prevents. The check happens AFTER the freshness gate so a
+        // Cluster-side dedupe (best-effort coalescing optimisation). The
+        // in-process `in_flight` map above only serialises triggers within
+        // THIS server process; a Job running from a previous process
+        // incarnation (e.g. `kubectl rollout` overlap, server restart
+        // mid-warm) is invisible to the per-process map. This query reduces
+        // the likelihood of a duplicate Job — but it is NOT a single-writer
+        // guarantee: a list/create race or a lister fail-open can still let
+        // both processes dispatch. If that happens, the worker's per-project
+        // PVC advisory lock (`/cache/cargo-target/.warm-locks/<project-id>.lock`,
+        // task `t6g0`) serialises the overlapping Pods' prune/stamp/compile
+        // phases. The check happens AFTER the freshness gate so a
         // commit-aligned cache is still short-circuited without burning an
         // apiserver round-trip.
         if self.cluster_has_in_flight_warm(project_id).await {
@@ -695,13 +736,15 @@ impl WarmDispatch {
         // acquisition of the in-process slot, another process (rolling
         // update overlap, parallel pod) may have won and dispatched a
         // Job. Re-query the cluster under our claim and release the slot
-        // if a Job has appeared — this is the only place we can close
-        // the cross-process race, because the in-process map is per-
-        // process and the apiserver is the only thing all processes
-        // share. On fail-open (apiserver hiccup) we proceed; the
-        // worst-case is the pre-fix duplicate-warm behaviour, not a
-        // stuck cluster, and the freshness gate at the top of the next
-        // trigger will reclaim the dispatch on the following tick.
+        // if a Job has appeared. This *narrows* the list/create race
+        // window but does not eliminate it — a concurrent create after
+        // this re-check still produces object-level overlap, which is
+        // safe because the worker's PVC advisory lock (task `t6g0`)
+        // serialises prune/stamp/compile across the overlapping Pods.
+        // On fail-open (apiserver hiccup) we proceed; the worst-case is
+        // a duplicate warm, not a stuck cluster, and the freshness gate
+        // at the top of the next trigger will reclaim the dispatch on
+        // the following tick.
         if self.cluster_has_in_flight_warm(project_id).await {
             debug!(
                 project_id,
