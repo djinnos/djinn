@@ -73,8 +73,8 @@ use djinn_workspace::Workspace;
 use crate::AgentType;
 use crate::actors::slot::helpers::conflict_context_for_dispatch;
 use crate::actors::slot::helpers::{
-    build_provider_from_resolved, build_restamp_target, build_telemetry_meta_with_attribution,
-    default_base_url, resolved_needs_base_url,
+    ProviderCredential, build_provider_from_resolved, build_restamp_target,
+    build_telemetry_meta_with_attribution, default_base_url, resolved_needs_base_url,
 };
 use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use crate::actors::slot::lifecycle::model_resolution::{
@@ -248,7 +248,6 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
 /// (`is_subscription_provider` / `governable_subscription_for_model`) remain an
 /// additional signal so e.g. a `zai-coding-plan/...` API-key session is still
 /// `SubscriptionPlan`.
-#[cfg(test)]
 fn derive_billing_signal(
     provider_id: &str,
     model_name: &str,
@@ -291,7 +290,6 @@ fn derive_billing_signal(
 /// `openai` → `chatgpt_codex`), and its builtin `credential_class` is
 /// authoritative. A provider whose OAuth flow is NOT a subscription returns
 /// `false` — this is what keeps OAuth transport alone from implying a plan.
-#[cfg(test)]
 fn oauth_is_subscription_plan(provider_id: &str) -> bool {
     use djinn_provider::catalog::builtin::{is_subscription_provider, resolve_oauth_provider};
     let effective = match provider_id {
@@ -856,6 +854,21 @@ pub(crate) async fn execute_stage(
         }
     };
 
+    // The session is intentionally created before extension loading so every
+    // diagnostic has a session foreign key. Preserve its billing attribution
+    // from the credential already resolved above rather than dropping it while
+    // moving creation earlier in the stage.
+    let billing_signal = resolved.as_ref().map(|resolved| {
+        derive_billing_signal(
+            &resolved.catalog_provider_id,
+            &resolved.model_name,
+            matches!(
+                resolved.provider_credential.as_ref(),
+                Some(ProviderCredential::OAuthConfig(_))
+            ),
+        )
+    });
+
     let _ = services
         .report_stage_step(djinn_runtime::stage_step::SESSION_CREATE)
         .await;
@@ -868,8 +881,8 @@ pub(crate) async fn execute_stage(
                 agent_type: runtime_role_name.to_string(),
                 metadata_json: None,
                 task_run_id: Some(task_run_id.to_string()),
-                cost_basis_hint: None,
-                billing_source: None,
+                cost_basis_hint: billing_signal.map(|(hint, _)| hint),
+                billing_source: billing_signal.map(|(_, source)| source),
             },
         )
         .await
