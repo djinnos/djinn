@@ -698,6 +698,7 @@ pub fn tool_memory_write() -> RmcpTool {
                 "title": {"type": "string", "description": "Note title"},
                 "content": {"type": "string", "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes."},
                 "type": {"type": "string", "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)"},
+                "reason": {"type": "string", "description": "Non-blank explanation for this mutation."},
                 "status": {"type": "string", "description": "Optional explicit status. For ADRs, use \"proposed\" to mark it as an in-flight proposal."},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags for categorisation"}
             }

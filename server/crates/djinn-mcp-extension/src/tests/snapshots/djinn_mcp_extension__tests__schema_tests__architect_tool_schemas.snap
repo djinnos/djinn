@@ -1668,7 +1668,8 @@ expression: tool_schemas_architect()
       "required": [
         "title",
         "content",
-        "type"
+        "type",
+        "reason"
       ],
       "properties": {
         "title": {
@@ -1682,6 +1683,10 @@ expression: tool_schemas_architect()
         "type": {
           "type": "string",
           "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Non-blank explanation for this mutation."
         },
         "status": {
           "type": "string",
@@ -1710,7 +1715,8 @@ expression: tool_schemas_architect()
       "required": [
         "identifier",
         "operation",
-        "content"
+        "content",
+        "reason"
       ],
       "properties": {
         "identifier": {
@@ -1724,6 +1730,10 @@ expression: tool_schemas_architect()
         "content": {
           "type": "string",
           "description": "New content to insert or replace with"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Non-blank explanation for this mutation."
         },
         "find_text": {
           "type": "string",
