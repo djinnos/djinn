@@ -4,7 +4,7 @@ use super::*;
 
 use djinn_core::events::EventBus;
 use djinn_core::models::ActivityEntry;
-use djinn_db::{Database, EpicRepository, ProposalCreateInput, ProposalRepository};
+use djinn_db::{Database, EpicRepository, NoteRepository, ProposalCreateInput, ProposalRepository};
 use tokio_util::sync::CancellationToken;
 
 use crate::roles::{AgentRole, LeadRole, WorkerRole};
@@ -18,6 +18,152 @@ use super::test_support::{
 async fn lead_prompt_context(db: Database, task: &Task) -> PromptContext {
     let role = LeadRole;
     assemble_for_role(db, task, &role, None, "", &[], &[]).await
+}
+
+fn planned_query(note_type: PlannedNoteType, query: &str) -> PlannedQuery {
+    PlannedQuery {
+        note_type,
+        query: query.to_string(),
+    }
+}
+
+/// The default-off stage gate passes no planned queries into the real loader.
+/// Its rendered knowledge must therefore remain byte-identical to scope-only.
+#[tokio::test]
+async fn planner_host_disabled_scope_only_real_path_is_byte_identical() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task =
+        create_project_epic_task(&db, &events, "Planner gate epic", "Planner gate task").await;
+    let notes = NoteRepository::new(db.clone(), events);
+    notes
+        .create(
+            &task.project_id,
+            "Scope baseline",
+            "scope baseline body",
+            "pattern",
+            "[]",
+        )
+        .await
+        .expect("seed scope note");
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let scope_only = load_knowledge_context(&task, None, &app_state, None, None)
+        .await
+        .expect("scope result");
+    let disabled = load_knowledge_context(&task, None, &app_state, None, None)
+        .await
+        .expect("disabled result");
+    assert_eq!(disabled, scope_only);
+}
+
+/// Exercise repository-backed typed planner buckets through the real load path.
+#[tokio::test]
+async fn planner_host_enabled_real_path_preserves_query_order_and_rank() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task =
+        create_project_epic_task(&db, &events, "Planner query epic", "Planner query task").await;
+    let notes = NoteRepository::new(db.clone(), events);
+    notes
+        .create(
+            &task.project_id,
+            "Scope anchor",
+            "scope body",
+            "pattern",
+            "[]",
+        )
+        .await
+        .expect("scope");
+    notes
+        .create(
+            &task.project_id,
+            "First planned",
+            "alpha planner marker",
+            "pitfall",
+            "[]",
+        )
+        .await
+        .expect("first");
+    notes
+        .create(
+            &task.project_id,
+            "Second planned",
+            "alpha planner marker",
+            "pitfall",
+            "[]",
+        )
+        .await
+        .expect("second");
+    notes
+        .create(
+            &task.project_id,
+            "Third planned",
+            "beta planner marker",
+            "case",
+            "[]",
+        )
+        .await
+        .expect("third");
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let queries = [
+        planned_query(PlannedNoteType::Pitfall, "alpha planner marker"),
+        planned_query(PlannedNoteType::Case, "beta planner marker"),
+    ];
+    let rendered = load_knowledge_context(&task, None, &app_state, None, Some(&queries))
+        .await
+        .expect("planned result");
+    assert_ordered(
+        &rendered,
+        &[
+            "Scope anchor",
+            "First planned",
+            "Second planned",
+            "Third planned",
+        ],
+    );
+}
+
+/// A full scope pack short-circuits planned lookup in the real loader.
+#[tokio::test]
+async fn planned_real_path_full_scope_budget_retains_scope_bytes() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Full scope epic", "Full scope task").await;
+    let notes = NoteRepository::new(db.clone(), events);
+    notes
+        .create(
+            &task.project_id,
+            "Scope owns budget",
+            &"scope ".repeat(KNOWLEDGE_BUDGET_CHARS),
+            "pattern",
+            "[]",
+        )
+        .await
+        .expect("full scope note");
+    notes
+        .create(
+            &task.project_id,
+            "Planner must not render",
+            "unreachable marker",
+            "pitfall",
+            "[]",
+        )
+        .await
+        .expect("planned note");
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let baseline = load_knowledge_context(&task, None, &app_state, None, None)
+        .await
+        .expect("scope baseline");
+    let queries = [planned_query(
+        PlannedNoteType::Pitfall,
+        "unreachable marker",
+    )];
+    let planned = load_knowledge_context(&task, None, &app_state, None, Some(&queries))
+        .await
+        .expect("planned load");
+    assert_eq!(planned, baseline);
+    assert!(planned.contains("Scope owns budget"));
+    assert!(!planned.contains("Planner must not render"));
 }
 
 #[tokio::test]
