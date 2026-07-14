@@ -1,5 +1,7 @@
 use djinn_db::{
-    NoteRepository, NoteStatus, folder_for_type_with_status, note_hash::note_content_hash,
+    NoteRepository, NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation,
+    NoteRevisionReason, NoteRevisionSubsystem, NoteStatus, TrustedNoteRevisionAttribution,
+    TrustedNoteRevisionProvenance, folder_for_type_with_status, note_hash::note_content_hash,
 };
 use djinn_memory::{Note, NoteDedupCandidate};
 use djinn_provider::CompletionRequest;
@@ -20,6 +22,22 @@ const SUPERSEDES_WEIGHT: f64 = 1.0;
 
 pub(crate) struct LlmMemoryWriteDedupDecider {
     runtime: Box<dyn MemoryWriteProviderRuntime>,
+}
+
+async fn canonical_candidate(
+    repo: &NoteRepository,
+    project_id: &str,
+    candidate_id: &str,
+) -> Result<Note, String> {
+    let note = repo
+        .get(candidate_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("dedup candidate not found: {candidate_id}"))?;
+    if note.project_id != project_id {
+        return Err(format!("dedup candidate not found: {candidate_id}"));
+    }
+    Ok(note)
 }
 
 impl LlmMemoryWriteDedupDecider {
@@ -145,9 +163,8 @@ pub(crate) async fn lookup_write_dedup_candidates(
     .map_err(|error| error.to_string())
 }
 
-/// The sole write-dedup mutation integration point until a note revision API is
-/// available. Merge updates immediately; supersede is completed after the
-/// centralized normal note creation path has produced the incoming note.
+/// Apply a dedup decision with dedup-owned attribution. Ordinary incoming
+/// creation remains attributed to the MCP caller in `write_services`.
 pub(crate) async fn apply_dedup_decision(
     repo: &NoteRepository,
     pending: PendingWriteDedup<'_>,
@@ -156,29 +173,38 @@ pub(crate) async fn apply_dedup_decision(
     match decision {
         MemoryWriteDedupDecision::CreateNew => Ok(WriteDedupOutcome::CreateNew),
         MemoryWriteDedupDecision::ReuseExisting { candidate_id } => {
-            let note = repo
-                .get(&candidate_id)
-                .await
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("dedup candidate not found: {candidate_id}"))?;
+            let note = canonical_candidate(repo, pending.project_id, &candidate_id).await?;
             Ok(WriteDedupOutcome::Respond(Box::new(
                 MemoryNoteResponse::deduplicated_from_note(&note),
             )))
         }
         MemoryWriteDedupDecision::MergeIntoExisting {
             candidate_id,
-            merged_title,
+            merged_title: _,
             merged_content,
         } => {
-            let note = repo
-                .update(
-                    &candidate_id,
-                    &merged_title,
-                    &merged_content,
-                    pending.tags_json,
-                )
+            let existing = canonical_candidate(repo, pending.project_id, &candidate_id).await?;
+            let result = repo
+                .mutate_with_revision(NoteRevisionMutation {
+                    project_id: pending.project_id.to_owned(),
+                    note_id: Some(candidate_id),
+                    event_kind: NoteRevisionEventKind::Updated,
+                    desired: NoteRevisionDesiredState::Existing {
+                        content: merged_content,
+                        confidence: existing.confidence,
+                    },
+                    attribution: TrustedNoteRevisionAttribution::system(
+                        NoteRevisionSubsystem::Dedup,
+                    ),
+                    provenance: TrustedNoteRevisionProvenance::default(),
+                    reason: NoteRevisionReason::new("dedup:merge_into_existing")
+                        .expect("dedup reason is non-blank"),
+                })
                 .await
                 .map_err(|error| error.to_string())?;
+            let note = result
+                .note
+                .expect("existing note mutation returns the canonical note");
             Ok(WriteDedupOutcome::Respond(Box::new(
                 MemoryNoteResponse::deduplicated_from_note(&note),
             )))

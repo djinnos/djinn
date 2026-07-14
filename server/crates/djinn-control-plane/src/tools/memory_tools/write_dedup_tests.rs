@@ -163,6 +163,98 @@ mod tests {
         let updated = repo.get(&existing.id).await.unwrap().unwrap();
         assert_eq!(response.id.as_deref(), Some(existing.id.as_str()));
         assert_eq!(updated.content, "tokio spawn\njoinset");
+        assert_eq!(updated.title, "Async Pattern");
+
+        let revisions = repo.revision_events_for_test(&project.id).await.unwrap();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].actor_kind, "system");
+        assert_eq!(revisions[0].subsystem.as_deref(), Some("dedup"));
+        assert_eq!(revisions[0].event_kind, "updated");
+        assert_eq!(revisions[0].content_before.as_deref(), Some("tokio spawn"));
+        assert_eq!(
+            revisions[0].content_after.as_deref(),
+            Some("tokio spawn\njoinset")
+        );
+        assert_eq!(revisions[0].confidence_before, Some(existing.confidence));
+        assert_eq!(revisions[0].confidence_after, Some(existing.confidence));
+        assert_eq!(revisions[0].reason, "dedup:merge_into_existing");
+    }
+
+    #[tokio::test]
+    async fn unchanged_merge_and_reuse_suppress_dedup_revisions() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let project = create_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let existing = repo
+            .create(
+                &project.id,
+                "Canonical",
+                "unchanged content",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let pending = PendingWriteDedup {
+            project_path: tmp.path().to_str().unwrap(),
+            project_id: &project.id,
+            title: "Duplicate",
+            content: "unchanged content",
+            note_type: "pattern",
+            status: None,
+            tags_json: "[]",
+        };
+
+        let merged = apply_dedup_decision(
+            &repo,
+            pending,
+            MemoryWriteDedupDecision::MergeIntoExisting {
+                candidate_id: existing.id.clone(),
+                merged_title: "Ignored merged title".to_owned(),
+                merged_content: "unchanged content".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(merged, WriteDedupOutcome::Respond(_)));
+
+        let reused = apply_dedup_decision(
+            &repo,
+            pending,
+            MemoryWriteDedupDecision::ReuseExisting {
+                candidate_id: existing.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(reused, WriteDedupOutcome::Respond(_)));
+
+        let create_new = apply_dedup_decision(&repo, pending, MemoryWriteDedupDecision::CreateNew)
+            .await
+            .unwrap();
+        assert!(matches!(create_new, WriteDedupOutcome::CreateNew));
+
+        let supersede = apply_dedup_decision(
+            &repo,
+            pending,
+            MemoryWriteDedupDecision::SupersedeExisting {
+                candidate_id: existing.id.clone(),
+                reason: "replacement coverage".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            supersede,
+            WriteDedupOutcome::SupersedeExisting { .. }
+        ));
+        assert!(
+            repo.revision_events_for_test(&project.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
