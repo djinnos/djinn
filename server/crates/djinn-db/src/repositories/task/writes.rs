@@ -1027,7 +1027,7 @@ mod created_by_tests {
         );
 
         // Unresolvable provenance must fail before INSERT instead of committing NULL.
-        let before: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM tasks")
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -1048,7 +1048,7 @@ mod created_by_tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains(EFFECTIVE_CREATOR_UNAVAILABLE));
-        let after: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM tasks")
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -1148,41 +1148,52 @@ mod created_by_tests {
         let (project_id, epic_id) = seed_project_and_epic(&db).await;
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
 
-        // Blocking task — stays `open` (unresolved).
-        let blocker = repo
-            .create_in_project(
-                &project_id,
-                Some(&epic_id),
-                "Blocker",
-                "",
-                "",
-                "task",
-                0,
-                "",
-                None,
-                None,
-            )
+        // Seed a user so the effective-creator resolver succeeds.
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(424242, "blocker-tester", Some("Blocker Tester"), None)
             .await
             .unwrap();
 
-        // New task created together WITH its blocker, in one call.
-        let blocked = repo
-            .create_in_project_with_blockers(
-                &project_id,
-                Some(&epic_id),
-                EffectiveCreatorProvenance::default(),
-                "Blocked",
-                "",
-                "",
-                "task",
-                0,
-                "",
-                None,
-                None,
-                std::slice::from_ref(&blocker.id),
-            )
-            .await
-            .unwrap();
+        let (blocker, blocked) = SESSION_USER_ID
+            .scope(Some(user.id.clone()), async {
+                // Blocking task — stays `open` (unresolved).
+                let blocker = repo
+                    .create_in_project(
+                        &project_id,
+                        Some(&epic_id),
+                        "Blocker",
+                        "",
+                        "",
+                        "task",
+                        0,
+                        "",
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+
+                // New task created together WITH its blocker, in one call.
+                let blocked = repo
+                    .create_in_project_with_blockers(
+                        &project_id,
+                        Some(&epic_id),
+                        EffectiveCreatorProvenance::default(),
+                        "Blocked",
+                        "",
+                        "",
+                        "task",
+                        0,
+                        "",
+                        None,
+                        None,
+                        std::slice::from_ref(&blocker.id),
+                    )
+                    .await
+                    .unwrap();
+                (blocker, blocked)
+            })
+            .await;
 
         // The edge exists the moment creation returns — no window where the task
         // is dispatchable-but-unblocked.
