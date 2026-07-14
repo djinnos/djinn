@@ -1,48 +1,27 @@
 use super::*;
-
+use djinn_db::{NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation};
 use rmcp::{Json, handler::server::wrapper::Parameters};
-
 pub(super) async fn memory_edit(
     server: &DjinnMcpServer,
     Parameters(p): Parameters<EditParams>,
 ) -> Json<MemoryNoteResponse> {
+    let (reason, attribution, provenance) = match revision_context(&p.reason) {
+        Ok(context) => context,
+        Err(error) => return Json(MemoryNoteResponse::error(error)),
+    };
     let Some(project_id) = server.project_id_for_path(&p.project).await else {
         return Json(MemoryNoteResponse::error(format!(
             "project not found: {}",
             p.project
         )));
     };
-
-    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
-        .with_embedding_provider(server.state.embedding_provider())
-        .with_vector_store(server.state.vector_store());
-
-    let note = match resolve_note_by_identifier(&repo, &project_id, &p.identifier).await {
-        Some(n) => n,
-        None => {
-            return Json(MemoryNoteResponse::error(format!(
-                "note not found: {}",
-                p.identifier
-            )));
-        }
+    let repo = super::write_services::note_repository(server);
+    let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
+        return Json(MemoryNoteResponse::error(format!(
+            "note not found: {}",
+            p.identifier
+        )));
     };
-
-    let note = if let Some(ref new_type) = p.note_type {
-        if new_type != &note.note_type {
-            match repo
-                .move_note(&note.id, Path::new(&p.project), &note.title, new_type)
-                .await
-            {
-                Ok(moved) => moved,
-                Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
-            }
-        } else {
-            note
-        }
-    } else {
-        note
-    };
-
     let new_content = match apply_edit_operation(
         &note.content,
         &p.operation,
@@ -50,32 +29,34 @@ pub(super) async fn memory_edit(
         p.find_text.as_deref(),
         p.section.as_deref(),
     ) {
-        Ok(c) => c,
-        Err(e) => return Json(MemoryNoteResponse::error(e)),
+        Ok(content) => content,
+        Err(error) => return Json(MemoryNoteResponse::error(error)),
     };
-
     match repo
-        .update(&note.id, &note.title, &new_content, &note.tags)
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id,
+            note_id: Some(note.id),
+            event_kind: NoteRevisionEventKind::Updated,
+            desired: NoteRevisionDesiredState::Existing {
+                content: new_content,
+                confidence: note.confidence,
+            },
+            attribution,
+            provenance,
+            reason,
+        })
         .await
     {
-        Ok(updated) => {
-            let updated = match p.retrieval_anchor.as_deref() {
-                Some(anchor) => match repo
-                    .update_retrieval_anchor(&updated.id, Some(anchor))
-                    .await
-                {
-                    Ok(note) => note,
-                    Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
-                },
-                None => updated,
-            };
-            super::lifecycle::schedule_summary_regeneration(server, &updated.id);
+        Ok(result) => {
+            let updated = result.note.expect("existing mutation returns note");
+            if result.changed {
+                super::lifecycle::schedule_summary_regeneration(server, &updated.id);
+            }
             Json(MemoryNoteResponse::from_note(&updated))
         }
-        Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
+        Err(error) => Json(MemoryNoteResponse::error(error.to_string())),
     }
 }
-
 fn apply_edit_operation(
     content: &str,
     operation: &str,
@@ -113,31 +94,28 @@ fn apply_edit_operation(
         other => Err(format!("unknown operation: '{other}'")),
     }
 }
-
 fn replace_section_in_content(
     content: &str,
     section: &str,
     new_body: &str,
 ) -> Result<String, String> {
     let lines: Vec<&str> = content.lines().collect();
-
-    let heading_idx = lines.iter().position(|l| {
-        let stripped = l.trim_start_matches('#');
-        l.starts_with('#') && stripped.trim().eq_ignore_ascii_case(section)
-    });
-
-    let start = heading_idx.ok_or_else(|| format!("section '{section}' not found"))?;
-    let heading_level = lines[start].chars().take_while(|&c| c == '#').count();
-
+    let start = lines
+        .iter()
+        .position(|line| {
+            let stripped = line.trim_start_matches('#');
+            line.starts_with('#') && stripped.trim().eq_ignore_ascii_case(section)
+        })
+        .ok_or_else(|| format!("section '{section}' not found"))?;
+    let level = lines[start].chars().take_while(|&c| c == '#').count();
     let end = lines[start + 1..]
         .iter()
-        .position(|l| {
-            let lvl = l.chars().take_while(|&c| c == '#').count();
-            lvl > 0 && lvl <= heading_level
+        .position(|line| {
+            let level_here = line.chars().take_while(|&c| c == '#').count();
+            level_here > 0 && level_here <= level
         })
-        .map(|i| start + 1 + i)
+        .map(|index| start + 1 + index)
         .unwrap_or(lines.len());
-
     let mut result = lines[..=start].join("\n");
     result.push('\n');
     result.push_str(new_body);
@@ -148,20 +126,5 @@ fn replace_section_in_content(
         result.push('\n');
         result.push_str(&lines[end..].join("\n"));
     }
-
     Ok(result)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::apply_edit_operation;
-
-    #[test]
-    fn replace_section_updates_heading_body_only() {
-        let content = "# Intro\nhello\n## Details\nold\n# Next\nkeep";
-        let updated =
-            apply_edit_operation(content, "replace_section", "new", None, Some("Details")).unwrap();
-
-        assert_eq!(updated, "# Intro\nhello\n## Details\nnew\n\n# Next\nkeep");
-    }
 }

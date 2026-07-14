@@ -6,11 +6,14 @@ use crate::tools::json_object::AnyJson;
 // ── Param structs ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WriteParams {
     /// Absolute path to the project directory.
     pub project: String,
     pub title: String,
     pub content: String,
+    /// Non-blank explanation recorded in the immutable revision ledger.
+    pub reason: String,
     /// Note type: adr, pattern, case, pitfall, research, requirement,
     /// reference, design, session, persona, journey, design_spec,
     /// competitive, tech_spike, brief (singleton), roadmap (singleton).
@@ -110,6 +113,7 @@ pub struct MemoryConfirmParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EditParams {
     pub project: String,
     /// Note permalink or title.
@@ -117,6 +121,8 @@ pub struct EditParams {
     /// Operation: "append", "prepend", "find_replace", "replace_section".
     pub operation: String,
     pub content: String,
+    /// Non-blank explanation recorded in the immutable revision ledger.
+    pub reason: String,
     /// Required for find_replace: exact text to search for.
     pub find_text: Option<String>,
     /// Required for replace_section: heading text identifying the section.
@@ -168,9 +174,12 @@ pub struct ListParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteParams {
     pub project: String,
     pub identifier: String,
+    /// Non-blank explanation recorded in the immutable revision ledger.
+    pub reason: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]

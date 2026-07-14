@@ -7344,11 +7344,16 @@ expression: signatures
         },
         "project": {
           "type": "string"
-        }
+        },
+        "reason": {
+          "description": "Non-blank explanation recorded in the immutable revision ledger.",
+          "type": "string"
+        },
       },
       "required": [
         "project",
-        "identifier"
+        "identifier",
+        "reason"
       ],
       "type": "object"
     },
@@ -7433,6 +7438,10 @@ expression: signatures
         "content": {
           "type": "string"
         },
+        "reason": {
+          "description": "Non-blank explanation recorded in the immutable revision ledger.",
+          "type": "string"
+        },
         "find_text": {
           "description": "Required for find_replace: exact text to search for.",
           "type": [
@@ -7478,7 +7487,8 @@ expression: signatures
         "project",
         "identifier",
         "operation",
-        "content"
+        "content",
+        "reason"
       ],
       "type": "object"
     },
@@ -9886,6 +9896,10 @@ expression: signatures
         "content": {
           "type": "string"
         },
+        "reason": {
+          "description": "Non-blank explanation recorded in the immutable revision ledger.",
+          "type": "string"
+        },
         "project": {
           "description": "Absolute path to the project directory.",
           "type": "string"
@@ -9936,7 +9950,8 @@ expression: signatures
         "project",
         "title",
         "content",
-        "type"
+        "type",
+        "reason"
       ],
       "type": "object"
     },
