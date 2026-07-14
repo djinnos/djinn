@@ -347,4 +347,51 @@ mod tests {
             remedy_template(ExtensionLoadRemedyCode::CheckSkillFrontmatter)
         );
     }
+
+    #[test]
+    fn session_correlation_fixture_keeps_sources_retries_and_attempts_distinct() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/extension_diagnostics/session_two_sources.json"
+        ))
+        .unwrap();
+        let associations = ExtensionDiagnosticAssociations {
+            project_id: fixture["project_id"].as_str().unwrap().to_owned(),
+            task_id: Some(fixture["task_id"].as_str().unwrap().to_owned()),
+            session_id: Some(fixture["session_id"].as_str().unwrap().to_owned()),
+            load_attempt_id: fixture["first_attempt_id"].as_str().unwrap().to_owned(),
+        };
+        let mcp = fact(fixture["facts"][0]["summary_material"].as_str().unwrap());
+        let skill = ExtensionDiagnosticFact {
+            source_kind: ExtensionLoadSourceKind::ProjectSkill,
+            source_key: fixture["facts"][1]["source_key"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            phase: ExtensionLoadPhase::Frontmatter,
+            severity: ExtensionLoadSeverity::Warning,
+            remedy_code: ExtensionLoadRemedyCode::CheckSkillFrontmatter,
+            summary_material: fixture["facts"][1]["summary_material"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        };
+        let first = build_insert_extension_diagnostic(associations.clone(), &mcp);
+        let retry = build_insert_extension_diagnostic(associations.clone(), &mcp);
+        let second_source = build_insert_extension_diagnostic(associations.clone(), &skill);
+        let later = build_insert_extension_diagnostic(
+            ExtensionDiagnosticAssociations {
+                load_attempt_id: fixture["later_attempt_id"].as_str().unwrap().to_owned(),
+                ..associations
+            },
+            &mcp,
+        );
+        assert_eq!(first.project_id, fixture["project_id"].as_str().unwrap());
+        assert_eq!(first.task_id.as_deref(), fixture["task_id"].as_str());
+        assert_eq!(first.session_id.as_deref(), fixture["session_id"].as_str());
+        assert_eq!(first.load_attempt_id, retry.load_attempt_id);
+        assert_eq!(first.summary_fingerprint, retry.summary_fingerprint);
+        assert_ne!(first.source_kind, second_source.source_kind);
+        assert_ne!(first.source_key, second_source.source_key);
+        assert_ne!(first.load_attempt_id, later.load_attempt_id);
+    }
 }

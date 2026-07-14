@@ -104,6 +104,25 @@ use djinn_runtime::{LoopGuardKind as RuntimeLoopGuardKind, LoopGuardTrip, Provid
 
 use super::SupervisorCallbackContext;
 
+/// A session is created before extension loading so diagnostic rows can carry
+/// its foreign key. Every later setup failure must therefore settle that row.
+async fn mark_session_failed(services: &dyn SupervisorServices, session_id: &str) {
+    if let Err(error) = services
+        .update_session_status(
+            session_id.to_owned(),
+            SessionStatus::Failed,
+            0,
+            0,
+            0,
+            0,
+            None,
+        )
+        .await
+    {
+        tracing::warn!(session_id, error = %error, "Supervisor stage: failed to mark setup session failed");
+    }
+}
+
 /// Conservative quota-reset window synthesized for an exhausted Codex/OpenAI
 /// empty-200 throttle (idea A6/idea 3).
 ///
@@ -873,7 +892,7 @@ pub(crate) async fn execute_stage(
         resolved_skills,
         native_skill_names: _native_skill_names,
         mcp_server_instructions,
-        extension_diagnostics: _extension_diagnostics,
+        extension_diagnostics,
     } = resolve_mcp_and_skills(
         worktree_path,
         runtime_role.as_ref(),
@@ -894,10 +913,16 @@ pub(crate) async fn execute_stage(
     // Pre-verification hooks come from `lifecycle.pre_verification` (via the
     // SupervisorServices RPC). Missing / malformed configs degrade to empty
     // lists (see `environment`).
-    let env_config = services
+    let env_config = match services
         .get_environment_config(task.project_id.clone())
         .await
-        .map_err(|e| StageError::Setup(format!("env_config: {e}")))?;
+    {
+        Ok(config) => config,
+        Err(error) => {
+            mark_session_failed(services, &session_id).await;
+            return Err(StageError::Setup(format!("env_config: {error}")));
+        }
+    };
     let SetupContext {
         prompt_setup_commands,
     } = match resolve_setup_context(
@@ -911,6 +936,7 @@ pub(crate) async fn execute_stage(
     {
         Ok(ctx) => ctx,
         Err(SetupError { reason }) => {
+            mark_session_failed(services, &session_id).await;
             return Err(StageError::Setup(reason));
         }
     };
@@ -991,6 +1017,7 @@ pub(crate) async fn execute_stage(
         worker_resume_note: worker_resume_note.as_deref(),
         arbiter_directive: arbiter_directive.as_deref(),
         mcp_server_instructions: &mcp_server_instructions,
+        extension_diagnostics: &extension_diagnostics,
     })
     .await;
 
@@ -1061,17 +1088,7 @@ pub(crate) async fn execute_stage(
         ) {
             Some(provider) => provider,
             None => {
-                let _ = services
-                    .update_session_status(
-                        session_id.clone(),
-                        SessionStatus::Failed,
-                        0,
-                        0,
-                        0,
-                        0,
-                        None,
-                    )
-                    .await;
+                mark_session_failed(services, &session_id).await;
                 return Err(StageError::ModelResolution(
                     "no provider credential resolved for model".into(),
                 ));
