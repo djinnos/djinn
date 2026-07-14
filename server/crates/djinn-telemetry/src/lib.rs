@@ -126,7 +126,7 @@ const CACHE_CLEANUP_COMPONENTS: [&str; 4] = [
     "cargo_warm_base",
     "cargo_warm_base_fingerprint",
 ];
-const CACHE_CLEANUP_OUTCOMES: [&str; 14] = [
+const CACHE_CLEANUP_OUTCOMES: [&str; 19] = [
     "deleted",
     "skipped",
     "retained",
@@ -141,6 +141,11 @@ const CACHE_CLEANUP_OUTCOMES: [&str; 14] = [
     "retained_young",
     "retained_active",
     "retained_lock_busy",
+    "within_budget",
+    "trimmed_within_budget",
+    "over_budget_protected",
+    "over_budget_error",
+    "over_budget_protected_and_error",
 ];
 const CACHE_CLEANUP_MODES: [&str; 2] = ["dry_run", "delete"];
 
@@ -1753,6 +1758,13 @@ pub mod cache_cleanup {
     pub const OUTCOME_RETAINED_FRESH_MALFORMED: &str = "retained_fresh_malformed";
     pub const OUTCOME_RETAINED_NON_UTF8: &str = "retained_non_utf8";
 
+    /// Bounded outcomes emitted by the cargo-target-runs joint cap engine.
+    pub const OUTCOME_WITHIN_BUDGET: &str = "within_budget";
+    pub const OUTCOME_TRIMMED_WITHIN_BUDGET: &str = "trimmed_within_budget";
+    pub const OUTCOME_OVER_BUDGET_PROTECTED: &str = "over_budget_protected";
+    pub const OUTCOME_OVER_BUDGET_ERROR: &str = "over_budget_error";
+    pub const OUTCOME_OVER_BUDGET_PROTECTED_AND_ERROR: &str = "over_budget_protected_and_error";
+
     /// Warm-base idle eviction specific outcome labels. These are bounded and
     /// distinguish the most common retention reasons without leaking
     /// high-cardinality project or path labels into metrics.
@@ -1775,7 +1787,7 @@ pub mod cache_cleanup {
 
     /// All bounded outcome labels — used for registration seeding.
     #[cfg(test)]
-    pub(crate) const ALL_OUTCOMES: [&str; 14] = [
+    pub(crate) const ALL_OUTCOMES: [&str; 19] = [
         OUTCOME_DELETED,
         OUTCOME_SKIPPED,
         OUTCOME_RETAINED,
@@ -1790,6 +1802,11 @@ pub mod cache_cleanup {
         OUTCOME_RETAINED_YOUNG,
         OUTCOME_RETAINED_ACTIVE,
         OUTCOME_RETAINED_LOCK_BUSY,
+        OUTCOME_WITHIN_BUDGET,
+        OUTCOME_TRIMMED_WITHIN_BUDGET,
+        OUTCOME_OVER_BUDGET_PROTECTED,
+        OUTCOME_OVER_BUDGET_ERROR,
+        OUTCOME_OVER_BUDGET_PROTECTED_AND_ERROR,
     ];
 
     /// All bounded mode labels — used for registration seeding.
