@@ -25,12 +25,13 @@
 //! has permissive `Ok` returns for a handful of `RuntimeOps` mutations that
 //! pre-existing unit tests rely on.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use djinn_core::events::EventBus;
+use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::DjinnSettings;
 use djinn_db::{
     Database,
@@ -48,15 +49,68 @@ use serde_json::Value;
 use crate::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CoordinatorOps,
     CoordinatorStatus, CycleGroup, DeadSymbolEntry, DeprecatedHit, DiffTouchesResult, EdgeEntry,
-    GitOps, GraphStatus, HotPathHit, HotspotEntry, ImpactResult, LspOps, LspWarning,
-    MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, PoolStatus, ProjectCtx, RankedNode,
-    RepoGraphOps, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps,
-    SymbolAtHit, SymbolDescription, TaskrunJobRef,
+    ExtensionDiagnosticsProbeOps, GitOps, GraphStatus, HotPathHit, HotspotEntry, ImpactResult,
+    LspOps, LspWarning, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, PoolStatus,
+    ProjectCtx, RankedNode, RepoGraphOps, RunningTaskInfo, RuntimeOps, SearchHit,
+    SemanticQueryEmbedding, SlotPoolOps, SymbolAtHit, SymbolDescription, TaskrunJobRef,
 };
 use crate::server::DjinnMcpServer;
 use crate::state::McpState;
 
 // ── Strict stubs ───────────────────────────────────────────────────────────────
+
+/// One invocation captured by [`RecordingExtensionDiagnosticsProbe`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionDiagnosticsProbeCall {
+    pub project_id: String,
+    pub canonical_workspace: PathBuf,
+}
+
+/// Deterministic probe bridge for doctor tool tests.
+///
+/// It returns caller-supplied canonical records and records the only two
+/// permitted bridge inputs, allowing tests to pin the project/path boundary.
+pub struct RecordingExtensionDiagnosticsProbe {
+    diagnostics: Vec<ExtensionLoadDiagnosticV1>,
+    calls: Mutex<Vec<ExtensionDiagnosticsProbeCall>>,
+}
+
+impl RecordingExtensionDiagnosticsProbe {
+    pub fn new(diagnostics: Vec<ExtensionLoadDiagnosticV1>) -> Self {
+        Self {
+            diagnostics,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn calls(&self) -> Vec<ExtensionDiagnosticsProbeCall> {
+        self.calls.lock().expect("recording probe calls mutex").clone()
+    }
+}
+
+impl Default for RecordingExtensionDiagnosticsProbe {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+#[async_trait]
+impl ExtensionDiagnosticsProbeOps for RecordingExtensionDiagnosticsProbe {
+    async fn probe_project_extensions(
+        &self,
+        project_id: &str,
+        canonical_workspace: &Path,
+    ) -> std::result::Result<Vec<ExtensionLoadDiagnosticV1>, String> {
+        self.calls
+            .lock()
+            .expect("recording probe calls mutex")
+            .push(ExtensionDiagnosticsProbeCall {
+                project_id: project_id.to_owned(),
+                canonical_workspace: canonical_workspace.to_owned(),
+            });
+        Ok(self.diagnostics.clone())
+    }
+}
 
 /// CoordinatorOps stub. `get_status` returns a visible error (it's the
 /// *reading* side of a subsystem we haven't wired up — not "no data");
