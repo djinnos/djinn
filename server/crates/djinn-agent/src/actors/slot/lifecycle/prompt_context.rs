@@ -412,7 +412,7 @@ fn render_planned_knowledge(
             if !ids.insert(row.id.clone()) || !links.insert(row.permalink.clone()) {
                 continue;
             }
-            if lines.len() == PLANNER_NOTES_GLOBAL {
+            if lines.len() >= PLANNER_NOTES_GLOBAL {
                 return lines.join("\n");
             }
             let label = match row.note_type.as_str() {
