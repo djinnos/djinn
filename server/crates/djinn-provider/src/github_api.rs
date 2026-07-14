@@ -55,7 +55,7 @@ pub use types::{
     PrRef, PrReview, PrReviewFeedback, PrState, PullRequest, RepoMergeConfig, ReproductionJob,
     ReproductionSetupStep, ReproductionStep, RequiredCheckReproduction,
     RequiredCheckReproductionContext, RequiredCheckUnreproducible,
-    RequiredCheckUnreproducibleReason, ReviewComment,
+    RequiredCheckUnreproducibleReason, ReviewComment, WorkflowRun,
 };
 pub use write_errors::{
     GitHubWriteErrorEnvelope, GitHubWriteErrorInput, github_write_error_envelope,
