@@ -26,7 +26,7 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     let project = proj.slug();
 
     let created = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation",
@@ -60,7 +60,7 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     assert_eq!(note.file_path, "");
 
     let duplicate = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation",
@@ -83,7 +83,7 @@ async fn mcp_memory_write_and_move_accept_case_and_pitfall_types() {
     let project = proj.slug();
 
     let created = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation",
@@ -124,7 +124,7 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
     let project = proj.slug();
 
     let created = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation",
@@ -172,7 +172,7 @@ async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
     let project = proj.slug();
 
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Rust Alpha", "content": "rust rust rust memory", "type": "reference"}),
@@ -180,7 +180,7 @@ async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
         .await
         .expect("memory_write alpha should dispatch");
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Rust Beta", "content": "rust memory", "type": "reference"}),
@@ -188,7 +188,7 @@ async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
         .await
         .expect("memory_write beta should dispatch");
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "ADR Gamma", "content": "rust decision", "type": "adr"}),
@@ -237,7 +237,7 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     let project = proj.slug();
 
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Edit Note", "content": "middle", "type": "reference"}),
@@ -246,7 +246,7 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
         .expect("seed memory_write should dispatch");
 
     let appended = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_edit",
             json!({
                 "reason": "test mutation","project": project, "identifier": "Edit Note", "operation": "append", "content": "tail"}),
@@ -256,7 +256,7 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     assert!(appended["content"].as_str().unwrap().contains("tail"));
 
     let prepended = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_edit",
             json!({
                 "reason": "test mutation","project": project, "identifier": "Edit Note", "operation": "prepend", "content": "head"}),
@@ -266,7 +266,7 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     assert!(prepended["content"].as_str().unwrap().starts_with("head"));
 
     let replaced = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_edit",
             json!({
                 "reason": "test mutation","project": project, "identifier": "Edit Note", "operation": "find_replace", "find_text": "middle", "content": "center"}),
@@ -276,7 +276,7 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     assert!(replaced["content"].as_str().unwrap().contains("center"));
 
     let missing = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_edit",
             json!({
                 "reason": "test mutation","project": project, "identifier": "Missing", "operation": "append", "content": "x"}),
@@ -293,7 +293,7 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
     let project = proj.slug();
 
     let created = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Move Me", "content": "content", "type": "reference"}),
@@ -320,7 +320,7 @@ async fn mcp_memory_delete_success_and_missing_note_error() {
     let project = proj.slug();
 
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Delete Me", "content": "bye", "type": "reference"}),
@@ -329,7 +329,7 @@ async fn mcp_memory_delete_success_and_missing_note_error() {
         .expect("seed memory_write should dispatch");
 
     let deleted = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_delete",
             json!({
                 "reason": "test mutation","project": project, "identifier": "Delete Me"}),
@@ -339,7 +339,7 @@ async fn mcp_memory_delete_success_and_missing_note_error() {
     assert_eq!(deleted["ok"], true);
 
     let missing = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_delete",
             json!({
                 "reason": "test mutation","project": project, "identifier": "Delete Me"}),
@@ -357,7 +357,7 @@ async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
     let project = proj.slug();
 
     let adr = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "A", "content": "x", "type": "adr"}),
@@ -366,7 +366,7 @@ async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
         .expect("memory_write adr should dispatch");
     assert_eq!(adr["deduplicated"], false);
     let reference = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "B", "content": "different content", "type": "reference"}),
@@ -411,7 +411,7 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
     let project = proj.slug();
 
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Node B", "content": "b", "type": "reference"}),
@@ -419,7 +419,7 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
         .await
         .expect("seed node B should dispatch");
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "type": "reference"}),
@@ -427,7 +427,7 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
         .await
         .expect("seed node A should dispatch");
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "type": "reference"}),
@@ -435,7 +435,7 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
         .await
         .expect("seed node C should dispatch");
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Node D", "content": "isolated", "type": "reference"}),
@@ -477,7 +477,7 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
     let project = proj.slug();
 
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Older", "content": "o", "type": "reference"}),
@@ -491,7 +491,7 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
     // still keeping total runtime sub-second.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Newer", "content": "n", "type": "reference"}),
@@ -536,7 +536,7 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
     let project = proj.slug();
 
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Catalog Item", "content": "c", "type": "reference"}),
@@ -566,7 +566,7 @@ async fn mcp_memory_health_orphans_and_broken_links_shapes() {
     // only asserts the shape of the three health / orphans / broken_links
     // responses, so that's fine.
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Source", "content": "[[Missing Target]]", "type": "reference"}),
@@ -603,7 +603,7 @@ async fn mcp_memory_history_and_diff_round_trip() {
     let project = proj.slug();
 
     let created = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "History Diff", "content": "line one", "type": "reference"}),
@@ -613,7 +613,7 @@ async fn mcp_memory_history_and_diff_round_trip() {
     let permalink = created["permalink"].as_str().unwrap().to_string();
 
     let edited = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_edit",
             json!({
                 "reason": "test mutation","project": project, "identifier": permalink, "operation": "append", "content": "line two"}),
@@ -656,7 +656,7 @@ async fn mcp_memory_build_context_follows_wikilinks() {
     let project = proj.slug();
 
     let target = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Context Target", "content": "target body", "type": "reference"}),
@@ -664,7 +664,7 @@ async fn mcp_memory_build_context_follows_wikilinks() {
         .await
         .expect("memory_write target should dispatch");
     let seed = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Context Seed", "content": "see [[Context Target]]", "type": "reference"}),
@@ -706,7 +706,7 @@ async fn mcp_memory_task_refs_returns_tasks_for_permalink() {
     let project = project_row.slug();
 
     let note = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Task Ref Note", "content": "task refs seed", "type": "reference"}),
@@ -861,7 +861,7 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
 
     // Three notes: one on an epic, one on a task, one shared across both.
     let epic_note = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Epic Ref Note", "content": "epic level note", "type": "adr"}),
@@ -874,7 +874,7 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
         .to_string();
 
     let task_note = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Task Ref Note", "content": "task level note", "type": "pitfall"}),
@@ -887,7 +887,7 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
         .to_string();
 
     let shared_note = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Shared Ref Note", "content": "shared across epic and task", "type": "reference"}),
@@ -1240,7 +1240,7 @@ async fn memory_read_regression_resolved_mentions_still_works() {
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
     let note = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation",
@@ -1372,7 +1372,7 @@ async fn memory_read_resolves_short_id_mentions() {
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
     let note = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation",
@@ -1460,7 +1460,7 @@ async fn no_regression_memory_refs_autolink() {
     let project = project_row.slug();
 
     let note = harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Autolink Note", "content": "autolink seed", "type": "reference"}),
@@ -1533,7 +1533,7 @@ async fn no_regression_memory_search_ranking_notes_only() {
 
     // Create notes that should be searchable.
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Rust Note One", "content": "rust memory test", "type": "reference"}),
@@ -1541,7 +1541,7 @@ async fn no_regression_memory_search_ranking_notes_only() {
         .await
         .expect("memory_write one should dispatch");
     harness
-        .call_tool(
+        .call_memory_mutation_tool(
             "memory_write",
             json!({
                 "reason": "test mutation","project": project, "title": "Rust Note Two", "content": "another rust note", "type": "adr"}),

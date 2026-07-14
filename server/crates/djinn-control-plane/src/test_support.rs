@@ -675,15 +675,30 @@ impl McpTestHarness {
         &self.server
     }
 
-    /// Dispatch an MCP tool by name with a JSON argument object.  Goes
+    /// Dispatch a non-revision MCP tool by name with a JSON argument object.  Goes
     /// through the same code path production does — `dispatch_tool` is the
     /// name-keyed match against the `#[tool_router]` methods — so what tests
     /// assert on is the live tool surface, not a bespoke test router.
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value> {
+        self.server
+            .dispatch_tool(name, args)
+            .await
+            .map_err(|e| anyhow!("call_tool({name}) failed: {e}"))
+    }
+
+    /// Dispatch a memory mutation under an explicit server-owned caller scope.
+    ///
+    /// Contract tests bypass authenticated production dispatch, so successful
+    /// revision-routed mutations must opt into trusted attribution explicitly.
+    pub async fn call_memory_mutation_tool(&self, name: &str, args: Value) -> Result<Value> {
+        assert!(
+            matches!(name, "memory_write" | "memory_edit" | "memory_delete"),
+            "call_memory_mutation_tool only accepts revision-routed memory mutations"
+        );
         let caller = TrustedRevisionCallerContext::authenticated_agent("mcp-test-harness");
         REVISION_CALLER_CONTEXT
             .scope(caller, self.server.dispatch_tool(name, args))
             .await
-            .map_err(|e| anyhow!("call_tool({name}) failed: {e}"))
+            .map_err(|e| anyhow!("call_memory_mutation_tool({name}) failed: {e}"))
     }
 }
