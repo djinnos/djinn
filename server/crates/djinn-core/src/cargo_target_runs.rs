@@ -1036,6 +1036,55 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn inventory_candidate_order_is_mtime_creation_then_raw_name() {
+        let epoch = SystemTime::UNIX_EPOCH;
+        let later = epoch + Duration::from_secs(1);
+        let mut candidates = vec![
+            RunDirInventoryCandidate {
+                name: b"newer-modified".to_vec(),
+                modified: Some(later),
+                created: Some(epoch),
+            },
+            RunDirInventoryCandidate {
+                name: b"later-created".to_vec(),
+                modified: Some(epoch),
+                created: Some(later),
+            },
+            RunDirInventoryCandidate {
+                name: b"z".to_vec(),
+                modified: Some(epoch),
+                created: Some(epoch),
+            },
+            RunDirInventoryCandidate {
+                name: b"a".to_vec(),
+                modified: Some(epoch),
+                created: Some(epoch),
+            },
+        ];
+
+        candidates.sort_by(|left, right| {
+            left.modified
+                .cmp(&right.modified)
+                .then_with(|| left.created.cmp(&right.created))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        assert_eq!(
+            candidates
+                .into_iter()
+                .map(|candidate| candidate.name)
+                .collect::<Vec<_>>(),
+            vec![
+                b"a".to_vec(),
+                b"z".to_vec(),
+                b"later-created".to_vec(),
+                b"newer-modified".to_vec(),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn joint_trim_protects_active_runs_and_reports_exact_postcondition() {
         let tmp = tempfile::tempdir().unwrap();
         mkdir(tmp.path(), "active");
