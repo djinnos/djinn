@@ -1,0 +1,1 @@
+{"deleted":2,"errors":0,"protected":0,"final_directory_count":0,"final_allocated_bytes":4096,"outcome":"trimmed_within_budget","survivors":[],"absent":["a","b"],"inventory":{"allocated_bytes":24576,"directories":2,"candidates":["a","b"],"protected":0,"errors":0,"top_level_non_directories":0,"sparse_logical_bytes":null}}
