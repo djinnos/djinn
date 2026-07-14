@@ -153,7 +153,14 @@ async fn resolve_project(
     call: &IncomingToolCall,
 ) -> Option<djinn_core::models::Project> {
     let repo = djinn_db::ProjectRepository::new(ctx.db(), ctx.event_bus());
-    let mut candidates: Vec<String> = vec![worktree_path.to_string_lossy().into_owned()];
+    // A task worktree lives below the registered project's root at
+    // `<project>/.djinn/worktrees/<worktree>`. Resolve that trusted root before
+    // considering any caller-provided project hint: mutation payloads do not
+    // accept a `project` field and must not need one to target their project.
+    let mut candidates: Vec<String> = project_resolution_candidates(worktree_path)
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
     if let Some(args) = call.arguments.as_ref()
         && let Some(proj) = args.get("project").and_then(|v| v.as_str())
     {
@@ -196,6 +203,28 @@ async fn resolve_project(
     resolved
 }
 
+/// Return trusted filesystem candidates for resolving a project from a task
+/// worktree. The project root is the parent of `.djinn` when the supplied path
+/// is nested inside `.djinn/worktrees`; it must be considered alongside the
+/// worktree itself because reverse-parsing the latter yields `worktrees/<name>`.
+fn project_resolution_candidates(worktree_path: &Path) -> Vec<std::path::PathBuf> {
+    let mut candidates = vec![worktree_path.to_path_buf()];
+    for ancestor in worktree_path.ancestors() {
+        if ancestor.file_name().is_some_and(|name| name == "worktrees")
+            && ancestor
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == ".djinn")
+        {
+            if let Some(project_root) = ancestor.parent().and_then(Path::parent) {
+                candidates.push(project_root.to_path_buf());
+            }
+            break;
+        }
+    }
+    candidates
+}
+
 // ── Tool-group dispatch helpers ─────────────────────────────────────────────
 
 /// Task query and basic mutation tools.
@@ -218,6 +247,26 @@ async fn dispatch_task_query_tools(
         ),
         "task_activity_list" => Some(task_epic::call_task_activity_list(ctx, args).await),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::project_resolution_candidates;
+
+    #[test]
+    fn project_resolution_candidates_include_root_for_nested_djinn_worktree() {
+        let worktree = Path::new("/srv/djinn/projects/acme/widgets/.djinn/worktrees/task-123");
+
+        assert_eq!(
+            project_resolution_candidates(worktree),
+            vec![
+                worktree.to_path_buf(),
+                Path::new("/srv/djinn/projects/acme/widgets").to_path_buf(),
+            ]
+        );
     }
 }
 
