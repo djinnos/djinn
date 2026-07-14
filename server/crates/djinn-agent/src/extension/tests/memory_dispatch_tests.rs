@@ -384,33 +384,43 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
     std::fs::create_dir_all(worktree.join(".git")).expect("create worktree dir");
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let revision_caller =
+        djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner");
 
-    let created = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "memory_write",
-        Some(
-            serde_json::json!({
-                "project": project.slug(),
-                "title": "Project Roadmap",
-                "content": "tracks [[ADR-043 Repo Graph]]",
-                "reason": "record project roadmap",
-                "type": "roadmap"
-            })
-            .as_object()
-            .expect("memory_write args object")
-            .clone(),
-        ),
-        &worktree,
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_write dispatch should succeed");
+    let created = djinn_core::auth_context::REVISION_CALLER_CONTEXT
+        .scope(
+            revision_caller,
+            call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "memory_write",
+                Some(
+                    serde_json::json!({
+                        "project": project.slug(),
+                        "title": "Project Roadmap",
+                        "content": "tracks [[ADR-043 Repo Graph]]",
+                        "reason": "record project roadmap",
+                        "type": "roadmap"
+                    })
+                    .as_object()
+                    .expect("memory_write args object")
+                    .clone(),
+                ),
+                &worktree,
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
+            ),
+        )
+        .await
+        .expect("memory_write dispatch should succeed");
 
+    assert!(
+        created.get("error").is_none_or(serde_json::Value::is_null),
+        "memory_write returned an error response: {created}"
+    );
     assert_eq!(
         created.get("permalink").and_then(|v| v.as_str()),
         Some("roadmap")
