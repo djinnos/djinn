@@ -1,3 +1,4 @@
+// djinn:allow-oversize -- legacy integration collection
 //! Contract tests for `memory_*` MCP tools (worktree-free).
 //!
 //! Migrated from `server/src/mcp_contract_tests/memory_tools/contract_tests.rs`.

@@ -6,6 +6,7 @@ mod common;
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext};
 use djinn_core::events::EventBus;
+use djinn_db::test_support::{note_and_revision_counts, note_revision_contract_rows};
 use djinn_db::{
     Database, NoteRepository, NoteRevisionCreateState, NoteRevisionDesiredState,
     NoteRevisionEventKind, NoteRevisionMutation, NoteRevisionReason, ProjectRepository,
@@ -23,42 +24,6 @@ async fn harness_and_project() -> (McpTestHarness, String, String) {
         .await
         .expect("project");
     (harness, project.slug(), project.id)
-}
-
-async fn revision_rows(
-    db: &Database,
-    project_id: &str,
-) -> Vec<(
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    String,
-)> {
-    sqlx::query_as(
-        "SELECT event_kind, reason, actor_kind, actor_id, session_id, task_id, COALESCE(task_run_id, '') FROM note_revision_events WHERE project_id = $1 ORDER BY created_at, id",
-    )
-    .bind(project_id)
-    .fetch_all(db.pool())
-    .await
-    .expect("revision rows")
-}
-
-async fn persisted_counts(db: &Database, project_id: &str) -> (i64, i64) {
-    let notes = sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = $1")
-        .bind(project_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-    let revisions =
-        sqlx::query_scalar("SELECT COUNT(*) FROM note_revision_events WHERE project_id = $1")
-            .bind(project_id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-    (notes, revisions)
 }
 
 fn write(project: &str, title: &str, content: &str, note_type: &str, reason: Value) -> Value {
@@ -97,7 +62,10 @@ async fn dispatch_rejects_invalid_or_spoofed_reason_inputs_before_durable_mutati
             error.contains(expected_envelope),
             "expected reason rejection envelope `{expected_envelope}` in error: {error}"
         );
-        assert_eq!(persisted_counts(harness.db(), &project_id).await, (0, 0));
+        assert_eq!(
+            note_and_revision_counts(harness.db(), &project_id).await,
+            (0, 0)
+        );
     }
 
     for key in [
@@ -118,7 +86,10 @@ async fn dispatch_rejects_invalid_or_spoofed_reason_inputs_before_durable_mutati
             .expect_err("spoofed input must reject")
             .to_string();
         assert!(error.contains(key), "{error}");
-        assert_eq!(persisted_counts(harness.db(), &project_id).await, (0, 0));
+        assert_eq!(
+            note_and_revision_counts(harness.db(), &project_id).await,
+            (0, 0)
+        );
     }
 }
 
@@ -168,7 +139,7 @@ async fn dispatch_persists_trimmed_reason_event_kind_and_trusted_provenance() {
     assert!(edited["content"].as_str().unwrap().contains("more"));
     REVISION_CALLER_CONTEXT.scope(TrustedRevisionCallerContext::authenticated_human("human-contract"), harness.call_tool("memory_delete", json!({"project": project, "identifier": created["permalink"], "reason": " delete brief "}))).await.expect("delete");
 
-    let rows = revision_rows(harness.db(), &project_id).await;
+    let rows = note_revision_contract_rows(harness.db(), &project_id).await;
     assert_eq!(rows.len(), 4);
     assert_eq!(
         rows[0],
@@ -251,7 +222,10 @@ async fn repository_failure_rolls_back_note_and_revision_together() {
     repo.set_revision_event_insertion_failure_for_test(false);
     assert!(result.is_err());
     assert!(repo.get(&note_id).await.unwrap().is_none());
-    assert_eq!(persisted_counts(harness.db(), &project_id).await, (0, 0));
+    assert_eq!(
+        note_and_revision_counts(harness.db(), &project_id).await,
+        (0, 0)
+    );
 }
 
 #[tokio::test]
@@ -299,7 +273,10 @@ async fn singleton_noop_emits_no_revision_or_retrieval_side_effect() {
         )
         .await
         .expect("no-op singleton response");
-    assert_eq!(persisted_counts(harness.db(), &project_id).await, (1, 1));
+    assert_eq!(
+        note_and_revision_counts(harness.db(), &project_id).await,
+        (1, 1)
+    );
     assert_eq!(
         metrics
             .snapshot()

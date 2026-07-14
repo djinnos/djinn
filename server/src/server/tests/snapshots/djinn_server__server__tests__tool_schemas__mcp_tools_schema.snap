@@ -7348,7 +7348,7 @@ expression: signatures
         "reason": {
           "description": "Non-blank explanation recorded in the immutable revision ledger.",
           "type": "string"
-        },
+        }
       },
       "required": [
         "project",

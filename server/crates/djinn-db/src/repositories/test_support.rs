@@ -8,6 +8,39 @@ use crate::database::Database;
 use crate::repositories::note::NoteRepository;
 use djinn_memory::Note;
 
+pub type NoteRevisionContractRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+pub async fn note_revision_contract_rows(
+    db: &Database,
+    project_id: &str,
+) -> Vec<NoteRevisionContractRow> {
+    sqlx::query_as("SELECT event_kind, reason, actor_kind, actor_id, session_id, task_id, COALESCE(task_run_id, '') FROM note_revision_events WHERE project_id = $1 ORDER BY created_at, id")
+        .bind(project_id).fetch_all(db.pool()).await.expect("revision contract rows")
+}
+
+pub async fn note_and_revision_counts(db: &Database, project_id: &str) -> (i64, i64) {
+    let notes = sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = $1")
+        .bind(project_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("note count");
+    let revisions =
+        sqlx::query_scalar("SELECT COUNT(*) FROM note_revision_events WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("revision count");
+    (notes, revisions)
+}
+
 // ── Seed helpers for usage-analytics route tests ─────────────────────────
 // These insert rows directly via raw SQL so integration tests outside
 // djinn-db can seed deterministic fixture data without going through the
