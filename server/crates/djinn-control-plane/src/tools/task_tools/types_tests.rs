@@ -44,6 +44,14 @@ fn task_with_merge_commit_sha(merge_commit_sha: Option<&str>) -> Task {
         ci_github_head_sha: None,
         ci_heads_diverged: None,
         ci_head_observation_error: None,
+        ci_mq_state: None,
+        ci_mq_run_id: None,
+        ci_mq_head_sha: None,
+        ci_mq_failed_check_names: None,
+        ci_mq_failure_fingerprint: None,
+        ci_mq_same_signature_count: None,
+        ci_mq_first_seen_at: None,
+        ci_mq_last_seen_at: None,
         unresolved_blocker_count: 0,
     }
 }
@@ -499,6 +507,74 @@ fn ci_snapshot_without_reconciliation_fields_is_backwards_compatible() {
         ci.get("head_observation_error").is_none(),
         "head_observation_error must be absent when None"
     );
+    // Merge-queue lane absent when no mq state recorded.
+    assert!(
+        ci.get("merge_queue").is_none(),
+        "merge_queue must be absent when no lane state is recorded"
+    );
+}
+
+#[test]
+fn ci_snapshot_surfaces_merge_queue_lane_when_mq_columns_set() {
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    task.ci_mq_state = Some("dequeued_failure".into());
+    task.ci_mq_run_id = Some(778899);
+    task.ci_mq_head_sha = Some("mq00head00sha000000000000000000000000ffff".into());
+    task.ci_mq_failed_check_names = Some(r#"["Integration Tests","Server Tests"]"#.into());
+    task.ci_mq_failure_fingerprint = Some("mq-fp-abc".into());
+    task.ci_mq_same_signature_count = Some(3);
+    task.ci_mq_first_seen_at = Some("2026-07-14T00:00:00.000Z".into());
+    task.ci_mq_last_seen_at = Some("2026-07-14T00:05:00.000Z".into());
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+    let lane = serialized["ci"]["merge_queue"]
+        .as_object()
+        .expect("merge_queue lane should be an object when mq columns are set");
+
+    assert_eq!(lane["state"], "dequeued_failure");
+    assert_eq!(lane["run_id"], 778899);
+    assert_eq!(
+        lane["head_sha"],
+        "mq00head00sha000000000000000000000000ffff"
+    );
+    assert_eq!(
+        lane["failed_check_names"],
+        serde_json::json!(["Integration Tests", "Server Tests"])
+    );
+    assert_eq!(lane["failure_fingerprint"], "mq-fp-abc");
+    assert_eq!(lane["same_signature_count"], 3);
+    assert_eq!(lane["first_seen_at"], "2026-07-14T00:00:00.000Z");
+    assert_eq!(lane["last_seen_at"], "2026-07-14T00:05:00.000Z");
+}
+
+#[test]
+fn ci_snapshot_merge_queue_lane_omits_absent_optional_fields() {
+    let mut task = task_with_ci_snapshot_for_reconciliation();
+    // Only the state is known; every other lane field is nullable.
+    task.ci_mq_state = Some("dequeued_failure".into());
+    task.ci_mq_same_signature_count = Some(1);
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+    let lane = serialized["ci"]["merge_queue"]
+        .as_object()
+        .expect("merge_queue lane present with only state set");
+
+    assert_eq!(lane["state"], "dequeued_failure");
+    assert_eq!(lane["same_signature_count"], 1);
+    // failed_check_names defaults to an empty array (always serialized).
+    assert_eq!(lane["failed_check_names"], serde_json::json!([]));
+    for absent in [
+        "run_id",
+        "head_sha",
+        "failure_fingerprint",
+        "first_seen_at",
+        "last_seen_at",
+    ] {
+        assert!(
+            lane.get(absent).is_none(),
+            "{absent} must be omitted when None"
+        );
+    }
 }
 
 #[test]

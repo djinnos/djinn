@@ -19,8 +19,10 @@ use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 use tracing::Instrument;
 
+mod ci_directive;
 mod diagnostics;
 mod types;
+use ci_directive::build_ci_blocking_directive;
 pub(crate) use types::{PromptContext, PromptContextInputs, ReadSourceInfo};
 // Re-export for `use super::*` in test modules.
 #[allow(unused_imports)]
@@ -987,38 +989,6 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         prompt_setup_commands,
         extension_diagnostics: extension_diagnostics.to_vec(),
     }
-}
-
-/// Build BLOCKING directive for red required CI. Returns None for passing/advisory states.
-fn build_ci_blocking_directive(task: &Task) -> Option<String> {
-    if task.ci_status != "failing" {
-        return None;
-    }
-    let base_sha = task.ci_last_remediation_base_sha.as_deref()?;
-    let head_sha = task.ci_head_sha.as_deref().unwrap_or("unknown");
-    let pr_number = task.ci_pr_number.unwrap_or(0);
-    let check_names: Vec<String> =
-        serde_json::from_str(&task.ci_blocking_required_check_names).unwrap_or_default();
-    let checks_display = if check_names.is_empty() {
-        "unknown".to_string()
-    } else {
-        check_names.join(", ")
-    };
-    let fingerprint_line = match &task.ci_failure_fingerprint {
-        Some(fp) => format!("**Failure fingerprint:** `{fp}`\n"),
-        None => String::new(),
-    };
-    Some(format!(
-        "**PR:** #{pr_number}\\\n\
-         **Failing head SHA:** `{head_sha}`\\\n\
-         **Blocking checks:** {checks_display}\\\n\
-         {fingerprint_line}\
-         **Remediation baseline SHA:** `{base_sha}`\n\n\
-         > REQUIRED CI is failing on the current PR head. You MUST fix the \
-         failing required checks listed above before this task can proceed. \
-         The task will remain in remediation until all blocking checks pass \
-         on a new commit pushed to the PR branch."
-    ))
 }
 
 /// Resolve (from_sha, to_sha) for reviewer diff context via git. Best-effort.
