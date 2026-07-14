@@ -19,6 +19,21 @@ use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 use tracing::Instrument;
 
+/// Test-only observation point at the real typed-search boundary. It keeps
+/// production repository semantics intact while smoke tests assert concurrency.
+#[cfg(test)]
+pub(super) struct PlannedSearchObserver {
+    pub entered: std::sync::atomic::AtomicUsize,
+    pub barrier: std::sync::Arc<tokio::sync::Barrier>,
+    pub ready: std::sync::Arc<tokio::sync::Notify>,
+    pub release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static PLANNED_SEARCH_OBSERVER: std::sync::Arc<PlannedSearchObserver>;
+}
+
 mod types;
 pub(crate) use types::{
     KnowledgeContextIdentity, PromptContext, PromptContextInputs, ReadSourceInfo,
