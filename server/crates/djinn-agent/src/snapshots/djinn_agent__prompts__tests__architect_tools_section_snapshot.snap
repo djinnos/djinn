@@ -37,8 +37,8 @@ expression: section
 - `memory_recall_trace()`
 - `agent_metrics(role)`
 - `agent_create(base_role, name, description?, model_preference?, system_prompt_extensions?)`
-- `memory_write(content, title, type, status?, tags?)`
-- `memory_edit(content, identifier, operation, find_text?, section?, type?)`
+- `memory_write(content, reason, title, type, status?, tags?)`
+- `memory_edit(content, identifier, operation, reason, find_text?, section?, type?)`
 - `memory_move(identifier, type, title?)`
 - `task_delete_branch(id)`
 - `task_archive_activity(id)`
