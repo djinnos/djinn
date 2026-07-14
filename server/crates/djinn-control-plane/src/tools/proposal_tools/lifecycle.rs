@@ -26,7 +26,7 @@ use crate::tools::proposal_ops::{
     ProposalSingleResponse,
 };
 use djinn_core::events::DjinnEventEnvelope;
-use djinn_db::repositories::task::apply_parent_disposition_tx;
+use djinn_db::repositories::task::{EffectiveCreatorProvenance, apply_parent_disposition_tx};
 use djinn_db::{
     DispositionPlan, DispositionScope, EpicRepository, ProjectRepository, ProposalRepository,
     TaskRepository,
@@ -225,9 +225,14 @@ impl DjinnMcpServer {
 
         let title = format!("Break down proposal: {}", proposal.title);
         let task = match task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &home_project_id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&owner),
+                    source_task_id: None,
+                    proposal_id: Some(&proposal.id),
+                },
                 &title,
                 &design,
                 &design,
@@ -244,10 +249,6 @@ impl DjinnMcpServer {
                 return Json(err_single(format!("failed to create breakdown task: {e}")));
             }
         };
-        // Attribute the breakdown task (and the epics the Planner spawns from it,
-        // which inherit the session user) to the build owner so commits resolve
-        // to a real GitHub account.
-        let _ = task_repo.set_created_by_user_id(&task.id, &owner).await;
         // Record the breakdown task so a later proposal_stop_build can find and
         // force-close it (it has no epic, so it is not in proposal_epics).
         let _ = repo.set_breakdown_task(&proposal.id, &task.id).await;

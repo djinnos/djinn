@@ -29,6 +29,7 @@ use crate::tools::task_tools::types::{
     task_ci_gate_state, task_ci_status,
 };
 use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
+use djinn_db::repositories::task::EffectiveCreatorProvenance;
 use djinn_db::{EpicRepository, TaskRepository};
 
 const IMPACT_CHECK_WARNING: &str = "This task appears to involve a removal or rename. Consider calling `impact_check` before proceeding to avoid breaking compile-time consumers in other crates. See the planner prompt contract for details.";
@@ -280,10 +281,16 @@ pub async fn create_task(
     // Create the task AND its blocker edges atomically (one transaction) so the
     // coordinator's ready-poll never claims it as a dispatchable `open` task
     // before its blockers are committed — the planner↔dispatch race.
+    let acting_user_id = djinn_core::auth_context::current_user_id();
     let mut task = match repo
         .create_in_project_with_blockers(
             project_id,
             epic_id.as_deref(),
+            EffectiveCreatorProvenance {
+                explicit_user_id: acting_user_id.as_deref(),
+                source_task_id: None,
+                proposal_id: None,
+            },
             &request.title,
             &request.description,
             &request.design,

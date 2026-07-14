@@ -1,6 +1,17 @@
 use super::task_select_where_id;
 use super::*;
 
+/// Producer provenance for creator attribution. Producers provide facts, never
+/// a locally resolved fallback identity.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EffectiveCreatorProvenance<'a> {
+    pub explicit_user_id: Option<&'a str>,
+    pub source_task_id: Option<&'a str>,
+    pub proposal_id: Option<&'a str>,
+}
+
+const EFFECTIVE_CREATOR_UNAVAILABLE: &str = "effective_creator_unavailable";
+
 /// Parse a caller-supplied JSON string destined for one of the array-shaped
 /// JSONB columns (`labels`, `acceptance_criteria`, `memory_refs`).
 ///
@@ -19,23 +30,95 @@ fn parse_json_array_column(column: &str, raw: &str) -> Result<serde_json::Value>
         .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.{column}: {e}")))
 }
 
-impl TaskRepository {
-    #[allow(clippy::too_many_arguments)]
-    /// Set the task's creator. Used by proposal graduation so the
-    /// `epic_breakdown` task (and the epics the planner spawns from it, which
-    /// inherit the session user) attribute to the chosen build owner.
-    pub async fn set_created_by_user_id(&self, id: &str, user_id: &str) -> Result<()> {
-        self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE tasks SET created_by_user_id = $1 WHERE id = $2",
-            user_id,
-            id
+/// Resolve an attributable user while the caller's insert transaction is open.
+/// A disabled/retained user is intentionally valid: existence, not current org
+/// membership, is the attribution invariant. Explicit identities are different
+/// from fallback provenance: an invalid explicit value is an immediate error.
+async fn resolve_effective_creator(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    provenance: EffectiveCreatorProvenance<'_>,
+    parent_epic_id: Option<&str>,
+) -> Result<String> {
+    async fn existing_user(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        candidate: Option<String>,
+    ) -> Result<Option<String>> {
+        let Some(candidate) = candidate else {
+            return Ok(None);
+        };
+        Ok(
+            sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE id = $1")
+                .bind(&candidate)
+                .fetch_optional(&mut **tx)
+                .await?,
         )
-        .execute(self.db.pool())
-        .await?;
-        Ok(())
     }
 
+    if let Some(explicit) = provenance.explicit_user_id {
+        return existing_user(tx, Some(explicit.to_owned()))
+            .await?
+            .ok_or_else(|| {
+                Error::InvalidData(format!(
+                    "{EFFECTIVE_CREATOR_UNAVAILABLE}: invalid_explicit_identity"
+                ))
+            });
+    }
+
+    let source_creator = if let Some(source_task_id) = provenance.source_task_id {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT created_by_user_id FROM tasks WHERE id = $1",
+        )
+        .bind(source_task_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .flatten()
+    } else {
+        None
+    };
+    if let Some(user) = existing_user(tx, source_creator).await? {
+        return Ok(user);
+    }
+
+    let (epic_creator, epic_proposal_id) = if let Some(epic_id) = parent_epic_id {
+        sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT created_by_user_id, proposal_id FROM epics WHERE id = $1",
+        )
+        .bind(epic_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .unwrap_or((None, None))
+    } else {
+        (None, None)
+    };
+    if let Some(user) = existing_user(tx, epic_creator).await? {
+        return Ok(user);
+    }
+
+    let proposal_id = provenance
+        .proposal_id
+        .map(str::to_owned)
+        .or(epic_proposal_id);
+    if let Some(proposal_id) = proposal_id {
+        let proposal = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT build_owner_user_id, author_user_id FROM proposals WHERE id = $1",
+        )
+        .bind(proposal_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some((build_owner, author)) = proposal {
+            if let Some(user) = existing_user(tx, build_owner).await? {
+                return Ok(user);
+            }
+            if let Some(user) = existing_user(tx, author).await? {
+                return Ok(user);
+            }
+        }
+    }
+
+    Err(Error::InvalidData(EFFECTIVE_CREATOR_UNAVAILABLE.to_owned()))
+}
+
+impl TaskRepository {
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
@@ -110,6 +193,7 @@ impl TaskRepository {
         &self,
         project_id: &str,
         epic_id: Option<&str>,
+        provenance: EffectiveCreatorProvenance<'_>,
         title: &str,
         description: &str,
         design: &str,
@@ -125,26 +209,14 @@ impl TaskRepository {
         let short_id = self.generate_short_id(&id).await?;
         let ac =
             parse_json_array_column("acceptance_criteria", acceptance_criteria.unwrap_or("[]"))?;
-        // Stamp `created_by_user_id` with the effective creator, in order:
-        //   1. the session user (`SESSION_USER_ID`, set at the MCP dispatch
-        //      root) — a human acting directly;
-        //   2. the parent epic's creator — Planner work spawned under an owned
-        //      epic belongs to that human.
-        // Leaves NULL when neither resolves. There is deliberately NO automation
-        // fallback (proposal 1omc): ownerless tasks are refused at dispatch
-        // rather than silently run under a synthetic service user.
-        let created_by_user_id = match djinn_core::auth_context::current_user_id() {
-            Some(uid) => Some(uid),
-            None => match epic_id {
-                Some(eid) => {
-                    sqlx::query_scalar!("SELECT created_by_user_id FROM epics WHERE id = $1", eid)
-                        .fetch_optional(self.db.pool())
-                        .await?
-                        .flatten()
-                }
-                None => None,
-            },
-        };
+        // This is provenance, not a resolved value. Resolution happens after
+        // opening the transaction immediately below.
+        let explicit_creator = provenance
+            .explicit_user_id
+            .map(str::to_owned)
+            .or_else(djinn_core::auth_context::current_user_id);
+        let source_task_id = provenance.source_task_id.map(str::to_owned);
+        let proposal_id = provenance.proposal_id.map(str::to_owned);
 
         let project_id_owned = project_id.to_owned();
         let epic_id_owned = epic_id.map(|s| s.to_owned());
@@ -178,10 +250,22 @@ impl TaskRepository {
                 let owner = owner_owned.clone();
                 let status = status_owned.clone();
                 let ac = ac.clone();
-                let created_by_user_id = created_by_user_id.clone();
+                let explicit_creator = explicit_creator.clone();
+                let source_task_id = source_task_id.clone();
+                let proposal_id = proposal_id.clone();
                 let blocker_ids = blocker_ids_owned.clone();
                 async move {
                     let mut tx = self.db.pool().begin().await?;
+                    let created_by_user_id = resolve_effective_creator(
+                        &mut tx,
+                        EffectiveCreatorProvenance {
+                            explicit_user_id: explicit_creator.as_deref(),
+                            source_task_id: source_task_id.as_deref(),
+                            proposal_id: proposal_id.as_deref(),
+                        },
+                        epic_id.as_deref(),
+                    )
+                    .await?;
                     sqlx::query!(
                         "INSERT INTO tasks
                             (id, project_id, short_id, epic_id, title, description, design,
@@ -253,6 +337,7 @@ impl TaskRepository {
 
     /// Create a task with no blocker edges (the common path). See
     /// [`Self::create_in_project_with_blockers`].
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn create_in_project(
         &self,
@@ -270,6 +355,40 @@ impl TaskRepository {
         self.create_in_project_with_blockers(
             project_id,
             epic_id,
+            EffectiveCreatorProvenance::default(),
+            title,
+            description,
+            design,
+            issue_type,
+            priority,
+            owner,
+            status,
+            acceptance_criteria,
+            &[],
+        )
+        .await
+    }
+
+    /// Production creation boundary: producers supply facts and this repository resolves a concrete creator in the insert transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_in_project_with_provenance(
+        &self,
+        project_id: &str,
+        epic_id: Option<&str>,
+        provenance: EffectiveCreatorProvenance<'_>,
+        title: &str,
+        description: &str,
+        design: &str,
+        issue_type: &str,
+        priority: i64,
+        owner: &str,
+        status: Option<&str>,
+        acceptance_criteria: Option<&str>,
+    ) -> Result<Task> {
+        self.create_in_project_with_blockers(
+            project_id,
+            epic_id,
+            provenance,
             title,
             description,
             design,
@@ -801,7 +920,7 @@ mod created_by_tests {
     //! `SESSION_USER_ID` task-local and default to NULL when no user context
     //! is in scope.
 
-    use super::TaskRepository;
+    use super::{EFFECTIVE_CREATOR_UNAVAILABLE, EffectiveCreatorProvenance, TaskRepository};
     use crate::database::Database;
     use crate::repositories::user::UserRepository;
     use djinn_core::auth_context::SESSION_USER_ID;
@@ -892,12 +1011,16 @@ mod created_by_tests {
             "created_by_user_id must match the SESSION_USER_ID task-local"
         );
 
-        // Without SESSION_USER_ID in scope, created_by_user_id stays NULL —
-        // agent/background insert semantics.
-        let unattributed = repo
-            .create_in_project(
+        // Unresolvable provenance must fail before INSERT instead of committing NULL.
+        let before: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM tasks")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let error = repo
+            .create_in_project_with_provenance(
                 &project_id,
                 Some(&epic_id),
+                EffectiveCreatorProvenance::default(),
                 "Unattributed",
                 "",
                 "",
@@ -908,18 +1031,13 @@ mod created_by_tests {
                 None,
             )
             .await
+            .unwrap_err();
+        assert!(error.to_string().contains(EFFECTIVE_CREATOR_UNAVAILABLE));
+        let after: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM tasks")
+            .fetch_one(db.pool())
+            .await
             .unwrap();
-        let stamped: Option<String> = sqlx::query_scalar!(
-            "SELECT created_by_user_id FROM tasks WHERE id = $1",
-            unattributed.id
-        )
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert!(
-            stamped.is_none(),
-            "task created outside SESSION_USER_ID scope under an unowned epic must leave created_by_user_id NULL"
-        );
+        assert_eq!(before, after, "unresolvable creator must not commit a task");
     }
 
     /// A background/agent caller (no SESSION_USER_ID) creating a task under an
@@ -1037,6 +1155,7 @@ mod created_by_tests {
             .create_in_project_with_blockers(
                 &project_id,
                 Some(&epic_id),
+                EffectiveCreatorProvenance::default(),
                 "Blocked",
                 "",
                 "",

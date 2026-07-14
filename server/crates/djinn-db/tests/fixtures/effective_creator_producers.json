@@ -1,0 +1,13 @@
+{
+  "phase": "expand",
+  "writers": [
+    "server/crates/djinn-control-plane/src/tools/task_tools/ops.rs",
+    "server/crates/djinn-control-plane/src/tools/proposal_tools/lifecycle.rs",
+    "server/crates/djinn-control-plane/src/tools/refinement_tools.rs",
+    "server/crates/djinn-agent/src/direct_services.rs",
+    "server/crates/djinn-coordinator/src/refinement_outcome.rs",
+    "server/crates/djinn-coordinator/src/rules.rs",
+    "server/crates/djinn-coordinator/src/wave.rs",
+    "server/crates/djinn-coordinator/src/dispatch/retry.rs"
+  ]
+}

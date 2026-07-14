@@ -834,9 +834,14 @@ impl CoordinatorActor {
     ) {
         let title = format!("Plan next wave ({trigger})");
         match task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 project_id,
                 Some(epic_id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: None,
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 &title,
                 "Plan the next wave of work for this epic. Review completed work, update the roadmap, and create 3–5 tasks.",
                 "",
