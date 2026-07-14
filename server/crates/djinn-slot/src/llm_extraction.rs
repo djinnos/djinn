@@ -706,6 +706,22 @@ async fn record_extraction_skipped(
     }
 }
 
+/// Finalize an extraction run from its committed output count. This deliberately
+/// accepts only the count returned by canonical mutations, never extraction
+/// quality bookkeeping, so every terminal no-output path shares one predicate.
+async fn finalize_extraction_output(
+    note_repo: &dyn ExtractionNoteRepository,
+    project_id: &str,
+    session_id: &str,
+    task_id: &str,
+    task_run_id: Option<&str>,
+    durable_output_count: usize,
+) {
+    if durable_output_count == 0 {
+        record_extraction_skipped(note_repo, project_id, session_id, task_id, task_run_id).await;
+    }
+}
+
 #[async_trait::async_trait]
 impl ExtractionNoteRepository for NoteRepository {
     async fn mutate_with_revision(
@@ -1301,16 +1317,15 @@ async fn run_llm_extraction_inner(
         )
         .await;
     }
-    if durable_output_count == 0 {
-        record_extraction_skipped(
-            &note_repo,
-            &project.id,
-            &session_id,
-            &task.id,
-            session.task_run_id.as_deref(),
-        )
-        .await;
-    }
+    finalize_extraction_output(
+        &note_repo,
+        &project.id,
+        &session_id,
+        &task.id,
+        session.task_run_id.as_deref(),
+        durable_output_count,
+    )
+    .await;
     taxonomy.extraction_quality = extraction_quality;
     persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
     // Write a lightweight consolidation_run_metrics row so the admission-dropped
@@ -3259,6 +3274,12 @@ mod evidence_merge_regression_tests {
             }
         }
 
+        fn empty_with_mutation_failure(event_kind: NoteRevisionEventKind) -> Self {
+            let repo = Self::empty();
+            *repo.fail_next_kind.lock().unwrap() = Some(event_kind);
+            repo
+        }
+
         fn with_existing(existing: djinn_memory::Note) -> Self {
             Self {
                 ops: Arc::new(Mutex::new(Vec::new())),
@@ -3286,6 +3307,10 @@ mod evidence_merge_regression_tests {
 
         fn revisions(&self) -> Vec<RevisionRecord> {
             self.revisions.lock().unwrap().clone()
+        }
+
+        fn clear_revisions(&self) {
+            self.revisions.lock().unwrap().clear();
         }
 
         fn existing_content(&self) -> String {
@@ -3423,9 +3448,15 @@ mod evidence_merge_regression_tests {
         async fn get_by_permalink(
             &self,
             _project_id: &str,
-            _permalink: &str,
+            permalink: &str,
         ) -> djinn_db::Result<Option<djinn_memory::Note>> {
-            Ok(None)
+            Ok(self
+                .existing
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|note| note.permalink == permalink)
+                .cloned())
         }
         async fn create_db_note_with_scope_and_retrieval_anchor(
             &self,
@@ -3616,6 +3647,41 @@ mod evidence_merge_regression_tests {
         vec![test_candidate()]
     }
 
+    fn test_context<'a>(
+        repo: &'a dyn ExtractionNoteRepository,
+        provider: &'a dyn LlmProvider,
+    ) -> ExtractionContext<'a> {
+        ExtractionContext {
+            note_repo: repo,
+            provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_id: "task-1",
+            task_run_id: Some("run-1"),
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "\n\n---\n*Extracted from session new. Confidence: 0.5 (session-extracted).*",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        }
+    }
+
+    async fn finalize_test_output(repo: &dyn ExtractionNoteRepository, durable_output_count: usize) {
+        finalize_extraction_output(
+            repo,
+            "project-1",
+            "new",
+            "task-1",
+            Some("run-1"),
+            durable_output_count,
+        )
+        .await;
+    }
+
     fn assert_extraction_identity(record: &RevisionRecord, reason: &str) {
         assert_eq!(
             record.mutation.attribution,
@@ -3704,6 +3770,101 @@ mod evidence_merge_regression_tests {
         assert_eq!(skipped.after_content, None);
         assert_eq!(skipped.after_confidence, None);
         assert_eq!(skipped.committed_note_id, None);
+    }
+
+    #[tokio::test]
+    async fn terminal_admission_drop_records_one_trusted_skipped_revision() {
+        let provider = ScriptedProvider::new(vec![]);
+        let repo = RecordingExtractionRepository::empty();
+        let context = test_context(&repo, &provider);
+        let dropped = ExtractedNote {
+            title: "Incomplete".to_owned(),
+            content: "too short for durable memory".to_owned(),
+            retrieval_anchor: None,
+            scope_paths: vec![],
+        };
+        let mut quality = ExtractionQuality::default();
+        let durable = process_extracted_note(&context, "case", &dropped, &mut quality).await;
+        assert_eq!(durable, 0);
+        assert_eq!(quality.admission_dropped, 1);
+
+        finalize_test_output(&repo, durable).await;
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].mutation.event_kind, NoteRevisionEventKind::ExtractionSkipped);
+        assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
+    }
+
+    #[tokio::test]
+    async fn terminal_duplicate_confidence_noop_records_one_trusted_skipped_revision() {
+        let provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_owned(),
+        ]);
+        let mut existing = test_existing_note();
+        existing.confidence = 1.0;
+        let repo = RecordingExtractionRepository::with_existing(existing);
+        let context = test_context(&repo, &provider);
+        let mut quality = ExtractionQuality::default();
+        let durable = process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+        assert_eq!(durable, 0);
+
+        finalize_test_output(&repo, durable).await;
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].mutation.event_kind, NoteRevisionEventKind::ExtractionSkipped);
+        assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
+    }
+
+    #[tokio::test]
+    async fn terminal_unchanged_working_spec_records_one_trusted_skipped_revision() {
+        let provider = ScriptedProvider::new(vec![]);
+        let repo = RecordingExtractionRepository::empty();
+        let context = test_context(&repo, &provider);
+        assert!(persist_working_spec(&context, &test_extracted_case(), &["test reason"]).await);
+        repo.clear_revisions(); // Models a later run whose working spec already exists.
+
+        let changed = persist_working_spec(&context, &test_extracted_case(), &["test reason"]).await;
+        assert!(!changed);
+        finalize_test_output(&repo, usize::from(changed)).await;
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 2, "the no-op mutation and terminal skip are recorded");
+        assert!(!revisions[0].changed);
+        assert_eq!(revisions[0].mutation.event_kind, NoteRevisionEventKind::Updated);
+        assert_eq!(revisions[1].mutation.event_kind, NoteRevisionEventKind::ExtractionSkipped);
+        assert_extraction_identity(&revisions[1], EXTRACTION_SKIPPED_REASON);
+    }
+
+    #[tokio::test]
+    async fn terminal_mutation_failure_does_not_fabricate_output_and_records_skip() {
+        let provider = ScriptedProvider::new(vec![r#"{"decision":"novel"}"#.to_owned()]);
+        let repo = RecordingExtractionRepository::empty_with_mutation_failure(NoteRevisionEventKind::Created);
+        let context = test_context(&repo, &provider);
+        let mut quality = ExtractionQuality::default();
+        let durable = process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+        assert_eq!(durable, 0);
+
+        finalize_test_output(&repo, durable).await;
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 1, "failed create must not fabricate a revision");
+        assert_eq!(revisions[0].mutation.event_kind, NoteRevisionEventKind::ExtractionSkipped);
+        assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
+    }
+
+    #[tokio::test]
+    async fn terminal_durable_success_suppresses_skipped_revision() {
+        let provider = ScriptedProvider::new(vec![]);
+        let repo = RecordingExtractionRepository::empty();
+        let context = test_context(&repo, &provider);
+        let created = context
+            .create_extracted_note("Partial success", "durable body", "case", "[]", None)
+            .await
+            .expect("create succeeds");
+        finalize_test_output(&repo, usize::from(created.changed)).await;
+
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].mutation.event_kind, NoteRevisionEventKind::Created);
+        assert_extraction_identity(&revisions[0], "created note from completed session extraction");
     }
 
     #[tokio::test]
