@@ -154,10 +154,11 @@ pub(crate) async fn persist_extension_diagnostic_batch(
     facts: Vec<ExtensionDiagnosticFact>,
 ) -> djinn_db::Result<Vec<ExtensionLoadDiagnosticV1>> {
     for fact in facts {
-        if let Err(error) = persist_extension_diagnostic(repository, associations.clone(), fact).await {
-            if !continue_after_error(&error) {
-                return Err(error);
-            }
+        if let Err(error) =
+            persist_extension_diagnostic(repository, associations.clone(), fact).await
+            && !continue_after_error(&error)
+        {
+            return Err(error);
         }
     }
     repository

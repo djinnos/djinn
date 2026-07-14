@@ -5,9 +5,14 @@ use djinn_db::ExtensionLoadDiagnosticRepository;
 
 use crate::context::AgentContext;
 use crate::environment::environment_config_for_project_id;
-use crate::extension_diagnostics::{ExtensionDiagnosticAssociations, persist_extension_diagnostic_batch};
+use crate::extension_diagnostics::{
+    ExtensionDiagnosticAssociations, persist_extension_diagnostic_batch,
+};
 use crate::mcp_client::connect_and_discover_with_diagnostics;
-use crate::mcp_settings::{effective_mcp_server_names, effective_skill_names, load_mcp_server_registry, resolve_mcp_servers};
+use crate::mcp_settings::{
+    effective_mcp_server_names, effective_skill_names, load_mcp_server_registry,
+    resolve_mcp_servers,
+};
 use crate::skills_manifest::load_verified_skills_detailed;
 
 /// Runs one fresh, read-only doctor extension diagnostics attempt.
@@ -48,8 +53,8 @@ pub async fn probe_project_extensions(
 mod tests {
     use std::fs;
 
-    use djinn_core::extension_diagnostics::{ExtensionLoadPhase, ExtensionLoadSourceKind};
     use djinn_core::events::EventBus;
+    use djinn_core::extension_diagnostics::{ExtensionLoadPhase, ExtensionLoadSourceKind};
     use djinn_db::{ExtensionLoadDiagnosticRepository, ProjectRepository};
     use tokio_util::sync::CancellationToken;
 
@@ -82,7 +87,8 @@ mod tests {
             r#"{"mcpServers":{"missing-placeholder":{"url":"${DOCTOR_PROBE_UNSET}"}}}"#,
         )
         .expect("MCP fixture");
-        let app_state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+        let app_state =
+            crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
 
         let first = probe_project_extensions(&project_id, workspace.path(), &app_state)
             .await
@@ -95,8 +101,16 @@ mod tests {
             row.source_kind == ExtensionLoadSourceKind::ProjectMcp
                 && row.phase == ExtensionLoadPhase::PlaceholderResolution
         }));
-        assert!(first.iter().any(|row| row.source_kind == ExtensionLoadSourceKind::ProjectSkill));
-        assert!(first.iter().all(|row| row.task_id.is_none() && row.session_id.is_none()));
+        assert!(
+            first
+                .iter()
+                .any(|row| row.source_kind == ExtensionLoadSourceKind::ProjectSkill)
+        );
+        assert!(
+            first
+                .iter()
+                .all(|row| row.task_id.is_none() && row.session_id.is_none())
+        );
         assert!(!first.is_empty());
         assert!(!second.is_empty());
         assert_ne!(first[0].load_attempt_id, second[0].load_attempt_id);
