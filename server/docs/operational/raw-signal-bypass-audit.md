@@ -41,7 +41,7 @@ grep-guard or manual audit should verify.
 | 5 | **Respawn/retry** | `dispatch/retry.rs`, `dispatch/respawn_guard.rs` | Retry accounting uses `TaskAttemptOutcome` derived from classifier verdict; protocol violations increment attempts |
 | 6 | **DB board_health** | `djinn_db::TaskRepository::board_health` | Surfaces `liveness_outcomes.recent[].verdict`, `outcome_kind`, `outcome_reason` from `liveness_evidence` table |
 | 7 | **Control-plane board_health** | `djinn-control-plane` MCP `board_health` tool | Surfaces DB liveness_outcomes/protocol_violations/stranded_ready sections; `stranded_ready.findings[].dispatch_gate` carries gate evidence |
-| 8 | **Coordinator doctor tick** | `doctor::leader_tick`, `doctor::zombie_running_session` | Doctor zombie check loads `CurrentLivenessState` via `LivenessRepository` and surfaces `liveness_verdict`, `liveness_outcome_kind`, `liveness_evidence` in finding |
+| 8 | **Coordinator doctor tick** | `doctor::leader_tick` | Runs registered cheap checks and persists their findings. |
 
 ## Audit Procedure
 
@@ -97,7 +97,6 @@ test and are tracked here as operator obligations:
 - `server/crates/djinn-coordinator/src/dispatch/liveness.rs` — Pure classifier
 - `server/crates/djinn-coordinator/src/dispatch/session_recovery.rs` — Stall/zombie/idle consumers
 - `server/crates/djinn-coordinator/src/dispatch/retry.rs` — Retry accounting
-- `server/crates/djinn-coordinator/src/doctor/zombie_running_session.rs` — Doctor zombie check
 - `server/crates/djinn-coordinator/src/doctor/leader_tick.rs` — Doctor leader-tick integration
 - `server/crates/djinn-db/src/repositories/task/board_health.rs` — DB board_health sections
 - `server/crates/djinn-control-plane/tests/board_tools.rs` — MCP contract tests

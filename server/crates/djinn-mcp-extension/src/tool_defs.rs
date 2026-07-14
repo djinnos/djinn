@@ -563,7 +563,7 @@ pub fn tool_schemas_planner() -> Vec<serde_json::Value> {
     ));
     // Memory-health and knowledge-graph tools used by board maintenance
     // (sections "Memory Health Review" and "Contradiction and Low-Confidence
-    // Review", formerly the patrol prompt).
+    // Review").
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_build_context(),
         read_only(),

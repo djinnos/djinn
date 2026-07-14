@@ -1287,7 +1287,7 @@ impl TaskRunSupervisor {
                         // Commit the staged merge now so it lands even with no
                         // worker edits. Author as the task creator (resolved
                         // host-side), mirroring the post-worker commit path;
-                        // falls back to the bot identity for system tasks.
+                        // falls back to the bot identity for tasks without a resolved creator.
                         let identity = GitIdentity {
                             name: spec.commit_author_name.as_deref().unwrap_or("djinn-bot"),
                             email: spec
@@ -1647,7 +1647,7 @@ impl TaskRunSupervisor {
                         // Vercel's commit-author check authorizes the build. The
                         // PR is still opened by the App, so the creator can
                         // review/approve their own commits. Falls back to the bot
-                        // identity for system/patrol tasks with no human creator.
+                        // identity for tasks without a resolved creator with no human creator.
                         let identity = GitIdentity {
                             name: spec.commit_author_name.as_deref().unwrap_or("djinn-bot"),
                             email: spec
@@ -2071,7 +2071,7 @@ impl TaskRunSupervisor {
                         // commit 4de6f49c7 stripped that to fix the
                         // worker/reviewer race and accidentally left planner
                         // tasks dispatching every ~30s in a tight loop
-                        // (observed on patrol planning task k4my: 10 sessions
+                        // (observed on repeated planning task k4my: 10 sessions
                         // in 8 minutes).
                         //
                         // Planner tasks use the SIMPLE lifecycle
@@ -2543,13 +2543,13 @@ impl TaskRunSupervisor {
                         reason,
                         provider_failure,
                     } => {
-                        // Planner patrol tasks (issue_type=review) must close
+                        // Planner review tasks (issue_type=review) must close
                         // even on Failed — the LLM sometimes finishes without
                         // calling submit_grooming (StageOutcome::Failed via
                         // "finalized via unexpected tool", or no finalize at
                         // all), and the task otherwise stays `open` and the
                         // coordinator re-dispatches it every ~30s in a tight
-                        // loop. Observed on n6k8 "Planner patrol: board
+                        // loop. Observed on n6k8 "Planner review: board
                         // health review" after k4my had the same pattern.
                         if role_kind == RoleKind::Planner
                             && task.issue_type == "review"
@@ -3920,7 +3920,7 @@ mod tests {
     // planning-type task used to surface `TaskRunOutcome::Escalated`
     // and fire NO `transition_task` call, leaving the task in
     // `in_progress` for the coordinator's ready-task sweep to
-    // re-dispatch every ~30s (the `k4my` / patrol planning redispatch
+    // re-dispatch every ~30s (the `k4my` / planning redispatch
     // loop). The fix routes planner + planning-type escalates through a
     // cancel-gated `close` transition so the task parks durably.
     //

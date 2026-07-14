@@ -333,7 +333,7 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
 
             // Look up the backing task.
             let task = match task_repo.get_by_short_id(short_id).await {
-                Ok(Some(task)) => task,
+                Ok(Some(task)) => Some(task),
                 Ok(None) => {
                     // Task not found. For the sweep, a missing task with an open
                     // PR is considered stale — the PR is orphaned. We create a
@@ -347,50 +347,7 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
                         short_id,
                         "CoordinatorActor: stale PR sweep found PR with missing backing task"
                     );
-                    djinn_core::models::Task {
-                        id: String::new(),
-                        project_id: project.id.clone(),
-                        short_id: short_id.to_string(),
-                        epic_id: None,
-                        title: String::new(),
-                        description: String::new(),
-                        design: String::new(),
-                        issue_type: String::new(),
-                        status: "closed".to_string(),
-                        priority: 0,
-                        owner: String::new(),
-                        labels: "[]".to_string(),
-                        acceptance_criteria: "[]".to_string(),
-                        reopen_count: 0,
-                        continuation_count: 0,
-                        total_reopen_count: 0,
-                        intervention_count: 0,
-                        last_intervention_at: None,
-                        created_at: "1970-01-01T00:00:00Z".to_string(),
-                        updated_at: "1970-01-01T00:00:00Z".to_string(),
-                        closed_at: Some("1970-01-01T00:00:00Z".to_string()),
-                        close_reason: None,
-                        merge_commit_sha: None,
-                        pr_url: Some(pr.html_url.clone()),
-                        merge_conflict_metadata: None,
-                        memory_refs: "[]".to_string(),
-                        agent_type: None,
-                        created_by_user_id: None,
-                        ci_status: djinn_core::models::CiStatus::Unknown.to_string(),
-                        ci_head_sha: None,
-                        ci_pr_number: None,
-                        ci_blocking_required_check_names: "[]".to_string(),
-                        ci_failure_fingerprint: None,
-                        ci_first_seen_at: None,
-                        ci_last_seen_at: None,
-                        ci_same_signature_count: 0,
-                        ci_last_remediation_base_sha: None,
-                        ci_mirror_head_sha: None,
-                        ci_github_head_sha: None,
-                        ci_heads_diverged: None,
-                        ci_head_observation_error: None,
-                        unresolved_blocker_count: 0,
-                    }
+                    None
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -410,12 +367,12 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
 
             // Only reap PRs for tasks that are closed (or we created a synthetic
             // closed one above).
-            if task.status != "closed" {
+            if task.as_ref().is_some_and(|task| task.status != "closed") {
                 tracing::debug!(
                     project_id = %project.id,
                     pr = pr.number,
                     head = %head_branch,
-                    task_status = %task.status,
+                    task_status = %task.as_ref().expect("present task was checked").status,
                     "CoordinatorActor: stale PR sweep skipping PR whose task is still open"
                 );
                 stats.prs_skipped += 1;
@@ -426,7 +383,8 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
             }
 
             // Run guardrail checks via PrCleanupPolicy.
-            match cleanup_policy.should_cleanup_pr(&task, pr).await {
+            let cleanup_target = task.as_ref().map(super::pr_poller::pr_cleanup::PrCleanupTarget::from).unwrap_or_else(|| super::pr_poller::pr_cleanup::PrCleanupTarget { short_id: short_id.to_owned(), closed_at: Some("1970-01-01T00:00:00Z".to_owned()), updated_at: "1970-01-01T00:00:00Z".to_owned() });
+            match cleanup_policy.should_cleanup_pr(&cleanup_target, pr).await {
                 Ok(true) => {
                     // Guardrails passed — proceed with cleanup.
                 }
@@ -499,7 +457,7 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
 
             // ── Delete the remote branch ────────────────────────────────
             match cleanup_policy
-                .delete_branch_if_allowed(&task, head_branch)
+                .delete_branch_if_allowed(&cleanup_target, head_branch)
                 .await
             {
                 Ok(super::pr_poller::pr_cleanup::BranchCleanupOutcome::Deleted) => {
@@ -562,32 +520,12 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
                 // Non-fatal — the PR is already closed.
             }
 
-            // ── Task activity log entry ─────────────────────────────────
-            let activity_payload = serde_json::json!({
-                "event": "stale_pr_swept",
-                "pr_number": pr.number,
-                "pr_url": pr.html_url,
-                "branch": head_branch,
-                "project_id": project.id,
-            });
-            if let Err(e) = task_repo
-                .log_activity(
-                    Some(&task.id),
-                    "system",
-                    "system",
-                    "stale_pr_swept",
-                    &activity_payload.to_string(),
-                )
-                .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    project_id = %project.id,
-                    task_id = %task.id,
-                    pr = pr.number,
-                    "CoordinatorActor: stale PR sweep failed to write activity log; continuing"
-                );
-                // Non-fatal — the PR is already closed.
+            // ── Task activity log entry (orphaned PRs have no task row).
+            if let Some(task) = task.as_ref() {
+                let activity_payload = serde_json::json!({ "event": "stale_pr_swept", "pr_number": pr.number, "pr_url": pr.html_url, "branch": head_branch, "project_id": project.id });
+                if let Err(e) = task_repo.log_activity(Some(&task.id), "system", "system", "stale_pr_swept", &activity_payload.to_string()).await {
+                    tracing::warn!(error = %e, project_id = %project.id, task_id = %task.id, pr = pr.number, "CoordinatorActor: stale PR sweep failed to write activity log; continuing");
+                }
             }
         }
     }

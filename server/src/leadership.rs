@@ -4,7 +4,7 @@
 //! ## Why this exists
 //!
 //! The server is both the HTTP/UI/API plane *and* the coordinator (task
-//! dispatch, reaping, patrols, the worker RPC listener). Those two roles have
+//! dispatch, reaping, maintenance, the worker RPC listener). Those two roles have
 //! different correctness requirements during a deploy:
 //!
 //!   * The HTTP plane wants **zero downtime** — a `Recreate` rollout (kill old

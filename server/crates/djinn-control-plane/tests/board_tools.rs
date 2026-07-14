@@ -29,7 +29,7 @@ async fn board_health_with_no_pool_returns_response_shape() {
     assert!(response.get("review_queue").is_some());
     assert!(response.get("stale_threshold_hours").is_some());
     // Memory health is no longer embedded in board_health (the planner
-    // patrol that consumed it was removed with proposal 1omc); note-health
+    // legacy consumer that consumed it was removed with proposal 1omc); note-health
     // signals live on the dedicated `memory_health` tool.
     assert!(response.get("memory_health").is_none());
 }

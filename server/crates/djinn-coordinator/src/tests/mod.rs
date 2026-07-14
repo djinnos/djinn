@@ -1393,7 +1393,6 @@ async fn planner_intervention_markers(
 
 mod deploy_interruptions_environmental;
 mod dispatch_flow;
-mod doctor_zombie_e2e;
 mod intervention;
 mod pause_is_not_fault;
 mod session_reaping;
@@ -1411,8 +1410,6 @@ mod i3mv_regression_tests;
 #[cfg(test)]
 mod operator_explanation_tests;
 
-#[cfg(test)]
-mod raw_signal_bypass_guard;
 
 #[cfg(test)]
 mod tripwire_planner_escalation;

@@ -32,13 +32,6 @@ const sampleContext: SymbolContext = {
   incoming: {
     calls: [
       {
-        uid: "scip:rust . djinn . :: actors :: architect :: patrol()",
-        name: "patrol",
-        kind: "function",
-        file_path: "server/crates/djinn-agent/src/actors/architect.rs",
-        confidence: 0.95,
-      },
-      {
         uid: "scip:rust . djinn . :: actors :: slot :: helpers :: ensure_warm()",
         name: "ensure_warm",
         kind: "function",
