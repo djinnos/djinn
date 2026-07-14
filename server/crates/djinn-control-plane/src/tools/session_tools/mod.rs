@@ -2,8 +2,10 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
+use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::SessionRecord;
 use djinn_db::ActivityQuery;
+use djinn_db::ExtensionLoadDiagnosticRepository;
 use djinn_db::SessionMessageRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
@@ -170,6 +172,11 @@ pub struct SessionActiveResponse {
 pub struct SessionShowResponse {
     #[serde(flatten)]
     pub session: Option<SessionToolSession>,
+    /// Canonical extension-load failures associated with this session. Present
+    /// on successful lookups, including as an empty array.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<Vec<super::json_object::AnyJson>>")]
+    pub extension_load_diagnostics: Option<Vec<ExtensionLoadDiagnosticV1>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -476,7 +483,7 @@ impl DjinnMcpServer {
 
     /// Get a single session by id.
     #[tool(
-        description = "session_show(id) returns session details: id, task_id, model_id, agent_type, started_at, ended_at, status, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens"
+        description = "session_show(id) returns session details and canonical session-associated extension_load_diagnostics: id, task_id, model_id, agent_type, started_at, ended_at, status, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens"
     )]
     pub async fn session_show(
         &self,
@@ -487,6 +494,7 @@ impl DjinnMcpServer {
             Err(e) => {
                 return Json(SessionShowResponse {
                     session: None,
+                    extension_load_diagnostics: None,
                     error: Some(e),
                 });
             }
@@ -495,18 +503,36 @@ impl DjinnMcpServer {
         let task_run_repo =
             djinn_db::repositories::task_run::TaskRunRepository::new(self.state.db().clone());
         match repo.get_in_project(&project_id, &p.id).await {
-            Ok(Some(session)) => Json(SessionShowResponse {
-                session: Some(
-                    SessionToolSession::from_session_with_run(session, &task_run_repo).await,
-                ),
-                error: None,
-            }),
+            Ok(Some(session)) => {
+                let diagnostic_repo =
+                    ExtensionLoadDiagnosticRepository::new(self.state.db().clone());
+                match diagnostic_repo
+                    .list_for_session(&project_id, &session.id)
+                    .await
+                {
+                    Ok(extension_load_diagnostics) => Json(SessionShowResponse {
+                        session: Some(
+                            SessionToolSession::from_session_with_run(session, &task_run_repo)
+                                .await,
+                        ),
+                        extension_load_diagnostics: Some(extension_load_diagnostics),
+                        error: None,
+                    }),
+                    Err(e) => Json(SessionShowResponse {
+                        session: None,
+                        extension_load_diagnostics: None,
+                        error: Some(e.to_string()),
+                    }),
+                }
+            }
             Ok(None) => Json(SessionShowResponse {
                 session: None,
+                extension_load_diagnostics: None,
                 error: Some(format!("session not found: {}", p.id)),
             }),
             Err(e) => Json(SessionShowResponse {
                 session: None,
+                extension_load_diagnostics: None,
                 error: Some(e.to_string()),
             }),
         }
