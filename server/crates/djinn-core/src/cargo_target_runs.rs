@@ -166,11 +166,32 @@ pub fn inventory_cargo_target_runs(
                     kind: InventoryIssueKind::MalformedTopLevelName,
                 });
             } else {
-                inventory.candidates.push(RunDirInventoryCandidate {
+                let candidate = RunDirInventoryCandidate {
                     name: raw_name.clone(),
                     modified: metadata.modified().ok(),
                     created: metadata.created().ok(),
-                });
+                };
+                // Recursive failures make the entire run unmeasurable, so it
+                // must not remain a removal candidate.
+                let errors_before = inventory.errors.len();
+                inventory_directory(
+                    &entry.path(),
+                    Some(raw_name.clone()),
+                    &mut seen,
+                    &mut inventory,
+                )?;
+                if inventory.errors[errors_before..]
+                    .iter()
+                    .any(|issue| issue.top_level_name.as_deref() == Some(raw_name.as_slice()))
+                {
+                    inventory.protected.push(InventoryIssue {
+                        top_level_name: Some(raw_name),
+                        kind: InventoryIssueKind::ReadDirectory,
+                    });
+                } else {
+                    inventory.candidates.push(candidate);
+                }
+                continue;
             }
             inventory_directory(&entry.path(), Some(raw_name), &mut seen, &mut inventory)?;
         }
@@ -589,9 +610,7 @@ pub fn trim_cargo_target_runs(
                 deleted,
                 errors,
                 protected,
-                outcome: if errors > 0 {
-                    CargoTargetRunsTrimOutcome::OverBudgetError
-                } else if deleted == 0 {
+                outcome: if deleted == 0 {
                     CargoTargetRunsTrimOutcome::WithinBudget
                 } else {
                     CargoTargetRunsTrimOutcome::TrimmedWithinBudget
@@ -602,6 +621,10 @@ pub fn trim_cargo_target_runs(
             std::str::from_utf8(&candidate.name)
                 .ok()
                 .is_some_and(|id| !active_ids.contains(id))
+                && !inventory
+                    .errors
+                    .iter()
+                    .any(|issue| issue.top_level_name.as_deref() == Some(candidate.name.as_slice()))
                 && !attempted.contains(&candidate.name)
         });
         let Some(candidate) = candidate else {
@@ -922,5 +945,119 @@ mod tests {
                 kind: InventoryIssueKind::ReadDirectory,
             }]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_error_affected_directory_is_never_a_candidate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = mkdir(tmp.path(), "run");
+        let mut inventory = CargoTargetRunsInventory::default();
+        inventory_directory(
+            &run.join("missing"),
+            Some(b"run".to_vec()),
+            &mut HashSet::new(),
+            &mut inventory,
+        )
+        .unwrap();
+        assert!(!inventory.errors.is_empty());
+
+        // This is the same post-recursion decision made by the root inventory:
+        // an error belonging to `run` excludes its otherwise valid candidate.
+        let candidate = RunDirInventoryCandidate {
+            name: b"run".to_vec(),
+            modified: None,
+            created: None,
+        };
+        assert!(
+            inventory.errors.iter().any(|issue| {
+                issue.top_level_name.as_deref() == Some(candidate.name.as_slice())
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn joint_trim_protects_active_runs_and_reports_exact_postcondition() {
+        let tmp = tempfile::tempdir().unwrap();
+        mkdir(tmp.path(), "active");
+        mkdir(tmp.path(), "inactive");
+        let active_ids = HashSet::from(["active".to_owned()]);
+        let result = trim_cargo_target_runs(
+            tmp.path(),
+            &active_ids,
+            CargoTargetRunsCaps {
+                max_dirs: 0,
+                max_bytes: 1,
+            },
+        )
+        .unwrap();
+        let inventory = inventory_cargo_target_runs(tmp.path()).unwrap();
+        // The active directory remains while the inactive one is exhausted.
+        assert!(tmp.path().join("active").exists());
+        assert!(!tmp.path().join("inactive").exists());
+        assert_eq!(
+            result.final_allocated_bytes,
+            inventory.total_allocated_bytes
+        );
+        assert_eq!(
+            result.final_top_level_directory_count,
+            inventory.top_level_directory_count
+        );
+        assert_eq!(
+            result.outcome,
+            CargoTargetRunsTrimOutcome::OverBudgetProtected
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn joint_trim_removes_newest_when_byte_budget_requires_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        mkdir(tmp.path(), "only-run");
+        let result = trim_cargo_target_runs(
+            tmp.path(),
+            &HashSet::new(),
+            CargoTargetRunsCaps {
+                max_dirs: 0,
+                max_bytes: 1,
+            },
+        )
+        .unwrap();
+        assert!(!tmp.path().join("only-run").exists());
+        assert_eq!(result.deleted, 1);
+        assert_eq!(
+            result.final_allocated_bytes,
+            inventory_cargo_target_runs(tmp.path())
+                .unwrap()
+                .total_allocated_bytes
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn joint_trim_rescans_hardlinks_for_exact_final_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = mkdir(tmp.path(), "a");
+        let second = mkdir(tmp.path(), "b");
+        let file = first.join("shared");
+        fs::write(&file, vec![1_u8; 4096]).unwrap();
+        fs::hard_link(&file, second.join("shared")).unwrap();
+        let result = trim_cargo_target_runs(
+            tmp.path(),
+            &HashSet::new(),
+            CargoTargetRunsCaps {
+                max_dirs: 1,
+                max_bytes: 0,
+            },
+        )
+        .unwrap();
+        let inventory = inventory_cargo_target_runs(tmp.path()).unwrap();
+        assert_eq!(result.deleted, 1);
+        assert_eq!(
+            result.final_allocated_bytes,
+            inventory.total_allocated_bytes
+        );
+        assert_eq!(result.final_top_level_directory_count, 1);
     }
 }
