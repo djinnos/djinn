@@ -450,21 +450,59 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlink_profiles_and_tree_links_are_rejected_without_following_them() {
+    fn a_link_beneath_a_valid_incremental_tree_rejects_the_entire_base() {
         use std::os::unix::fs::symlink;
+
         let temp = tempfile::tempdir().expect("tempdir");
         let base = mkdir(temp.path(), "base");
         let outside = mkdir(temp.path(), "outside");
-        mkdir(&outside, "incremental");
-        symlink(&outside, base.join("debug")).expect("profile link");
+        fs::write(outside.join("must-not-be-counted"), vec![0u8; 4096]).expect("outside file");
+        let incremental = mkdir(&base, "debug/incremental");
+        symlink(&outside, incremental.join("outside-link")).expect("tree link");
+
         let plan = build_three_rung_pressure_plan(
             vec![snapshot(&base, "base", Some(UNIX_EPOCH))],
             UNIX_EPOCH + Duration::from_secs(1),
             Duration::ZERO,
         );
-        assert!(matches!(
+        assert_eq!(plan.units.len(), 1);
+        assert_eq!(plan.units[0].rung, PressureRung::WholeBase);
+        assert_eq!(plan.units[0].projected_allocated_bytes, 0);
+        assert_eq!(
             plan.units[0].disposition,
             PressurePlanDisposition::Retained(PressurePlanRetainReason::UnsafeProfile)
-        ));
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_profile_traversal_rejects_the_entire_base() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = mkdir(temp.path(), "base");
+        let incremental = mkdir(&base, "debug/incremental");
+        fs::write(incremental.join("artifact"), b"artifact").expect("artifact");
+        let profile_root = base.join("debug");
+        let original = fs::metadata(&profile_root)
+            .expect("profile metadata")
+            .permissions();
+        let mut unreadable = original.clone();
+        unreadable.set_mode(0o000);
+        fs::set_permissions(&profile_root, unreadable).expect("remove profile permissions");
+
+        let plan = build_three_rung_pressure_plan(
+            vec![snapshot(&base, "base", Some(UNIX_EPOCH))],
+            UNIX_EPOCH + Duration::from_secs(1),
+            Duration::ZERO,
+        );
+
+        fs::set_permissions(&profile_root, original).expect("restore profile permissions");
+        assert_eq!(plan.units.len(), 1);
+        assert_eq!(plan.units[0].rung, PressureRung::WholeBase);
+        assert_eq!(
+            plan.units[0].disposition,
+            PressurePlanDisposition::Retained(PressurePlanRetainReason::TraversalError)
+        );
     }
 }
