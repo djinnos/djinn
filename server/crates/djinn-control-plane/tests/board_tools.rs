@@ -455,8 +455,15 @@ async fn board_health_stranded_ready_matches_seeded_task() {
         .await
         .expect("attribute stranded-ready task");
 
-    // Backdate the task's updated_at well past the 30-minute threshold.
-    djinn_db::test_support::backdate_task_updated_at(harness.db(), &task.id, "90 minutes").await;
+    // Backdate both updated_at and the latest open transition. Board health
+    // deliberately gives that transition precedence as high-confidence
+    // unclaimed evidence.
+    djinn_db::test_support::backdate_task_open_transition_and_updated_at(
+        harness.db(),
+        &task.id,
+        "90 minutes",
+    )
+    .await;
 
     // Call board_health through the MCP tool.
     let response = harness

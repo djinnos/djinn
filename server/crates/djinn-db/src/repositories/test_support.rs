@@ -267,6 +267,53 @@ pub async fn backdate_task_updated_at(db: &Database, task_id: &str, interval: &s
     .unwrap();
 }
 
+/// Backdate a task's `updated_at` and its latest `status_changed` transition
+/// to `open` by the same PostgreSQL `interval` string.
+///
+/// Test-fixture helper for stranded-ready scenarios. Board health deliberately
+/// prefers the newest open transition over `updated_at` as high-confidence
+/// unclaimed evidence, so changing only the task timestamp would create an
+/// internally inconsistent fixture.
+pub async fn backdate_task_open_transition_and_updated_at(
+    db: &Database,
+    task_id: &str,
+    interval: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    let mut tx = db.pool().begin().await.unwrap();
+
+    sqlx::query(
+        "UPDATE tasks SET updated_at = to_char(
+             now() AT TIME ZONE 'utc' - $1::interval,
+             'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+         WHERE id = $2",
+    )
+    .bind(interval)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE activity_log SET created_at = to_char(
+             now() AT TIME ZONE 'utc' - $1::interval,
+             'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+         WHERE id = (SELECT id FROM activity_log
+                     WHERE task_id = $2
+                       AND event_type = 'status_changed'
+                       AND payload->>'to_status' = 'open'
+                     ORDER BY created_at DESC
+                     LIMIT 1)",
+    )
+    .bind(interval)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    tx.commit().await.unwrap();
+}
+
 /// Backdate a `task_attempts` row's `created_at` by a PostgreSQL `interval`
 /// string (e.g. `'1 hour'`).
 ///

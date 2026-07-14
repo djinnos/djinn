@@ -13,8 +13,8 @@ pub mod test_support {
     pub use crate::repositories::test_support::{
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
         UsageTestSessionSeed, UsageTestTaskSeed, add_blocker_edge,
-        backdate_task_attempt_created_at, backdate_task_updated_at,
-        build_multi_project_housekeeping_fixture, close_task_at,
+        backdate_task_attempt_created_at, backdate_task_open_transition_and_updated_at,
+        backdate_task_updated_at, build_multi_project_housekeeping_fixture, close_task_at,
         corrupt_credential_encrypted_value, drop_table_cascade_for_test, drop_table_for_test,
         ensure_doctor_findings_schema, event_bus_for, make_project,
         nullify_note_confidence_for_test, override_debate_trail_body_metadata,
