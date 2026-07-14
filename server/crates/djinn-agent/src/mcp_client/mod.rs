@@ -14,23 +14,26 @@ use std::future::Future;
 #[cfg(test)]
 use std::pin::Pin;
 
-use reqwest::header::{HeaderName, HeaderValue};
-use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ReadResourceRequestParams, Resource as RmcpResource,
     ResourceContents, Tool as RmcpTool,
 };
 use rmcp::service::{Peer, RoleClient};
-use rmcp::transport::{
-    StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
-};
 
 use crate::context::AgentContext;
 use crate::extension::shared_schemas;
+use crate::extension_diagnostics::ExtensionDiagnosticFact;
 use crate::mcp_settings::McpServerConfig;
+use djinn_core::extension_diagnostics::{ExtensionLoadPhase, ExtensionLoadRemedyCode};
+#[cfg(test)]
+use djinn_core::extension_diagnostics::{ExtensionLoadSeverity, ExtensionLoadSourceKind};
 
 mod config;
+mod startup;
 use config::{McpTransportKind, resolve_server_config};
+#[cfg(test)]
+use startup::{McpStartupFailure, connect_to_server};
+use startup::{mcp_diagnostic, startup_and_list};
 
 /// Maximum length of the advertised provider-facing MCP namespaced tool name,
 /// including the `mcp__` prefix and both `__` separators.
@@ -287,9 +290,9 @@ impl rmcp::ClientHandler for McpNotificationHandler {
             let timeout = Duration::from_millis(timeout_ms);
 
             // Issue tools/list with request timeout — no lock held.
-            let result = match tokio::time::timeout(timeout, peer.list_tools(None)).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => {
+            let result = match refresh_tools_list(&peer, timeout).await {
+                Ok(result) => result,
+                Err(RefreshToolsListFailure::Request(e)) => {
                     tracing::error!(
                         server = %server_name,
                         task_short_id = %task_short_id,
@@ -298,7 +301,7 @@ impl rmcp::ClientHandler for McpNotificationHandler {
                     );
                     return;
                 }
-                Err(_elapsed) => {
+                Err(RefreshToolsListFailure::Timeout) => {
                     tracing::error!(
                         server = %server_name,
                         task_short_id = %task_short_id,
@@ -334,6 +337,24 @@ impl rmcp::ClientHandler for McpNotificationHandler {
                 );
             }
         }
+    }
+}
+
+/// A failure from a post-discovery `tools/list_changed` refresh.
+/// This remains separate from startup observations.
+enum RefreshToolsListFailure {
+    Request(rmcp::service::ServiceError),
+    Timeout,
+}
+
+async fn refresh_tools_list(
+    peer: &Peer<RoleClient>,
+    timeout: Duration,
+) -> Result<rmcp::model::ListToolsResult, RefreshToolsListFailure> {
+    match tokio::time::timeout(timeout, peer.list_tools(None)).await {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(error)) => Err(RefreshToolsListFailure::Request(error)),
+        Err(_elapsed) => Err(RefreshToolsListFailure::Timeout),
     }
 }
 
@@ -863,8 +884,19 @@ fn call_tool_result_to_json(result: CallToolResult) -> Result<serde_json::Value,
     }
 }
 
-/// Connect to resolved MCP servers and discover their tools.
+/// Additive result from MCP startup discovery.
 ///
+/// Lifecycle owns load-attempt association and persistence. This result only
+/// carries bounded facts to the shared diagnostic producer.
+pub(crate) struct McpDiscoveryResult {
+    pub registry: Option<McpToolRegistry>,
+    #[allow(
+        dead_code,
+        reason = "lifecycle consumes diagnostics when it owns attempt persistence"
+    )]
+    pub diagnostics: Vec<ExtensionDiagnosticFact>,
+}
+
 /// For each `(name, config)` pair:
 /// 1. Resolve `${VAR_NAME}` placeholders against environment/credentials.
 /// 2. If the config resolves to HTTP, connect via Streamable HTTP transport.
@@ -879,8 +911,27 @@ pub async fn connect_and_discover(
     servers: &[(String, McpServerConfig)],
     app_state: &AgentContext,
 ) -> Option<McpToolRegistry> {
+    connect_and_discover_with_diagnostics(task_short_id, role_name, servers, app_state)
+        .await
+        .registry
+}
+
+/// Diagnostics-capable MCP startup entry point for lifecycle integration.
+///
+/// It preserves the legacy non-fatal policy: a failed server is skipped and
+/// later servers still load. Facts cover only configured-server startup; tool
+/// calls, schema serialization, disconnects, and refreshes do not enter here.
+pub(crate) async fn connect_and_discover_with_diagnostics(
+    task_short_id: &str,
+    role_name: &str,
+    servers: &[(String, McpServerConfig)],
+    app_state: &AgentContext,
+) -> McpDiscoveryResult {
     if servers.is_empty() {
-        return None;
+        return McpDiscoveryResult {
+            registry: None,
+            diagnostics: Vec::new(),
+        };
     }
 
     // Create the shared routing state early so notification handlers
@@ -904,11 +955,18 @@ pub async fn connect_and_discover(
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
     let mut server_instructions: BTreeMap<String, String> = BTreeMap::new();
     let mut resource_servers_set: HashSet<String> = HashSet::new();
+    let mut diagnostics = Vec::new();
 
     for (name, config) in servers {
         let resolved = match resolve_server_config(name, config, app_state).await {
             Ok(resolved) => resolved,
             Err(missing) => {
+                diagnostics.push(mcp_diagnostic(
+                    name,
+                    ExtensionLoadPhase::PlaceholderResolution,
+                    ExtensionLoadRemedyCode::CheckPlaceholder,
+                    "A configured MCP placeholder value is unavailable.",
+                ));
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
@@ -924,6 +982,13 @@ pub async fn connect_and_discover(
         let url = match resolved.transport_kind() {
             McpTransportKind::Http => resolved.url.clone().expect("HTTP transport requires URL"),
             McpTransportKind::Stdio => {
+                // No stdio process is launched by this loader, so process_start is not reached.
+                diagnostics.push(mcp_diagnostic(
+                    name,
+                    ExtensionLoadPhase::Transport,
+                    ExtensionLoadRemedyCode::CheckTransport,
+                    "MCP stdio transport is not supported for agent sessions.",
+                ));
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
@@ -936,6 +1001,12 @@ pub async fn connect_and_discover(
                 continue;
             }
             McpTransportKind::Unsupported => {
+                diagnostics.push(mcp_diagnostic(
+                    name,
+                    ExtensionLoadPhase::Transport,
+                    ExtensionLoadRemedyCode::CheckTransport,
+                    "MCP transport configuration is unsupported.",
+                ));
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
@@ -975,18 +1046,26 @@ pub async fn connect_and_discover(
                 );
                 (Arc::new(peer), list_result)
             }
-            Ok(Err(e)) => {
+            Ok(Err(failure)) => {
+                diagnostics.push(failure.diagnostic(name));
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
                     server = %name,
                     url = %url,
-                    error = %e,
+                    error = %failure,
                     "Failed to connect to MCP server; skipping"
                 );
                 continue;
             }
             Err(_elapsed) => {
+                // The combined timeout cannot prove initial tools/list was reached.
+                diagnostics.push(mcp_diagnostic(
+                    name,
+                    ExtensionLoadPhase::Handshake,
+                    ExtensionLoadRemedyCode::CheckServer,
+                    "MCP connection or initialization timed out.",
+                ));
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
@@ -1082,7 +1161,10 @@ pub async fn connect_and_discover(
     }
 
     if tool_schemas.is_empty() {
-        return None;
+        return McpDiscoveryResult {
+            registry: None,
+            diagnostics,
+        };
     }
 
     // Populate the shared routing state with all discovered data.
@@ -1101,84 +1183,17 @@ pub async fn connect_and_discover(
     let mut resource_server_names: Vec<String> = resource_servers_set.into_iter().collect();
     resource_server_names.sort();
 
-    Some(McpToolRegistry {
-        routing,
-        tool_schemas,
-        server_instructions,
-        resource_servers: resource_server_names,
-        #[cfg(test)]
-        test_dispatch: None,
-    })
-}
-
-/// Establish a connection to an MCP server via Streamable HTTP transport.
-///
-/// The returned peer uses a [`McpNotificationHandler`] that observes
-/// `LoggingMessageNotification`s from the server and emits them through
-/// host `tracing` with structured `{server, logger, level, task_short_id}` fields.
-///
-/// The handler also holds a reference to the shared `routing` state so it can
-/// process `tools/list_changed` notifications by issuing a refresh.
-async fn connect_to_server(
-    url: &str,
-    headers: &HashMap<String, String>,
-    server_name: &str,
-    task_short_id: &str,
-    routing: Arc<RwLock<RoutingState>>,
-) -> Result<Peer<RoleClient>, String> {
-    let mut custom_headers = HashMap::new();
-    for (name, value) in headers {
-        let header_name = HeaderName::try_from(name.as_str())
-            .map_err(|e| format!("invalid header name `{name}` for `{url}`: {e}"))?;
-        let header_value = HeaderValue::try_from(value.as_str())
-            .map_err(|e| format!("invalid header value for `{name}` on `{url}`: {e}"))?;
-        custom_headers.insert(header_name, header_value);
+    McpDiscoveryResult {
+        registry: Some(McpToolRegistry {
+            routing,
+            tool_schemas,
+            server_instructions,
+            resource_servers: resource_server_names,
+            #[cfg(test)]
+            test_dispatch: None,
+        }),
+        diagnostics,
     }
-
-    let config = StreamableHttpClientTransportConfig::with_uri(url.to_string())
-        .custom_headers(custom_headers);
-    let transport = StreamableHttpClientTransport::from_config(config);
-
-    let handler = McpNotificationHandler {
-        server_name: server_name.to_string(),
-        task_short_id: task_short_id.to_string(),
-        routing,
-    };
-    let service = handler
-        .serve(transport)
-        .await
-        .map_err(|e| format!("MCP transport handshake failed: {e}"))?;
-    let peer = service.peer().clone();
-    // Keep the service alive in the background so notification processing
-    // continues for the lifetime of the connection.
-    tokio::spawn(async move {
-        let _ = service.waiting().await;
-    });
-    Ok(peer)
-}
-
-/// Combined connect + initialize + initial `tools/list` in a single future.
-///
-/// This is the unit that [`connect_and_discover`] wraps with
-/// `startup_timeout_ms`.  Breaking it out lets `tokio::time::timeout` cancel
-/// the whole operation if either the transport handshake or the initial
-/// tool enumeration stalls.
-///
-/// Returns the connected peer *and* the raw `ListToolsResult` so the caller
-/// can inspect tool definitions without a second round-trip.
-async fn startup_and_list(
-    url: &str,
-    headers: &HashMap<String, String>,
-    server_name: &str,
-    task_short_id: &str,
-    routing: Arc<RwLock<RoutingState>>,
-) -> Result<(Peer<RoleClient>, rmcp::model::ListToolsResult), String> {
-    let peer = connect_to_server(url, headers, server_name, task_short_id, routing).await?;
-    let result = peer
-        .list_tools(None)
-        .await
-        .map_err(|e| format!("MCP tools/list failed: {e}"))?;
-    Ok((peer, result))
 }
 
 #[cfg(test)]
