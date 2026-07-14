@@ -10,7 +10,7 @@ use djinn_db::ExtensionLoadDiagnosticRepository;
 use crate::context::AgentContext;
 use crate::environment::environment_config_for_path;
 use crate::extension_diagnostics::{
-    ExtensionDiagnosticAssociations, ExtensionDiagnosticFact, persist_extension_diagnostic,
+    ExtensionDiagnosticAssociations, ExtensionDiagnosticFact, persist_extension_diagnostic_batch,
 };
 use crate::mcp_client::McpToolRegistry;
 use crate::mcp_settings::{effective_mcp_server_names, effective_skill_names};
@@ -234,17 +234,23 @@ pub(crate) async fn persist_load_diagnostics(
         session_id: Some(session_id.to_owned()),
         load_attempt_id: load_attempt_id.to_owned(),
     };
-    for fact in facts {
-        match persist_extension_diagnostic(&repository, associations.clone(), fact).await {
-            Ok(_) => {}
-            Err(error) => {
-                tracing::error!(project_id, task_id, session_id, load_attempt_id, error = %error, "Lifecycle: failed to persist extension diagnostics")
-            }
-        }
-    }
-    match repository
-        .list_for_load_attempt(project_id, load_attempt_id)
-        .await
+    match persist_extension_diagnostic_batch(
+        |error| {
+            tracing::error!(
+                project_id,
+                task_id,
+                session_id,
+                load_attempt_id,
+                error = %error,
+                "Lifecycle: failed to persist extension diagnostic"
+            );
+            true
+        },
+        &repository,
+        associations,
+        facts,
+    )
+    .await
     {
         Ok(rows) => rows,
         Err(error) => {
