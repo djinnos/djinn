@@ -24,6 +24,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+#[cfg(unix)]
+use std::collections::HashSet;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 /// Default hard cap on the number of per-run target dirs retained under the
 /// runs root. Each seeded dir is hardlink-heavy but still costs real bytes for
 /// copied metadata + the run's own incremental output; capping the *count*
@@ -33,6 +40,355 @@ pub const DEFAULT_HARD_CAP_DIRS: usize = 64;
 
 /// Environment override for [`DEFAULT_HARD_CAP_DIRS`]. `0` disables the cap.
 pub const HARD_CAP_ENV: &str = "DJINN_CARGO_TARGET_RUNS_MAX_DIRS";
+
+/// Default allocated-byte cap for all entries below a runs root (8 GiB).
+pub const DEFAULT_HARD_CAP_BYTES: u64 = 8_589_934_592;
+
+/// Environment override for [`DEFAULT_HARD_CAP_BYTES`]. `0` disables only the
+/// allocated-byte cap.
+pub const HARD_CAP_BYTES_ENV: &str = "DJINN_CARGO_TARGET_RUNS_MAX_BYTES";
+
+/// Resolved count and allocated-byte caps. A zero value disables that cap.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct CargoTargetRunsCaps {
+    pub max_dirs: usize,
+    pub max_bytes: u64,
+}
+
+/// A deterministically orderable directory candidate. Names are raw Unix bytes
+/// so later policy can tie-break without lossy UTF-8 conversion.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RunDirInventoryCandidate {
+    pub name: Vec<u8>,
+    pub modified: Option<SystemTime>,
+    pub created: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum InventoryIssueKind {
+    MalformedTopLevelName,
+    TopLevelSymlink,
+    ReadDirectory,
+    Stat,
+}
+
+/// Protected data and incomplete-scan information, without exposing arbitrary
+/// filesystem error text as telemetry.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct InventoryIssue {
+    pub top_level_name: Option<Vec<u8>>,
+    pub kind: InventoryIssueKind,
+}
+
+/// Allocated-byte inventory for a runs root.
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct CargoTargetRunsInventory {
+    pub total_allocated_bytes: u64,
+    pub top_level_directory_count: usize,
+    pub candidates: Vec<RunDirInventoryCandidate>,
+    pub non_directory_allocated_bytes: u64,
+    pub protected: Vec<InventoryIssue>,
+    pub errors: Vec<InventoryIssue>,
+}
+
+#[derive(Debug)]
+pub enum CargoTargetRunsInventoryError {
+    UnsupportedPlatform,
+    RootRead(io::Error),
+    ByteOverflow,
+}
+impl std::fmt::Display for CargoTargetRunsInventoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedPlatform => {
+                f.write_str("allocated-byte inventory is supported only on Unix")
+            }
+            Self::RootRead(error) => write!(f, "failed to read cargo target runs root: {error}"),
+            Self::ByteOverflow => {
+                f.write_str("cargo target runs allocated-byte total overflowed u64")
+            }
+        }
+    }
+}
+impl std::error::Error for CargoTargetRunsInventoryError {}
+
+/// Inventory `st_blocks * 512` without following symlinks. Root read failures
+/// are fatal; entry failures are retained as error data and never look clean.
+#[cfg(unix)]
+pub fn inventory_cargo_target_runs(
+    root: &Path,
+) -> Result<CargoTargetRunsInventory, CargoTargetRunsInventoryError> {
+    let root_metadata =
+        fs::symlink_metadata(root).map_err(CargoTargetRunsInventoryError::RootRead)?;
+    if root_metadata.file_type().is_symlink() {
+        return Err(CargoTargetRunsInventoryError::RootRead(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cargo target runs root must not be a symlink",
+        )));
+    }
+    let root_entries = fs::read_dir(root).map_err(CargoTargetRunsInventoryError::RootRead)?;
+    let mut inventory = CargoTargetRunsInventory::default();
+    let mut seen = HashSet::new();
+    account_metadata(&root_metadata, false, &mut seen, &mut inventory)?;
+    for entry in root_entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                inventory.errors.push(InventoryIssue {
+                    top_level_name: None,
+                    kind: InventoryIssueKind::ReadDirectory,
+                });
+                continue;
+            }
+        };
+        let raw_name = entry.file_name().as_bytes().to_vec();
+        let metadata = match fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                inventory.errors.push(InventoryIssue {
+                    top_level_name: Some(raw_name),
+                    kind: InventoryIssueKind::Stat,
+                });
+                continue;
+            }
+        };
+        account_metadata(&metadata, !metadata.is_dir(), &mut seen, &mut inventory)?;
+        if metadata.file_type().is_symlink() {
+            inventory.protected.push(InventoryIssue {
+                top_level_name: Some(raw_name),
+                kind: InventoryIssueKind::TopLevelSymlink,
+            });
+        } else if metadata.is_dir() {
+            inventory.top_level_directory_count += 1;
+            if entry.file_name().is_empty() || entry.file_name().to_str().is_none() {
+                inventory.protected.push(InventoryIssue {
+                    top_level_name: Some(raw_name.clone()),
+                    kind: InventoryIssueKind::MalformedTopLevelName,
+                });
+            } else {
+                inventory.candidates.push(RunDirInventoryCandidate {
+                    name: raw_name.clone(),
+                    modified: metadata.modified().ok(),
+                    created: metadata.created().ok(),
+                });
+            }
+            inventory_directory(&entry.path(), Some(raw_name), &mut seen, &mut inventory)?;
+        }
+    }
+    inventory.candidates.sort_by(|left, right| {
+        left.modified
+            .cmp(&right.modified)
+            .then_with(|| left.created.cmp(&right.created))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(inventory)
+}
+
+#[cfg(not(unix))]
+pub fn inventory_cargo_target_runs(
+    _root: &Path,
+) -> Result<CargoTargetRunsInventory, CargoTargetRunsInventoryError> {
+    Err(CargoTargetRunsInventoryError::UnsupportedPlatform)
+}
+
+#[cfg(unix)]
+fn inventory_directory(
+    path: &Path,
+    top_level_name: Option<Vec<u8>>,
+    seen: &mut HashSet<(u64, u64)>,
+    inventory: &mut CargoTargetRunsInventory,
+) -> Result<(), CargoTargetRunsInventoryError> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => {
+            inventory.errors.push(InventoryIssue {
+                top_level_name,
+                kind: InventoryIssueKind::ReadDirectory,
+            });
+            return Ok(());
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                inventory.errors.push(InventoryIssue {
+                    top_level_name: top_level_name.clone(),
+                    kind: InventoryIssueKind::ReadDirectory,
+                });
+                continue;
+            }
+        };
+        let metadata = match fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                inventory.errors.push(InventoryIssue {
+                    top_level_name: top_level_name.clone(),
+                    kind: InventoryIssueKind::Stat,
+                });
+                continue;
+            }
+        };
+        account_metadata(&metadata, !metadata.is_dir(), seen, inventory)?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            inventory_directory(&entry.path(), top_level_name.clone(), seen, inventory)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn account_metadata(
+    metadata: &fs::Metadata,
+    non_directory: bool,
+    seen: &mut HashSet<(u64, u64)>,
+    inventory: &mut CargoTargetRunsInventory,
+) -> Result<(), CargoTargetRunsInventoryError> {
+    if !seen.insert((metadata.dev(), metadata.ino())) {
+        return Ok(());
+    }
+    let bytes = metadata
+        .blocks()
+        .checked_mul(512)
+        .ok_or(CargoTargetRunsInventoryError::ByteOverflow)?;
+    inventory.total_allocated_bytes = inventory
+        .total_allocated_bytes
+        .checked_add(bytes)
+        .ok_or(CargoTargetRunsInventoryError::ByteOverflow)?;
+    if non_directory {
+        inventory.non_directory_allocated_bytes = inventory
+            .non_directory_allocated_bytes
+            .checked_add(bytes)
+            .ok_or(CargoTargetRunsInventoryError::ByteOverflow)?;
+    }
+    Ok(())
+}
+
+impl Default for CargoTargetRunsCaps {
+    fn default() -> Self {
+        Self {
+            max_dirs: DEFAULT_HARD_CAP_DIRS,
+            max_bytes: DEFAULT_HARD_CAP_BYTES,
+        }
+    }
+}
+
+/// Whether a configured cap had to fall back to its default.
+///
+/// This deliberately contains no environment value: callers may safely log it
+/// without retaining an unbounded, operator-provided string.
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub struct CapResolutionDiagnostics {
+    pub invalid_max_dirs: bool,
+    pub invalid_max_bytes: bool,
+}
+
+/// Resolve cap values supplied by a caller, making parser behaviour testable
+/// without mutating process environment. Values must be non-empty ASCII
+/// unsigned decimal; whitespace, signs, suffixes, and overflow are invalid.
+pub fn resolve_cargo_target_runs_caps(
+    max_dirs: Option<&str>,
+    max_bytes: Option<&str>,
+) -> (CargoTargetRunsCaps, CapResolutionDiagnostics) {
+    let (dirs, invalid_max_dirs) = parse_unsigned_decimal(max_dirs, DEFAULT_HARD_CAP_DIRS as u64);
+    let (max_bytes, invalid_max_bytes) = parse_unsigned_decimal(max_bytes, DEFAULT_HARD_CAP_BYTES);
+    let (max_dirs, dirs_overflow) = match usize::try_from(dirs) {
+        Ok(value) => (value, false),
+        Err(_) => (DEFAULT_HARD_CAP_DIRS, true),
+    };
+    (
+        CargoTargetRunsCaps {
+            max_dirs,
+            max_bytes,
+        },
+        CapResolutionDiagnostics {
+            invalid_max_dirs: invalid_max_dirs || dirs_overflow,
+            invalid_max_bytes,
+        },
+    )
+}
+
+fn parse_unsigned_decimal(raw: Option<&str>, default: u64) -> (u64, bool) {
+    let Some(raw) = raw else {
+        return (default, false);
+    };
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return (default, true);
+    }
+    match raw.parse() {
+        Ok(value) => (value, false),
+        Err(_) => (default, true),
+    }
+}
+
+fn bounded_env_value(raw: &str) -> String {
+    const LIMIT: usize = 128;
+    let mut preview = raw.chars().take(LIMIT).collect::<String>();
+    if raw.chars().nth(LIMIT).is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
+/// Resolve both caps from the process environment, logging only a bounded
+/// preview when an override is invalid.
+pub fn cargo_target_runs_caps_from_env() -> CargoTargetRunsCaps {
+    let (caps, diagnostics, dirs, bytes) = resolve_caps_from_env_results(
+        std::env::var(HARD_CAP_ENV),
+        std::env::var(HARD_CAP_BYTES_ENV),
+    );
+    if diagnostics.invalid_max_dirs {
+        tracing::warn!(
+            env = HARD_CAP_ENV,
+            value = dirs
+                .as_deref()
+                .map(bounded_env_value)
+                .as_deref()
+                .unwrap_or("<non-unicode>"),
+            "invalid cargo target runs count cap; using default"
+        );
+    }
+    if diagnostics.invalid_max_bytes {
+        tracing::warn!(
+            env = HARD_CAP_BYTES_ENV,
+            value = bytes
+                .as_deref()
+                .map(bounded_env_value)
+                .as_deref()
+                .unwrap_or("<non-unicode>"),
+            "invalid cargo target runs byte cap; using default"
+        );
+    }
+    caps
+}
+
+/// Preserve `VarError::NotUnicode` as invalid configuration rather than
+/// treating it like an unset variable. The returned strings are only used for
+/// bounded diagnostic previews.
+fn resolve_caps_from_env_results(
+    dirs: Result<String, std::env::VarError>,
+    bytes: Result<String, std::env::VarError>,
+) -> (
+    CargoTargetRunsCaps,
+    CapResolutionDiagnostics,
+    Option<String>,
+    Option<String>,
+) {
+    let (dirs, dirs_not_unicode) = env_value_or_invalid(dirs);
+    let (bytes, bytes_not_unicode) = env_value_or_invalid(bytes);
+    let (caps, mut diagnostics) = resolve_cargo_target_runs_caps(dirs.as_deref(), bytes.as_deref());
+    diagnostics.invalid_max_dirs |= dirs_not_unicode;
+    diagnostics.invalid_max_bytes |= bytes_not_unicode;
+    (caps, diagnostics, dirs, bytes)
+}
+
+fn env_value_or_invalid(value: Result<String, std::env::VarError>) -> (Option<String>, bool) {
+    match value {
+        Ok(value) => (Some(value), false),
+        Err(std::env::VarError::NotPresent) => (None, false),
+        Err(std::env::VarError::NotUnicode(_)) => (None, true),
+    }
+}
 
 /// Outcome of a single per-run dir teardown.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -105,10 +461,7 @@ pub struct HardCapTrimStats {
 /// Resolve the effective hard cap from [`HARD_CAP_ENV`], falling back to
 /// [`DEFAULT_HARD_CAP_DIRS`]. A configured `0` disables the cap.
 pub fn hard_cap_dirs_from_env() -> usize {
-    std::env::var(HARD_CAP_ENV)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .unwrap_or(DEFAULT_HARD_CAP_DIRS)
+    cargo_target_runs_caps_from_env().max_dirs
 }
 
 /// LRU-trim the runs `root` so at most `max_dirs` subdirectories remain,
@@ -181,11 +534,148 @@ pub fn trim_run_dirs_to_cap(root: &Path, max_dirs: usize) -> io::Result<HardCapT
     Ok(stats)
 }
 
+/// Bounded result labels for [`trim_cargo_target_runs`].
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CargoTargetRunsTrimOutcome {
+    WithinBudget,
+    TrimmedWithinBudget,
+    OverBudgetProtected,
+    OverBudgetError,
+    OverBudgetProtectedAndError,
+}
+impl CargoTargetRunsTrimOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WithinBudget => "within_budget",
+            Self::TrimmedWithinBudget => "trimmed_within_budget",
+            Self::OverBudgetProtected => "over_budget_protected",
+            Self::OverBudgetError => "over_budget_error",
+            Self::OverBudgetProtectedAndError => "over_budget_protected_and_error",
+        }
+    }
+}
+
+/// Exact postcondition and bounded safety accounting from a joint-cap trim.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct CargoTargetRunsTrimResult {
+    pub final_allocated_bytes: u64,
+    pub final_top_level_directory_count: usize,
+    pub deleted: usize,
+    pub errors: usize,
+    pub protected: usize,
+    pub outcome: CargoTargetRunsTrimOutcome,
+}
+
+/// Enforce enabled count and allocated-byte caps conjunctively, re-inventorying after every attempt.
+#[cfg(unix)]
+pub fn trim_cargo_target_runs(
+    root: &Path,
+    active_ids: &HashSet<String>,
+    caps: CargoTargetRunsCaps,
+) -> Result<CargoTargetRunsTrimResult, CargoTargetRunsInventoryError> {
+    let (mut deleted, mut operation_errors) = (0, 0);
+    let mut attempted = HashSet::<Vec<u8>>::new();
+    loop {
+        let inventory = inventory_cargo_target_runs(root)?;
+        let errors = operation_errors.saturating_add(inventory.errors.len());
+        let mut protected =
+            inventory.protected.len() + usize::from(inventory.non_directory_allocated_bytes > 0);
+        let within = (caps.max_dirs == 0 || inventory.top_level_directory_count <= caps.max_dirs)
+            && (caps.max_bytes == 0 || inventory.total_allocated_bytes <= caps.max_bytes);
+        if within {
+            return Ok(CargoTargetRunsTrimResult {
+                final_allocated_bytes: inventory.total_allocated_bytes,
+                final_top_level_directory_count: inventory.top_level_directory_count,
+                deleted,
+                errors,
+                protected,
+                outcome: if errors > 0 {
+                    CargoTargetRunsTrimOutcome::OverBudgetError
+                } else if deleted == 0 {
+                    CargoTargetRunsTrimOutcome::WithinBudget
+                } else {
+                    CargoTargetRunsTrimOutcome::TrimmedWithinBudget
+                },
+            });
+        }
+        let candidate = inventory.candidates.iter().find(|candidate| {
+            std::str::from_utf8(&candidate.name)
+                .ok()
+                .is_some_and(|id| !active_ids.contains(id))
+                && !attempted.contains(&candidate.name)
+        });
+        let Some(candidate) = candidate else {
+            protected = protected.saturating_add(
+                inventory
+                    .candidates
+                    .iter()
+                    .filter(|candidate| {
+                        std::str::from_utf8(&candidate.name)
+                            .ok()
+                            .is_some_and(|id| active_ids.contains(id))
+                    })
+                    .count(),
+            );
+            return Ok(CargoTargetRunsTrimResult {
+                final_allocated_bytes: inventory.total_allocated_bytes,
+                final_top_level_directory_count: inventory.top_level_directory_count,
+                deleted,
+                errors,
+                protected,
+                outcome: over_budget_outcome(protected > 0, errors > 0),
+            });
+        };
+        let name = candidate.name.clone();
+        attempted.insert(name.clone());
+        let id = std::str::from_utf8(&name).expect("inventory candidates are UTF-8");
+        let path = root.join(std::ffi::OsString::from_vec(name));
+        let removable = run_dir_within(root, id).as_deref() == Some(path.as_path())
+            && !active_ids.contains(id)
+            && fs::symlink_metadata(&path)
+                .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+                .unwrap_or_else(|_| {
+                    operation_errors = operation_errors.saturating_add(1);
+                    false
+                });
+        if !removable {
+            // Revalidation failure is fail-closed; the next full scan records
+            // the current protection/error state.
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => deleted += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => deleted += 1,
+            Err(_) => operation_errors = operation_errors.saturating_add(1),
+        }
+    }
+}
+#[cfg(not(unix))]
+pub fn trim_cargo_target_runs(
+    _root: &Path,
+    _active_ids: &std::collections::HashSet<String>,
+    _caps: CargoTargetRunsCaps,
+) -> Result<CargoTargetRunsTrimResult, CargoTargetRunsInventoryError> {
+    Err(CargoTargetRunsInventoryError::UnsupportedPlatform)
+}
+fn over_budget_outcome(protected: bool, errors: bool) -> CargoTargetRunsTrimOutcome {
+    match (protected, errors) {
+        (true, true) => CargoTargetRunsTrimOutcome::OverBudgetProtectedAndError,
+        (true, false) => CargoTargetRunsTrimOutcome::OverBudgetProtected,
+        (false, _) => CargoTargetRunsTrimOutcome::OverBudgetError,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::thread::sleep;
     use std::time::Duration;
+    #[cfg(unix)]
+    use std::{
+        collections::HashSet,
+        ffi::OsString,
+        os::unix::{ffi::OsStringExt, fs::symlink},
+    };
 
     fn mkdir(root: &Path, name: &str) -> PathBuf {
         let dir = root.join(name);
@@ -278,9 +768,159 @@ mod tests {
     }
 
     #[test]
-    fn hard_cap_env_parses_and_falls_back() {
-        // The default applies when unset/garbage; this asserts the pure parse
-        // path without mutating the process env under test parallelism.
+    fn caps_resolver_accepts_decimal_and_zero_and_rejects_invalid_values() {
         assert_eq!(DEFAULT_HARD_CAP_DIRS, 64);
+        assert_eq!(DEFAULT_HARD_CAP_BYTES, 8_589_934_592);
+        assert_eq!(
+            resolve_cargo_target_runs_caps(None, None),
+            (
+                CargoTargetRunsCaps::default(),
+                CapResolutionDiagnostics::default()
+            )
+        );
+        assert_eq!(
+            resolve_cargo_target_runs_caps(Some("0"), Some("0")),
+            (
+                CargoTargetRunsCaps {
+                    max_dirs: 0,
+                    max_bytes: 0,
+                },
+                CapResolutionDiagnostics::default(),
+            )
+        );
+        let (caps, diagnostics) = resolve_cargo_target_runs_caps(Some("12"), Some("34"));
+        assert_eq!(
+            caps,
+            CargoTargetRunsCaps {
+                max_dirs: 12,
+                max_bytes: 34
+            }
+        );
+        assert_eq!(diagnostics, CapResolutionDiagnostics::default());
+
+        for invalid in ["", "-1", "+1", " 1", "1 ", "1K", "18446744073709551616"] {
+            let (caps, diagnostics) = resolve_cargo_target_runs_caps(Some(invalid), Some(invalid));
+            assert_eq!(caps, CargoTargetRunsCaps::default(), "{invalid:?}");
+            assert_eq!(
+                diagnostics,
+                CapResolutionDiagnostics {
+                    invalid_max_dirs: true,
+                    invalid_max_bytes: true,
+                },
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_environment_values_are_invalid_not_unset() {
+        let non_unicode = || std::env::VarError::NotUnicode(OsString::from_vec(vec![0xff]));
+        let (caps, diagnostics, dirs, bytes) =
+            resolve_caps_from_env_results(Err(non_unicode()), Err(non_unicode()));
+        assert_eq!(caps, CargoTargetRunsCaps::default());
+        assert_eq!(dirs, None);
+        assert_eq!(bytes, None);
+        assert_eq!(
+            diagnostics,
+            CapResolutionDiagnostics {
+                invalid_max_dirs: true,
+                invalid_max_bytes: true,
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    fn allocated_bytes(path: &Path) -> u64 {
+        fs::symlink_metadata(path).unwrap().blocks() * 512
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_accounts_sparse_hardlinked_and_symlink_entries_without_following() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = tmp.path().join("run");
+        fs::create_dir(&run).unwrap();
+        let sparse = run.join("sparse");
+        fs::File::create(&sparse)
+            .unwrap()
+            .set_len(8 * 1024 * 1024)
+            .unwrap();
+        fs::hard_link(&sparse, run.join("hardlink")).unwrap();
+        symlink(&sparse, tmp.path().join("run-link")).unwrap();
+
+        let inventory = inventory_cargo_target_runs(tmp.path()).unwrap();
+        let expected = allocated_bytes(tmp.path())
+            + allocated_bytes(&run)
+            + allocated_bytes(&sparse)
+            + allocated_bytes(&tmp.path().join("run-link"));
+        assert_eq!(inventory.total_allocated_bytes, expected);
+        assert_eq!(
+            inventory.non_directory_allocated_bytes,
+            allocated_bytes(&sparse) + allocated_bytes(&tmp.path().join("run-link"))
+        );
+        assert!(allocated_bytes(&sparse) < 8 * 1024 * 1024);
+        assert_eq!(inventory.top_level_directory_count, 1);
+        assert_eq!(inventory.candidates[0].name, b"run");
+        assert_eq!(
+            inventory.protected,
+            vec![InventoryIssue {
+                top_level_name: Some(b"run-link".to_vec()),
+                kind: InventoryIssueKind::TopLevelSymlink,
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_protects_malformed_names_and_rejects_symlink_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let malformed = tmp.path().join(OsString::from_vec(vec![b'x', 0xff]));
+        fs::create_dir(&malformed).unwrap();
+        let inventory = inventory_cargo_target_runs(tmp.path()).unwrap();
+        assert_eq!(inventory.top_level_directory_count, 1);
+        assert!(inventory.candidates.is_empty());
+        assert_eq!(
+            inventory.protected[0].kind,
+            InventoryIssueKind::MalformedTopLevelName
+        );
+        assert_eq!(
+            inventory.protected[0].top_level_name,
+            Some(vec![b'x', 0xff])
+        );
+
+        let link = tmp.path().join("root-link");
+        symlink(tmp.path(), &link).unwrap();
+        assert!(matches!(
+            inventory_cargo_target_runs(&link),
+            Err(CargoTargetRunsInventoryError::RootRead(error))
+                if error.kind() == io::ErrorKind::InvalidInput
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_reports_fatal_root_and_per_directory_read_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            inventory_cargo_target_runs(&tmp.path().join("missing")),
+            Err(CargoTargetRunsInventoryError::RootRead(_))
+        ));
+
+        let mut inventory = CargoTargetRunsInventory::default();
+        inventory_directory(
+            &tmp.path().join("missing"),
+            Some(b"run".to_vec()),
+            &mut HashSet::new(),
+            &mut inventory,
+        )
+        .unwrap();
+        assert_eq!(
+            inventory.errors,
+            vec![InventoryIssue {
+                top_level_name: Some(b"run".to_vec()),
+                kind: InventoryIssueKind::ReadDirectory,
+            }]
+        );
     }
 }
