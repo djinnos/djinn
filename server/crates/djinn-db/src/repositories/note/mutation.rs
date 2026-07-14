@@ -218,7 +218,14 @@ impl NoteRepository {
             NoteRevisionDesiredState::Supersede { canonical_note_id } => (
                 before.content.as_str(),
                 before.confidence,
-                "deprecated",
+                // Only active candidates are deprecated. Stale terminal
+                // candidates still record their supersedes association, but
+                // retain their archived/deprecated status.
+                if before.status == "active" {
+                    "deprecated"
+                } else {
+                    before.status.as_str()
+                },
                 Some(canonical_note_id.as_str()),
             ),
             _ => unreachable!("validated update command"),

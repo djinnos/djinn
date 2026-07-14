@@ -181,7 +181,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unchanged_merge_and_reuse_suppress_dedup_revisions() {
+    async fn unchanged_merge_suppresses_dedup_revision() {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let project = create_project(&db, tmp.path()).await;
@@ -218,42 +218,90 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(merged, WriteDedupOutcome::Respond(_)));
+        assert!(
+            repo.revision_events_for_test(&project.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "an unchanged canonical merge must not append a dedup revision"
+        );
+    }
 
-        let reused = apply_dedup_decision(
+    #[tokio::test]
+    async fn reuse_existing_suppresses_dedup_revision() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let project = create_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let existing = repo
+            .create(
+                &project.id,
+                "Canonical",
+                "existing content",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let outcome = apply_dedup_decision(
             &repo,
-            pending,
+            PendingWriteDedup {
+                project_path: tmp.path().to_str().unwrap(),
+                project_id: &project.id,
+                title: "Duplicate",
+                content: "existing content",
+                note_type: "pattern",
+                status: None,
+                tags_json: "[]",
+            },
             MemoryWriteDedupDecision::ReuseExisting {
                 candidate_id: existing.id.clone(),
             },
         )
         .await
         .unwrap();
-        assert!(matches!(reused, WriteDedupOutcome::Respond(_)));
 
-        let create_new = apply_dedup_decision(&repo, pending, MemoryWriteDedupDecision::CreateNew)
-            .await
-            .unwrap();
-        assert!(matches!(create_new, WriteDedupOutcome::CreateNew));
-
-        let supersede = apply_dedup_decision(
-            &repo,
-            pending,
-            MemoryWriteDedupDecision::SupersedeExisting {
-                candidate_id: existing.id.clone(),
-                reason: "replacement coverage".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            supersede,
-            WriteDedupOutcome::SupersedeExisting { .. }
-        ));
+        assert!(matches!(outcome, WriteDedupOutcome::Respond(_)));
         assert!(
             repo.revision_events_for_test(&project.id)
                 .await
                 .unwrap()
-                .is_empty()
+                .is_empty(),
+            "reuse must not append a dedup content or confidence revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_new_leaves_revision_ownership_to_the_caller() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let project = create_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+        let outcome = apply_dedup_decision(
+            &repo,
+            PendingWriteDedup {
+                project_path: tmp.path().to_str().unwrap(),
+                project_id: &project.id,
+                title: "New note",
+                content: "new content",
+                note_type: "pattern",
+                status: None,
+                tags_json: "[]",
+            },
+            MemoryWriteDedupDecision::CreateNew,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, WriteDedupOutcome::CreateNew));
+        assert!(
+            repo.revision_events_for_test(&project.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "CreateNew must not be misattributed as a dedup revision before caller creation"
         );
     }
 
@@ -451,7 +499,15 @@ mod tests {
                 Some((1.0, "supersedes".to_string()))
             );
             let revisions = repo.revision_events_for_test(&project.id).await.unwrap();
-            assert_eq!(revisions.len(), match status { "active" => 1, "archived" => 2, "deprecated" => 3, _ => unreachable!() });
+            assert_eq!(
+                revisions.len(),
+                match status {
+                    "active" => 1,
+                    "archived" => 2,
+                    "deprecated" => 3,
+                    _ => unreachable!(),
+                }
+            );
             for revision in revisions {
                 assert_eq!(revision.actor_kind, "system");
                 assert_eq!(revision.subsystem.as_deref(), Some("dedup"));
