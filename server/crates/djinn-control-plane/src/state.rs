@@ -12,8 +12,8 @@ use djinn_provider::catalog::{CatalogService, HealthTracker, builtin};
 use djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics;
 
 use crate::bridge::{
-    CoordinatorOps, GitOps, LspOps, MemoryEnrichmentOps, RepoGraphOps, RuntimeOps,
-    SemanticQueryEmbedding, SlotPoolOps, TaskrunJobRef,
+    CoordinatorOps, ExtensionDiagnosticsProbeOps, GitOps, LspOps, MemoryEnrichmentOps,
+    RepoGraphOps, RuntimeOps, SemanticQueryEmbedding, SlotPoolOps, TaskrunJobRef,
 };
 
 /// Subset of application state consumed by the MCP layer.
@@ -43,6 +43,10 @@ pub struct McpState {
     /// harnesses, off-server contexts). The MCP tool degrades to a clear
     /// "not configured" error in that case.
     enrichment_ops: Option<Arc<dyn MemoryEnrichmentOps>>,
+    /// Bridge into the agent-owned fresh project extension diagnostics probe.
+    /// This remains absent in off-server contexts; the explicitly selected
+    /// doctor probe then reports that it has not been configured.
+    extension_diagnostics_probe: Option<Arc<dyn ExtensionDiagnosticsProbeOps>>,
 }
 
 impl McpState {
@@ -118,7 +122,19 @@ impl McpState {
             git,
             repo_graph,
             enrichment_ops,
+            extension_diagnostics_probe: None,
         }
+    }
+
+    /// Add the optional fresh extension diagnostics probe after constructing
+    /// state with one of the stable constructors. Keeping this as a builder
+    /// avoids widening [`McpState::new`] or [`McpState::with_enrichment`].
+    pub fn with_extension_diagnostics_probe(
+        mut self,
+        ops: Arc<dyn ExtensionDiagnosticsProbeOps>,
+    ) -> Self {
+        self.extension_diagnostics_probe = Some(ops);
+        self
     }
 
     pub fn db(&self) -> &Database {
@@ -175,6 +191,15 @@ impl McpState {
         self.enrichment_ops.clone()
     }
 
+    /// Access the fresh project extension diagnostics probe. It is optional so
+    /// test and off-server contexts do not need to depend on the agent-owned
+    /// implementation.
+    pub fn extension_diagnostics_probe(
+        &self,
+    ) -> Option<Arc<dyn crate::bridge::ExtensionDiagnosticsProbeOps>> {
+        self.extension_diagnostics_probe.clone()
+    }
+
     /// Test-only hook to install an enrichment bridge on an already-built
     /// `McpState`. Production code uses [`McpState::with_enrichment`] at
     /// construction time; tests that stand up state via [`McpState::new`]
@@ -183,6 +208,17 @@ impl McpState {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_enrichment_ops(&mut self, ops: Arc<dyn crate::bridge::MemoryEnrichmentOps>) {
         self.enrichment_ops = Some(ops);
+    }
+
+    /// Test-only hook to install a fresh extension diagnostics probe on an
+    /// already-built state. Production composition uses
+    /// [`McpState::with_extension_diagnostics_probe`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_extension_diagnostics_probe(
+        &mut self,
+        ops: Arc<dyn crate::bridge::ExtensionDiagnosticsProbeOps>,
+    ) {
+        self.extension_diagnostics_probe = Some(ops);
     }
 
     pub async fn git_actor(

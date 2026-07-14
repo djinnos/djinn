@@ -1042,3 +1042,6 @@ async fn trigger_skips_completion_sink_when_job_disappears() {
         "completion sink must not fire when deletion or eviction makes the Job disappear"
     );
 }
+
+#[path = "graph_warmer_overlap_tests.rs"]
+mod overlap;

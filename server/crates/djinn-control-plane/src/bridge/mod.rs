@@ -4,6 +4,7 @@
 /// (CoordinatorHandle, SlotPoolHandle, LspManager, AppState).
 /// McpState holds Arc<dyn Trait> so the MCP layer never imports server types.
 mod coordinator_bridge;
+mod extension_diagnostics_probe_bridge;
 mod git_bridge;
 mod graph_bridge;
 mod graph_data;
@@ -16,6 +17,7 @@ mod slot_pool_bridge;
 pub use self::coordinator_bridge::{
     CoordinatorOps, CoordinatorStatus, ProposalRefinementStartRequest,
 };
+pub use self::extension_diagnostics_probe_bridge::ExtensionDiagnosticsProbeOps;
 pub use self::git_bridge::GitOps;
 pub use self::graph_bridge::{REPO_GRAPH_OPS_METHODS, RepoGraphOps};
 pub use self::graph_data::{
