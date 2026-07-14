@@ -1,0 +1,22 @@
+[
+  {
+    "name": "enabled_success",
+    "enabled": true,
+    "provider": "success",
+    "payload": "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+    "expected_outcome": "success",
+    "expected_context": "scope-only\n- **[Pitfall] first**: ranked one (permalink: pitfall/first)\n- **[Pattern] second**: ranked two (permalink: pattern/second)",
+    "expected_available_usage": 17
+  },
+  {"name":"disabled_no_work","enabled":false,"provider":"success","expected_outcome":"disabled","expected_context":"scope-only","expected_available_usage":0},
+  {"name":"timeout","enabled":true,"provider":"timeout","expected_outcome":"timeout","expected_context":"scope-only","expected_available_usage":17},
+  {"name":"provider_error","enabled":true,"provider":"provider_error","expected_outcome":"provider_error","expected_context":"scope-only","expected_available_usage":17},
+  {"name":"malformed_json","enabled":true,"provider":"success","payload":"not json","expected_outcome":"invalid_payload","expected_context":"scope-only","expected_available_usage":17},
+  {"name":"unknown_type","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"unknown\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"case\",\"query\":\"Memory planner configuration injection\"}]}","expected_outcome":"invalid_payload","expected_context":"scope-only","expected_available_usage":17},
+  {"name":"wrong_query_count","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"case\",\"query\":\"Only one query\"}]}","expected_outcome":"invalid_payload","expected_context":"scope-only","expected_available_usage":17},
+  {"name":"query_style_invalid","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"case\",\"query\":\"Find migration failures\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}","expected_outcome":"invalid_payload","expected_context":"scope-only","expected_available_usage":17},
+  {"name":"accounting_finalization_failure","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}","finalization_fails":true,"expected_outcome":"accounting_finalization_failed","expected_context":"scope-only","expected_available_usage":17},
+  {"name":"duplicate_collapse","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}","expected_outcome":"success","expected_context":"scope-only","expected_available_usage":17},
+  {"name":"full_scope_budget","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}","full_scope_budget":true,"expected_outcome":"success","expected_context":"scope-only","expected_available_usage":17},
+  {"name":"resume_compaction_input","enabled":true,"provider":"success","payload":"{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}","resume_compaction_summary":"UNTRUNCATED-RESUME-COMPACTION-SUMMARY: exact retained text","expected_outcome":"success","expected_context":"scope-only\n- **[Pitfall] first**: ranked one (permalink: pitfall/first)\n- **[Pattern] second**: ranked two (permalink: pattern/second)","expected_available_usage":17}
+]

@@ -12,6 +12,8 @@ pub(crate) mod attempt_context;
 pub(crate) mod mcp_resolve;
 #[allow(dead_code)] // Contract is wired into the session-start integration task.
 pub(crate) mod memory_intent_planner;
+#[cfg(test)]
+mod memory_intent_planner_replay_tests;
 pub(crate) mod model_resolution;
 pub(crate) mod prompt_context;
 pub(crate) mod role_overrides;
