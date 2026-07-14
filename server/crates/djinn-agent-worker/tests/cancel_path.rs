@@ -308,6 +308,12 @@ async fn start_fake_server(
                                  provider must run locally even on the cancellation path"
                             );
                         }
+                        ServiceRpcRequest::PlanMemoryIntents { .. } => {
+                            panic!(
+                                "worker dispatched memory planning after cancellation — \
+                                 no stage work may start on the cancellation path"
+                            );
+                        }
                         ServiceRpcRequest::OpenPr { .. } => {
                             audit.lock().await.open_pr_calls += 1;
                             ServiceRpcResponse::OpenPr(TaskRunOutcome::Closed {
