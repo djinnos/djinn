@@ -1702,6 +1702,29 @@ pub(super) struct CargoTargetRunDirSweepStats {
     pub(super) debris_bytes_deleted: u64,
 }
 
+/// Emit the bounded terminal record for a cargo-target-runs sweep, including
+/// fail-closed setup paths that never reach the blocking trim engine.
+fn report_cargo_target_run_sweep(
+    root: &Path,
+    config: &crate::context::CacheCleanupConfig,
+    caps: djinn_core::cargo_target_runs::CargoTargetRunsCaps,
+    stats: &CargoTargetRunDirSweepStats,
+) {
+    tracing::info!(
+        root = %root.display(), scanned = stats.scanned, deleted = stats.deleted,
+        retained = stats.retained, errors = stats.errors, cap_trimmed = stats.cap_trimmed,
+        cap_errors = stats.cap_errors, cap_final_allocated_bytes = ?stats.cap_final_allocated_bytes,
+        cap_final_directory_count = ?stats.cap_final_directory_count, cap_protected = stats.cap_protected,
+        cap_outcome = ?stats.cap_outcome, cap_max_dirs = caps.max_dirs, cap_max_bytes = caps.max_bytes,
+        malformed_dir_deleted = stats.malformed_dir_deleted, loose_file_deleted = stats.loose_file_deleted,
+        retained_fresh_malformed = stats.retained_fresh_malformed, retained_non_utf8 = stats.retained_non_utf8,
+        debris_bytes_deleted = stats.debris_bytes_deleted, mode = %config.mode.as_metric_label(),
+        cargo_debris_enabled = config.cargo_debris_enabled, cargo_debris_max_age_days = config.cargo_debris_max_age_days,
+        cleanup_outcome = stats.cap_outcome.unwrap_or(if stats.errors == 0 { "completed" } else { "error" }),
+        "CoordinatorActor: cargo target run-dir sweep completed"
+    );
+}
+
 async fn sweep_orphaned_cargo_target_run_dirs(
     db: &djinn_db::Database,
     root: Option<&Path>,
@@ -1723,6 +1746,8 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
     root: &Path,
     config: &crate::context::CacheCleanupConfig,
 ) -> CargoTargetRunDirSweepStats {
+    let caps = djinn_core::cargo_target_runs::cargo_target_runs_caps_from_env();
+    let mode_label = config.mode.as_metric_label();
     let protected = match protected_cargo_target_run_ids(db).await {
         Ok(ids) => ids,
         Err(e) => {
@@ -1731,21 +1756,43 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                 root = %root.display(),
                 "CoordinatorActor: cargo target run-dir sweep failed to load protected task_run ids"
             );
-            return CargoTargetRunDirSweepStats {
+            let stats = CargoTargetRunDirSweepStats {
                 errors: 1,
+                cap_errors: 1,
+                cap_outcome: Some(djinn_telemetry::cache_cleanup::OUTCOME_ERROR),
                 ..Default::default()
             };
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+                mode_label,
+            );
+            report_cargo_target_run_sweep(root, config, caps, &stats);
+            return stats;
         }
     };
 
     let mut entries = match tokio::fs::read_dir(root).await {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::debug!(
+            tracing::warn!(
                 root = %root.display(),
-                "CoordinatorActor: cargo target run-dir root does not exist; skipping sweep"
+                cleanup_outcome = "error",
+                "CoordinatorActor: cargo target run-dir root does not exist; retaining data"
             );
-            return CargoTargetRunDirSweepStats::default();
+            let stats = CargoTargetRunDirSweepStats {
+                errors: 1,
+                cap_errors: 1,
+                cap_outcome: Some(djinn_telemetry::cache_cleanup::OUTCOME_ERROR),
+                ..Default::default()
+            };
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+                mode_label,
+            );
+            report_cargo_target_run_sweep(root, config, caps, &stats);
+            return stats;
         }
         Err(e) => {
             tracing::warn!(
@@ -1753,10 +1800,19 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                 root = %root.display(),
                 "CoordinatorActor: cargo target run-dir sweep failed to enumerate root"
             );
-            return CargoTargetRunDirSweepStats {
+            let stats = CargoTargetRunDirSweepStats {
                 errors: 1,
+                cap_errors: 1,
+                cap_outcome: Some(djinn_telemetry::cache_cleanup::OUTCOME_ERROR),
                 ..Default::default()
             };
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+                mode_label,
+            );
+            report_cargo_target_run_sweep(root, config, caps, &stats);
+            return stats;
         }
     };
 
@@ -1771,11 +1827,6 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
         } else {
             None
         };
-    let mode_label = if config.mode.is_delete() {
-        djinn_telemetry::cache_cleanup::MODE_DELETE
-    } else {
-        djinn_telemetry::cache_cleanup::MODE_DRY_RUN
-    };
     loop {
         let entry = match entries.next_entry().await {
             Ok(Some(entry)) => entry,
@@ -2065,7 +2116,6 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
     }
 
     // Joint count-and-byte cap. The active-id snapshot above is mandatory.
-    let caps = djinn_core::cargo_target_runs::cargo_target_runs_caps_from_env();
     let trim_root = root.to_path_buf();
     let trim_protected = protected;
     match tokio::task::spawn_blocking(move || {
@@ -2112,35 +2162,7 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
         }
     }
 
-    tracing::info!(
-        root = %root.display(),
-        scanned = stats.scanned,
-        deleted = stats.deleted,
-        retained = stats.retained,
-        errors = stats.errors,
-        cap_trimmed = stats.cap_trimmed,
-        cap_errors = stats.cap_errors,
-        cap_final_allocated_bytes = ?stats.cap_final_allocated_bytes,
-        cap_final_directory_count = ?stats.cap_final_directory_count,
-        cap_protected = stats.cap_protected,
-        cap_outcome = ?stats.cap_outcome,
-        cap_max_dirs = caps.max_dirs,
-        cap_max_bytes = caps.max_bytes,
-        malformed_dir_deleted = stats.malformed_dir_deleted,
-        loose_file_deleted = stats.loose_file_deleted,
-        retained_fresh_malformed = stats.retained_fresh_malformed,
-        retained_non_utf8 = stats.retained_non_utf8,
-        debris_bytes_deleted = stats.debris_bytes_deleted,
-        mode = %config.mode.as_metric_label(),
-        cargo_debris_enabled = config.cargo_debris_enabled,
-        cargo_debris_max_age_days = config.cargo_debris_max_age_days,
-        cleanup_outcome = stats.cap_outcome.unwrap_or(if stats.errors == 0 {
-            "completed"
-        } else {
-            "error"
-        }),
-        "CoordinatorActor: cargo target run-dir sweep completed"
-    );
+    report_cargo_target_run_sweep(root, config, caps, &stats);
 
     stats
 }
@@ -2936,6 +2958,38 @@ mod cache_cleanup_cross_path_tests {
                 .status()
                 .unwrap()
                 .success()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_runs_root_is_a_fail_closed_error_outcome() {
+        use djinn_telemetry::cache_cleanup as metrics;
+
+        djinn_telemetry::init().unwrap();
+        let db = crate::test_helpers::create_test_db();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing_root = tmp.path().join("missing-cargo-target-runs");
+        let stats = sweep_orphaned_cargo_target_run_dirs_under(
+            &db,
+            &missing_root,
+            &CacheCleanupConfig::default(),
+        )
+        .await;
+
+        assert_eq!(stats.errors, 1);
+        assert_eq!(stats.cap_errors, 1);
+        assert_eq!(stats.cap_outcome, Some(metrics::OUTCOME_ERROR));
+        assert_eq!(stats.cap_final_allocated_bytes, None);
+        assert_eq!(stats.cap_final_directory_count, None);
+        assert!(
+            cache_metric_value(
+                "djinn_cache_cleanup_total",
+                &[
+                    ("component", metrics::COMPONENT_CARGO_TARGET_RUNS),
+                    ("outcome", metrics::OUTCOME_ERROR),
+                    ("mode", metrics::MODE_DRY_RUN),
+                ],
+            ) >= 1.0
         );
     }
 
