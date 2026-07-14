@@ -13,6 +13,7 @@ use crate::actors::slot::helpers::{
     format_attempt_history, pack_knowledge_notes, recent_feedback,
 };
 use crate::actors::slot::lifecycle::attempt_context;
+use crate::actors::slot::lifecycle::memory_intent_planner::{PlannedNoteType, PlannedQuery};
 use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
 use crate::skills::ResolvedSkill;
@@ -21,7 +22,6 @@ use tracing::Instrument;
 
 mod diagnostics;
 mod types;
-pub(crate) use types::{PromptContext, PromptContextInputs, ReadSourceInfo};
 // Re-export for `use super::*` in test modules.
 #[allow(unused_imports)]
 pub(super) use diagnostics::{
@@ -29,7 +29,9 @@ pub(super) use diagnostics::{
     MAX_EXTENSION_DIAGNOSTIC_SECTION_BYTES, insert_diagnostics_before_task,
     render_extension_diagnostics,
 };
-
+pub(crate) use types::{
+    KnowledgeContextIdentity, PromptContext, PromptContextInputs, ReadSourceInfo,
+};
 /// Append read-only sibling repo section to prompt. No-op when no read sources.
 fn append_read_sources_prompt(prompt: &str, read_sources: &[ReadSourceInfo]) -> String {
     if read_sources.is_empty() {
@@ -298,6 +300,8 @@ async fn load_epic_context(
     task: &Task,
     needs_epic_context: bool,
     app_state: &AgentContext,
+    _identity: Option<KnowledgeContextIdentity<'_>>,
+    planned_queries: Option<&[PlannedQuery]>,
 ) -> Option<String> {
     if !needs_epic_context {
         return None;
@@ -333,6 +337,79 @@ const KNOWLEDGE_BUDGET_CHARS: usize = 2000;
 
 /// Note types queried for knowledge-context injection.
 const KNOWLEDGE_NOTE_TYPES: &[&str] = &["pattern", "pitfall", "case"];
+const PLANNER_NOTES_PER_QUERY: usize = 2;
+const PLANNER_NOTES_GLOBAL: usize = 6;
+
+fn planned_note_type_name(kind: PlannedNoteType) -> &'static str {
+    match kind {
+        PlannedNoteType::Pitfall => "pitfall",
+        PlannedNoteType::Pattern => "pattern",
+        PlannedNoteType::Case => "case",
+        PlannedNoteType::Reference => "reference",
+    }
+}
+
+async fn load_planned_knowledge(
+    note_repo: &NoteRepository,
+    task: &Task,
+    queries: &[PlannedQuery],
+    scope_notes: &[djinn_memory::Note],
+    scope_used: usize,
+) -> Option<String> {
+    if scope_used >= KNOWLEDGE_BUDGET_CHARS {
+        return None;
+    }
+    let entities = vec!["note".to_string()];
+    let buckets = futures::future::join_all(queries.iter().map(|q| {
+        note_repo.search(djinn_db::NoteSearchParams {
+            project_id: &task.project_id,
+            query: &q.query,
+            task_id: Some(&task.id),
+            folder: None,
+            note_type: Some(planned_note_type_name(q.note_type)),
+            limit: PLANNER_NOTES_PER_QUERY,
+            semantic_scores: None,
+            edge_kinds: None,
+            entity_types: Some(&entities),
+        })
+    }))
+    .await;
+    if buckets.iter().any(Result::is_err) {
+        return None;
+    }
+    let mut ids: std::collections::HashSet<String> =
+        scope_notes.iter().map(|n| n.id.clone()).collect();
+    let mut links: std::collections::HashSet<String> =
+        scope_notes.iter().map(|n| n.permalink.clone()).collect();
+    let (mut used, mut lines) = (scope_used, Vec::new());
+    for bucket in buckets {
+        for row in bucket.ok()?.into_iter().take(PLANNER_NOTES_PER_QUERY) {
+            if !ids.insert(row.id.clone()) || !links.insert(row.permalink.clone()) {
+                continue;
+            }
+            if lines.len() == PLANNER_NOTES_GLOBAL {
+                return Some(lines.join("\n"));
+            }
+            let label = match row.note_type.as_str() {
+                "pitfall" => "Pitfall",
+                "pattern" => "Pattern",
+                "case" => "Case",
+                "reference" => "Reference",
+                _ => "Note",
+            };
+            let line = format!(
+                "- **[{}] {}**: {} (permalink: {})",
+                label, row.title, row.snippet, row.permalink
+            );
+            if used + line.len() > KNOWLEDGE_BUDGET_CHARS {
+                return Some(lines.join("\n"));
+            }
+            used += line.len() + 1;
+            lines.push(line);
+        }
+    }
+    Some(lines.join("\n"))
+}
 
 /// Load knowledge context from scope-matched notes. Returns None on error/empty.
 ///
@@ -440,7 +517,7 @@ pub(crate) async fn load_knowledge_context(
     let trace_candidates_final = apply_budget_outcomes(classified, &packed, &notes);
     let estimated_injected_tokens = packed.total_injected_tokens as i32;
 
-    let rendered = if notes.is_empty() {
+    let scope_rendered = if notes.is_empty() {
         None
     } else {
         Some(packed.rendered)
@@ -464,7 +541,24 @@ pub(crate) async fn load_knowledge_context(
     )
     .await;
 
-    rendered
+    match planned_queries {
+        None => scope_rendered,
+        Some(queries) => match load_planned_knowledge(
+            &note_repo,
+            task,
+            queries,
+            &notes,
+            packed.total_injected_chars,
+        )
+        .await
+        {
+            Some(extra) if !extra.is_empty() => Some(match scope_rendered {
+                Some(scope) => format!("{scope}\n{extra}"),
+                None => extra,
+            }),
+            _ => scope_rendered,
+        },
+    }
 }
 
 /// Classify trace candidates into `TraceCandidate` DTOs with deterministic outcomes.
@@ -718,6 +812,8 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         system_prompt_extensions,
         resolved_skills,
         app_state,
+        knowledge_identity,
+        planned_queries,
         read_sources,
         worker_resume_note,
         arbiter_directive,
@@ -802,7 +898,22 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             );
             async move {
                 let child_start = tokio::time::Instant::now();
-                let result = load_knowledge_context(task, epic_context_ref, app_state).await;
+                let result = load_knowledge_context(
+                    task,
+                    epic_context_ref,
+                    app_state,
+                    knowledge_identity,
+                    planned_queries,
+                )
+                .await;
+                let result = load_knowledge_context(
+                    task,
+                    epic_context_ref,
+                    app_state,
+                    knowledge_identity,
+                    planned_queries,
+                )
+                .await;
                 (result, child_start.elapsed())
             }
             .instrument(span)

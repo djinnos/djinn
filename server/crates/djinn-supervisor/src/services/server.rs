@@ -1288,6 +1288,10 @@ async fn dispatch(
             let result = services.publish_branch_to_github(&spec, &task).await;
             ServiceRpcResponse::PublishBranchToGithub(result)
         }
+        ServiceRpcRequest::PlanMemoryIntents { request } => {
+            let result = services.plan_memory_intents(request).await;
+            ServiceRpcResponse::PlanMemoryIntents(result)
+        }
     }
 }
 

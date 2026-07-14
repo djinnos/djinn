@@ -22,9 +22,14 @@ use djinn_core::models::SessionRecord;
 use djinn_core::models::{Task, TaskRunStatus};
 use djinn_db::SessionRepository;
 use djinn_db::TaskRunRepository;
+use djinn_db::repositories::llm_call_attempt::{
+    CreateLlmCallAttemptParams, FinalizeLlmCallAttemptParams, LlmCallAttemptRepository,
+    LlmCallOutcome,
+};
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
 use djinn_stack::environment::EnvironmentConfig;
+use djinn_supervisor::services::wire::{PlannerAttemptResult, PlannerOutcome};
 use djinn_supervisor::services::{
     CostBasisHint, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
     SerializableDjinnEvent,
@@ -951,6 +956,198 @@ impl SupervisorServices for DirectServices {
             }
         }
         Ok(response)
+    }
+
+    async fn plan_memory_intents(
+        &self,
+        request: djinn_supervisor::services::wire::AttributedPlannerRequest,
+    ) -> Result<PlannerAttemptResult, String> {
+        use djinn_provider::completion::resolve_memory_provider_config_for_user_db;
+        use djinn_provider::provider::create_provider;
+        use std::time::Duration;
+        use tokio::time::timeout;
+        use uuid::Uuid;
+
+        let ctx = &self.callbacks.agent_context;
+        let db = &ctx.db;
+        let event_bus = ctx.event_bus.clone();
+        let repo = LlmCallAttemptRepository::new(db.clone(), event_bus);
+
+        let conversation: Conversation = serde_json::from_str(&request.conversation)
+            .map_err(|e| format!("decode planner conversation: {e}"))?;
+        let tools: Vec<serde_json::Value> = serde_json::from_str(&request.tools)
+            .map_err(|e| format!("decode planner tools: {e}"))?;
+
+        let call_id = Uuid::now_v7().to_string();
+
+        // Resolve model + credential under the caller-scoped policy.
+        let (provider_config, model_id) =
+            resolve_memory_provider_config_for_user_db(db, request.created_by_user_id.as_deref())
+                .await
+                .map_err(|e| format!("resolve memory provider for planner: {e}"))?;
+
+        // Snapshot catalog pricing at the time of the call.
+        let catalog_model = ctx.catalog.find_model(&model_id);
+        let input_price = catalog_model.as_ref().map(|m| m.pricing.input_per_million);
+        let output_price = catalog_model.as_ref().map(|m| m.pricing.output_per_million);
+        let cache_read_price = catalog_model
+            .as_ref()
+            .map(|m| m.pricing.cache_read_per_million);
+        let cache_write_price = catalog_model
+            .as_ref()
+            .map(|m| m.pricing.cache_write_per_million);
+
+        // Insert pending attempt before provider I/O.
+        let _pending = repo
+            .create(CreateLlmCallAttemptParams {
+                id: &call_id,
+                project_id: &request.project_id,
+                task_id: &request.task_id,
+                task_run_id: request.task_run_id.as_deref(),
+                session_id: request.session_id.as_deref(),
+                created_by_user_id: request.created_by_user_id.as_deref(),
+                operation: &request.operation,
+                prompt_id: &request.prompt_id,
+                model_id: &model_id,
+                input_price_per_million_snapshot: input_price,
+                output_price_per_million_snapshot: output_price,
+                cache_read_price_per_million_snapshot: cache_read_price,
+                cache_write_price_per_million_snapshot: cache_write_price,
+            })
+            .await
+            .map_err(|e| format!("persist planner attempt: {e}"))?;
+
+        // Build the provider from the resolved config.
+        let provider = create_provider(provider_config);
+
+        let timeout_dur = Duration::from_millis(request.timeout_ms.max(1));
+        let mut response = LlmResponse {
+            content: Vec::new(),
+            thinking: String::new(),
+            usage: TokenUsage::default(),
+        };
+        let mut outcome = LlmCallOutcome::ProviderError;
+        let mut diagnostic: Option<String> = None;
+
+        // Host-owned timeout around the stream; cancellation outside this
+        // boundary cannot erase the terminal write.
+        let stream_fut = provider.stream(&conversation, &tools, request.tool_choice);
+        let stream_result = match timeout(timeout_dur, stream_fut).await {
+            Ok(Ok(mut stream)) => {
+                let mut stream_err: Option<String> = None;
+                while let Some(ev) = stream.next().await {
+                    match ev {
+                        Ok(StreamEvent::Delta(block)) => response.content.push(block),
+                        Ok(StreamEvent::Thinking(s)) => response.thinking.push_str(&s),
+                        Ok(StreamEvent::Usage(u)) => response.usage = u,
+                        Ok(StreamEvent::Done) => break,
+                        Err(e) => {
+                            // Retain the latest observed usage across a late
+                            // stream error without dropping it.
+                            stream_err = Some(format!("provider stream error: {e}"));
+                            break;
+                        }
+                    }
+                }
+                if let Some(err) = stream_err {
+                    diagnostic = Some(err);
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            }
+            Ok(Err(e)) => {
+                diagnostic = Some(format!("provider stream init failed: {e}"));
+                Err(())
+            }
+            Err(_) => {
+                diagnostic = Some(format!(
+                    "planner call timed out after {}ms",
+                    request.timeout_ms
+                ));
+                outcome = LlmCallOutcome::Timeout;
+                Err(())
+            }
+        };
+
+        if stream_result.is_err() && outcome != LlmCallOutcome::Timeout {
+            outcome = LlmCallOutcome::ProviderError;
+        }
+
+        let content_text = response
+            .content
+            .iter()
+            .map(|b| b.as_text().unwrap_or(""))
+            .collect::<String>();
+
+        if stream_result.is_ok() {
+            // Validate completed payload before finalizing success. For the
+            // memory-intent planner, valid output is non-empty JSON. More
+            // specific contract validation lives in the lifecycle planner
+            // boundary; here we gate the primitive on well-formed payload.
+            let valid = !content_text.trim().is_empty()
+                && (request.operation != "memory_intent_planner"
+                    || serde_json::from_str::<serde_json::Value>(&content_text).is_ok());
+            if valid {
+                outcome = LlmCallOutcome::Success;
+            } else {
+                outcome = LlmCallOutcome::InvalidPayload;
+                diagnostic = Some("planner output failed payload validation".into());
+            }
+        }
+
+        // Finalize the ledger row with the latest usage.
+        let finalized = repo
+            .finalize(FinalizeLlmCallAttemptParams {
+                id: &call_id,
+                tokens_in: response.usage.input as i64,
+                tokens_out: response.usage.output as i64,
+                cache_read_tokens: response.usage.cache_read as i64,
+                cache_write_tokens: response.usage.cache_write as i64,
+                diagnostic: diagnostic.as_deref(),
+                outcome,
+            })
+            .await;
+
+        // If finalization itself fails, the pending row remains reconcilable
+        // and we must fail open (no injectable planner output).
+        let finalized = match finalized {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(PlannerAttemptResult {
+                    outcome: PlannerOutcome::ProviderError,
+                    content: None,
+                    tokens_in: response.usage.input as i64,
+                    tokens_out: response.usage.output as i64,
+                    cache_read_tokens: response.usage.cache_read as i64,
+                    cache_write_tokens: response.usage.cache_write as i64,
+                    cost_usd: None,
+                    diagnostic: Some(format!("ledger finalization failed: {e}")),
+                });
+            }
+        };
+
+        let planner_outcome = match outcome {
+            LlmCallOutcome::Success => PlannerOutcome::Success,
+            LlmCallOutcome::Timeout => PlannerOutcome::Timeout,
+            LlmCallOutcome::InvalidPayload => PlannerOutcome::InvalidPayload,
+            LlmCallOutcome::ProviderError => PlannerOutcome::ProviderError,
+        };
+
+        Ok(PlannerAttemptResult {
+            outcome: planner_outcome,
+            content: if planner_outcome == PlannerOutcome::Success {
+                Some(content_text)
+            } else {
+                None
+            },
+            tokens_in: finalized.tokens_in,
+            tokens_out: finalized.tokens_out,
+            cache_read_tokens: finalized.cache_read_tokens,
+            cache_write_tokens: finalized.cache_write_tokens,
+            cost_usd: finalized.cost_usd,
+            diagnostic: finalized.diagnostic.clone().or(diagnostic),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

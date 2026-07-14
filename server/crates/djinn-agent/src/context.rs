@@ -67,6 +67,15 @@ impl Default for MemoryIntentPlannerConfig {
 }
 
 impl MemoryIntentPlannerConfig {
+    /// Build deployment configuration while preserving the safe disabled default.
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        config.enabled = std::env::var("DJINN_MEMORY_INTENT_PLANNER_ENABLED")
+            .map(|value| parse_bool_env(&value))
+            .unwrap_or(false);
+        config
+    }
+
     /// Gate to evaluate before rendering the prompt or invoking a planner.
     pub const fn is_enabled(&self) -> bool {
         self.enabled
@@ -228,6 +237,11 @@ pub struct AgentContext {
     /// variables at `AgentContext` construction time via
     /// [`ReconciliationSweepConfig::from_env`].
     pub reconciliation_sweep: ReconciliationSweepConfig,
+    /// Explicitly injected configuration for the optional session-start memory
+    /// intent planner. It remains disabled by default, but keeping it on the
+    /// dispatch context makes an enabled deployment reachable without a local
+    /// stage-level replacement of the configured value.
+    pub memory_intent_planner: MemoryIntentPlannerConfig,
     /// Shared compaction critical section for the active slot lifecycle/run.
     ///
     /// This is normally owned by the slot actor and threaded into the reply

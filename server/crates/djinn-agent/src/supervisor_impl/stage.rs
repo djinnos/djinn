@@ -77,12 +77,15 @@ use crate::actors::slot::helpers::{
     build_telemetry_meta_with_attribution, default_base_url, resolved_needs_base_url,
 };
 use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
+use crate::actors::slot::lifecycle::memory_intent_planner::{
+    MEMORY_INTENT_PLANNER_PROMPT_ID, PlannerInput, parse_planned_queries, prepare_planner_request,
+};
 use crate::actors::slot::lifecycle::model_resolution::{
     ModelResolutionError, attempt_resume_model_rotation, resolve_model_and_credential,
 };
 use crate::actors::slot::lifecycle::prompt_context::{
-    PromptContext, PromptContextInputs, ReadSourceInfo, assemble_prompt_context,
-    build_worker_resume_note,
+    KnowledgeContextIdentity, PromptContext, PromptContextInputs, ReadSourceInfo,
+    assemble_prompt_context, build_worker_resume_note,
 };
 use crate::actors::slot::lifecycle::role_overrides::{
     ResolvedRoleOverrides, resolve_role_overrides,
@@ -96,6 +99,7 @@ use crate::actors::slot::reply_loop::loop_guard::{
 };
 use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
 use crate::context::AgentContext;
+use crate::context::MemoryIntentPlannerConfig;
 use crate::roles::{AgentRole, role_impl_for};
 use djinn_provider::message::{Conversation, Message};
 use djinn_provider::provider::LlmProvider;
@@ -956,6 +960,90 @@ pub(crate) async fn execute_stage(
         }
     };
 
+    // Create the role session before prompt assembly so retrieval traces use real identities.
+    let billing_signal = resolved.as_ref().map(|r| {
+        let credential_is_oauth = matches!(
+            r.provider_credential,
+            Some(crate::actors::slot::helpers::ProviderCredential::OAuthConfig(_))
+        );
+        derive_billing_signal(&r.catalog_provider_id, &r.model_name, credential_is_oauth)
+    });
+    let cost_basis_hint = billing_signal.map(|(hint, _)| hint);
+    let billing_source = billing_signal.map(|(_, source)| source);
+    let _ = services
+        .report_stage_step(djinn_runtime::stage_step::SESSION_CREATE)
+        .await;
+    let session_record = services
+        .create_session(
+            djinn_supervisor::services::SerializableCreateSessionParams {
+                project_id: task.project_id.clone(),
+                task_id: Some(task.id.clone()),
+                model: model_id.clone(),
+                agent_type: runtime_role_name.to_string(),
+                metadata_json: None,
+                task_run_id: Some(task_run_id.to_string()),
+                cost_basis_hint,
+                billing_source,
+            },
+        )
+        .await
+        .map_err(StageError::SessionCreate)?;
+    let session_id = session_record.id.clone();
+
+    // The injected default-off gate precedes prompt rendering and host I/O.
+    let planner_config = &agent_context.memory_intent_planner;
+    let planned_queries = if let Some(request) = prepare_planner_request(
+        &planner_config,
+        PlannerInput {
+            title: task.title.clone(),
+            description: task.description.clone(),
+            acceptance_criteria: serde_json::from_str::<Vec<serde_json::Value>>(
+                &task.acceptance_criteria,
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect(),
+            resume_compaction_summary: spec
+                .resume_lifecycle_metadata
+                .as_ref()
+                .and_then(|m| m.last_durable_progress_summary.clone()),
+        },
+    ) {
+        let mut planner_conversation = Conversation::new();
+        planner_conversation.push(Message::user(request.prompt));
+        let attributed = djinn_supervisor::services::wire::AttributedPlannerRequest {
+            project_id: task.project_id.clone(),
+            task_id: task.id.clone(),
+            task_run_id: Some(task_run_id.to_string()),
+            session_id: Some(session_id.clone()),
+            created_by_user_id: task.created_by_user_id.clone(),
+            operation: "memory_intent_planner".into(),
+            prompt_id: MEMORY_INTENT_PLANNER_PROMPT_ID.into(),
+            conversation: serde_json::to_string(&planner_conversation).unwrap_or_default(),
+            tools: "[]".into(),
+            tool_choice: None,
+            max_tokens: planner_config.max_output as u32,
+            timeout_ms: planner_config.timeout.as_millis() as u64,
+        };
+        match services.plan_memory_intents(attributed).await {
+            Ok(result)
+                if matches!(
+                    result.outcome,
+                    djinn_supervisor::services::wire::PlannerOutcome::Success
+                ) =>
+            {
+                result
+                    .content
+                    .as_deref()
+                    .and_then(|raw| parse_planned_queries(raw).ok())
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // ── Build prompt context ─────────────────────────────────────────────────
     // `runtime_role` renders the template (may be the specialist's base role);
     // `role_for_epic_check` stays the injected base role because the
@@ -1028,6 +1116,16 @@ pub(crate) async fn execute_stage(
         system_prompt_extensions: &system_prompt_extensions,
         resolved_skills: &resolved_skills,
         app_state: agent_context,
+        knowledge_identity: Some(KnowledgeContextIdentity {
+            session_id: &session_id,
+            task_run_id,
+            created_by_user_id: task.created_by_user_id.as_deref(),
+            resume_progress_summary: spec
+                .resume_lifecycle_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.last_durable_progress_summary.as_deref()),
+        }),
+        planned_queries: planned_queries.as_deref(),
         read_sources: &read_sources,
         worker_resume_note: worker_resume_note.as_deref(),
         arbiter_directive: arbiter_directive.as_deref(),
