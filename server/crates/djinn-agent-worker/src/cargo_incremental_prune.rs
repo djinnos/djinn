@@ -51,6 +51,9 @@ impl PruneErrorKind {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     fn tree() -> (TempDir, PathBuf, PathBuf) {
@@ -276,9 +279,11 @@ mod tests {
     fn injected_lock_errors_are_classified() {
         let lock_open = WarmBaseLock::acquire_with_operations(
             "project",
+            Path::new(WARM_BASE_ROOT),
             |_| Err(io::Error::other("cannot create lock directory")),
             |_| Ok(()),
             |_| -> io::Result<File> { unreachable!("lock file should not be opened") },
+            || {},
             |_| Ok(()),
         )
         .err()
@@ -287,9 +292,11 @@ mod tests {
 
         let lock_probe = WarmBaseLock::acquire_with_operations(
             "project",
+            Path::new(WARM_BASE_ROOT),
             |_| Ok(()),
             |_| Err(io::Error::other("locking unsupported")),
             |_| -> io::Result<File> { unreachable!("lock file should not be opened") },
+            || {},
             |_| Ok(()),
         )
         .err()
@@ -300,14 +307,151 @@ mod tests {
         let lock_file = File::create(temp.path().join("lock")).unwrap();
         let lock_acquire = WarmBaseLock::acquire_with_operations(
             "project",
+            Path::new(WARM_BASE_ROOT),
             |_| Ok(()),
             |_| Ok(()),
             |_| Ok(lock_file),
+            || {},
             |_| Err(io::Error::other("lock acquisition failed")),
         )
         .err()
         .unwrap();
         assert_eq!(lock_acquire.kind, PruneErrorKind::LockAcquire);
+    }
+
+    /// This uses separate processes because release on warm-pod death is a
+    /// shared-filesystem contract, not something a same-process mutex proves.
+    #[test]
+    fn shared_filesystem_lock_contract() {
+        let fixture = TempDir::new().expect("shared fixture");
+        // CI shards can run this binary with the same container-local PID while
+        // sharing /cache. Include tempfile's host-unique component so their
+        // production-derived lock paths cannot contend with each other.
+        let fixture_id = fixture
+            .path()
+            .file_name()
+            .expect("fixture component")
+            .to_string_lossy();
+        let project = format!("lock-contract-{}-{fixture_id}", std::process::id());
+        let base = fixture.path().join("cache/project");
+        let incremental = base.join("debug/incremental");
+        fs::create_dir_all(&incremental).expect("incremental tree");
+        fs::write(incremental.join("left-after-interruption"), b"partial").expect("partial file");
+
+        // A normal holder exit must hand off to a separately spawned waiter.
+        let mut release_holder = contract_child("release-holder", &project, fixture.path());
+        wait_for(&fixture.path().join("release-holder-acquired"));
+        let mut release_waiter = contract_child("release-waiter", &project, fixture.path());
+        thread::sleep(Duration::from_millis(150));
+        assert!(
+            !fixture.path().join("release-waiter-acquired").exists(),
+            "a second warm process must wait while the first owns the guard"
+        );
+        fs::write(fixture.path().join("release-holder-exit"), b"exit").expect("release marker");
+        assert!(release_holder.wait().expect("reap normal holder").success());
+        assert!(
+            release_waiter
+                .wait()
+                .expect("reap release waiter")
+                .success()
+        );
+        assert!(fixture.path().join("release-waiter-acquired").exists());
+
+        // Recreate a partial tree, then prove kernel process-death release.
+        fs::remove_file(fixture.path().join("cleanup-complete"))
+            .expect("clear first cleanup marker");
+        fs::remove_file(fixture.path().join("compile-after-cleanup"))
+            .expect("clear first compile marker");
+        fs::create_dir_all(&incremental).expect("partial incremental tree");
+        fs::write(incremental.join("left-after-death"), b"partial").expect("partial file");
+        let mut holder = contract_child("holder", &project, fixture.path());
+        wait_for(&fixture.path().join("holder-acquired"));
+        let mut killed_waiter = contract_child("killed-waiter", &project, fixture.path());
+        wait_for(&fixture.path().join("killed-waiter-lock-attempt"));
+        assert!(!fixture.path().join("killed-waiter-acquired").exists());
+        killed_waiter.kill().expect("kill waiting process");
+        killed_waiter.wait().expect("reap waiting process");
+        assert!(
+            !fixture.path().join("killed-waiter-terminal").exists(),
+            "a killed waiting attempt must not fabricate a terminal result"
+        );
+        let mut waiter = contract_child("waiter", &project, fixture.path());
+        holder.kill().expect("kill lock holder");
+        holder.wait().expect("reap lock holder");
+        assert!(waiter.wait().expect("reap waiter").success());
+        assert!(fixture.path().join("waiter-acquired").exists());
+        assert!(fixture.path().join("cleanup-complete").exists());
+        assert!(fixture.path().join("compile-after-cleanup").exists());
+        assert!(!incremental.exists(), "retry must remove the partial tree");
+    }
+
+    #[test]
+    fn shared_filesystem_lock_contract_child() {
+        let Ok(role) = std::env::var("DJINN_LOCK_CONTRACT_ROLE") else {
+            return;
+        };
+        let project = std::env::var("DJINN_LOCK_CONTRACT_PROJECT").expect("project");
+        let fixture = PathBuf::from(std::env::var("DJINN_LOCK_CONTRACT_FIXTURE").expect("fixture"));
+        let warm_root = fixture.join("cache");
+        // This is the same returned-error recorder boundary the warm flow uses.
+        // A SIGKILL while flock is blocked cannot reach this terminal callback.
+        let terminal = fixture.join(format!("{role}-terminal"));
+        let lock_attempt = fixture.join(format!("{role}-lock-attempt"));
+        let guard = WarmBaseLock::acquire_and_record_failure_with_attempt_observer_at_root(
+            &project,
+            &warm_root,
+            || fs::write(&lock_attempt, b"attempting").expect("lock-attempt observation"),
+            |error| fs::write(&terminal, error.kind.as_str()).expect("terminal observation"),
+        )
+        .expect("shared filesystem lock");
+        fs::write(fixture.join(format!("{role}-acquired")), b"acquired").expect("acquired marker");
+        if role == "holder" {
+            loop {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+        if role == "release-holder" {
+            wait_for(&fixture.join("release-holder-exit"));
+            drop(guard);
+            return;
+        }
+        let base = fixture.join("cache/project");
+        prune_fixture_incremental(&base, &fixture.join("cache")).expect("retry cleanup");
+        fs::write(fixture.join("cleanup-complete"), b"clean").expect("cleanup marker");
+        assert!(
+            !base.join("debug/incremental").exists(),
+            "compile only after cleanup"
+        );
+        fs::write(fixture.join("compile-after-cleanup"), b"compiled").expect("compile marker");
+        drop(guard);
+    }
+
+    fn contract_child(role: &str, project: &str, fixture: &Path) -> std::process::Child {
+        Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "cargo_incremental_prune::tests::shared_filesystem_lock_contract_child",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("DJINN_LOCK_CONTRACT_ROLE", role)
+            .env("DJINN_LOCK_CONTRACT_PROJECT", project)
+            .env("DJINN_LOCK_CONTRACT_FIXTURE", fixture)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn lock-contract process")
+    }
+
+    fn wait_for(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {}",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -365,6 +509,7 @@ impl WarmBaseLock {
     pub fn acquire(project_id: &str) -> Result<Self, PruneError> {
         Self::acquire_with_operations(
             project_id,
+            Path::new(WARM_BASE_ROOT),
             |lock_dir| fs::create_dir_all(lock_dir),
             probe_advisory_lock,
             |path| {
@@ -374,17 +519,114 @@ impl WarmBaseLock {
                     .create(true)
                     .open(path)
             },
+            || {},
             flock_exclusive,
         )
+    }
+
+    /// Acquire through the warm flow's terminal recorder boundary. The callback
+    /// runs only after a returned lock failure, never while an attempt blocks.
+    pub(crate) fn acquire_and_record_failure<Record>(
+        project_id: &str,
+        record_failure: Record,
+    ) -> Result<Self, PruneError>
+    where
+        Record: FnOnce(&PruneError),
+    {
+        let result = Self::acquire(project_id);
+        if let Err(error) = &result {
+            record_failure(error);
+        }
+        result
+    }
+
+    /// Test-only observation from the shared warm lock-attempt/recorder seam.
+    /// It runs immediately before the blocking filesystem acquisition, proving
+    /// a killed subprocess reached the actual wait rather than merely starting.
+    #[cfg(test)]
+    pub(crate) fn acquire_and_record_failure_with_attempt_observer_at_root<Record, Observe>(
+        project_id: &str,
+        warm_root: &Path,
+        observe_attempt: Observe,
+        record_failure: Record,
+    ) -> Result<Self, PruneError>
+    where
+        Record: FnOnce(&PruneError),
+        Observe: FnOnce(),
+    {
+        let result = Self::acquire_with_operations(
+            project_id,
+            warm_root,
+            |lock_dir| fs::create_dir_all(lock_dir),
+            probe_advisory_lock,
+            |path| {
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(path)
+            },
+            observe_attempt,
+            flock_exclusive,
+        );
+        if let Err(error) = &result {
+            record_failure(error);
+        }
+        result
+    }
+
+    /// Test-only operation-level seam used by `warm_cargo_target_base` tests.
+    /// It retains the production lock derivation and only substitutes the
+    /// requested probe or acquisition operation.
+    #[cfg(test)]
+    pub(crate) fn acquire_with_operation_failure_and_record<Record>(
+        project_id: &str,
+        failure: WarmLockOperationFailure,
+        record_failure: Record,
+    ) -> Result<Self, PruneError>
+    where
+        Record: FnOnce(&PruneError),
+    {
+        let result = Self::acquire_with_operations(
+            project_id,
+            Path::new(WARM_BASE_ROOT),
+            |lock_dir| fs::create_dir_all(lock_dir),
+            |lock_dir| match failure {
+                WarmLockOperationFailure::Probe => {
+                    Err(io::Error::other("injected unsupported lock probe"))
+                }
+                WarmLockOperationFailure::Acquire => probe_advisory_lock(lock_dir),
+            },
+            |path| {
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(path)
+            },
+            || {},
+            |file| match failure {
+                WarmLockOperationFailure::Probe => flock_exclusive(file),
+                WarmLockOperationFailure::Acquire => {
+                    Err(io::Error::other("injected lock acquisition failure"))
+                }
+            },
+        );
+        if let Err(error) = &result {
+            record_failure(error);
+        }
+        result
     }
 
     /// Injectable filesystem operations keep fail-closed classifications
     /// deterministic without allowing callers to choose a lock path.
     fn acquire_with_operations<Create, Probe, Open, Acquire>(
         project_id: &str,
+        warm_root: &Path,
         create_lock_dir: Create,
         probe: Probe,
         open_lock: Open,
+        before_acquire: impl FnOnce(),
         acquire_lock: Acquire,
     ) -> Result<Self, PruneError>
     where
@@ -394,7 +636,7 @@ impl WarmBaseLock {
         Acquire: FnOnce(&File) -> io::Result<()>,
     {
         validate_project_id(project_id)?;
-        let lock_dir = Path::new(WARM_BASE_ROOT).join(LOCK_DIRECTORY);
+        let lock_dir = warm_root.join(LOCK_DIRECTORY);
         create_lock_dir(&lock_dir)
             .map_err(|error| PruneError::new(PruneErrorKind::LockOpen, error))?;
         probe(&lock_dir).map_err(|error| PruneError::new(PruneErrorKind::LockProbe, error))?;
@@ -402,9 +644,18 @@ impl WarmBaseLock {
         let path = lock_dir.join(format!("{project_id}.lock"));
         let file =
             open_lock(&path).map_err(|error| PruneError::new(PruneErrorKind::LockOpen, error))?;
+        before_acquire();
         acquire_lock(&file).map_err(|error| PruneError::new(PruneErrorKind::LockAcquire, error))?;
         Ok(Self { _file: file })
     }
+}
+
+/// The operation failures injected by the warm-flow ordering test.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WarmLockOperationFailure {
+    Probe,
+    Acquire,
 }
 
 /// Validate the configured warm target and remove only `debug/incremental`.
@@ -438,6 +689,27 @@ pub(crate) fn prune_warm_incremental_for_target(
         ));
     }
     prune_derived_base(&base, Path::new(WARM_BASE_ROOT))
+}
+
+#[cfg(test)]
+pub(crate) fn prune_warm_incremental_for_root(
+    project_id: &str,
+    configured_target: &Path,
+    warm_root: &Path,
+) -> Result<PruneResult, PruneError> {
+    validate_project_id(project_id)?;
+    let base = warm_root.join(project_id);
+    if configured_target != base {
+        return Err(PruneError::new(
+            PruneErrorKind::TargetMismatch,
+            format!(
+                "configured {} does not exactly match {}",
+                configured_target.display(),
+                base.display()
+            ),
+        ));
+    }
+    prune_derived_base(&base, warm_root)
 }
 
 fn validate_project_id(project_id: &str) -> Result<(), PruneError> {
