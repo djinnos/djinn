@@ -1,0 +1,11 @@
+{
+  "project_id": "019f5cc9-0000-7000-8000-000000000001",
+  "task_id": "019f5cc9-0000-7000-8000-000000000002",
+  "session_id": "019f5cc9-0000-7000-8000-000000000003",
+  "first_attempt_id": "019f5cc9-0000-7000-8000-000000000004",
+  "later_attempt_id": "019f5cc9-0000-7000-8000-000000000005",
+  "facts": [
+    {"source_kind":"project_mcp","source_key":"alpha-mcp","phase":"tools_list","severity":"error","remedy_code":"check_server","summary_material":"tools list failed"},
+    {"source_kind":"project_skill","source_key":"skills/release.md","phase":"frontmatter","severity":"warning","remedy_code":"check_skill_frontmatter","summary_material":"invalid frontmatter"}
+  ]
+}
