@@ -406,3 +406,128 @@ async fn migration_85_backfills_open_pr_tasks_to_unknown_and_skips_closed_tasks(
     })
     .await;
 }
+
+/// Migration 116 is purely additive: it adds the nullable `mq_*` merge-queue
+/// lane columns plus two CHECK constraints, with no backfill. Assert the
+/// columns exist as nullable-without-default, the constraints are present, and
+/// that they reject bad values while accepting a NULL lane and a well-formed
+/// lane.
+#[tokio::test]
+async fn migration_116_adds_nullable_merge_queue_lane_columns_and_constraints() {
+    with_temp_database("mq_lane", |db_url| async move {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .expect("connect fresh migration database");
+        sqlx::migrate!("./migrations_postgres")
+            .run(&pool)
+            .await
+            .expect("apply all migrations to fresh database");
+
+        // Pre-existing PR-head lane schema is still intact.
+        assert_schema(&pool).await;
+
+        for (column, data_type) in [
+            ("mq_state", "text"),
+            ("mq_run_id", "bigint"),
+            ("mq_head_sha", "character varying"),
+            ("mq_failed_check_names", "jsonb"),
+            ("mq_failure_fingerprint", "text"),
+            ("mq_same_signature_count", "bigint"),
+            ("mq_first_seen_at", "character varying"),
+            ("mq_last_seen_at", "character varying"),
+        ] {
+            let (actual_type, actual_nullable, actual_default): (String, String, Option<String>) =
+                sqlx::query_as(
+                    "SELECT data_type, is_nullable, column_default \
+                     FROM information_schema.columns \
+                     WHERE table_name = 'task_pr_ci_snapshots' AND column_name = $1",
+                )
+                .bind(column)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("inspect mq column {column}: {e}"));
+            assert_eq!(actual_type, data_type, "unexpected type for {column}");
+            assert_eq!(actual_nullable, "YES", "mq column {column} must be nullable");
+            assert_eq!(
+                actual_default, None,
+                "mq column {column} must have no default"
+            );
+        }
+
+        let constraints: Vec<String> = sqlx::query_scalar(
+            "SELECT conname FROM pg_constraint \
+             WHERE conrelid = 'task_pr_ci_snapshots'::regclass \
+             ORDER BY conname",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("inspect task_pr_ci_snapshots constraints");
+        for expected in [
+            "task_pr_ci_snapshots_mq_failed_names_array_check",
+            "task_pr_ci_snapshots_mq_same_signature_count_check",
+        ] {
+            assert!(
+                constraints.iter().any(|c| c == expected),
+                "expected constraint {expected}, got {constraints:?}"
+            );
+        }
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, github_owner, github_repo) \
+             VALUES ('project-mq', 'project-mq', 'djinnos', 'djinn-mq')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed mq project");
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) \
+             VALUES ('task-mq', 'project-mq', 'mq', 'title', 'description', 'design', \
+                     '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed mq task");
+
+        // A NULL merge-queue lane is allowed (the additive default).
+        sqlx::query("INSERT INTO task_pr_ci_snapshots (task_id, pr_number) VALUES ('task-mq', 1)")
+            .execute(&pool)
+            .await
+            .expect("NULL mq lane is permitted");
+
+        // A well-formed lane (JSON array + non-negative count) is accepted.
+        sqlx::query(
+            "INSERT INTO task_pr_ci_snapshots \
+             (task_id, pr_number, mq_state, mq_failed_check_names, mq_same_signature_count) \
+             VALUES ('task-mq', 2, 'dequeued_failure', '[\"Server Test\"]'::jsonb, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("well-formed mq lane is accepted");
+
+        // A non-array mq_failed_check_names is rejected by the CHECK.
+        sqlx::query(
+            "INSERT INTO task_pr_ci_snapshots \
+             (task_id, pr_number, mq_failed_check_names) \
+             VALUES ('task-mq', 3, '{}'::jsonb)",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("non-array mq_failed_check_names should be rejected");
+
+        // A negative mq_same_signature_count is rejected by the CHECK.
+        sqlx::query(
+            "INSERT INTO task_pr_ci_snapshots \
+             (task_id, pr_number, mq_same_signature_count) \
+             VALUES ('task-mq', 4, -1)",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("negative mq_same_signature_count should be rejected");
+
+        pool.close().await;
+    })
+    .await;
+}
