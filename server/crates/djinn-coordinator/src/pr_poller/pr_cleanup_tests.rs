@@ -11,7 +11,7 @@ use djinn_provider::github_api::{
 use time::OffsetDateTime;
 
 use super::pr_cleanup::{
-    BranchCleanupOutcome, PrCleanupGitHub, PrCleanupPolicy, PrCleanupPolicyConfig,
+    BranchCleanupOutcome, PrCleanupGitHub, PrCleanupPolicy, PrCleanupPolicyConfig, PrCleanupTarget,
 };
 
 #[derive(Clone, Default)]
@@ -154,6 +154,14 @@ fn task(closed_at: Option<&str>, updated_at: &str) -> djinn_core::models::Task {
     }
 }
 
+fn cleanup_target(closed_at: Option<&str>, updated_at: &str) -> PrCleanupTarget {
+    PrCleanupTarget {
+        short_id: "b111".to_string(),
+        closed_at: closed_at.map(str::to_string),
+        updated_at: updated_at.to_string(),
+    }
+}
+
 fn pr(number: u64, author: &str, head: &str, base: &str) -> PullRequest {
     PullRequest {
         number,
@@ -283,7 +291,7 @@ async fn branch_cleanup_skips_protected_branches() {
     assert!(
         !cleanup
             .should_delete_branch(
-                &task(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
+                &cleanup_target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
                 "main",
             )
             .await
@@ -305,7 +313,7 @@ async fn branch_cleanup_skips_branch_used_as_base_of_open_pr() {
     assert!(
         !cleanup
             .should_delete_branch(
-                &task(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
+                &cleanup_target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
                 "task/b111",
             )
             .await
@@ -322,7 +330,7 @@ async fn branch_cleanup_dry_run_does_not_delete_ref() {
 
     let outcome = cleanup
         .delete_branch_if_allowed(
-            &task(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
+            &cleanup_target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
             "refs/heads/task/b111",
         )
         .await
@@ -339,7 +347,7 @@ async fn branch_cleanup_deletes_ref_when_guardrails_pass() {
 
     let outcome = cleanup
         .delete_branch_if_allowed(
-            &task(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
+            &cleanup_target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
             "task/b111",
         )
         .await
