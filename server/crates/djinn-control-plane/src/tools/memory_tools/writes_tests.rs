@@ -13,7 +13,10 @@ mod tests {
 
     use std::time::Duration;
 
-    use djinn_core::events::EventBus;
+    use djinn_core::{
+        auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
+        events::EventBus,
+    };
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use rmcp::{Json, handler::server::wrapper::Parameters};
     use tokio::time::sleep;
@@ -22,7 +25,7 @@ mod tests {
         server::DjinnMcpServer,
         state::stubs::test_mcp_state,
         tools::memory_tools::{
-            BrokenLinksParams, EditParams, ListParams, ReadParams, WriteParams, ops,
+            BrokenLinksParams, EditParams, ListParams, MemoryNoteResponse, ReadParams, WriteParams, ops,
             write_dedup_types::{MemoryWriteDedupDecider, MemoryWriteDedupDecision},
         },
     };
@@ -41,6 +44,22 @@ mod tests {
             .unwrap()
     }
 
+    #[async_trait::async_trait]
+    trait ScopedMemoryToolCalls {
+        async fn test_memory_write(&self, params: Parameters<WriteParams>) -> Json<MemoryNoteResponse>;
+        async fn test_memory_edit(&self, params: Parameters<EditParams>) -> Json<MemoryNoteResponse>;
+    }
+
+    #[async_trait::async_trait]
+    impl ScopedMemoryToolCalls for DjinnMcpServer {
+        async fn test_memory_write(&self, params: Parameters<WriteParams>) -> Json<MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT.scope(TrustedRevisionCallerContext::authenticated_human("memory-tools-test"), self.memory_write(params)).await
+        }
+        async fn test_memory_edit(&self, params: Parameters<EditParams>) -> Json<MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT.scope(TrustedRevisionCallerContext::authenticated_human("memory-tools-test"), self.memory_edit(params)).await
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn non_mergeable_note_type_bypasses_dedup() {
         let tmp = workspace_tempdir();
@@ -51,7 +70,7 @@ mod tests {
 
         // Create first note
         let Json(created1) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Research Topic".to_string(),
                 content: "This is a research note about async Rust patterns.".to_string(),
@@ -70,7 +89,7 @@ mod tests {
         // Create second similar note - research is not mergeable, so it should create a new note
         // Use a slightly different title to avoid permalink collision
         let Json(created2) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Research Topic Two".to_string(),
                 content: "This is a research note about async Rust patterns.".to_string(),
@@ -103,7 +122,7 @@ mod tests {
 
         // Create first pattern note
         let Json(created1) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Async Pattern".to_string(),
                 content: "Use tokio::spawn for concurrent task execution in Rust async code."
@@ -151,7 +170,7 @@ mod tests {
 
         // Create a pattern note
         let Json(pattern) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Error Handling Pattern".to_string(),
                 content: "Use Result types for explicit error handling in Rust.".to_string(),
@@ -168,7 +187,7 @@ mod tests {
 
         // Create an ADR in decisions folder with similar content
         let Json(adr) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Error Handling ADR".to_string(),
                 content: "Use Result types for explicit error handling in Rust.".to_string(),
@@ -231,7 +250,7 @@ mod tests {
 
         // Create a pattern note with unique content
         let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Unique Pattern XYZ123".to_string(),
                 content:
@@ -260,7 +279,7 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Canonical Pattern".to_string(),
                 content: "Alpha\r\nBeta\n".to_string(),
@@ -286,7 +305,7 @@ mod tests {
         assert_eq!(rebuilt, 1);
 
         let Json(reused) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Canonical Pattern Copy".to_string(),
                 content: "  Alpha\nBeta  ".to_string(),
@@ -362,7 +381,7 @@ mod tests {
 
         // Write first note
         let Json(r1) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Auth Token Validation Pattern".to_string(),
                 content: shared.to_string(),
@@ -379,7 +398,7 @@ mod tests {
 
         // Write second note with same content to trigger detection
         let Json(r2) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "JWT Bearer Auth Validation".to_string(),
                 content: shared.to_string(),
@@ -433,7 +452,7 @@ mod tests {
         let project_path = project.slug();
 
         let Json(initial_brief) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project_path.clone(),
                 title: "Project Brief".to_string(),
                 content: "Broken [[Missing ADR]]. Broken [[Roadmap]].".to_string(),
@@ -448,7 +467,7 @@ mod tests {
         assert!(initial_brief.error.is_none(), "{:?}", initial_brief.error);
 
         let Json(initial_roadmap) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project_path.clone(),
                 title: "Project Roadmap".to_string(),
                 content: "Broken [[Missing ADR-043]].".to_string(),
@@ -481,7 +500,7 @@ mod tests {
         );
 
         let Json(updated_roadmap) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project_path.clone(),
                 title: "Project Roadmap".to_string(),
                 content: "References [[ADR-043 Repo Graph]].".to_string(),
@@ -500,7 +519,7 @@ mod tests {
         );
 
         let Json(updated_brief) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project_path.clone(),
                 title: "Project Brief".to_string(),
                 content: "Links [[ADR-008 Example]] and [[roadmap]].".to_string(),
@@ -570,7 +589,7 @@ mod tests {
         let content = "Originated from ADR-054 closure reconciliation.";
 
         let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: title.to_string(),
                 content: content.to_string(),
@@ -650,7 +669,7 @@ mod tests {
         .unwrap();
 
         let Json(edited) = server
-            .memory_edit(Parameters(EditParams {
+            .test_memory_edit(Parameters(EditParams {
                 project: project.slug(),
                 identifier: "requirements/v1-requirements".to_string(),
                 operation: "find_replace".to_string(),
@@ -682,7 +701,7 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "ADR-300 Empty Scope".to_string(),
                 content: "body for ADR-300".to_string(),
@@ -717,7 +736,7 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "ADR-301 Scoped".to_string(),
                 content: "scoped body".to_string(),
@@ -750,7 +769,7 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "ADR-303 Editable".to_string(),
                 content: "The quick brown fox".to_string(),
@@ -767,7 +786,7 @@ mod tests {
         let note_id = created.id.clone().unwrap();
 
         let Json(edited) = server
-            .memory_edit(Parameters(EditParams {
+            .test_memory_edit(Parameters(EditParams {
                 project: project.slug(),
                 identifier: permalink,
                 operation: "find_replace".to_string(),
@@ -805,7 +824,7 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "ADR-304 NoopEdit".to_string(),
                 content: "hello world".to_string(),
@@ -827,7 +846,7 @@ mod tests {
         sleep(Duration::from_millis(50)).await;
 
         let Json(edited) = server
-            .memory_edit(Parameters(EditParams {
+            .test_memory_edit(Parameters(EditParams {
                 project: project.slug(),
                 identifier: created.permalink.clone().unwrap(),
                 operation: "find_replace".to_string(),
@@ -884,7 +903,7 @@ mod tests {
         let server = DjinnMcpServer::new(state);
 
         let Json(first) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Telemetry Reuse Pattern".to_string(),
                 content: "apple banana cherry date elderberry".to_string(),
@@ -902,7 +921,7 @@ mod tests {
         // Exact content match triggers the deterministic hash-reuse path and
         // records a single Success observation.
         let Json(second) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Telemetry Reuse Pattern".to_string(),
                 content: "apple banana cherry date elderberry".to_string(),
@@ -940,7 +959,7 @@ mod tests {
         let server = DjinnMcpServer::new(state);
 
         let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Unique Pattern".to_string(),
                 content: "A completely unique pattern that has no dedup candidates.".to_string(),
@@ -973,7 +992,7 @@ mod tests {
         let server = DjinnMcpServer::new(state);
 
         let Json(first) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Telemetry Error Pattern".to_string(),
                 content: "apple banana cherry date elderberry".to_string(),

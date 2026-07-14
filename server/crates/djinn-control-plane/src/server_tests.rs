@@ -3,7 +3,10 @@
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use djinn_core::events::{DjinnEventEnvelope, EventBus};
+    use djinn_core::{
+        auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
+        events::{DjinnEventEnvelope, EventBus},
+    };
     use djinn_core::models::DispatchPause;
     use djinn_db::repositories::dispatch_pause::{DispatchPauseRepository, DispatchPauseTarget};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
@@ -14,7 +17,7 @@ mod tests {
     use crate::{
         server::{DjinnMcpServer, SessionEndHookSessionManager},
         state::stubs::test_mcp_state,
-        tools::memory_tools::{EditParams, ReadParams, WriteParams},
+        tools::memory_tools::{EditParams, MemoryNoteResponse, ReadParams, WriteParams},
     };
 
     fn workspace_tempdir() -> tempfile::TempDir {
@@ -88,6 +91,22 @@ mod tests {
         repo.get(note_id).await.unwrap().unwrap()
     }
 
+    #[async_trait::async_trait]
+    trait ScopedMemoryToolCalls {
+        async fn test_memory_write(&self, params: Parameters<WriteParams>) -> Json<MemoryNoteResponse>;
+        async fn test_memory_edit(&self, params: Parameters<EditParams>) -> Json<MemoryNoteResponse>;
+    }
+
+    #[async_trait::async_trait]
+    impl ScopedMemoryToolCalls for DjinnMcpServer {
+        async fn test_memory_write(&self, params: Parameters<WriteParams>) -> Json<MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT.scope(TrustedRevisionCallerContext::authenticated_human("server-test"), self.memory_write(params)).await
+        }
+        async fn test_memory_edit(&self, params: Parameters<EditParams>) -> Json<MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT.scope(TrustedRevisionCallerContext::authenticated_human("server-test"), self.memory_edit(params)).await
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_write_and_edit_regenerate_summaries_without_blocking_ack() {
         let db = Database::open_in_memory().unwrap();
@@ -99,7 +118,7 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+            .test_memory_write(Parameters(WriteParams {
                 project: project.slug(),
                 title: "Summary Note".to_string(),
                 content: "Sentence one. Sentence two.\n\nMore context follows here.".to_string(),
@@ -144,7 +163,7 @@ mod tests {
         let previous_overview = generated.overview.clone();
 
         let Json(edited) = server
-            .memory_edit(Parameters(EditParams {
+            .test_memory_edit(Parameters(EditParams {
                 project: project.slug(),
                 identifier: note_id.clone(),
                 operation: "append".to_string(),
