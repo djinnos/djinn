@@ -62,6 +62,10 @@ mod tests {
 
     #[tokio::test]
     async fn probe_uses_existing_detectors_and_returns_fresh_canonical_rows() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/extension_diagnostics/doctor_probe.json"
+        ))
+        .expect("valid doctor probe fixture");
         let db = djinn_db::Database::open_in_memory().expect("in-memory database");
         let project_id = uuid::Uuid::now_v7().to_string();
         ProjectRepository::new(db.clone(), EventBus::noop())
@@ -69,22 +73,14 @@ mod tests {
             .await
             .expect("project");
         ProjectRepository::new(db.clone(), EventBus::noop())
-            .set_environment_config(
-                &project_id,
-                &serde_json::json!({
-                    "schema_version": 1,
-                    "agent_mcp_defaults": { "doctor": ["missing-placeholder"] },
-                    "global_skills": ["missing-skill"]
-                })
-                .to_string(),
-            )
+            .set_environment_config(&project_id, &fixture["environment_config"].to_string())
             .await
             .expect("environment config");
 
         let workspace = crate::test_helpers::test_tempdir("doctor-extension-probe-");
         fs::write(
             workspace.path().join("mcp.json"),
-            r#"{"mcpServers":{"missing-placeholder":{"url":"${DOCTOR_PROBE_UNSET}"}}}"#,
+            fixture["mcp_json"].as_str().expect("MCP fixture"),
         )
         .expect("MCP fixture");
         let app_state =
@@ -129,6 +125,14 @@ mod tests {
                 .list_for_load_attempt(&project_id, &second[0].load_attempt_id)
                 .await
                 .expect("canonical second attempt")
+        );
+        assert!(
+            repository
+                .list_for_load_attempt(&uuid::Uuid::now_v7().to_string(), &first[0].load_attempt_id)
+                .await
+                .expect("cross-project attempt query")
+                .is_empty(),
+            "the probe result must be scoped by its authorized project ID"
         );
     }
 }
