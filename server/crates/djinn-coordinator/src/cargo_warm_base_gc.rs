@@ -119,7 +119,7 @@ pub async fn execute_three_rung_pressure_plan(
 ) -> ThreeRungPressureResult {
     let mut result = ThreeRungPressureResult::default();
     let mut blocked = HashSet::new();
-    for unit in &plan.units {
+    for (index, unit) in plan.units.iter().enumerate() {
         if blocked.contains(&unit.project_id)
             || !matches!(unit.disposition, PressurePlanDisposition::Eligible)
         {
@@ -147,6 +147,7 @@ pub async fn execute_three_rung_pressure_plan(
         // `NotFound` from a concurrent safe remover is idempotent; it does
         // not make the broader rung eligible for escalation in this pass.
         if !unit.canonical_target.exists() {
+            blocked.insert(unit.project_id.clone());
             drop(guard);
             continue;
         }
@@ -164,6 +165,7 @@ pub async fn execute_three_rung_pressure_plan(
             Ok(value) => value,
             Err(_) => {
                 result.remeasurement_failed = true;
+                result.retained.extend(plan.units[index..].iter().cloned());
                 break;
             }
         };
@@ -173,6 +175,7 @@ pub async fn execute_three_rung_pressure_plan(
             config.warm_base_high_free_ratio,
         ) {
             result.reached_high_watermark = true;
+            result.retained.extend(plan.units[index..].iter().cloned());
             break;
         }
         result.attempted.push(unit.clone());
@@ -189,10 +192,16 @@ pub async fn execute_three_rung_pressure_plan(
                         ) => {}
                     Ok(_) => {
                         result.reached_high_watermark = true;
+                        result
+                            .retained
+                            .extend(plan.units[index + 1..].iter().cloned());
                         break;
                     }
                     Err(_) => {
                         result.remeasurement_failed = true;
+                        result
+                            .retained
+                            .extend(plan.units[index + 1..].iter().cloned());
                         break;
                     }
                 }

@@ -113,6 +113,128 @@ fn executable_pressure_config() -> crate::context::CacheCleanupConfig {
     config
 }
 
+fn eligible_three_rung_unit(base: &Path, target: &Path, rung: PressureRung) -> PressurePlanUnit {
+    PressurePlanUnit {
+        rung,
+        project_id: base.file_name().unwrap().to_str().unwrap().into(),
+        canonical_base: base.to_path_buf(),
+        canonical_target: target.to_path_buf(),
+        projected_allocated_bytes: 0,
+        disposition: PressurePlanDisposition::Eligible,
+    }
+}
+
+fn three_rung_clock() -> TestClock {
+    TestClock::new(
+        SystemTime::now() + Duration::from_secs(1),
+        std::time::Instant::now(),
+    )
+}
+
+#[tokio::test]
+async fn three_rung_executor_retains_terminal_precheck_suffix() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000020");
+    let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000021");
+    let first_unit = eligible_three_rung_unit(&first, &first, PressureRung::WholeBase);
+    let second_unit = eligible_three_rung_unit(&second, &second, PressureRung::WholeBase);
+    let capacity = SequenceCapacity(std::sync::Mutex::new(std::collections::VecDeque::from([
+        Err("external capacity probe failed".into()),
+    ])));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![first_unit.clone(), second_unit.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+
+    assert!(result.remeasurement_failed);
+    assert!(result.attempted.is_empty());
+    assert_eq!(result.retained, vec![first_unit, second_unit]);
+    assert!(first.exists() && second.exists());
+}
+
+#[tokio::test]
+async fn three_rung_executor_keeps_success_and_retains_postcheck_suffix() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000022");
+    let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000023");
+    std::fs::write(first.join("reclaim"), b"bytes").unwrap();
+    let first_unit = eligible_three_rung_unit(&first, &first, PressureRung::WholeBase);
+    let second_unit = eligible_three_rung_unit(&second, &second, PressureRung::WholeBase);
+    let capacity = SequenceCapacity(std::sync::Mutex::new(std::collections::VecDeque::from([
+        Ok(CapacitySnapshot {
+            total_bytes: 1000,
+            available_bytes: 100,
+        }),
+        Err("post-removal probe failed".into()),
+    ])));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![first_unit.clone(), second_unit.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+
+    assert!(result.remeasurement_failed);
+    assert_eq!(result.attempted, vec![first_unit.clone()]);
+    assert_eq!(result.deleted, vec![first_unit]);
+    assert_eq!(result.retained, vec![second_unit]);
+    assert!(!first.exists() && second.exists());
+}
+
+#[tokio::test]
+async fn three_rung_executor_absent_unit_blocks_same_base_escalation() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000024");
+    let absent = eligible_three_rung_unit(
+        &base,
+        &base.join("debug").join("incremental"),
+        PressureRung::Incremental,
+    );
+    let broader = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
+    let locks = RecordingBaseLock {
+        attempts: std::sync::Mutex::new(Vec::new()),
+        succeed: true,
+    };
+    let capacity = SequenceCapacity(std::sync::Mutex::new(std::collections::VecDeque::new()));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![absent, broader.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &locks,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+
+    assert!(result.attempted.is_empty());
+    assert_eq!(result.retained, vec![broader]);
+    assert_eq!(locks.attempts.lock().unwrap().len(), 1);
+    assert!(base.exists());
+}
+
 #[test]
 fn dry_run_planning_lock_policy_does_not_create_lock_file() {
     let temp = tempfile::tempdir().unwrap();
