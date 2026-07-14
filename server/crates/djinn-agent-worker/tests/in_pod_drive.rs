@@ -373,6 +373,9 @@ async fn handle_rpc(
                 "worker must call the provider locally; invoke_llm RPC is a Phase 7b regression"
             );
         }
+        ServiceRpcRequest::PlanMemoryIntents { .. } => {
+            panic!("default-off memory planning must not dispatch from the worker")
+        }
         ServiceRpcRequest::OpenPr { .. } => {
             audit.lock().await.open_pr += 1;
             ServiceRpcResponse::OpenPr(TaskRunOutcome::Closed {
