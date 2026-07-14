@@ -1159,12 +1159,13 @@ async fn run_llm_extraction_inner(
                 "llm_extraction: LLM completion failed; skipping extraction"
             );
             let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-            record_extraction_skipped(
+            finalize_extraction_output(
                 &note_repo,
                 &project.id,
                 &session_id,
                 &task.id,
                 session.task_run_id.as_deref(),
+                0,
             )
             .await;
             return;
@@ -1176,12 +1177,13 @@ async fn run_llm_extraction_inner(
                 "llm_extraction: LLM completion timed out; skipping extraction"
             );
             let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-            record_extraction_skipped(
+            finalize_extraction_output(
                 &note_repo,
                 &project.id,
                 &session_id,
                 &task.id,
                 session.task_run_id.as_deref(),
+                0,
             )
             .await;
             return;
@@ -1201,12 +1203,13 @@ async fn run_llm_extraction_inner(
                 "llm_extraction: LLM response parse FAILED; skipping (extraction error, not empty)"
             );
             let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-            record_extraction_skipped(
+            finalize_extraction_output(
                 &note_repo,
                 &project.id,
                 &session_id,
                 &task.id,
                 session.task_run_id.as_deref(),
+                0,
             )
             .await;
             return;
@@ -1226,12 +1229,13 @@ async fn run_llm_extraction_inner(
     // nothing novel to record. This is normal — log at debug, not warn.
     if total == 0 {
         let repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-        record_extraction_skipped(
+        finalize_extraction_output(
             &repo,
             &project.id,
             &session_id,
             &task.id,
             session.task_run_id.as_deref(),
+            0,
         )
         .await;
         persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
@@ -1885,7 +1889,9 @@ fn merge_working_spec_content(existing: &str, section: &str) -> String {
     let trimmed_existing = existing.trim_end();
     let trimmed_section = section.trim();
     if trimmed_existing.contains(trimmed_section) {
-        trimmed_existing.to_string()
+        // Preserve the committed representation exactly on a semantic no-op;
+        // trimming a terminal newline would otherwise fabricate a revision.
+        existing.to_owned()
     } else {
         format!("{trimmed_existing}\n\n{trimmed_section}\n")
     }
@@ -3780,6 +3786,26 @@ mod evidence_merge_regression_tests {
     }
 
     #[tokio::test]
+    async fn terminal_completion_transport_parse_and_empty_paths_record_one_skipped_revision() {
+        // The outer runner maps each of these paths to this shared terminal
+        // boundary. Keep the fake-backed assertion here so a future branch
+        // cannot bypass the canonical skipped mutation or its provenance.
+        for terminal_path in ["completion transport", "timeout", "parse failure", "parsed empty"] {
+            let repo = RecordingExtractionRepository::empty();
+            finalize_test_output(&repo, 0).await;
+
+            let revisions = repo.revisions();
+            assert_eq!(revisions.len(), 1, "{terminal_path} must record one terminal revision");
+            assert_eq!(
+                revisions[0].mutation.event_kind,
+                NoteRevisionEventKind::ExtractionSkipped,
+                "{terminal_path} must record extraction skipped"
+            );
+            assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
+        }
+    }
+
+    #[tokio::test]
     async fn terminal_admission_drop_records_one_trusted_skipped_revision() {
         let provider = ScriptedProvider::new(vec![]);
         let repo = RecordingExtractionRepository::empty();
@@ -3832,10 +3858,14 @@ mod evidence_merge_regression_tests {
     #[tokio::test]
     async fn terminal_unchanged_working_spec_records_one_trusted_skipped_revision() {
         let provider = ScriptedProvider::new(vec![]);
-        let repo = RecordingExtractionRepository::empty();
+        let setup_repo = RecordingExtractionRepository::empty();
+        let setup_context = test_context(&setup_repo, &provider);
+        let section = render_working_spec_entry(&setup_context, &test_extracted_case(), &["test reason"], &[]);
+        let mut existing = test_existing_note();
+        existing.permalink = permalink_for("design", "Working Spec t1");
+        existing.content = render_working_spec_document(&setup_context, &section, &[]);
+        let repo = RecordingExtractionRepository::with_existing(existing);
         let context = test_context(&repo, &provider);
-        assert!(persist_working_spec(&context, &test_extracted_case(), &["test reason"]).await);
-        repo.clear_revisions(); // Models a later run whose working spec already exists.
 
         let changed =
             persist_working_spec(&context, &test_extracted_case(), &["test reason"]).await;
