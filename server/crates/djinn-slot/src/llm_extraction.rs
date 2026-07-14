@@ -3790,12 +3790,21 @@ mod evidence_merge_regression_tests {
         // The outer runner maps each of these paths to this shared terminal
         // boundary. Keep the fake-backed assertion here so a future branch
         // cannot bypass the canonical skipped mutation or its provenance.
-        for terminal_path in ["completion transport", "timeout", "parse failure", "parsed empty"] {
+        for terminal_path in [
+            "completion transport",
+            "timeout",
+            "parse failure",
+            "parsed empty",
+        ] {
             let repo = RecordingExtractionRepository::empty();
             finalize_test_output(&repo, 0).await;
 
             let revisions = repo.revisions();
-            assert_eq!(revisions.len(), 1, "{terminal_path} must record one terminal revision");
+            assert_eq!(
+                revisions.len(),
+                1,
+                "{terminal_path} must record one terminal revision"
+            );
             assert_eq!(
                 revisions[0].mutation.event_kind,
                 NoteRevisionEventKind::ExtractionSkipped,
@@ -3860,7 +3869,12 @@ mod evidence_merge_regression_tests {
         let provider = ScriptedProvider::new(vec![]);
         let setup_repo = RecordingExtractionRepository::empty();
         let setup_context = test_context(&setup_repo, &provider);
-        let section = render_working_spec_entry(&setup_context, &test_extracted_case(), &["test reason"], &[]);
+        let section = render_working_spec_entry(
+            &setup_context,
+            &test_extracted_case(),
+            &["test reason"],
+            &[],
+        );
         let mut existing = test_existing_note();
         existing.permalink = permalink_for("design", "Working Spec t1");
         existing.content = render_working_spec_document(&setup_context, &section, &[]);
@@ -4167,8 +4181,12 @@ mod evidence_merge_regression_tests {
 
         assert_eq!(quality.evidence_merged, 0);
         assert_eq!(quality.boost_fallback, 1);
-        assert_eq!(quality.novelty_skipped, 0);
-        assert_eq!(quality.merged, 0);
+        // These counters describe the novelty decision, not whether the
+        // evidence-merge response could be parsed or persisted. The malformed
+        // response still classified this note as a duplicate before its
+        // confidence-only fallback committed.
+        assert_eq!(quality.novelty_skipped, 1);
+        assert_eq!(quality.merged, 1);
         assert!(
             repo.revisions()
                 .iter()
