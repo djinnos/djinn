@@ -1,4 +1,4 @@
-use super::error_handling::{BudgetWindDownIgnored, supports_tool_choice_required};
+use super::error_handling::{supports_tool_choice_required, BudgetWindDownIgnored};
 // djinn:allow-oversize — integration tests for the entire reply_loop module.
 // The file already exceeded the 1500-line / 51.2KB size-guard thresholds
 // before the rrdr soft-budget converge reminder tests were added; the marker
@@ -7,7 +7,7 @@ use super::error_handling::{BudgetWindDownIgnored, supports_tool_choice_required
 // reply-loop coverage.
 use super::loop_guard::{LoopGuardError, LoopGuardKind};
 use super::persistence::serialize_llm_input;
-use super::turn::{ReplyLoopContext, WindDownReason, run_reply_loop};
+use super::turn::{run_reply_loop, ReplyLoopContext, WindDownReason};
 use crate::finalize_handlers::handle_budget_park;
 use crate::finalize_handlers::record_rejected_integrity_entry;
 use crate::helpers::extract_worker_context;
@@ -2994,7 +2994,8 @@ async fn second_strike_no_progress_submission_settles_session() {
 async fn gs37_no_edit_submit_after_rejection_keeps_one_quality_strike_and_prompt_carries_rejection()
 {
     // The verbatim reviewer rejection the redispatch prompt must carry forward.
-    const NEWEST_REJECTION: &str = "AC-2 unmet: the handler is implemented but never registered with the \
+    const NEWEST_REJECTION: &str =
+        "AC-2 unmet: the handler is implemented but never registered with the \
          service. Wire it into `build_router` before resubmitting.";
 
     let worktree = init_git_repo_with_dirty_file();
@@ -5227,27 +5228,23 @@ async fn provider_phase_script_counts_stream_init_consumption_and_errors() {
     assert_eq!(phase_delta(&before, &after, "provider_wait"), 5);
     assert_eq!(phase_delta(&before, &after, "tool_execution"), 0);
     let before = after;
-    assert!(
-        run_phase_script(vec![PhaseTurn::InitError {
-            advance: Duration::from_secs(7)
-        }])
-        .await
-        .is_err()
-    );
+    assert!(run_phase_script(vec![PhaseTurn::InitError {
+        advance: Duration::from_secs(7)
+    }])
+    .await
+    .is_err());
     let after = render().expect("render phase metrics");
     assert_eq!(phase_delta(&before, &after, "provider_wait"), 7);
     let before = after;
-    assert!(
-        run_phase_script(vec![PhaseTurn::Stream {
-            init_advance: Duration::from_secs(2),
-            events: vec![PhaseEvent {
-                advance: Duration::from_secs(4),
-                event: Err(anyhow::anyhow!("scripted stream failure"))
-            }]
-        }])
-        .await
-        .is_err()
-    );
+    assert!(run_phase_script(vec![PhaseTurn::Stream {
+        init_advance: Duration::from_secs(2),
+        events: vec![PhaseEvent {
+            advance: Duration::from_secs(4),
+            event: Err(anyhow::anyhow!("scripted stream failure"))
+        }]
+    }])
+    .await
+    .is_err());
     let after = render().expect("render phase metrics");
     assert_eq!(phase_delta(&before, &after, "provider_wait"), 6);
 }
@@ -5274,7 +5271,10 @@ async fn provider_phase_script_counts_empty_assistant_backoff_not_local_time() {
     clock.advance_mono(Duration::from_secs(11)); // unrelated local setup time
     let before = render().expect("render phase metrics");
     let tools = vec![dummy_tool_schema("submit_work")];
-    let run = harness.run(&provider, &tools);
+    // Empty-assistant retries are enabled only for Codex/OpenAI-family models.
+    // Use that canonical model branch so advancing Tokio's retry sleep below
+    // proves the provider-owned backoff interval, rather than a terminal error.
+    let run = harness.run_with_model(&provider, &tools, "openai/gpt-5.4");
     tokio::pin!(run);
     tokio::task::yield_now().await;
     // Advance the real empty-assistant provider-loop backoff on both clocks.
