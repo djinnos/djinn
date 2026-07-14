@@ -29,6 +29,8 @@ use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
 /// Default hard cap on the number of per-run target dirs retained under the
@@ -587,14 +589,65 @@ pub struct CargoTargetRunsTrimResult {
     pub outcome: CargoTargetRunsTrimOutcome,
 }
 
-/// Enforce enabled count and allocated-byte caps conjunctively, re-inventorying after every attempt.
+/// Injected filesystem operation seam for [`trim_cargo_target_runs_with_fs`]. The
+/// default implementation delegates to `std::fs`; tests override
+/// [`Filesystem::remove_dir_all`] and [`Filesystem::symlink_metadata`] to
+/// deterministically simulate removal failure and TOCTOU revalidation races
+/// without depending on ambient permissions.
+#[cfg(unix)]
+pub trait Filesystem {
+    /// Return `symlink_metadata` without following the link (lstat).
+    fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata>;
+
+    /// Recursively remove a directory, mirroring `std::fs::remove_dir_all`.
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
+}
+
+/// Production filesystem seam: delegates to `std::fs`.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StdFilesystem;
+
+#[cfg(unix)]
+impl Filesystem for StdFilesystem {
+    fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+        fs::symlink_metadata(path)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        fs::remove_dir_all(path)
+    }
+}
+
+/// Enforce enabled count and allocated-byte caps conjunctively, re-inventorying
+/// after every attempt. Delegates to [`trim_cargo_target_runs_with_fs`] with the
+/// production [`StdFilesystem`] seam.
 #[cfg(unix)]
 pub fn trim_cargo_target_runs(
     root: &Path,
     active_ids: &HashSet<String>,
     caps: CargoTargetRunsCaps,
 ) -> Result<CargoTargetRunsTrimResult, CargoTargetRunsInventoryError> {
-    let (mut deleted, mut operation_errors) = (0, 0);
+    trim_cargo_target_runs_with_fs(root, active_ids, caps, &StdFilesystem)
+}
+
+/// Trim engine core. Candidates are selected from the inventory in sorted order
+/// (mtime ascending, then creation time, then raw name bytes), excluding any name
+/// present in `inventory.errors` so an error-affected run is never removed. Before
+/// each removal the name is revalidated as a contained single component, the path
+/// is confirmed to still be a non-symlink directory, and the ID is confirmed still
+/// inactive. The whole root is re-inventoried after every deletion attempt so
+/// hardlink release and races produce exact totals. The loop continues until both
+/// enabled caps hold or candidates exhaust, including deleting an oversized newest
+/// inactive directory when required.
+#[cfg(unix)]
+pub fn trim_cargo_target_runs_with_fs(
+    root: &Path,
+    active_ids: &HashSet<String>,
+    caps: CargoTargetRunsCaps,
+    fs: &dyn Filesystem,
+) -> Result<CargoTargetRunsTrimResult, CargoTargetRunsInventoryError> {
+    let (mut deleted, mut operation_errors) = (0_usize, 0_usize);
     let mut attempted = HashSet::<Vec<u8>>::new();
     loop {
         let inventory = inventory_cargo_target_runs(root)?;
@@ -650,11 +703,16 @@ pub fn trim_cargo_target_runs(
         };
         let name = candidate.name.clone();
         attempted.insert(name.clone());
+        let path = root.join(std::ffi::OsString::from_vec(name.clone()));
         let id = std::str::from_utf8(&name).expect("inventory candidates are UTF-8");
-        let path = root.join(std::ffi::OsString::from_vec(name));
+        // Revalidate immediately before removal: the name must be a contained
+        // single component, the ID must still be inactive, and the path must
+        // still be a non-symlink directory. A race between the scan and removal
+        // (TOCTOU) is fail-closed: a now-symlink or now-active entry is skipped.
         let removable = run_dir_within(root, id).as_deref() == Some(path.as_path())
             && !active_ids.contains(id)
-            && fs::symlink_metadata(&path)
+            && fs
+                .symlink_metadata(&path)
                 .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
                 .unwrap_or_else(|_| {
                     operation_errors = operation_errors.saturating_add(1);
@@ -665,7 +723,7 @@ pub fn trim_cargo_target_runs(
             // the current protection/error state.
             continue;
         }
-        match fs::remove_dir_all(&path) {
+        match fs.remove_dir_all(&path) {
             Ok(()) => deleted += 1,
             Err(error) if error.kind() == io::ErrorKind::NotFound => deleted += 1,
             Err(_) => operation_errors = operation_errors.saturating_add(1),
@@ -1059,5 +1117,249 @@ mod tests {
             inventory.total_allocated_bytes
         );
         assert_eq!(result.final_top_level_directory_count, 1);
+    }
+
+    /// Tie-breaking: three dirs with identical mtime must be ordered by creation
+    /// time, then raw name bytes. With a count cap of 1, the two earliest-sorted
+    /// candidates are removed and the latest-sorted one survives.
+    #[cfg(unix)]
+    #[test]
+    fn joint_trim_tie_breaks_on_creation_then_raw_name_bytes() {
+        use std::time::SystemTime;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let epoch = SystemTime::UNIX_EPOCH;
+        // Create in alphabetical order so both creation time and raw-name bytes
+        // agree: alpha is earliest, charlie is latest.
+        for name in ["alpha", "bravo", "charlie"] {
+            let dir = tmp.path().join(name);
+            fs::create_dir_all(dir.join("debug/deps")).unwrap();
+            fs::write(dir.join("debug/deps/lib.rlib"), b"artifact").unwrap();
+            let file = fs::File::open(&dir).unwrap();
+            file.set_times(fs::FileTimes::new().set_modified(epoch).set_accessed(epoch))
+                .unwrap();
+        }
+        let result = trim_cargo_target_runs(
+            tmp.path(),
+            &HashSet::new(),
+            CargoTargetRunsCaps {
+                max_dirs: 1,
+                max_bytes: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.deleted, 2);
+        assert_eq!(
+            result.outcome,
+            CargoTargetRunsTrimOutcome::TrimmedWithinBudget
+        );
+        assert_eq!(result.final_top_level_directory_count, 1);
+        // charlie has the latest creation time and latest raw-name bytes, so it
+        // sorts last and survives the oldest-first trim.
+        assert!(tmp.path().join("charlie").exists());
+        assert!(!tmp.path().join("alpha").exists());
+        assert!(!tmp.path().join("bravo").exists());
+    }
+
+    /// When the sole candidate cannot be removed (deterministic removal failure
+    /// via the mock seam), the engine records an operation error and, with no
+    /// remaining candidates, returns `over_budget_error`. A bare empty directory
+    /// is used so `non_directory_allocated_bytes` stays zero and does not inflate
+    /// the protected count.
+    #[cfg(unix)]
+    #[test]
+    fn joint_trim_reports_over_budget_error_when_removal_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("only")).unwrap();
+        let fs = FailingRemoveFilesystem;
+        let result = trim_cargo_target_runs_with_fs(
+            tmp.path(),
+            &HashSet::new(),
+            CargoTargetRunsCaps {
+                max_dirs: 0,
+                max_bytes: 1,
+            },
+            &fs,
+        )
+        .unwrap();
+        assert_eq!(result.deleted, 0);
+        assert!(result.errors > 0);
+        assert_eq!(result.outcome, CargoTargetRunsTrimOutcome::OverBudgetError);
+        assert!(tmp.path().join("only").exists());
+    }
+
+    /// A protected (active) candidate and a candidate whose removal fails coexist,
+    /// producing the combined `over_budget_protected_and_error` outcome.
+    #[cfg(unix)]
+    #[test]
+    fn joint_trim_reports_both_protected_and_error_causes() {
+        let tmp = tempfile::tempdir().unwrap();
+        mkdir(tmp.path(), "active");
+        mkdir(tmp.path(), "stuck");
+        let active_ids = HashSet::from(["active".to_owned()]);
+        let fs = FailingRemoveFilesystem;
+        let result = trim_cargo_target_runs_with_fs(
+            tmp.path(),
+            &active_ids,
+            CargoTargetRunsCaps {
+                max_dirs: 0,
+                max_bytes: 1,
+            },
+            &fs,
+        )
+        .unwrap();
+        assert_eq!(
+            result.outcome,
+            CargoTargetRunsTrimOutcome::OverBudgetProtectedAndError
+        );
+        assert!(result.errors > 0);
+        assert!(result.protected > 0);
+        assert!(tmp.path().join("active").exists());
+        assert!(tmp.path().join("stuck").exists());
+    }
+
+    /// When `remove_dir_all` fails for the first candidate, the engine continues
+    /// to the next candidate and successfully removes it, rather than aborting.
+    #[cfg(unix)]
+    #[test]
+    fn joint_trim_continues_after_removal_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        mkdir(tmp.path(), "aaa-stuck");
+        mkdir(tmp.path(), "bbb-free");
+        // "aaa-stuck" sorts first (both mtime and name), so it is attempted
+        // first. The mock fails removal only for "aaa-stuck".
+        let fs = RemoveByNameFilesystem {
+            fail: "aaa-stuck".to_owned(),
+        };
+        let result = trim_cargo_target_runs_with_fs(
+            tmp.path(),
+            &HashSet::new(),
+            CargoTargetRunsCaps {
+                max_dirs: 0,
+                max_bytes: 1,
+            },
+            &fs,
+        )
+        .unwrap();
+        // "aaa-stuck" failed (error), "bbb-free" was successfully removed.
+        assert!(result.errors > 0);
+        assert!(tmp.path().join("aaa-stuck").exists());
+        assert!(!tmp.path().join("bbb-free").exists());
+    }
+
+    /// TOCTOU race: between the inventory scan and the pre-removal revalidation,
+    /// the target directory is replaced by a symlink. The revalidation must
+    /// reject it (fail-closed) so the symlink target is never removed.
+    #[cfg(unix)]
+    #[test]
+    fn joint_trim_revalidation_rejects_toctou_symlink_race() {
+        let tmp = tempfile::tempdir().unwrap();
+        mkdir(tmp.path(), "victim");
+        let redirect = tempfile::tempdir().unwrap();
+        let fs = RaceToSymlinkFilesystem {
+            target: "victim".to_owned(),
+            redirect: redirect.path().to_path_buf(),
+        };
+        let result = trim_cargo_target_runs_with_fs(
+            tmp.path(),
+            &HashSet::new(),
+            CargoTargetRunsCaps {
+                max_dirs: 0,
+                max_bytes: 1,
+            },
+            &fs,
+        )
+        .unwrap();
+        // The symlink replacement must not be deleted; the engine records the
+        // protected-symlink state on the next scan and returns over_budget.
+        let meta = fs::symlink_metadata(tmp.path().join("victim")).unwrap();
+        assert!(meta.file_type().is_symlink());
+        // The redirect target (outside the runs root) must survive.
+        assert!(redirect.path().exists());
+        assert!(
+            result.outcome == CargoTargetRunsTrimOutcome::OverBudgetProtected
+                || result.outcome == CargoTargetRunsTrimOutcome::OverBudgetProtectedAndError
+        );
+    }
+
+    // ---- Mock filesystem seams for deterministic trim-engine tests ----
+
+    /// Always fails `remove_dir_all` with a generic I/O error; passes through
+    /// `symlink_metadata` to the real filesystem so the inventory and
+    /// revalidation still see on-disk state.
+    #[cfg(unix)]
+    struct FailingRemoveFilesystem;
+
+    #[cfg(unix)]
+    impl Filesystem for FailingRemoveFilesystem {
+        fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+            fs::symlink_metadata(path)
+        }
+
+        fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "mock: removal disabled",
+            ))
+        }
+    }
+
+    /// Fails `remove_dir_all` only for directories whose final path component
+    /// equals `fail`; delegates real removal otherwise.
+    #[cfg(unix)]
+    struct RemoveByNameFilesystem {
+        fail: String,
+    }
+
+    #[cfg(unix)]
+    impl Filesystem for RemoveByNameFilesystem {
+        fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+            fs::symlink_metadata(path)
+        }
+
+        fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name == self.fail)
+            {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "mock: stuck",
+                ))
+            } else {
+                fs::remove_dir_all(path)
+            }
+        }
+    }
+
+    /// Replaces `target` (a top-level dir under root) with a symlink pointing to
+    /// `redirect` during the revalidation `symlink_metadata` call, so the
+    /// revalidation sees a symlink and skips removal. This deterministically
+    /// simulates a TOCTOU directory→symlink race.
+    #[cfg(unix)]
+    struct RaceToSymlinkFilesystem {
+        target: String,
+        redirect: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Filesystem for RaceToSymlinkFilesystem {
+        fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name == self.target)
+                && path.is_dir()
+            {
+                let _ = fs::remove_dir_all(path);
+                let _ = std::os::unix::fs::symlink(&self.redirect, path);
+            }
+            fs::symlink_metadata(path)
+        }
+
+        fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+            fs::remove_dir_all(path)
+        }
     }
 }
