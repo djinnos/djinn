@@ -3976,6 +3976,7 @@ export namespace MemoryHealthOutputSchema {
   machine_connected_orphan_count?: number
   orphan_note_count?: number
   recent_sweep?: (RecentSweepMetrics | null)
+  retrieval: RetrievalHealthResponse
   stale_note_count?: number
   stale_notes_by_folder?: StaleFolder[]
   total_notes?: number
@@ -3999,6 +4000,48 @@ export namespace MemoryHealthOutputSchema {
   last_decayed_count: number
   last_superseded_source_count: number
   last_sweep_at?: string
+  [k: string]: any
+  }
+  /**
+   * Required even when the top-level note-health operation returns an error.
+   */
+  export interface RetrievalHealthResponse {
+  config_window_hours: number
+  persisted: RetrievalHealthScope
+  process: RetrievalHealthScope
+  [k: string]: any
+  }
+  /**
+   * A retrieval source remains present when it is unavailable. Stable error
+   * codes are `project_required`, `project_unresolved`, `rollup_unavailable`,
+   * and `process_snapshot_unavailable`.
+   */
+  export interface RetrievalHealthScope {
+  error_code?: string
+  /**
+   * Process construction time; only applicable to the process scope.
+   */
+  started_at?: string
+  status: string
+  /**
+   * Fixed, bounded entry-point evidence (four workload entry points).
+   */
+  summaries: RetrievalEntryPointHealthSummary[]
+  window_end?: string
+  /**
+   * Inclusive start and exclusive end of the persisted half-open window.
+   */
+  window_start?: string
+  [k: string]: any
+  }
+  export interface RetrievalEntryPointHealthSummary {
+  candidate_count: number
+  entry_point: string
+  error_queries: number
+  injected_count: number
+  skipped_count: number
+  total_queries: number
+  zero_result_queries: number
   [k: string]: any
   }
   /**
