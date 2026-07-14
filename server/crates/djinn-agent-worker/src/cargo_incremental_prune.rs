@@ -158,6 +158,82 @@ mod tests {
             1024 * 1024
         );
     }
+
+    #[test]
+    fn injected_scan_errors_are_classified() {
+        let (_temp, root, base) = tree();
+        for (error, expected) in [
+            (
+                io::Error::other("broken directory entry"),
+                PruneErrorKind::Scan,
+            ),
+            (
+                io::Error::from(io::ErrorKind::PermissionDenied),
+                PruneErrorKind::Permission,
+            ),
+        ] {
+            assert_eq!(
+                prune_derived_base_with_operations(&base, &root, |_| Err(error), |_| Ok(()))
+                    .unwrap_err()
+                    .kind,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn injected_remove_error_is_classified() {
+        let (_temp, root, base) = tree();
+        assert_eq!(
+            prune_derived_base_with_operations(
+                &base,
+                &root,
+                |_| Ok(0),
+                |_| Err(io::Error::other("remove failed")),
+            )
+            .unwrap_err()
+            .kind,
+            PruneErrorKind::Remove
+        );
+    }
+
+    #[test]
+    fn injected_lock_errors_are_classified() {
+        let lock_open = WarmBaseLock::acquire_with_operations(
+            "project",
+            |_| Err(io::Error::other("cannot create lock directory")),
+            |_| Ok(()),
+            |_| -> io::Result<File> { unreachable!("lock file should not be opened") },
+            |_| Ok(()),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(lock_open.kind, PruneErrorKind::LockOpen);
+
+        let lock_probe = WarmBaseLock::acquire_with_operations(
+            "project",
+            |_| Ok(()),
+            |_| Err(io::Error::other("locking unsupported")),
+            |_| -> io::Result<File> { unreachable!("lock file should not be opened") },
+            |_| Ok(()),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(lock_probe.kind, PruneErrorKind::LockProbe);
+
+        let temp = TempDir::new().unwrap();
+        let lock_file = File::create(temp.path().join("lock")).unwrap();
+        let lock_acquire = WarmBaseLock::acquire_with_operations(
+            "project",
+            |_| Ok(()),
+            |_| Ok(()),
+            |_| Ok(lock_file),
+            |_| Err(io::Error::other("lock acquisition failed")),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(lock_acquire.kind, PruneErrorKind::LockAcquire);
+    }
 }
 
 /// A fail-closed pruning or locking error.  The free-form detail is for logs,
@@ -212,21 +288,46 @@ impl WarmBaseLock {
     /// Probe the repository-local filesystem and wait for the per-project lock.
     /// A lock open/probe/acquisition error intentionally fails closed.
     pub fn acquire(project_id: &str) -> Result<Self, PruneError> {
+        Self::acquire_with_operations(
+            project_id,
+            |lock_dir| fs::create_dir_all(lock_dir),
+            probe_advisory_lock,
+            |path| {
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(path)
+            },
+            flock_exclusive,
+        )
+    }
+
+    /// Injectable filesystem operations keep fail-closed classifications
+    /// deterministic without allowing callers to choose a lock path.
+    fn acquire_with_operations<Create, Probe, Open, Acquire>(
+        project_id: &str,
+        create_lock_dir: Create,
+        probe: Probe,
+        open_lock: Open,
+        acquire_lock: Acquire,
+    ) -> Result<Self, PruneError>
+    where
+        Create: FnOnce(&Path) -> io::Result<()>,
+        Probe: FnOnce(&Path) -> io::Result<()>,
+        Open: FnOnce(&Path) -> io::Result<File>,
+        Acquire: FnOnce(&File) -> io::Result<()>,
+    {
         validate_project_id(project_id)?;
         let lock_dir = Path::new(WARM_BASE_ROOT).join(LOCK_DIRECTORY);
-        fs::create_dir_all(&lock_dir)
+        create_lock_dir(&lock_dir)
             .map_err(|error| PruneError::new(PruneErrorKind::LockOpen, error))?;
-        probe_advisory_lock(&lock_dir)?;
+        probe(&lock_dir).map_err(|error| PruneError::new(PruneErrorKind::LockProbe, error))?;
 
         let path = lock_dir.join(format!("{project_id}.lock"));
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path)
-            .map_err(|error| PruneError::new(PruneErrorKind::LockOpen, error))?;
-        flock_exclusive(&file)
-            .map_err(|error| PruneError::new(PruneErrorKind::LockAcquire, error))?;
+        let file =
+            open_lock(&path).map_err(|error| PruneError::new(PruneErrorKind::LockOpen, error))?;
+        acquire_lock(&file).map_err(|error| PruneError::new(PruneErrorKind::LockAcquire, error))?;
         Ok(Self { _file: file })
     }
 }
@@ -280,6 +381,24 @@ fn validate_project_id(project_id: &str) -> Result<(), PruneError> {
 }
 
 fn prune_derived_base(base: &Path, cache_root: &Path) -> Result<PruneResult, PruneError> {
+    prune_derived_base_with_operations(base, cache_root, scan_regular_file_bytes, |path| {
+        fs::remove_dir_all(path)
+    })
+}
+
+/// The operations are injected only after the deletion root has been derived
+/// and every component has been validated. This makes error handling testable
+/// without creating a caller-controlled deletion target.
+fn prune_derived_base_with_operations<Scan, Remove>(
+    base: &Path,
+    cache_root: &Path,
+    scan: Scan,
+    remove: Remove,
+) -> Result<PruneResult, PruneError>
+where
+    Scan: FnOnce(&Path) -> io::Result<u64>,
+    Remove: FnOnce(&Path) -> io::Result<()>,
+{
     let canonical_root = checked_directory(cache_root, PruneErrorKind::Scan)?;
     // This check is redundant for the production derivation, but makes the
     // containment invariant explicit before inspecting descendants.
@@ -303,8 +422,8 @@ fn prune_derived_base(base: &Path, cache_root: &Path) -> Result<PruneResult, Pru
         return Ok(absent());
     }
 
-    let bytes = scan_regular_file_bytes(&incremental)?;
-    remove_incremental_dir(&incremental)?;
+    let bytes = scan(&incremental).map_err(classify_scan_error)?;
+    remove_incremental_dir_with(&incremental, remove)?;
     Ok(PruneResult {
         outcome: PruneOutcome::Pruned,
         logical_bytes: bytes,
@@ -406,25 +525,25 @@ fn require_contained(candidate: &Path, canonical_root: &Path) -> Result<(), Prun
     }
 }
 
-fn scan_regular_file_bytes(root: &Path) -> Result<u64, PruneError> {
+fn scan_regular_file_bytes(root: &Path) -> io::Result<u64> {
     let mut pending = vec![root.to_path_buf()];
     let mut bytes = 0_u64;
     while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(directory).map_err(classify_scan_error)? {
-            let entry = entry.map_err(classify_scan_error)?;
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
             // `file_type` is lstat-like: do not call metadata on symlinks.
-            let file_type = entry.file_type().map_err(classify_scan_error)?;
+            let file_type = entry.file_type()?;
             if file_type.is_symlink() {
                 continue;
             }
             if file_type.is_dir() {
                 pending.push(entry.path());
             } else if file_type.is_file() {
-                let metadata = fs::symlink_metadata(entry.path()).map_err(classify_scan_error)?;
+                let metadata = fs::symlink_metadata(entry.path())?;
                 if metadata.is_file() {
-                    bytes = bytes.checked_add(metadata.len()).ok_or_else(|| {
-                        PruneError::new(PruneErrorKind::Scan, "logical byte count overflow")
-                    })?;
+                    bytes = bytes
+                        .checked_add(metadata.len())
+                        .ok_or_else(|| io::Error::other("logical byte count overflow"))?;
                 }
             }
         }
@@ -432,10 +551,12 @@ fn scan_regular_file_bytes(root: &Path) -> Result<u64, PruneError> {
     Ok(bytes)
 }
 
-// Kept as a small seam so deterministic tests can exercise remove failures;
-// production invokes exactly this one `remove_dir_all` call after scanning.
-fn remove_incremental_dir(path: &Path) -> Result<(), PruneError> {
-    match fs::remove_dir_all(path) {
+// Production supplies exactly one `remove_dir_all` call after scanning.
+fn remove_incremental_dir_with<Remove>(path: &Path, remove: Remove) -> Result<(), PruneError>
+where
+    Remove: FnOnce(&Path) -> io::Result<()>,
+{
+    match remove(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(PruneError::new(PruneErrorKind::Remove, error)),
@@ -458,19 +579,17 @@ fn classify_scan_error(error: io::Error) -> PruneError {
     PruneError::new(kind, error)
 }
 
-fn probe_advisory_lock(lock_dir: &Path) -> Result<(), PruneError> {
+fn probe_advisory_lock(lock_dir: &Path) -> io::Result<()> {
     let path = lock_dir.join(format!(".capability-{}.probe", std::process::id()));
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .open(&path)
-        .map_err(|error| PruneError::new(PruneErrorKind::LockProbe, error))?;
-    flock_exclusive_nonblocking(&file)
-        .map_err(|error| PruneError::new(PruneErrorKind::LockProbe, error))?;
+        .open(&path)?;
+    flock_exclusive_nonblocking(&file)?;
     // Explicit unlock verifies both lock operations on this filesystem. Closing
     // the descriptor is also a release fallback if unlock itself fails.
-    flock_unlock(&file).map_err(|error| PruneError::new(PruneErrorKind::LockProbe, error))
+    flock_unlock(&file)
 }
 
 fn flock_exclusive(file: &File) -> io::Result<()> {
