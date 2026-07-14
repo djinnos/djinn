@@ -104,7 +104,73 @@ fn parse_kb_value(s: &str) -> Option<u64> {
     Some(kb * 1024)
 }
 
-// ─── /proc/pressure/memory parsing ──────────────────────────────────────────
+// ─── /proc/pressure parsing ─────────────────────────────────────────────────
+
+/// One PSI sampling pass, with a separate result for every kernel resource.
+///
+/// Values are kernel PSI percentages, not Prometheus ratios. Errors are the
+/// bounded [`djinn_telemetry::psi::REASON_*`] values used by the telemetry
+/// producer. Keeping the results independent means a partially supported
+/// kernel still reports pressure for the resources it does expose.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PsiSamples {
+    pub cpu: Result<f64, &'static str>,
+    pub memory: Result<f64, &'static str>,
+    pub io: Result<f64, &'static str>,
+}
+
+/// Read the three Linux PSI files through `read_file`.
+///
+/// The injected boundary makes this operation deterministic in tests and lets
+/// callers handle each resource independently. `read_file` is called exactly
+/// once for each path in CPU, memory, IO order.
+pub fn sample_psi_with(mut read_file: impl FnMut(&str) -> std::io::Result<String>) -> PsiSamples {
+    PsiSamples {
+        cpu: sample_psi_resource(&mut read_file, "/proc/pressure/cpu"),
+        memory: sample_psi_resource(&mut read_file, "/proc/pressure/memory"),
+        io: sample_psi_resource(&mut read_file, "/proc/pressure/io"),
+    }
+}
+
+/// Sample PSI from the host's procfs files.
+#[cfg(target_os = "linux")]
+pub fn sample_psi() -> PsiSamples {
+    sample_psi_with(|path| std::fs::read_to_string(path))
+}
+
+/// A non-Linux host does not expose Linux procfs PSI files.
+#[cfg(not(target_os = "linux"))]
+pub fn sample_psi() -> PsiSamples {
+    sample_psi_with(|_| Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+}
+
+fn sample_psi_resource(
+    read_file: &mut impl FnMut(&str) -> std::io::Result<String>,
+    path: &str,
+) -> Result<f64, &'static str> {
+    match read_file(path) {
+        Ok(contents) => parse_some_avg10(&contents).ok_or(djinn_telemetry::psi::REASON_PARSE),
+        Err(error) => Err(classify_psi_read_error(error.kind())),
+    }
+}
+
+fn classify_psi_read_error(kind: std::io::ErrorKind) -> &'static str {
+    match kind {
+        std::io::ErrorKind::NotFound => djinn_telemetry::psi::REASON_MISSING,
+        std::io::ErrorKind::PermissionDenied => djinn_telemetry::psi::REASON_PERMISSION,
+        _ => djinn_telemetry::psi::REASON_IO,
+    }
+}
+
+/// Parse the `some` line's `avg10` field from a PSI file.
+///
+/// CPU PSI files normally do not have a `full` line, so a valid `some` line is
+/// sufficient. PSI values must be finite kernel percentages.
+fn parse_some_avg10(contents: &str) -> Option<f64> {
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix("some ").and_then(extract_avg10))
+}
 
 /// Parse PSI memory file. Returns `(some_avg10, full_avg10)`.
 #[cfg(target_os = "linux")]
@@ -133,7 +199,8 @@ fn parse_psi_contents(contents: &str) -> Option<(f64, f64)> {
 fn extract_avg10(line: &str) -> Option<f64> {
     for token in line.split_whitespace() {
         if let Some(val) = token.strip_prefix("avg10=") {
-            return val.parse().ok();
+            let value: f64 = val.parse().ok()?;
+            return value.is_finite().then_some(value);
         }
     }
     None
@@ -228,6 +295,52 @@ full avg10=0.05 avg60=0.01 avg300=0.00 total=111111
     fn parse_psi_missing_full_returns_none() {
         let input = "some avg10=1.23 avg60=0.45 avg300=0.12 total=999999\n";
         assert!(parse_psi_contents(input).is_none());
+    }
+
+    #[test]
+    fn psi_sampling_keeps_resources_independent_and_uses_kernel_percentages() {
+        let samples = sample_psi_with(|path| match path {
+            "/proc/pressure/cpu" => Ok("some avg10=12.50 avg60=0.00 total=1\n".to_owned()),
+            "/proc/pressure/memory" => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            "/proc/pressure/io" => Ok("some avg10=0.25 avg60=0.00 total=1\n".to_owned()),
+            _ => Err(std::io::Error::from(std::io::ErrorKind::Other)),
+        });
+
+        assert_eq!(samples.cpu, Ok(12.50));
+        assert_eq!(samples.memory, Err(djinn_telemetry::psi::REASON_MISSING));
+        assert_eq!(samples.io, Ok(0.25));
+    }
+
+    #[test]
+    fn psi_sampling_classifies_read_errors() {
+        let samples = sample_psi_with(|path| match path {
+            "/proc/pressure/cpu" => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            "/proc/pressure/memory" => {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            }
+            "/proc/pressure/io" => Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            _ => Err(std::io::Error::from(std::io::ErrorKind::Other)),
+        });
+
+        assert_eq!(samples.cpu, Err(djinn_telemetry::psi::REASON_MISSING));
+        assert_eq!(samples.memory, Err(djinn_telemetry::psi::REASON_PERMISSION));
+        assert_eq!(samples.io, Err(djinn_telemetry::psi::REASON_IO));
+    }
+
+    #[test]
+    fn psi_sampling_classifies_invalid_some_avg10_as_parse_errors() {
+        for contents in [
+            "some avg10=not-a-number avg60=0.00 total=1\n",
+            "full avg10=0.00 avg60=0.00 total=1\n",
+            "some avg60=0.00 total=1\n",
+            "some avg10=NaN avg60=0.00 total=1\n",
+            "some avg10=inf avg60=0.00 total=1\n",
+        ] {
+            let samples = sample_psi_with(|_| Ok(contents.to_owned()));
+            assert_eq!(samples.cpu, Err(djinn_telemetry::psi::REASON_PARSE));
+            assert_eq!(samples.memory, Err(djinn_telemetry::psi::REASON_PARSE));
+            assert_eq!(samples.io, Err(djinn_telemetry::psi::REASON_PARSE));
+        }
     }
 
     #[test]
