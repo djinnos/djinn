@@ -230,12 +230,9 @@ async fn persist_load_diagnostics(
         session_id: Some(session_id.to_owned()),
         load_attempt_id: load_attempt_id.to_owned(),
     };
-    let mut records = std::collections::BTreeMap::new();
     for fact in facts {
         match persist_extension_diagnostic(&repository, associations.clone(), fact).await {
-            Ok(record) => {
-                records.insert(record.diagnostic_id.clone(), record);
-            }
+            Ok(_) => {}
             Err(error) => {
                 tracing::error!(project_id, task_id, session_id, load_attempt_id, error = %error, "Lifecycle: failed to persist extension diagnostics")
             }
@@ -248,7 +245,10 @@ async fn persist_load_diagnostics(
         Ok(rows) => rows,
         Err(error) => {
             tracing::error!(project_id, task_id, session_id, load_attempt_id, error = %error, "Lifecycle: failed to read persisted extension diagnostics");
-            records.into_values().collect()
+            // Prompt rendering only consumes the repository's scoped, canonically
+            // ordered read. Do not substitute write-return values when that read
+            // fails: they are neither the complete attempt nor its canonical order.
+            Vec::new()
         }
     }
 }
