@@ -3,12 +3,12 @@
 use super::*;
 
 use djinn_core::events::EventBus;
-use djinn_db::{Database, TaskRepository};
+use djinn_db::{Database, EffectiveCreatorProvenance, TaskRepository};
 
 use crate::roles::{AgentRole, ReviewerRole, WorkerRole};
 
 use super::test_support::{assemble_for_role, assert_contains_all, create_epic, task_with_ci};
-use crate::test_helpers::create_test_project;
+use crate::test_helpers::{create_test_project, create_test_user};
 
 fn ci_directive_section(prompt: &str) -> &str {
     let start = prompt
@@ -65,15 +65,22 @@ async fn task_with_structured_red_ci_and_audit_activity(
     )
     .await;
     let task_repo = TaskRepository::new(db.clone(), events.clone());
+    let creator_id = create_test_user(db).await;
     let task = task_repo
-        .create(
-            &epic.id,
+        .create_in_project_with_provenance(
+            &project.id,
+            Some(&epic.id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                ..Default::default()
+            },
             "Fix structured CI failure",
             "The task has red required CI.",
             "Use the durable CI snapshot, not activity prose.",
             "task",
             1,
             "test-owner",
+            None,
             None,
         )
         .await
