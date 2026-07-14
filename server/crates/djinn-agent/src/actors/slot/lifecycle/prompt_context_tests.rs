@@ -275,6 +275,86 @@ async fn load_knowledge_context_returns_none_when_no_notes() {
     );
 }
 
+fn planner_row(
+    id: &str,
+    permalink: &str,
+    title: &str,
+    snippet: &str,
+) -> djinn_memory::MemorySearchEntityRow {
+    djinn_memory::MemorySearchEntityRow {
+        entity: "note".into(),
+        id: id.into(),
+        title: title.into(),
+        folder: "patterns".into(),
+        note_type: "pattern".into(),
+        permalink: permalink.into(),
+        snippet: snippet.into(),
+        score: 1.0,
+    }
+}
+
+#[test]
+fn planned_merge_is_scope_first_deduplicated_capped_and_stable() {
+    let rows = vec![
+        vec![
+            planner_row("a", "a", "first", "one"),
+            planner_row("b", "b", "second", "two"),
+        ],
+        vec![
+            planner_row("a", "other", "duplicate id", "ignored"),
+            planner_row("c", "b", "duplicate permalink", "ignored"),
+        ],
+        vec![
+            planner_row("d", "d", "third", "three"),
+            planner_row("e", "e", "fourth", "four"),
+        ],
+        vec![
+            planner_row("f", "f", "fifth", "five"),
+            planner_row("g", "g", "sixth", "six"),
+        ],
+    ];
+    let first = render_planned_knowledge(rows.clone(), &[], 0);
+    let second = render_planned_knowledge(rows, &[], 0);
+    assert_eq!(
+        first, second,
+        "identical ranked buckets must render byte-identically"
+    );
+    assert_ordered(
+        &first,
+        &["first", "second", "third", "fourth", "fifth", "sixth"],
+    );
+    assert!(!first.contains("duplicate id"));
+    assert!(!first.contains("duplicate permalink"));
+    assert_eq!(first.matches("- **[").count(), 6, "global cap is six notes");
+}
+
+#[test]
+fn planned_merge_respects_scope_budget_without_evicting_scope() {
+    let full_scope = render_planned_knowledge(
+        vec![vec![planner_row("p", "p", "planner must not fit", "body")]],
+        &[],
+        KNOWLEDGE_BUDGET_CHARS,
+    );
+    let remaining_byte = render_planned_knowledge(
+        vec![vec![planner_row(
+            "p",
+            "p",
+            "planner must not fit",
+            &"x".repeat(100),
+        )]],
+        &[],
+        KNOWLEDGE_BUDGET_CHARS - 1,
+    );
+    assert!(
+        full_scope.is_empty(),
+        "scope owns the complete injection budget"
+    );
+    assert!(
+        remaining_byte.is_empty(),
+        "planner rows cannot evict scope notes"
+    );
+}
+
 #[tokio::test]
 async fn load_epic_context_includes_blocker_and_sibling_sections_in_order() {
     let db = Database::ephemeral().await.expect("create ephemeral db");

@@ -357,18 +357,33 @@ async fn load_planned_knowledge(
     if buckets.iter().any(Result::is_err) {
         return None;
     }
+    Some(render_planned_knowledge(
+        buckets.into_iter().map(Result::unwrap).collect(),
+        scope_notes,
+        scope_used,
+    ))
+}
+
+/// Deterministically pack already-ranked planner buckets after the authoritative
+/// scope result. Keeping this separate from repository I/O makes the scope-first
+/// budget, dedupe, cap, and ordering invariants directly regression-testable.
+fn render_planned_knowledge(
+    buckets: Vec<Vec<djinn_memory::MemorySearchEntityRow>>,
+    scope_notes: &[djinn_memory::Note],
+    scope_used: usize,
+) -> String {
     let mut ids: std::collections::HashSet<String> =
         scope_notes.iter().map(|n| n.id.clone()).collect();
     let mut links: std::collections::HashSet<String> =
         scope_notes.iter().map(|n| n.permalink.clone()).collect();
     let (mut used, mut lines) = (scope_used, Vec::new());
     for bucket in buckets {
-        for row in bucket.ok()?.into_iter().take(PLANNER_NOTES_PER_QUERY) {
+        for row in bucket.into_iter().take(PLANNER_NOTES_PER_QUERY) {
             if !ids.insert(row.id.clone()) || !links.insert(row.permalink.clone()) {
                 continue;
             }
             if lines.len() == PLANNER_NOTES_GLOBAL {
-                return Some(lines.join("\n"));
+                return lines.join("\n");
             }
             let label = match row.note_type.as_str() {
                 "pitfall" => "Pitfall",
@@ -382,13 +397,13 @@ async fn load_planned_knowledge(
                 label, row.title, row.snippet, row.permalink
             );
             if used + line.len() > KNOWLEDGE_BUDGET_CHARS {
-                return Some(lines.join("\n"));
+                return lines.join("\n");
             }
             used += line.len() + 1;
             lines.push(line);
         }
     }
-    Some(lines.join("\n"))
+    lines.join("\n")
 }
 
 /// Load knowledge context from scope-matched notes. Returns None on error/empty.
