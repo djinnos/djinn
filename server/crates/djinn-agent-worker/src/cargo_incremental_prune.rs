@@ -461,6 +461,18 @@ fn prune_derived_base(base: &Path, cache_root: &Path) -> Result<PruneResult, Pru
     })
 }
 
+/// Exercise the same checked pruning operation against an isolated fixture.
+///
+/// This is deliberately test-only: production callers must derive both paths
+/// from the fixed warm-base convention through [`prune_warm_incremental`].
+#[cfg(test)]
+pub(crate) fn prune_fixture_incremental(
+    base: &Path,
+    cache_root: &Path,
+) -> Result<PruneResult, PruneError> {
+    prune_derived_base(base, cache_root)
+}
+
 /// The operations are injected only after the deletion root has been derived
 /// and every component has been validated. This makes error handling testable
 /// without creating a caller-controlled deletion target.
