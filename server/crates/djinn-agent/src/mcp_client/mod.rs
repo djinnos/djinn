@@ -343,9 +343,15 @@ impl rmcp::ClientHandler for McpNotificationHandler {
 
 /// A failure from a post-discovery `tools/list_changed` refresh.
 /// This remains separate from startup observations.
-enum RefreshToolsListFailure { Request(rmcp::ErrorData), Timeout }
+enum RefreshToolsListFailure {
+    Request(rmcp::ErrorData),
+    Timeout,
+}
 
-async fn refresh_tools_list(peer: &Peer<RoleClient>, timeout: Duration) -> Result<rmcp::model::ListToolsResult, RefreshToolsListFailure> {
+async fn refresh_tools_list(
+    peer: &Peer<RoleClient>,
+    timeout: Duration,
+) -> Result<rmcp::model::ListToolsResult, RefreshToolsListFailure> {
     match tokio::time::timeout(timeout, peer.list_tools(None)).await {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(error)) => Err(RefreshToolsListFailure::Request(error)),

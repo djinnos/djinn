@@ -304,10 +304,8 @@ async fn consolidation_canonical_create_rolls_back_when_revision_insert_fails() 
     let (tx, _rx) = broadcast::channel(256);
     let project = make_project(&db, tmp.path()).await;
     let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
-    let consolidation_repo = NoteConsolidationRepository::with_note_repository_for_test(
-        db.clone(),
-        note_repo.clone(),
-    );
+    let consolidation_repo =
+        NoteConsolidationRepository::with_note_repository_for_test(db.clone(), note_repo.clone());
 
     note_repo.set_revision_event_insertion_failure_for_test(true);
     assert!(
