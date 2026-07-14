@@ -119,10 +119,17 @@ fn diagnostics_stay_between_platform_extensions_and_task_bytes() {
         &Default::default(),
         &diagnostics,
     );
-    assert_eq!(
-        without,
-        apply_role_extensions(base, "Trusted role extension.")
+    // Without diagnostics, extensions still go before the task boundary so
+    // platform and task bytes are byte-identical with and without diagnostics.
+    assert_ordered(
+        &without,
+        &[
+            "Instruction.",
+            "Trusted role extension.",
+            "## Task\n\n**Title:** exact task",
+        ],
     );
+    assert!(without.ends_with("## Task\n\n**Title:** exact task\n"));
     assert_ordered(
         &with,
         &[
