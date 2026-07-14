@@ -1210,10 +1210,11 @@ impl SupervisorServices for DirectServices {
         if collected.completed {
             // Validate the complete typed planner contract before terminal
             // success persistence. This includes JSON shape, the closed note
-            // type set, query count, and the Phase-1 query style rules.
-            let valid = !content_text.trim().is_empty()
-                && (request.operation != "memory_intent_planner"
-                    || parse_planned_queries(&content_text).is_ok());
+            // type set, query count, and the Phase-1 query style rules. This
+            // is a dedicated planner operation: wire attribution fields are
+            // not a caller-controlled opt-out from payload validation.
+            let valid =
+                !content_text.trim().is_empty() && parse_planned_queries(&content_text).is_ok();
             if valid {
                 outcome = LlmCallOutcome::Success;
             } else {
@@ -3036,6 +3037,40 @@ mod tests {
         );
         assert!(r.content.is_none());
         assert_final(&l, super::LlmCallOutcome::InvalidPayload);
+    }
+    #[tokio::test]
+    async fn planner_host_validates_completed_payload_despite_other_operation() {
+        use djinn_supervisor::SupervisorServices;
+
+        let provider = std::sync::Arc::new(PlannerStreamProvider {
+            events: vec![
+                Ok(StreamEvent::Delta(ContentBlock::Text {
+                    text: "not JSON".into(),
+                })),
+                Ok(StreamEvent::Usage(usage())),
+                Ok(StreamEvent::Done),
+            ],
+            hang_after: false,
+        });
+        let ledger = std::sync::Arc::new(TestPlannerLedger::default());
+        let ctx = crate::test_helpers::agent_context_from_db(
+            crate::test_helpers::create_test_db(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let services = DirectServices::with_planner_test_seam(ctx, provider, ledger.clone());
+        let mut attributed_request = request(100);
+        attributed_request.operation = "other".into();
+
+        let result = SupervisorServices::plan_memory_intents(&services, attributed_request)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.outcome,
+            djinn_supervisor::services::wire::PlannerOutcome::InvalidPayload
+        );
+        assert!(result.content.is_none());
+        assert_final(&ledger, super::LlmCallOutcome::InvalidPayload);
     }
     #[tokio::test]
     async fn planner_host_late_oversized_error_finalizes_retained_usage() {
