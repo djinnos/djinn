@@ -3627,14 +3627,32 @@ async fn sweep_cargo_warm_base_guard(
             return;
         }
     };
+    if config.mode == crate::context::CacheCleanupMode::DryRun {
+        let snapshots = gc::snapshot_three_rung_pressure_bases(pressure_inventory, &activity).await;
+        let plan = gc::build_three_rung_pressure_plan(
+            snapshots,
+            clock.now(),
+            Duration::from_secs(config.warm_profile_min_idle_hours.saturating_mul(60 * 60)),
+        );
+        let units = gc::consume_three_rung_pressure_plan_dry_run(&plan);
+        if !units.is_empty() {
+            metrics::increment_candidates(
+                metrics::COMPONENT_CARGO_WARM_BASE,
+                config.mode.as_metric_label(),
+                units.len() as u64,
+            );
+        }
+        tracing::info!(
+            component = metrics::COMPONENT_CARGO_WARM_BASE,
+            mode = config.mode.as_metric_label(),
+            planned_units = units.len(),
+            "warm-base three-rung pressure GC dry-run completed"
+        );
+        return;
+    }
+
     let planning_locks = gc::BaseLockPlanningAdapter::new(gc::FlockBaseLock);
-    let dry_run_planning_locks = gc::NoopLockGuard;
-    // Flock creates a lock file, so a dry-run must use the non-mutating
-    // availability policy and leave base mtimes untouched.
-    let planning_locks: &dyn gc::BaseLockGuard = match config.mode {
-        crate::context::CacheCleanupMode::DryRun => &dry_run_planning_locks,
-        crate::context::CacheCleanupMode::Delete => &planning_locks,
-    };
+    let planning_locks: &dyn gc::BaseLockGuard = &planning_locks;
     let capacity = gc::StatvfsFilesystemCapacity;
     let plan = gc::plan_pressure_eviction(
         pressure_inventory,
