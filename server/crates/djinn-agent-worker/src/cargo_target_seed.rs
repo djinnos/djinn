@@ -513,7 +513,7 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
-    use std::sync::MutexGuard;
+    use std::sync::{Barrier, MutexGuard};
 
     const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
 
@@ -767,6 +767,81 @@ mod tests {
     }
 
     #[test]
+    fn incremental_prune_preserves_seedable_path_actions_and_contents() {
+        let _guard = metric_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cache_root = tmp.path().join("cache");
+        let base = cache_root.join("project");
+        let before_run = tmp.path().join("before-run");
+        let after_run = tmp.path().join("after-run");
+        populate_prune_parity_fixture(&base);
+
+        let before = seedable_snapshot(&base);
+        assert_incremental_is_skipped(&base);
+        let before_result =
+            seed_cargo_target_dir_with_options(&base, &before_run, &CargoTargetSeedOptions::new(1))
+                .expect("seed before prune");
+
+        let prune = crate::cargo_incremental_prune::prune_fixture_incremental(&base, &cache_root)
+            .expect("prune warm incremental fixture");
+        assert_eq!(prune.outcome.as_str(), "pruned");
+        assert!(!base.join("debug/incremental").exists());
+
+        let after = seedable_snapshot(&base);
+        let after_result =
+            seed_cargo_target_dir_with_options(&base, &after_run, &CargoTargetSeedOptions::new(1))
+                .expect("seed after prune");
+
+        assert_eq!(
+            before, after,
+            "pruning may only remove skipped incremental state"
+        );
+        assert_eq!(
+            seed_result_without_skips(&before_result),
+            seed_result_without_skips(&after_result),
+            "all Hardlink/Copy output counts and bytes must survive pruning"
+        );
+        assert_seeded_snapshot(&base, &before_run, &before);
+        assert_seeded_snapshot(&base, &after_run, &after);
+        assert_prune_kept_non_incremental_fixture(&base);
+    }
+
+    #[test]
+    fn concurrent_prune_and_seed_scan_never_selects_incremental_or_changes_candidates() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cache_root = tmp.path().join("cache");
+        let base = cache_root.join("project");
+        populate_prune_parity_fixture(&base);
+        let expected = seedable_snapshot(&base);
+        let barrier = Arc::new(Barrier::new(2));
+        let scan_base = base.clone();
+        let scan_barrier = Arc::clone(&barrier);
+
+        let scan = std::thread::spawn(move || {
+            let entries = scan_entries(&scan_base).expect("concurrent seed scan");
+            assert!(
+                entries
+                    .iter()
+                    .filter(|entry| has_component(&entry.relative_path, "incremental"))
+                    .all(|entry| entry.action == CloneAction::Skip),
+                "incremental entries observed by a seed scan must always be skipped"
+            );
+            scan_barrier.wait();
+            seedable_snapshot_from_entries(&scan_base, entries)
+        });
+
+        barrier.wait();
+        crate::cargo_incremental_prune::prune_fixture_incremental(&base, &cache_root)
+            .expect("concurrent prune");
+        let concurrent = scan.join().expect("seed scan thread");
+        let after = seedable_snapshot(&base);
+
+        assert_eq!(expected, concurrent);
+        assert_eq!(expected, after);
+        assert_prune_kept_non_incremental_fixture(&base);
+    }
+
+    #[test]
     fn emits_fallback_metric_with_bounded_reason_label() {
         let _guard = metric_test_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -855,6 +930,122 @@ mod tests {
         let path = base.join(relative);
         fs::create_dir_all(path.parent().expect("relative path parent")).expect("create parent");
         fs::write(path, contents).expect("write base file");
+    }
+
+    fn populate_prune_parity_fixture(base: &Path) {
+        write_base_file(
+            base,
+            Path::new("debug/deps/libalpha.rlib"),
+            b"alpha artifact",
+        );
+        fs::hard_link(
+            base.join("debug/deps/libalpha.rlib"),
+            base.join("debug/deps/libalpha-alias.rlib"),
+        )
+        .expect("hardlink fixture artifact");
+        write_base_file(base, Path::new("debug/deps/alpha.d"), b"alpha dep-info");
+        write_base_file(
+            base,
+            Path::new("debug/.fingerprint/alpha-abc/invoked.timestamp"),
+            b"fingerprint metadata",
+        );
+        write_base_file(base, Path::new(".rustc_info.json"), b"rustc metadata");
+        write_base_file(
+            base,
+            Path::new("release/build/alpha/out/generated.rs"),
+            b"unrelated hardlink candidate",
+        );
+        write_base_file(base, Path::new("unrelated/keep.txt"), b"unrelated subtree");
+        write_base_file(
+            base,
+            Path::new("debug/incremental/alpha/session.bin"),
+            b"disposable incremental state",
+        );
+        write_base_file(
+            base,
+            Path::new("debug/incremental/alpha/work-products.bin"),
+            b"more disposable state",
+        );
+    }
+
+    fn seedable_snapshot(base: &Path) -> Vec<(PathBuf, CloneAction, Vec<u8>)> {
+        seedable_snapshot_from_entries(base, scan_entries(base).expect("scan seed fixture"))
+    }
+
+    fn seedable_snapshot_from_entries(
+        base: &Path,
+        entries: Vec<SeedEntry>,
+    ) -> Vec<(PathBuf, CloneAction, Vec<u8>)> {
+        let mut snapshot: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| !entry.is_dir && entry.action != CloneAction::Skip)
+            .map(|entry| {
+                let contents =
+                    fs::read(base.join(&entry.relative_path)).expect("read seed candidate");
+                (entry.relative_path, entry.action, contents)
+            })
+            .collect();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
+    }
+
+    fn assert_incremental_is_skipped(base: &Path) {
+        let entries = scan_entries(base).expect("scan incremental fixture");
+        assert!(
+            entries
+                .iter()
+                .filter(|entry| has_component(&entry.relative_path, "incremental"))
+                .all(|entry| entry.action == CloneAction::Skip),
+            "CARGO_INCREMENTAL=1 warm state must remain represented as skipped seed input"
+        );
+    }
+
+    fn seed_result_without_skips(result: &CargoTargetSeedResult) -> (u64, u64, u64, u64) {
+        (
+            result.linked_file_count,
+            result.copied_file_count,
+            result.linked_bytes,
+            result.copied_bytes,
+        )
+    }
+
+    fn assert_seeded_snapshot(
+        base: &Path,
+        run: &Path,
+        snapshot: &[(PathBuf, CloneAction, Vec<u8>)],
+    ) {
+        for (relative, action, contents) in snapshot {
+            assert_eq!(
+                fs::read(run.join(relative)).expect("read seeded candidate"),
+                *contents
+            );
+            #[cfg(unix)]
+            match action {
+                CloneAction::Hardlink => {
+                    assert_same_inode(&base.join(relative), &run.join(relative))
+                }
+                CloneAction::Copy => {
+                    assert_different_inode(&base.join(relative), &run.join(relative))
+                }
+                CloneAction::Skip => panic!("snapshot excludes skipped entries"),
+            }
+        }
+    }
+
+    fn assert_prune_kept_non_incremental_fixture(base: &Path) {
+        assert_eq!(
+            fs::read(base.join("debug/deps/libalpha.rlib")).expect("deps survives"),
+            b"alpha artifact"
+        );
+        assert_eq!(
+            fs::read(base.join("debug/.fingerprint/alpha-abc/invoked.timestamp"))
+                .expect("fingerprint survives"),
+            b"fingerprint metadata"
+        );
+        assert_eq!(
+            fs::read(base.join("unrelated/keep.txt")).expect("unrelated subtree survives"),
+            b"unrelated subtree"
+        );
     }
 
     fn metric_test_guard() -> MutexGuard<'static, ()> {
