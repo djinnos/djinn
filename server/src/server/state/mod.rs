@@ -1612,6 +1612,7 @@ impl AppState {
             // this in build_worker_agent_context.
             default_project_id: None,
             reconciliation_sweep: djinn_agent::context::ReconciliationSweepConfig::from_env(),
+            memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
             compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
         }
     }

@@ -97,6 +97,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         rpc_registry: None,
         default_project_id: None,
         reconciliation_sweep: crate::context::ReconciliationSweepConfig::default(),
+        memory_intent_planner: crate::context::MemoryIntentPlannerConfig::default(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
 }

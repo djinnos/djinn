@@ -99,7 +99,6 @@ use crate::actors::slot::reply_loop::loop_guard::{
 };
 use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
 use crate::context::AgentContext;
-use crate::context::MemoryIntentPlannerConfig;
 use crate::roles::{AgentRole, role_impl_for};
 use djinn_provider::message::{Conversation, Message};
 use djinn_provider::provider::LlmProvider;
@@ -925,8 +924,10 @@ pub(crate) async fn execute_stage(
         .map_err(StageError::SessionCreate)?;
     let session_id = session_record.id.clone();
 
-    // The default-off gate precedes prompt rendering and host I/O. This small local config is intentionally environment-free; deployments inject the explicit opt-in at process launch.
-    let planner_config = MemoryIntentPlannerConfig::default();
+    // The injected default-off gate precedes prompt rendering and host I/O.
+    // Do not construct a local default here: deployments and focused tests may
+    // explicitly opt in through the dispatch context.
+    let planner_config = &agent_context.memory_intent_planner;
     let planned_queries = if let Some(request) = prepare_planner_request(
         &planner_config,
         PlannerInput {
