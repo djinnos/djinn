@@ -32,8 +32,11 @@ use std::sync::Arc;
 
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{
-    CreateConsolidationRunMetric, NoteConsolidationRepository, NoteRepository, ProjectRepository,
-    SessionRepository, TaskRepository, assess_note_quality, folder_for_type, permalink_for,
+    CreateConsolidationRunMetric, NoteConsolidationRepository, NoteRepository,
+    NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation,
+    NoteRevisionReason, NoteRevisionSubsystem, ProjectRepository, SessionRepository,
+    TaskRepository, TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance,
+    assess_note_quality, folder_for_type, permalink_for,
 };
 use djinn_provider::provider::{LlmProvider, TelemetryMeta, create_provider};
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
@@ -96,6 +99,7 @@ const EXTRACTION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 const NO_LLM_PROVIDER_WARNING: &str =
     "llm_extraction: no LLM provider available; skipping extraction";
+const EXTRACTION_SKIPPED_REASON: &str = "extraction completed without durable note output";
 
 enum LlmExtractionProviderResolution {
     Provider(Box<dyn LlmProvider>),
@@ -453,6 +457,41 @@ fn dedup_extracted_notes(
 }
 
 impl ExtractionContext<'_> {
+    fn revision_provenance(&self) -> djinn_db::Result<TrustedNoteRevisionProvenance> {
+        TrustedNoteRevisionProvenance::new(
+            Some(self.session_id.to_owned()),
+            Some(self.task_id.to_owned()),
+            self.task_run_id.map(ToOwned::to_owned),
+        )
+        .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))
+    }
+    async fn mutate_existing(
+        &self,
+        existing: &djinn_memory::Note,
+        content: String,
+        confidence: f64,
+        event_kind: NoteRevisionEventKind,
+        reason: &str,
+    ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
+        self.note_repo
+            .mutate_with_revision(NoteRevisionMutation {
+                project_id: self.project_id.to_owned(),
+                note_id: Some(existing.id.clone()),
+                event_kind,
+                desired: NoteRevisionDesiredState::Existing {
+                    content,
+                    confidence,
+                },
+                attribution: TrustedNoteRevisionAttribution::system(
+                    NoteRevisionSubsystem::Extraction,
+                ),
+                provenance: self.revision_provenance()?,
+                reason: NoteRevisionReason::new(reason)
+                    .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
+            })
+            .await
+    }
+
     async fn create_extracted_note(
         &self,
         title: &str,
@@ -460,36 +499,32 @@ impl ExtractionContext<'_> {
         note_type: &str,
         scope_paths_json: &str,
         retrieval_anchor: Option<&str>,
-    ) -> djinn_db::Result<djinn_memory::Note> {
-        match self.knowledge_branch_target {
-            KnowledgeBranchTarget::Main => {
-                self.note_repo
-                    .create_db_note_with_scope_and_retrieval_anchor(
-                        self.project_id,
-                        title,
-                        content,
-                        note_type,
-                        "[]",
-                        scope_paths_json,
-                        retrieval_anchor,
-                    )
-                    .await
-            }
-            KnowledgeBranchTarget::TaskScoped { .. } => {
-                self.note_repo
-                    .create_with_scope_and_retrieval_anchor(
-                        self.project_id,
-                        title,
-                        content,
-                        note_type,
-                        None,
-                        "[]",
-                        scope_paths_json,
-                        retrieval_anchor,
-                    )
-                    .await
-            }
-        }
+    ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
+        self.note_repo
+            .mutate_with_revision(NoteRevisionMutation {
+                project_id: self.project_id.to_owned(),
+                note_id: Some(uuid::Uuid::now_v7().to_string()),
+                event_kind: NoteRevisionEventKind::Created,
+                desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
+                    title: title.to_owned(),
+                    permalink: permalink_for(note_type, title),
+                    content: content.to_owned(),
+                    note_type: note_type.to_owned(),
+                    folder: folder_for_type(note_type).to_owned(),
+                    status: "active".to_owned(),
+                    tags: "[]".to_owned(),
+                    retrieval_anchor: retrieval_anchor.map(ToOwned::to_owned),
+                    scope_paths: scope_paths_json.to_owned(),
+                    confidence: 0.5,
+                }),
+                attribution: TrustedNoteRevisionAttribution::system(
+                    NoteRevisionSubsystem::Extraction,
+                ),
+                provenance: self.revision_provenance()?,
+                reason: NoteRevisionReason::new("created note from completed session extraction")
+                    .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
+            })
+            .await
     }
 }
 
@@ -562,6 +597,10 @@ pub type CandidateLookupOverride = fn(&str, &str, &str, &str) -> Vec<djinn_db::N
 #[allow(clippy::too_many_arguments)]
 #[async_trait::async_trait]
 pub(crate) trait ExtractionNoteRepository: Send + Sync {
+    async fn mutate_with_revision(
+        &self,
+        mutation: NoteRevisionMutation,
+    ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult>;
     async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>>;
     async fn update(
         &self,
@@ -623,8 +662,74 @@ pub(crate) trait ExtractionNoteRepository: Send + Sync {
     ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>>;
 }
 
+/// Record the sole terminal event for a run that committed no canonical note
+/// revision. Invalid loaded provenance must not be replaced with anonymous
+/// attribution.
+async fn record_extraction_skipped(
+    note_repo: &dyn ExtractionNoteRepository,
+    project_id: &str,
+    session_id: &str,
+    task_id: &str,
+    task_run_id: Option<&str>,
+) {
+    let provenance = match TrustedNoteRevisionProvenance::new(
+        Some(session_id.to_owned()),
+        Some(task_id.to_owned()),
+        task_run_id.map(ToOwned::to_owned),
+    ) {
+        Ok(provenance) => provenance,
+        Err(error) => {
+            tracing::error!(%session_id, %task_id, %error, "llm_extraction: invalid trusted extraction provenance");
+            return;
+        }
+    };
+    let reason = match NoteRevisionReason::new(EXTRACTION_SKIPPED_REASON) {
+        Ok(reason) => reason,
+        Err(error) => {
+            tracing::error!(%session_id, %error, "llm_extraction: invalid extraction-skipped reason");
+            return;
+        }
+    };
+    if let Err(error) = note_repo
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project_id.to_owned(),
+            note_id: None,
+            event_kind: NoteRevisionEventKind::ExtractionSkipped,
+            desired: NoteRevisionDesiredState::ExtractionSkipped,
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction),
+            provenance,
+            reason,
+        })
+        .await
+    {
+        tracing::warn!(%session_id, %error, "llm_extraction: failed to record no-output extraction revision");
+    }
+}
+
+/// Finalize an extraction run from its committed output count. This deliberately
+/// accepts only the count returned by canonical mutations, never extraction
+/// quality bookkeeping, so every terminal no-output path shares one predicate.
+async fn finalize_extraction_output(
+    note_repo: &dyn ExtractionNoteRepository,
+    project_id: &str,
+    session_id: &str,
+    task_id: &str,
+    task_run_id: Option<&str>,
+    durable_output_count: usize,
+) {
+    if durable_output_count == 0 {
+        record_extraction_skipped(note_repo, project_id, session_id, task_id, task_run_id).await;
+    }
+}
+
 #[async_trait::async_trait]
 impl ExtractionNoteRepository for NoteRepository {
+    async fn mutate_with_revision(
+        &self,
+        mutation: NoteRevisionMutation,
+    ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
+        NoteRepository::mutate_with_revision(self, mutation).await
+    }
     async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
         NoteRepository::get(self, id).await
     }
@@ -744,6 +849,8 @@ struct ExtractionContext<'a> {
     project_path: &'a str,
     knowledge_branch_target: &'a KnowledgeBranchTarget,
     session_id: &'a str,
+    task_id: &'a str,
+    task_run_id: Option<&'a str>,
     task_short_id: &'a str,
     task_title: &'a str,
     task_description: &'a str,
@@ -1051,6 +1158,16 @@ async fn run_llm_extraction_inner(
                 error = %e,
                 "llm_extraction: LLM completion failed; skipping extraction"
             );
+            let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            finalize_extraction_output(
+                &note_repo,
+                &project.id,
+                &session_id,
+                &task.id,
+                session.task_run_id.as_deref(),
+                0,
+            )
+            .await;
             return;
         }
         Err(_) => {
@@ -1059,6 +1176,16 @@ async fn run_llm_extraction_inner(
                 timeout_secs = EXTRACTION_LLM_TIMEOUT.as_secs(),
                 "llm_extraction: LLM completion timed out; skipping extraction"
             );
+            let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            finalize_extraction_output(
+                &note_repo,
+                &project.id,
+                &session_id,
+                &task.id,
+                session.task_run_id.as_deref(),
+                0,
+            )
+            .await;
             return;
         }
     };
@@ -1075,6 +1202,16 @@ async fn run_llm_extraction_inner(
                 raw_response = %response.text,
                 "llm_extraction: LLM response parse FAILED; skipping (extraction error, not empty)"
             );
+            let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            finalize_extraction_output(
+                &note_repo,
+                &project.id,
+                &session_id,
+                &task.id,
+                session.task_run_id.as_deref(),
+                0,
+            )
+            .await;
             return;
         }
     };
@@ -1091,6 +1228,16 @@ async fn run_llm_extraction_inner(
     // EMPTY (success) case: the call + parse succeeded, but after dedup there is
     // nothing novel to record. This is normal — log at debug, not warn.
     if total == 0 {
+        let repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+        finalize_extraction_output(
+            &repo,
+            &project.id,
+            &session_id,
+            &task.id,
+            session.task_run_id.as_deref(),
+            0,
+        )
+        .await;
         persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
         tracing::debug!(
             session_id = %session_id,
@@ -1149,6 +1296,8 @@ async fn run_llm_extraction_inner(
         project_path: &project_path,
         knowledge_branch_target: &knowledge_branch_target,
         session_id: &session_id,
+        task_id: &task.id,
+        task_run_id: session.task_run_id.as_deref(),
         task_short_id: &task.short_id,
         task_title: &task.title,
         task_description: &task.description,
@@ -1162,8 +1311,9 @@ async fn run_llm_extraction_inner(
             .map(|lookup| CandidateLookup::with_override(lookup))
             .unwrap_or_else(CandidateLookup::production),
     };
+    let mut durable_output_count = 0usize;
     for (note_type, note) in &deduped_notes {
-        process_extracted_note(
+        durable_output_count += process_extracted_note(
             &extraction_context,
             note_type,
             note,
@@ -1171,6 +1321,15 @@ async fn run_llm_extraction_inner(
         )
         .await;
     }
+    finalize_extraction_output(
+        &note_repo,
+        &project.id,
+        &session_id,
+        &task.id,
+        session.task_run_id.as_deref(),
+        durable_output_count,
+    )
+    .await;
     taxonomy.extraction_quality = extraction_quality;
     persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
     // Write a lightweight consolidation_run_metrics row so the admission-dropped
@@ -1254,10 +1413,15 @@ async fn persist_merged_extraction_content(
     context: &ExtractionContext<'_>,
     existing: &djinn_memory::Note,
     content: &str,
-) -> djinn_db::Result<djinn_memory::Note> {
+) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
     context
-        .note_repo
-        .update(&existing.id, &existing.title, content, &existing.tags)
+        .mutate_existing(
+            existing,
+            content.to_owned(),
+            existing.confidence,
+            NoteRevisionEventKind::Updated,
+            "merged extracted evidence into existing note",
+        )
         .await
 }
 
@@ -1297,17 +1461,34 @@ async fn boost_duplicate_confidence(
     note_type: &str,
     title: &str,
     outcome: &str,
-) {
+) -> bool {
+    let existing = match context.note_repo.get(candidate_id).await {
+        Ok(Some(note)) => note,
+        Ok(None) | Err(_) => return false,
+    };
+    let updated_confidence = (existing.confidence * DUPLICATE_CONFIDENCE_SIGNAL)
+        / (existing.confidence * DUPLICATE_CONFIDENCE_SIGNAL
+            + (1.0 - existing.confidence) * (1.0 - DUPLICATE_CONFIDENCE_SIGNAL));
+    if updated_confidence == existing.confidence {
+        return false;
+    }
     match context
-        .note_repo
-        .update_confidence(candidate_id, DUPLICATE_CONFIDENCE_SIGNAL)
+        .mutate_existing(
+            &existing,
+            existing.content.clone(),
+            updated_confidence,
+            NoteRevisionEventKind::ConfidenceChanged,
+            "confirmed duplicate extracted knowledge",
+        )
         .await
     {
-        Ok(updated_confidence) => {
-            tracing::debug!(session_id = %context.session_id, note_type, title, existing_note_id = candidate_id, updated_confidence, outcome, "llm_extraction: duplicate confidence updated")
+        Ok(result) => {
+            tracing::debug!(session_id = %context.session_id, note_type, title, existing_note_id = candidate_id, updated_confidence, outcome, "llm_extraction: duplicate confidence updated");
+            result.changed
         }
         Err(error) => {
-            tracing::warn!(session_id = %context.session_id, note_type, title, existing_note_id = candidate_id, %error, outcome, "llm_extraction: duplicate confidence update failed")
+            tracing::warn!(session_id = %context.session_id, note_type, title, existing_note_id = candidate_id, %error, outcome, "llm_extraction: duplicate confidence update failed");
+            false
         }
     }
 }
@@ -1316,16 +1497,16 @@ async fn merge_duplicate_evidence(
     context: &ExtractionContext<'_>,
     note: &ExtractedNote,
     selected: Option<&djinn_db::NoteDedupCandidate>,
-) -> bool {
+) -> usize {
     let Some(selected) = selected else {
-        return false;
+        return 0;
     };
     let existing = match context.note_repo.get(&selected.id).await {
         Ok(Some(note)) => note,
-        Ok(None) | Err(_) => return false,
+        Ok(None) | Err(_) => return 0,
     };
     if !eligible_evidence_merge(&existing, context.caller_attributed) {
-        return false;
+        return 0;
     }
     let prompt = format!(
         "Existing full note body:\n{}\n\nFresh extracted evidence:\n{}\n\nReturn JSON only: {{\"content\":\"merged markdown body\"}}. Preserve concrete evidence from both bodies; do not wholesale replace the existing note. The session provenance footer is managed by the caller.",
@@ -1342,19 +1523,19 @@ async fn merge_duplicate_evidence(
     .await
     {
         Ok(response) => response,
-        Err(_) => return false,
+        Err(_) => return 0,
     };
     let merged: EvidenceMergeResponse =
         match serde_json::from_str::<EvidenceMergeResponse>(response.text.trim()) {
             Ok(merged) if !merged.content.trim().is_empty() => merged,
-            _ => return false,
+            _ => return 0,
         };
     let content =
         content_with_one_provenance_footer(&merged.content, &existing.content, context.provenance);
     // Persistence completes before the confidence signal; failure reaches boost-only fallback.
     match persist_merged_extraction_content(context, &existing, &content).await {
-        Ok(_) => {
-            boost_duplicate_confidence(
+        Ok(result) => {
+            let confidence_changed = boost_duplicate_confidence(
                 context,
                 &existing.id,
                 "merge",
@@ -1362,9 +1543,9 @@ async fn merge_duplicate_evidence(
                 "evidence_merged",
             )
             .await;
-            true
+            usize::from(result.changed) + usize::from(confidence_changed)
         }
-        Err(_) => false,
+        Err(_) => 0,
     }
 }
 
@@ -1373,7 +1554,7 @@ async fn process_extracted_note(
     note_type: &str,
     note: &ExtractedNote,
     extraction_quality: &mut super::session_extraction::ExtractionQuality,
-) {
+) -> usize {
     // Runs BEFORE the novelty judge and BEFORE `create_extracted_note`. A
     // candidate that fails the structural gate is dropped without a novelty
     // LLM call, without a working-spec fallback, and without any note write
@@ -1395,7 +1576,7 @@ async fn process_extracted_note(
                 reasons = ?quality.reasons,
                 "llm_extraction: dropping underspecified note at admission gate"
             );
-            return;
+            return 0;
         }
     }
     let novelty = match novelty_decision(extraction_context, note_type, note).await {
@@ -1433,14 +1614,20 @@ async fn process_extracted_note(
     match assessment.outcome {
         ExtractionOutcome::MergeIntoExisting => {
             if let Some(candidate_id) = novelty.existing_note_id.as_deref() {
-                let merged = merge_duplicate_evidence(
+                // Quality accounting describes the semantic dedup decision, not
+                // whether its canonical content/confidence mutation committed.
+                // Keep these counters independent from the durable-output count
+                // returned below; terminal skipped routing uses only that count.
+                extraction_quality.novelty_skipped += 1;
+                extraction_quality.merged += 1;
+                let durable_outputs = merge_duplicate_evidence(
                     extraction_context,
                     note,
                     novelty.selected_candidate.as_ref(),
                 )
                 .await;
-                if !merged {
-                    boost_duplicate_confidence(
+                if durable_outputs == 0 {
+                    let boosted = boost_duplicate_confidence(
                         extraction_context,
                         candidate_id,
                         note_type,
@@ -1457,6 +1644,7 @@ async fn process_extracted_note(
                         outcome = "boost_fallback",
                         "llm_extraction: already-known decision completed with confidence-only fallback"
                     );
+                    return usize::from(boosted);
                 } else {
                     extraction_quality.evidence_merged += 1;
                     tracing::debug!(
@@ -1468,19 +1656,18 @@ async fn process_extracted_note(
                         "llm_extraction: already-known decision completed with evidence merge"
                     );
                 }
-                extraction_quality.novelty_skipped += 1;
-                extraction_quality.merged += 1;
+                return durable_outputs;
             }
-            return;
+            return 0;
         }
         ExtractionOutcome::DowngradeToWorkingSpec => {
-            persist_working_spec(extraction_context, note, &assessment.reasons).await;
+            let changed = persist_working_spec(extraction_context, note, &assessment.reasons).await;
             extraction_quality.downgraded += 1;
-            return;
+            return usize::from(changed);
         }
         ExtractionOutcome::Discard => {
             extraction_quality.discarded += 1;
-            return;
+            return 0;
         }
         ExtractionOutcome::DurableWrite => {}
     }
@@ -1519,27 +1706,21 @@ async fn process_extracted_note(
         )
         .await
     {
-        Ok(created) => {
-            if let Err(e) = extraction_context
-                .note_repo
-                .set_confidence(&created.id, 0.5)
-                .await
-            {
-                tracing::warn!(
-                    session_id = %extraction_context.session_id,
-                    note_id = %created.id,
-                    error = %e,
-                    "llm_extraction: failed to set confidence on extracted note"
-                );
-            }
+        Ok(result) => {
+            let created_id = result
+                .note
+                .as_ref()
+                .map(|note| note.id.as_str())
+                .unwrap_or("unknown");
             tracing::debug!(
                 session_id = %extraction_context.session_id,
-                note_id = %created.id,
+                note_id = %created_id,
                 note_type = %note_type,
                 title = %note.title,
                 "llm_extraction: note created"
             );
             extraction_quality.written += 1;
+            return 1;
         }
         Err(e) => {
             tracing::warn!(
@@ -1551,13 +1732,14 @@ async fn process_extracted_note(
             );
         }
     }
+    0
 }
 
 async fn persist_working_spec(
     extraction_context: &ExtractionContext<'_>,
     note: &ExtractedNote,
     reasons: &[&'static str],
-) {
+) -> bool {
     let scope_paths = if note.scope_paths.is_empty() {
         extraction_context.session_scope_paths.to_vec()
     } else {
@@ -1576,29 +1758,28 @@ async fn persist_working_spec(
         Ok(Some(existing)) => {
             let merged = merge_working_spec_content(&existing.content, &section);
             match extraction_context
-                .note_repo
-                .update(&existing.id, &title, &merged, "[]")
+                .mutate_existing(
+                    &existing,
+                    merged.clone(),
+                    existing.confidence,
+                    NoteRevisionEventKind::Updated,
+                    "updated extraction working specification",
+                )
                 .await
             {
-                Ok(updated) => {
-                    if let Err(error) = extraction_context
-                        .note_repo
-                        .update_scope_paths(&updated.id, &scope_paths_json)
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %extraction_context.session_id,
-                            note_id = %updated.id,
-                            error = %error,
-                            "llm_extraction: failed to update working spec scope paths"
-                        );
-                    }
+                Ok(result) => {
+                    let updated_id = result
+                        .note
+                        .as_ref()
+                        .map(|note| note.id.as_str())
+                        .unwrap_or("unknown");
                     tracing::debug!(
                         session_id = %extraction_context.session_id,
-                        note_id = %updated.id,
+                        note_id = %updated_id,
                         permalink = %permalink,
                         "llm_extraction: updated task working spec"
                     );
+                    return result.changed;
                 }
                 Err(error) => tracing::warn!(
                     session_id = %extraction_context.session_id,
@@ -1609,24 +1790,29 @@ async fn persist_working_spec(
             }
         }
         Ok(None) => match extraction_context
-            .note_repo
-            .create_with_scope(
-                extraction_context.project_id,
+            .create_extracted_note(
                 &title,
                 &render_working_spec_document(extraction_context, &section, &scope_paths),
                 "design",
-                None,
-                "[]",
                 &scope_paths_json,
+                None,
             )
             .await
         {
-            Ok(created) => tracing::debug!(
+            Ok(result) => {
+                let created_id = result
+                    .note
+                    .as_ref()
+                    .map(|note| note.id.as_str())
+                    .unwrap_or("unknown");
+                tracing::debug!(
                 session_id = %extraction_context.session_id,
-                note_id = %created.id,
+                note_id = %created_id,
                 permalink = %permalink,
                 "llm_extraction: created task working spec"
-            ),
+                );
+                return true;
+            }
             Err(error) => tracing::warn!(
                 session_id = %extraction_context.session_id,
                 permalink = %permalink,
@@ -1641,6 +1827,7 @@ async fn persist_working_spec(
             "llm_extraction: failed to load existing working spec"
         ),
     }
+    false
 }
 
 fn render_working_spec_document(
@@ -1702,7 +1889,9 @@ fn merge_working_spec_content(existing: &str, section: &str) -> String {
     let trimmed_existing = existing.trim_end();
     let trimmed_section = section.trim();
     if trimmed_existing.contains(trimmed_section) {
-        trimmed_existing.to_string()
+        // Preserve the committed representation exactly on a semantic no-op;
+        // trimming a terminal newline would otherwise fabricate a revision.
+        existing.to_owned()
     } else {
         format!("{trimmed_existing}\n\n{trimmed_section}\n")
     }
@@ -3064,31 +3253,74 @@ mod evidence_merge_regression_tests {
         },
     }
 
+    #[derive(Debug, Clone)]
+    struct RevisionRecord {
+        mutation: NoteRevisionMutation,
+        before_content: Option<String>,
+        before_confidence: Option<f64>,
+        after_content: Option<String>,
+        after_confidence: Option<f64>,
+        changed: bool,
+        committed_note_id: Option<String>,
+        revision_id: Option<String>,
+    }
+
     struct RecordingExtractionRepository {
         ops: Arc<Mutex<Vec<RepoOp>>>,
+        revisions: Arc<Mutex<Vec<RevisionRecord>>>,
         existing: Arc<Mutex<Option<djinn_memory::Note>>>,
-        fail_updates: bool,
+        /// Fail one canonical mutation before its fake state or ledger record
+        /// changes, while still allowing the later ExtractionSkipped mutation.
+        fail_next_kind: Arc<Mutex<Option<NoteRevisionEventKind>>>,
     }
 
     impl RecordingExtractionRepository {
-        fn with_existing(existing: djinn_memory::Note) -> Self {
+        fn empty() -> Self {
             Self {
                 ops: Arc::new(Mutex::new(Vec::new())),
-                existing: Arc::new(Mutex::new(Some(existing))),
-                fail_updates: false,
+                revisions: Arc::new(Mutex::new(Vec::new())),
+                existing: Arc::new(Mutex::new(None)),
+                fail_next_kind: Arc::new(Mutex::new(None)),
             }
         }
 
-        fn with_update_failure(existing: djinn_memory::Note) -> Self {
+        fn empty_with_mutation_failure(event_kind: NoteRevisionEventKind) -> Self {
+            let repo = Self::empty();
+            *repo.fail_next_kind.lock().unwrap() = Some(event_kind);
+            repo
+        }
+
+        fn with_existing(existing: djinn_memory::Note) -> Self {
             Self {
                 ops: Arc::new(Mutex::new(Vec::new())),
+                revisions: Arc::new(Mutex::new(Vec::new())),
                 existing: Arc::new(Mutex::new(Some(existing))),
-                fail_updates: true,
+                fail_next_kind: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn with_mutation_failure(
+            existing: djinn_memory::Note,
+            event_kind: NoteRevisionEventKind,
+        ) -> Self {
+            Self {
+                ops: Arc::new(Mutex::new(Vec::new())),
+                revisions: Arc::new(Mutex::new(Vec::new())),
+                existing: Arc::new(Mutex::new(Some(existing))),
+                fail_next_kind: Arc::new(Mutex::new(Some(event_kind))),
             }
         }
 
         fn ops(&self) -> Vec<RepoOp> {
             self.ops.lock().unwrap().clone()
+        }
+
+        fn revisions(&self) -> Vec<RevisionRecord> {
+            self.revisions.lock().unwrap().clone()
+        }
+
+        fn clear_revisions(&self) {
+            self.revisions.lock().unwrap().clear();
         }
 
         fn existing_content(&self) -> String {
@@ -3104,6 +3336,92 @@ mod evidence_merge_regression_tests {
 
     #[async_trait::async_trait]
     impl ExtractionNoteRepository for RecordingExtractionRepository {
+        async fn mutate_with_revision(
+            &self,
+            mutation: NoteRevisionMutation,
+        ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
+            if self
+                .fail_next_kind
+                .lock()
+                .unwrap()
+                .take_if(|kind| *kind == mutation.event_kind)
+                .is_some()
+            {
+                return Err(djinn_db::Error::Internal(
+                    "controlled revision mutation failure".to_owned(),
+                ));
+            }
+            let mut existing = self.existing.lock().unwrap();
+            let (before_content, before_confidence, changed, committed_note) =
+                match &mutation.desired {
+                    NoteRevisionDesiredState::Create(desired) => {
+                        let note = djinn_memory::Note {
+                            id: mutation.note_id.clone().expect("create has note id"),
+                            project_id: mutation.project_id.clone(),
+                            permalink: desired.permalink.clone(),
+                            title: desired.title.clone(),
+                            file_path: String::new(),
+                            storage: "db".to_owned(),
+                            note_type: desired.note_type.clone(),
+                            folder: desired.folder.clone(),
+                            status: desired.status.clone(),
+                            tags: desired.tags.clone(),
+                            content: desired.content.clone(),
+                            retrieval_anchor: desired.retrieval_anchor.clone(),
+                            created_at: "2026-01-01T00:00:00Z".to_owned(),
+                            updated_at: "2026-01-01T00:00:00Z".to_owned(),
+                            last_accessed: "2026-01-01T00:00:00Z".to_owned(),
+                            access_count: 0,
+                            confidence: desired.confidence,
+                            abstract_: None,
+                            overview: None,
+                            scope_paths: desired.scope_paths.clone(),
+                        };
+                        *existing = Some(note.clone());
+                        (None, None, true, Some(note))
+                    }
+                    NoteRevisionDesiredState::Existing {
+                        content,
+                        confidence,
+                    } => {
+                        let note = existing.as_mut().ok_or_else(|| {
+                            djinn_db::Error::Internal("missing test note".to_owned())
+                        })?;
+                        let before_content = note.content.clone();
+                        let before_confidence = note.confidence;
+                        let changed = note.content != *content || note.confidence != *confidence;
+                        if changed {
+                            note.content.clone_from(content);
+                            note.confidence = *confidence;
+                        }
+                        (
+                            Some(before_content),
+                            Some(before_confidence),
+                            changed,
+                            Some(note.clone()),
+                        )
+                    }
+                    NoteRevisionDesiredState::ExtractionSkipped => (None, None, true, None),
+                    NoteRevisionDesiredState::Delete => unreachable!("not used by extraction"),
+                };
+            let revision_id = changed.then(|| "test-revision".to_owned());
+            self.revisions.lock().unwrap().push(RevisionRecord {
+                mutation,
+                before_content,
+                before_confidence,
+                after_content: committed_note.as_ref().map(|note| note.content.clone()),
+                after_confidence: committed_note.as_ref().map(|note| note.confidence),
+                changed,
+                committed_note_id: committed_note.as_ref().map(|note| note.id.clone()),
+                revision_id: revision_id.clone(),
+            });
+            Ok(djinn_db::NoteRevisionMutationResult {
+                changed,
+                note: committed_note,
+                note_seq: changed.then_some(1),
+                revision_id,
+            })
+        }
         async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
             self.ops.lock().unwrap().push(RepoOp::Get(id.to_string()));
             Ok(self.existing.lock().unwrap().clone())
@@ -3121,11 +3439,6 @@ mod evidence_merge_regression_tests {
                 content: content.to_string(),
                 tags: tags.to_string(),
             });
-            if self.fail_updates {
-                return Err(djinn_db::Error::Internal(
-                    "controlled content update failure".to_string(),
-                ));
-            }
             let mut note = self.existing.lock().unwrap().clone().unwrap();
             note.title = title.to_string();
             note.content = content.to_string();
@@ -3145,9 +3458,15 @@ mod evidence_merge_regression_tests {
         async fn get_by_permalink(
             &self,
             _project_id: &str,
-            _permalink: &str,
+            permalink: &str,
         ) -> djinn_db::Result<Option<djinn_memory::Note>> {
-            Ok(None)
+            Ok(self
+                .existing
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|note| note.permalink == permalink)
+                .cloned())
         }
         async fn create_db_note_with_scope_and_retrieval_anchor(
             &self,
@@ -3338,6 +3657,301 @@ mod evidence_merge_regression_tests {
         vec![test_candidate()]
     }
 
+    fn test_context<'a>(
+        repo: &'a dyn ExtractionNoteRepository,
+        provider: &'a dyn LlmProvider,
+    ) -> ExtractionContext<'a> {
+        ExtractionContext {
+            note_repo: repo,
+            provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_id: "task-1",
+            task_run_id: Some("run-1"),
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "\n\n---\n*Extracted from session new. Confidence: 0.5 (session-extracted).*",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        }
+    }
+
+    async fn finalize_test_output(
+        repo: &dyn ExtractionNoteRepository,
+        durable_output_count: usize,
+    ) {
+        finalize_extraction_output(
+            repo,
+            "project-1",
+            "new",
+            "task-1",
+            Some("run-1"),
+            durable_output_count,
+        )
+        .await;
+    }
+
+    fn assert_extraction_identity(record: &RevisionRecord, reason: &str) {
+        assert_eq!(
+            record.mutation.attribution,
+            TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction)
+        );
+        assert_eq!(record.mutation.provenance.session_id(), Some("new"));
+        assert_eq!(record.mutation.provenance.task_id(), Some("task-1"));
+        assert_eq!(record.mutation.provenance.task_run_id(), Some("run-1"));
+        assert_eq!(record.mutation.reason.as_str(), reason);
+        assert!(record.changed);
+        assert!(record.revision_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn atomic_extracted_note_create_records_exact_revision_contract() {
+        let provider = ScriptedProvider::new(vec![]);
+        let repo = RecordingExtractionRepository::empty();
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_id: "task-1",
+            task_run_id: Some("run-1"),
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "footer",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let result = context
+            .create_extracted_note(
+                "Created extraction",
+                "created body",
+                "case",
+                r#"["src/lib.rs"]"#,
+                Some("created retrieval anchor"),
+            )
+            .await
+            .expect("atomic extraction create succeeds");
+        assert_eq!(usize::from(result.changed), 1);
+
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 1);
+        let created = &revisions[0];
+        assert_eq!(created.mutation.event_kind, NoteRevisionEventKind::Created);
+        assert_extraction_identity(created, "created note from completed session extraction");
+        assert_eq!(created.before_content, None);
+        assert_eq!(created.before_confidence, None);
+        assert_eq!(created.after_content.as_deref(), Some("created body"));
+        assert_eq!(created.after_confidence, Some(0.5));
+        assert!(created.committed_note_id.is_some());
+        assert!(
+            result
+                .note
+                .as_ref()
+                .is_some_and(|note| note.confidence == 0.5)
+        );
+        assert!(result.revision_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn extraction_skipped_records_exact_revision_contract() {
+        let repo = RecordingExtractionRepository::empty();
+        record_extraction_skipped(&repo, "project-1", "new", "task-1", Some("run-1")).await;
+
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 1);
+        let skipped = &revisions[0];
+        assert_eq!(
+            skipped.mutation.event_kind,
+            NoteRevisionEventKind::ExtractionSkipped
+        );
+        assert_eq!(skipped.mutation.note_id, None);
+        assert_eq!(
+            skipped.mutation.desired,
+            NoteRevisionDesiredState::ExtractionSkipped
+        );
+        assert_extraction_identity(skipped, EXTRACTION_SKIPPED_REASON);
+        assert_eq!(skipped.before_content, None);
+        assert_eq!(skipped.before_confidence, None);
+        assert_eq!(skipped.after_content, None);
+        assert_eq!(skipped.after_confidence, None);
+        assert_eq!(skipped.committed_note_id, None);
+    }
+
+    #[tokio::test]
+    async fn terminal_completion_transport_parse_and_empty_paths_record_one_skipped_revision() {
+        // The outer runner maps each of these paths to this shared terminal
+        // boundary. Keep the fake-backed assertion here so a future branch
+        // cannot bypass the canonical skipped mutation or its provenance.
+        for terminal_path in [
+            "completion transport",
+            "timeout",
+            "parse failure",
+            "parsed empty",
+        ] {
+            let repo = RecordingExtractionRepository::empty();
+            finalize_test_output(&repo, 0).await;
+
+            let revisions = repo.revisions();
+            assert_eq!(
+                revisions.len(),
+                1,
+                "{terminal_path} must record one terminal revision"
+            );
+            assert_eq!(
+                revisions[0].mutation.event_kind,
+                NoteRevisionEventKind::ExtractionSkipped,
+                "{terminal_path} must record extraction skipped"
+            );
+            assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_admission_drop_records_one_trusted_skipped_revision() {
+        let provider = ScriptedProvider::new(vec![]);
+        let repo = RecordingExtractionRepository::empty();
+        let context = test_context(&repo, &provider);
+        let dropped = ExtractedNote {
+            title: "Incomplete".to_owned(),
+            content: "too short for durable memory".to_owned(),
+            retrieval_anchor: None,
+            scope_paths: vec![],
+        };
+        let mut quality = ExtractionQuality::default();
+        let durable = process_extracted_note(&context, "case", &dropped, &mut quality).await;
+        assert_eq!(durable, 0);
+        assert_eq!(quality.admission_dropped, 1);
+
+        finalize_test_output(&repo, durable).await;
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(
+            revisions[0].mutation.event_kind,
+            NoteRevisionEventKind::ExtractionSkipped
+        );
+        assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
+    }
+
+    #[tokio::test]
+    async fn terminal_duplicate_confidence_noop_records_one_trusted_skipped_revision() {
+        let provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_owned(),
+        ]);
+        let mut existing = test_existing_note();
+        existing.confidence = 1.0;
+        let repo = RecordingExtractionRepository::with_existing(existing);
+        let context = test_context(&repo, &provider);
+        let mut quality = ExtractionQuality::default();
+        let durable =
+            process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+        assert_eq!(durable, 0);
+
+        finalize_test_output(&repo, durable).await;
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(
+            revisions[0].mutation.event_kind,
+            NoteRevisionEventKind::ExtractionSkipped
+        );
+        assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
+    }
+
+    #[tokio::test]
+    async fn terminal_unchanged_working_spec_records_one_trusted_skipped_revision() {
+        let provider = ScriptedProvider::new(vec![]);
+        let setup_repo = RecordingExtractionRepository::empty();
+        let setup_context = test_context(&setup_repo, &provider);
+        let section = render_working_spec_entry(
+            &setup_context,
+            &test_extracted_case(),
+            &["test reason"],
+            &[],
+        );
+        let mut existing = test_existing_note();
+        existing.permalink = permalink_for("design", "Working Spec t1");
+        existing.content = render_working_spec_document(&setup_context, &section, &[]);
+        let repo = RecordingExtractionRepository::with_existing(existing);
+        let context = test_context(&repo, &provider);
+
+        let changed =
+            persist_working_spec(&context, &test_extracted_case(), &["test reason"]).await;
+        assert!(!changed);
+        finalize_test_output(&repo, usize::from(changed)).await;
+        let revisions = repo.revisions();
+        assert_eq!(
+            revisions.len(),
+            2,
+            "the no-op mutation and terminal skip are recorded"
+        );
+        assert!(!revisions[0].changed);
+        assert_eq!(
+            revisions[0].mutation.event_kind,
+            NoteRevisionEventKind::Updated
+        );
+        assert_eq!(
+            revisions[1].mutation.event_kind,
+            NoteRevisionEventKind::ExtractionSkipped
+        );
+        assert_extraction_identity(&revisions[1], EXTRACTION_SKIPPED_REASON);
+    }
+
+    #[tokio::test]
+    async fn terminal_mutation_failure_does_not_fabricate_output_and_records_skip() {
+        let provider = ScriptedProvider::new(vec![r#"{"decision":"novel"}"#.to_owned()]);
+        let repo = RecordingExtractionRepository::empty_with_mutation_failure(
+            NoteRevisionEventKind::Created,
+        );
+        let context = test_context(&repo, &provider);
+        let mut quality = ExtractionQuality::default();
+        let durable =
+            process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+        assert_eq!(durable, 0);
+
+        finalize_test_output(&repo, durable).await;
+        let revisions = repo.revisions();
+        assert_eq!(
+            revisions.len(),
+            1,
+            "failed create must not fabricate a revision"
+        );
+        assert_eq!(
+            revisions[0].mutation.event_kind,
+            NoteRevisionEventKind::ExtractionSkipped
+        );
+        assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
+    }
+
+    #[tokio::test]
+    async fn terminal_durable_success_suppresses_skipped_revision() {
+        let provider = ScriptedProvider::new(vec![]);
+        let repo = RecordingExtractionRepository::empty();
+        let context = test_context(&repo, &provider);
+        let created = context
+            .create_extracted_note("Partial success", "durable body", "case", "[]", None)
+            .await
+            .expect("create succeeds");
+        finalize_test_output(&repo, usize::from(created.changed)).await;
+
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(
+            revisions[0].mutation.event_kind,
+            NoteRevisionEventKind::Created
+        );
+        assert_extraction_identity(
+            &revisions[0],
+            "created note from completed session extraction",
+        );
+    }
+
     #[tokio::test]
     async fn evidence_merge_persists_content_before_confidence() {
         let provider = ScriptedProvider::new(vec![
@@ -3354,6 +3968,8 @@ mod evidence_merge_regression_tests {
             project_path: "/projects/project-1",
             knowledge_branch_target: &KnowledgeBranchTarget::Main,
             session_id: "new",
+            task_id: "task-1",
+            task_run_id: Some("run-1"),
             task_short_id: "t1",
             task_title: "Test task",
             task_description: "Test task description",
@@ -3365,13 +3981,13 @@ mod evidence_merge_regression_tests {
         let mut quality = ExtractionQuality::default();
         process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
 
-        let ops = repo.ops();
-        let update_pos = ops
+        let revisions = repo.revisions();
+        let update_pos = revisions
             .iter()
-            .position(|op| matches!(op, RepoOp::Update { .. }));
-        let confidence_pos = ops
+            .position(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated);
+        let confidence_pos = revisions
             .iter()
-            .position(|op| matches!(op, RepoOp::UpdateConfidence { .. }));
+            .position(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged);
         assert!(update_pos.is_some(), "content update must be recorded");
         assert!(
             confidence_pos.is_some(),
@@ -3382,12 +3998,10 @@ mod evidence_merge_regression_tests {
             "content update must complete before confidence update"
         );
 
-        let updated_content = ops
+        let updated_content = revisions
             .iter()
-            .find_map(|op| match op {
-                RepoOp::Update { content, .. } => Some(content.clone()),
-                _ => None,
-            })
+            .find(|revision| revision.mutation.event_kind == NoteRevisionEventKind::Updated)
+            .and_then(|revision| revision.after_content.clone())
             .expect("update op must include content");
         assert!(
             updated_content
@@ -3402,6 +4016,34 @@ mod evidence_merge_regression_tests {
         );
         assert_eq!(quality.evidence_merged, 1);
         assert_eq!(quality.boost_fallback, 0);
+
+        let updated = &revisions[update_pos.unwrap()];
+        assert_extraction_identity(updated, "merged extracted evidence into existing note");
+        assert_eq!(
+            updated.before_content.as_deref(),
+            Some(test_existing_note().content.as_str())
+        );
+        assert_eq!(updated.before_confidence, Some(0.5));
+        assert_eq!(
+            updated.after_content.as_deref(),
+            Some(updated_content.as_str())
+        );
+        assert_eq!(updated.after_confidence, Some(0.5));
+        assert!(updated.committed_note_id.is_some());
+
+        let confidence = &revisions[confidence_pos.unwrap()];
+        assert_extraction_identity(confidence, "confirmed duplicate extracted knowledge");
+        assert_eq!(
+            confidence.before_content.as_deref(),
+            Some(updated_content.as_str())
+        );
+        assert_eq!(
+            confidence.after_content.as_deref(),
+            Some(updated_content.as_str())
+        );
+        assert_eq!(confidence.before_confidence, Some(0.5));
+        assert_eq!(confidence.after_confidence, Some(0.65));
+        assert!(confidence.committed_note_id.is_some());
     }
 
     #[tokio::test]
@@ -3417,6 +4059,8 @@ mod evidence_merge_regression_tests {
             project_path: "/projects/project-1",
             knowledge_branch_target: &KnowledgeBranchTarget::Main,
             session_id: "new",
+            task_id: "task-1",
+            task_run_id: None,
             task_short_id: "t1",
             task_title: "Test task",
             task_description: "Test task description",
@@ -3431,20 +4075,20 @@ mod evidence_merge_regression_tests {
         assert_eq!(quality.evidence_merged, 0);
         assert_eq!(quality.boost_fallback, 1);
         assert_eq!(quality.novelty_skipped, 1);
+        assert_eq!(quality.merged, 1);
+        let revisions = repo.revisions();
         assert_eq!(
-            quality.merged, 1,
-            "fallback remains a successful terminal path"
-        );
-        let ops = repo.ops();
-        assert_eq!(
-            ops.iter()
-                .filter(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+            revisions
+                .iter()
+                .filter(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged)
                 .count(),
             1,
             "transport failure must retain exactly one confidence-only boost"
         );
         assert!(
-            !ops.iter().any(|op| matches!(op, RepoOp::Update { .. })),
+            !revisions
+                .iter()
+                .any(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated),
             "transport failure must not persist content"
         );
     }
@@ -3456,7 +4100,10 @@ mod evidence_merge_regression_tests {
             r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
             r#"{"content":"Merged evidence that cannot be persisted because the controlled repository update fails."}"#.to_string(),
         ]);
-        let repo = RecordingExtractionRepository::with_update_failure(test_existing_note());
+        let repo = RecordingExtractionRepository::with_mutation_failure(
+            test_existing_note(),
+            NoteRevisionEventKind::Updated,
+        );
         let context = ExtractionContext {
             note_repo: &repo,
             provider: &provider,
@@ -3464,6 +4111,8 @@ mod evidence_merge_regression_tests {
             project_path: "/projects/project-1",
             knowledge_branch_target: &KnowledgeBranchTarget::Main,
             session_id: "new",
+            task_id: "task-1",
+            task_run_id: None,
             task_short_id: "t1",
             task_title: "Test task",
             task_description: "Test task description",
@@ -3478,21 +4127,20 @@ mod evidence_merge_regression_tests {
         assert_eq!(quality.evidence_merged, 0);
         assert_eq!(quality.boost_fallback, 1);
         assert_eq!(quality.novelty_skipped, 1);
+        assert_eq!(quality.merged, 1);
+        let revisions = repo.revisions();
         assert_eq!(
-            quality.merged, 1,
-            "fallback remains a successful terminal path"
-        );
-        let ops = repo.ops();
-        assert_eq!(
-            ops.iter()
-                .filter(|op| matches!(op, RepoOp::Update { .. }))
+            revisions
+                .iter()
+                .filter(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated)
                 .count(),
-            1,
+            0,
             "the controlled repository must receive the failed persistence attempt"
         );
         assert_eq!(
-            ops.iter()
-                .filter(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+            revisions
+                .iter()
+                .filter(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged)
                 .count(),
             1,
             "update failure must retain exactly one confidence-only boost"
@@ -3518,6 +4166,8 @@ mod evidence_merge_regression_tests {
             project_path: "/projects/project-1",
             knowledge_branch_target: &KnowledgeBranchTarget::Main,
             session_id: "new",
+            task_id: "task-1",
+            task_run_id: None,
             task_short_id: "t1",
             task_title: "Test task",
             task_description: "Test task description",
@@ -3531,20 +4181,22 @@ mod evidence_merge_regression_tests {
 
         assert_eq!(quality.evidence_merged, 0);
         assert_eq!(quality.boost_fallback, 1);
-        assert_eq!(
-            quality.novelty_skipped, 1,
-            "fallback remains a successful terminal path"
-        );
+        // These counters describe the novelty decision, not whether the
+        // evidence-merge response could be parsed or persisted. The malformed
+        // response still classified this note as a duplicate before its
+        // confidence-only fallback committed.
+        assert_eq!(quality.novelty_skipped, 1);
+        assert_eq!(quality.merged, 1);
         assert!(
-            repo.ops()
+            repo.revisions()
                 .iter()
-                .any(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+                .any(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged)
         );
         assert!(
             !repo
-                .ops()
+                .revisions()
                 .iter()
-                .any(|op| matches!(op, RepoOp::Update { .. }))
+                .any(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated)
         );
     }
 
@@ -3563,6 +4215,8 @@ mod evidence_merge_regression_tests {
             project_path: "/projects/project-1",
             knowledge_branch_target: &KnowledgeBranchTarget::Main,
             session_id: "new",
+            task_id: "task-1",
+            task_run_id: None,
             task_short_id: "t1",
             task_title: "Test task",
             task_description: "Test task description",
@@ -3577,15 +4231,15 @@ mod evidence_merge_regression_tests {
         assert_eq!(quality.evidence_merged, 0);
         assert_eq!(quality.boost_fallback, 1);
         assert!(
-            repo.ops()
+            repo.revisions()
                 .iter()
-                .any(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+                .any(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged)
         );
         assert!(
             !repo
-                .ops()
+                .revisions()
                 .iter()
-                .any(|op| matches!(op, RepoOp::Update { .. }))
+                .any(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated)
         );
     }
 }
