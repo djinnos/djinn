@@ -7,10 +7,12 @@
 //! score-union contract is target-specific, while memory planning needs typed,
 //! async queries and must preserve the existing memory-search scoring pipeline.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::future::join_all;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
@@ -284,6 +286,142 @@ pub trait MemoryIntentPlanner: Send + Sync {
 pub trait PlannedNoteSearch: Send + Sync {
     type Note: Send + Sync;
     async fn search(&self, query: PlannedQuery) -> Result<Vec<Self::Note>, PlannerError>;
+}
+/// Terminal durable status for one planner attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannerCallOutcome {
+    Success,
+    Timeout,
+    ProviderError,
+    InvalidPayload,
+}
+
+/// Repository-adapted planner result; ranking/rendering remain owned by search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedContextNote {
+    pub id: String,
+    pub permalink: String,
+    pub rendered: String,
+}
+
+/// Durable finalization seam. Finalization failure suppresses injection while preserving independently available attempted usage.
+#[async_trait]
+pub trait PlannerLedger: Send + Sync {
+    async fn record(
+        &self,
+        outcome: PlannerCallOutcome,
+        available_usage: u32,
+    ) -> Result<(), PlannerError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStartPlannerResult {
+    pub context: String,
+    pub outcome: Option<PlannerCallOutcome>,
+    pub accounting_finalized: bool,
+    pub available_usage: u32,
+}
+
+/// Final session-start planner orchestration shared by the injected fake seams.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_session_start_memory_planner<S, L>(
+    config: &MemoryIntentPlannerConfig,
+    input: PlannerInput,
+    scope_context: String,
+    scope_ids: &[String],
+    scope_permalinks: &[String],
+    planner: &dyn MemoryIntentPlanner,
+    search: &S,
+    ledger: &L,
+    available_usage: u32,
+) -> SessionStartPlannerResult
+where
+    S: PlannedNoteSearch<Note = PlannedContextNote>,
+    L: PlannerLedger,
+{
+    let Some(request) = prepare_planner_request(config, input) else {
+        return SessionStartPlannerResult {
+            context: scope_context,
+            outcome: None,
+            accounting_finalized: false,
+            available_usage: 0,
+        };
+    };
+    let (outcome, queries) = match planner.plan(request.input).await {
+        Err(PlannerError::Invocation(message)) if message == "timeout" => {
+            (PlannerCallOutcome::Timeout, None)
+        }
+        Err(_) => (PlannerCallOutcome::ProviderError, None),
+        Ok(raw) => match parse_planned_queries(&raw) {
+            Ok(q) => (PlannerCallOutcome::Success, Some(q)),
+            Err(_) => (PlannerCallOutcome::InvalidPayload, None),
+        },
+    };
+    if ledger.record(outcome, available_usage).await.is_err() {
+        return SessionStartPlannerResult {
+            context: scope_context,
+            outcome: Some(outcome),
+            accounting_finalized: false,
+            available_usage,
+        };
+    }
+    let Some(queries) = queries else {
+        return SessionStartPlannerResult {
+            context: scope_context,
+            outcome: Some(outcome),
+            accounting_finalized: true,
+            available_usage,
+        };
+    };
+    let results = join_all(queries.into_iter().map(|query| search.search(query))).await;
+    let Ok(buckets) = results.into_iter().collect::<Result<Vec<_>, _>>() else {
+        return SessionStartPlannerResult {
+            context: scope_context,
+            outcome: Some(PlannerCallOutcome::ProviderError),
+            accounting_finalized: true,
+            available_usage,
+        };
+    };
+    let added = merge_planned_context(&buckets, scope_context.len(), scope_ids, scope_permalinks);
+    let context = if added.is_empty() {
+        scope_context
+    } else {
+        format!("{scope_context}\n{added}")
+    };
+    SessionStartPlannerResult {
+        context,
+        outcome: Some(outcome),
+        accounting_finalized: true,
+        available_usage,
+    }
+}
+
+/// Scope-first deterministic caps/dedupe; scope bytes consume the same budget.
+pub fn merge_planned_context(
+    buckets: &[Vec<PlannedContextNote>],
+    scope_used: usize,
+    scope_ids: &[String],
+    scope_permalinks: &[String],
+) -> String {
+    let mut ids: HashSet<&str> = scope_ids.iter().map(String::as_str).collect();
+    let mut permalinks: HashSet<&str> = scope_permalinks.iter().map(String::as_str).collect();
+    let mut used = scope_used;
+    let mut lines = Vec::new();
+    for bucket in buckets {
+        for note in bucket.iter().take(2) {
+            if ids.contains(note.id.as_str()) || permalinks.contains(note.permalink.as_str()) {
+                continue;
+            }
+            if lines.len() == 6 || used + 1 + note.rendered.len() > 2_000 {
+                return lines.join("\n");
+            }
+            ids.insert(&note.id);
+            permalinks.insert(&note.permalink);
+            used += 1 + note.rendered.len();
+            lines.push(note.rendered.clone());
+        }
+    }
+    lines.join("\n")
 }
 
 /// Deterministic test planner that records calls and can delay its response.
