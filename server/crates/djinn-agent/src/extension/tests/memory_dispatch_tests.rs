@@ -384,10 +384,16 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
     std::fs::create_dir_all(worktree.join(".git")).expect("create worktree dir");
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    // Production agent dispatch installs this server-owned caller context.
+    // Keep direct-dispatch coverage on the same trusted mutation boundary.
+    let revision_caller =
+        djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner");
+    let services = crate::test_helpers::test_services();
+    let cancellation = crate::extension::ToolCancellation::never();
 
-    let created = call_tool(
+    let created_call = call_tool(
         &state,
-        &crate::test_helpers::test_services(),
+        &services,
         "memory_write",
         Some(
             serde_json::json!({
@@ -405,19 +411,21 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
         Some("planner"),
         None,
         None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_write dispatch should succeed");
+        &cancellation,
+    );
+    let created = djinn_core::auth_context::REVISION_CALLER_CONTEXT
+        .scope(revision_caller.clone(), created_call)
+        .await
+        .expect("memory_write dispatch should succeed");
 
     assert_eq!(
         created.get("permalink").and_then(|v| v.as_str()),
         Some("roadmap")
     );
 
-    let edited = call_tool(
+    let edited_call = call_tool(
         &state,
-        &crate::test_helpers::test_services(),
+        &services,
         "memory_edit",
         Some(
             serde_json::json!({
@@ -435,10 +443,12 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
         Some("planner"),
         None,
         None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_edit dispatch should succeed");
+        &cancellation,
+    );
+    let edited = djinn_core::auth_context::REVISION_CALLER_CONTEXT
+        .scope(revision_caller, edited_call)
+        .await
+        .expect("memory_edit dispatch should succeed");
 
     assert!(
         edited
