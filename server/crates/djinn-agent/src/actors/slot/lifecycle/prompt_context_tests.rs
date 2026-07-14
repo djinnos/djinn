@@ -5,6 +5,10 @@ use super::*;
 use djinn_core::events::EventBus;
 use djinn_core::models::ActivityEntry;
 use djinn_db::{Database, EpicRepository, NoteRepository, ProposalCreateInput, ProposalRepository};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::roles::{AgentRole, LeadRole, WorkerRole};
@@ -50,10 +54,25 @@ async fn planner_host_disabled_scope_only_real_path_is_byte_identical() {
     let scope_only = load_knowledge_context(&task, None, &app_state, None, None)
         .await
         .expect("scope result");
-    let disabled = load_knowledge_context(&task, None, &app_state, None, None)
+    let observer = Arc::new(PlannedSearchObserver {
+        entered: AtomicUsize::new(0),
+        barrier: Arc::new(tokio::sync::Barrier::new(1)),
+        ready: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    });
+    let disabled = PLANNED_SEARCH_OBSERVER
+        .scope(observer.clone(), async {
+            // This is the exact loader input emitted by the default-off stage gate.
+            load_knowledge_context(&task, None, &app_state, None, None).await
+        })
         .await
         .expect("disabled result");
     assert_eq!(disabled, scope_only);
+    assert_eq!(
+        observer.entered.load(Ordering::SeqCst),
+        0,
+        "disabled planner configuration must not issue planned repository searches"
+    );
 }
 
 /// Exercise repository-backed typed planner buckets through the real load path.
@@ -109,9 +128,27 @@ async fn planner_host_enabled_real_path_preserves_query_order_and_rank() {
         planned_query(PlannedNoteType::Pitfall, "alpha planner marker"),
         planned_query(PlannedNoteType::Case, "beta planner marker"),
     ];
-    let rendered = load_knowledge_context(&task, None, &app_state, None, Some(&queries))
-        .await
-        .expect("planned result");
+    let observer = Arc::new(PlannedSearchObserver {
+        entered: AtomicUsize::new(0),
+        barrier: Arc::new(tokio::sync::Barrier::new(queries.len())),
+        ready: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    });
+    let release = async {
+        observer.ready.notified().await;
+        assert_eq!(
+            observer.entered.load(Ordering::SeqCst),
+            queries.len(),
+            "every typed query reached the real repository boundary together"
+        );
+        observer.release.notify_waiters();
+    };
+    let planned_load = PLANNED_SEARCH_OBSERVER.scope(observer.clone(), async {
+        load_knowledge_context(&task, None, &app_state, None, Some(&queries)).await
+    });
+    let (rendered, ()) = tokio::join!(planned_load, release);
+    let rendered = rendered.expect("planned result");
+    assert_eq!(observer.entered.load(Ordering::SeqCst), 2);
     assert_ordered(
         &rendered,
         &[
@@ -158,10 +195,24 @@ async fn planned_real_path_full_scope_budget_retains_scope_bytes() {
         PlannedNoteType::Pitfall,
         "unreachable marker",
     )];
-    let planned = load_knowledge_context(&task, None, &app_state, None, Some(&queries))
+    let observer = Arc::new(PlannedSearchObserver {
+        entered: AtomicUsize::new(0),
+        barrier: Arc::new(tokio::sync::Barrier::new(1)),
+        ready: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    });
+    let planned = PLANNED_SEARCH_OBSERVER
+        .scope(observer.clone(), async {
+            load_knowledge_context(&task, None, &app_state, None, Some(&queries)).await
+        })
         .await
         .expect("planned load");
     assert_eq!(planned, baseline);
+    assert_eq!(
+        observer.entered.load(Ordering::SeqCst),
+        0,
+        "a full scope pack must short-circuit planned repository searches"
+    );
     assert!(planned.contains("Scope owns budget"));
     assert!(!planned.contains("Planner must not render"));
 }

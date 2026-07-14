@@ -356,17 +356,32 @@ async fn load_planned_knowledge(
     }
     let entities = vec!["note".to_string()];
     let buckets = futures::future::join_all(queries.iter().map(|q| {
-        note_repo.search(djinn_db::NoteSearchParams {
-            project_id: &task.project_id,
-            query: &q.query,
-            task_id: Some(&task.id),
-            folder: None,
-            note_type: Some(planned_note_type_name(q.note_type)),
-            limit: PLANNER_NOTES_PER_QUERY,
-            semantic_scores: None,
-            edge_kinds: None,
-            entity_types: Some(&entities),
-        })
+        async {
+            // Keep the test observation immediately adjacent to the production
+            // repository call so smoke tests exercise the real search boundary.
+            #[cfg(test)]
+            if let Ok(observer) = PLANNED_SEARCH_OBSERVER.try_with(Clone::clone) {
+                observer
+                    .entered
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                observer.barrier.wait().await;
+                observer.ready.notify_waiters();
+                observer.release.notified().await;
+            }
+            note_repo
+                .search(djinn_db::NoteSearchParams {
+                    project_id: &task.project_id,
+                    query: &q.query,
+                    task_id: Some(&task.id),
+                    folder: None,
+                    note_type: Some(planned_note_type_name(q.note_type)),
+                    limit: PLANNER_NOTES_PER_QUERY,
+                    semantic_scores: None,
+                    edge_kinds: None,
+                    entity_types: Some(&entities),
+                })
+                .await
+        }
     }))
     .await;
     if buckets.iter().any(Result::is_err) {
