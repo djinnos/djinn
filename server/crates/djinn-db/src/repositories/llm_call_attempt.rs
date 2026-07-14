@@ -320,7 +320,9 @@ mod tests {
         )
         .bind(task_id)
         .bind(project_id)
-        .bind(format!("short-{task_id}"))
+        // `tasks.short_id` is VARCHAR(32); the UUID task id is intentionally
+        // stored only in `id`, not interpolated into this fixture value.
+        .bind("test-task")
         .execute(db.pool())
         .await
         .unwrap();
