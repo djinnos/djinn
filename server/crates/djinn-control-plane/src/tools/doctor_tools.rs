@@ -35,6 +35,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use rmcp::{
     Json,
     handler::server::wrapper::Parameters,
@@ -68,6 +69,48 @@ pub struct DoctorRunParams {
     /// listing the valid check names so the caller can self-correct.
     #[serde(default)]
     pub check_names: Option<Vec<String>>,
+    /// Project UUID or exact `owner/repo` slug used only by the explicitly
+    /// selected extension diagnostics probe; this is never a filesystem path.
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+/// Explicit-only asynchronous project extension diagnostics check.
+pub const EXTENSION_DIAGNOSTICS_PROBE_NAME: &str = "extension_load.project_probe";
+
+const EXTENSION_DIAGNOSTICS_PROBE_DESCRIPTION: &str =
+    "Runs a fresh project-scoped extension-load diagnostics probe";
+
+/// Direct projection of a persisted V1 extension diagnostic.
+///
+/// The project probe never creates a duplicate `doctor_findings` row.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DoctorExtensionDiagnosticFinding {
+    pub diagnostic_id: String,
+    pub source_kind: String,
+    pub source_key: String,
+    pub phase: String,
+    pub summary: String,
+    pub remedy_code: String,
+    pub remedy: String,
+    pub severity: String,
+    pub occurrence_count: i64,
+}
+
+fn extension_diagnostic_to_finding(
+    diagnostic: ExtensionLoadDiagnosticV1,
+) -> DoctorExtensionDiagnosticFinding {
+    DoctorExtensionDiagnosticFinding {
+        diagnostic_id: diagnostic.diagnostic_id,
+        source_kind: diagnostic.source_kind.as_str().to_owned(),
+        source_key: diagnostic.source_key,
+        phase: diagnostic.phase.as_str().to_owned(),
+        summary: diagnostic.summary,
+        remedy_code: diagnostic.remedy_code.as_str().to_owned(),
+        remedy: diagnostic.remedy,
+        severity: diagnostic.severity.as_str().to_owned(),
+        occurrence_count: diagnostic.occurrence_count as i64,
+    }
 }
 
 /// Parameters for `doctor_fix`.
@@ -135,6 +178,10 @@ pub struct DoctorRunCheckResult {
     pub error: Option<String>,
     /// Findings emitted by this check, with their persisted ids filled in.
     pub findings: Vec<DoctorRunFindingEntry>,
+    /// Persisted V1 diagnostics from the explicit project probe. Empty and
+    /// skipped for ordinary global checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_diagnostics: Vec<DoctorExtensionDiagnosticFinding>,
 }
 
 /// Response for `doctor_run`.
@@ -507,6 +554,15 @@ impl DjinnMcpServer {
             name: RETRIEVAL_ZERO_RESULT_NAME.to_owned(),
             description: "Flags projects whose memory retrieval zero-result rate is strictly above the configured threshold".to_owned(),
         });
+        registered_checks.push(DoctorRunCheckMeta {
+            name: EXTENSION_DIAGNOSTICS_PROBE_NAME.to_owned(),
+            description: EXTENSION_DIAGNOSTICS_PROBE_DESCRIPTION.to_owned(),
+        });
+        let extension_probe_selected = p.check_names.as_ref().is_some_and(|names| {
+            names
+                .iter()
+                .any(|name| name == EXTENSION_DIAGNOSTICS_PROBE_NAME)
+        });
         let retrieval_selected = p.check_names.as_ref().is_none_or(|names| {
             names.is_empty() || names.iter().any(|name| name == RETRIEVAL_ZERO_RESULT_NAME)
         });
@@ -529,7 +585,10 @@ impl DjinnMcpServer {
         let ordinary_names: Option<Vec<String>> = p.check_names.as_ref().map(|names| {
             names
                 .iter()
-                .filter(|name| name.as_str() != RETRIEVAL_ZERO_RESULT_NAME)
+                .filter(|name| {
+                    name.as_str() != RETRIEVAL_ZERO_RESULT_NAME
+                        && name.as_str() != EXTENSION_DIAGNOSTICS_PROBE_NAME
+                })
                 .cloned()
                 .collect()
         });
@@ -576,7 +635,7 @@ impl DjinnMcpServer {
                     return Json(DoctorRunResponse {
                         ok: false, registered_checks, results: vec![DoctorRunCheckResult {
                             check: DoctorRunCheckMeta { name: RETRIEVAL_ZERO_RESULT_NAME.to_owned(), description: "Flags projects whose memory retrieval zero-result rate is strictly above the configured threshold".to_owned() },
-                            ran: false, error: Some(error), findings: Vec::new(),
+                            ran: false, error: Some(error), findings: Vec::new(), extension_diagnostics: Vec::new(),
                         }], total_findings: 0, error: None,
                     });
                 }
@@ -636,6 +695,7 @@ impl DjinnMcpServer {
                                     findings.len()
                                 )),
                                 findings: Vec::new(),
+                                extension_diagnostics: Vec::new(),
                             });
                             continue;
                         }
@@ -646,6 +706,7 @@ impl DjinnMcpServer {
                         ran: true,
                         error: None,
                         findings: entries,
+                        extension_diagnostics: Vec::new(),
                     });
                 }
                 Err(e) => {
@@ -654,8 +715,69 @@ impl DjinnMcpServer {
                         ran: false,
                         error: Some(e.to_string()),
                         findings: Vec::new(),
+                        extension_diagnostics: Vec::new(),
                     });
                 }
+            }
+        }
+
+        if extension_probe_selected {
+            let meta = DoctorRunCheckMeta {
+                name: EXTENSION_DIAGNOSTICS_PROBE_NAME.to_owned(),
+                description: EXTENSION_DIAGNOSTICS_PROBE_DESCRIPTION.to_owned(),
+            };
+            let probe: Result<Vec<ExtensionLoadDiagnosticV1>, String> = async {
+                let project_ref = p
+                    .project
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        "project is required when selecting extension_load.project_probe".to_owned()
+                    })?;
+                let project_id = self.resolve_project_id(project_ref).await?;
+                let project =
+                    ProjectRepository::new(self.state.db().clone(), self.state.event_bus())
+                        .get(&project_id)
+                        .await
+                        .map_err(|e| format!("load project {project_id}: {e}"))?
+                        .ok_or_else(|| format!("project not found: {project_ref}"))?;
+                let workspace =
+                    djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+                if !workspace.is_dir() {
+                    return Err(format!(
+                        "project workspace is not an existing directory: {}",
+                        workspace.display()
+                    ));
+                }
+                self.state
+                    .extension_diagnostics_probe()
+                    .ok_or_else(|| "extension diagnostics probe is not configured".to_owned())?
+                    .probe_project_extensions(&project_id, &workspace)
+                    .await
+            }
+            .await;
+            match probe {
+                Ok(rows) => {
+                    let extension_diagnostics: Vec<_> = rows
+                        .into_iter()
+                        .map(extension_diagnostic_to_finding)
+                        .collect();
+                    total_findings += extension_diagnostics.len() as i64;
+                    results.push(DoctorRunCheckResult {
+                        check: meta,
+                        ran: true,
+                        error: None,
+                        findings: Vec::new(),
+                        extension_diagnostics,
+                    });
+                }
+                Err(error) => results.push(DoctorRunCheckResult {
+                    check: meta,
+                    ran: false,
+                    error: Some(error),
+                    findings: Vec::new(),
+                    extension_diagnostics: Vec::new(),
+                }),
             }
         }
 
@@ -1077,6 +1199,7 @@ mod tests {
                     recommended_action: None,
                     recommended_reason: None,
                 }],
+                extension_diagnostics: Vec::new(),
             }],
             total_findings: 1,
             error: None,

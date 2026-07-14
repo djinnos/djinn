@@ -12,6 +12,7 @@ use djinn_control_plane::bridge::{GitOps, RuntimeOps, SemanticQueryEmbedding, Ta
 use djinn_git::{GitActorHandle, GitError};
 
 mod bridges;
+mod extension_diagnostics_probe;
 pub(crate) mod graph_neighbors;
 mod graph_ops;
 pub(crate) mod hybrid_search;
