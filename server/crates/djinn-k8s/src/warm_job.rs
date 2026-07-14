@@ -649,6 +649,97 @@ mod tests {
         assert_eq!(cfg.warm_memory_limit, "6Gi");
     }
 
+    /// The worker contract merged by l15u/t6g0 acquires its per-project
+    /// advisory lock at `/cache/cargo-target/.warm-locks/<project-id>.lock`.
+    /// This manifest proof deliberately covers only the shared-filesystem and
+    /// fingerprint prerequisites for that contract; lock acquisition remains
+    /// wholly in `djinn-agent-worker`.
+    #[test]
+    fn warm_manifest_preserves_shared_cache_lock_prerequisites() {
+        let mut cfg = KubernetesConfig::for_testing();
+        cfg.cache_pvc = "warm-cache-pvc".into();
+        cfg.warm_job_timeout_seconds = 1_237;
+        cfg.warm_cpu_limit = "7".into();
+        let job = build_warm_job(&cfg, "lock-project", "example/warm:latest", None);
+
+        let spec = job.spec.as_ref().expect("job spec");
+        // A non-default fixture proves this is configuration wiring rather
+        // than an accidental assertion of the default timeout.
+        assert_eq!(spec.active_deadline_seconds, Some(1_237));
+        assert_eq!(spec.backoff_limit, Some(0));
+
+        let pod = spec.template.spec.as_ref().expect("pod spec");
+        let container = pod.containers.first().expect("warm container");
+        let mounts: BTreeMap<&str, &VolumeMount> = container
+            .volume_mounts
+            .as_ref()
+            .expect("volume mounts")
+            .iter()
+            .map(|mount| (mount.name.as_str(), mount))
+            .collect();
+        let cache_mount = mounts
+            .get(crate::job::VOLUME_CACHE)
+            .expect("shared cache mount");
+        assert_eq!(cache_mount.mount_path, crate::job::CACHE_MOUNT_DIR);
+        assert_eq!(cache_mount.read_only, Some(false));
+
+        let volumes: BTreeMap<&str, &Volume> = pod
+            .volumes
+            .as_ref()
+            .expect("pod volumes")
+            .iter()
+            .map(|volume| (volume.name.as_str(), volume))
+            .collect();
+        let cache_pvc = volumes
+            .get(crate::job::VOLUME_CACHE)
+            .expect("shared cache volume")
+            .persistent_volume_claim
+            .as_ref()
+            .expect("shared cache PVC");
+        assert_eq!(cache_pvc.claim_name, "warm-cache-pvc");
+        assert_eq!(cache_pvc.read_only, Some(false));
+
+        let env: BTreeMap<&str, &str> = container
+            .env
+            .as_ref()
+            .expect("container environment")
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.as_str(),
+                    entry.value.as_deref().unwrap_or_default(),
+                )
+            })
+            .collect();
+        // The warm target and the worker's advisory-lock directory both resolve
+        // under the writable cache mount. Keep the containment assertion in
+        // addition to the exact target value: this is the filesystem handoff
+        // the l15u/t6g0 worker contract requires, not merely matching strings.
+        let target_dir = env
+            .get("CARGO_TARGET_DIR")
+            .copied()
+            .expect("CARGO_TARGET_DIR");
+        assert!(
+            std::path::Path::new(target_dir).starts_with(&cache_mount.mount_path),
+            "warm target {target_dir} must reside under writable cache mount {}",
+            cache_mount.mount_path
+        );
+        assert_eq!(
+            target_dir,
+            format!("{}/cargo-target/lock-project", crate::job::CACHE_MOUNT_DIR)
+        );
+        assert_eq!(env.get("CARGO_INCREMENTAL").copied(), Some("1"));
+        assert_eq!(env.get("CARGO_HOME").copied(), Some("/cache/cargo"));
+        assert_eq!(env.get("RUSTC_WRAPPER").copied(), Some(""));
+        assert_eq!(
+            env.get("CARGO_BUILD_RUSTFLAGS").copied(),
+            Some("-Clink-arg=-fuse-ld=mold")
+        );
+        assert_eq!(env.get("SQLX_OFFLINE").copied(), Some("true"));
+        assert_eq!(env.get("CARGO_BUILD_JOBS").copied(), Some("7"));
+        assert_eq!(env.get("NEXTEST_TEST_THREADS").copied(), Some("7"));
+    }
+
     #[test]
     fn sanitize_id_lowercases_and_maps_disallowed_chars() {
         assert_eq!(sanitize_id("Proj_ABC/xyz"), "proj-abc-xyz");
