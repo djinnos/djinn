@@ -1,4 +1,6 @@
-use super::error_handling::{BudgetWindDownIgnored, supports_tool_choice_required};
+use super::error_handling::{
+    BudgetWindDownIgnored, empty_turn_backoff, supports_tool_choice_required,
+};
 // djinn:allow-oversize — integration tests for the entire reply_loop module.
 // The file already exceeded the 1500-line / 51.2KB size-guard thresholds
 // before the rrdr soft-budget converge reminder tests were added; the marker
@@ -14,6 +16,7 @@ use crate::helpers::extract_worker_context;
 use crate::output_parser::ParsedAgentOutput;
 use crate::test_helpers;
 use crate::test_helpers::{extract_stash_content, test_session_settlement_for_stage_outcome};
+use djinn_core::clock::TestClock;
 use djinn_core::message::Role;
 use djinn_core::models::SessionStatus;
 use djinn_db::repositories::session::CreateSessionParams;
@@ -25,10 +28,12 @@ use djinn_provider::message::{ContentBlock, Conversation, Message};
 use djinn_provider::provider::ToolChoice;
 use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage};
 use djinn_supervisor::{ParkReason, StageOutcome};
+use djinn_telemetry::render;
 use futures::stream;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
 mod anthropic_replay;
@@ -240,6 +245,9 @@ struct ReplyLoopHarness {
     session_id: String,
     cancel: CancellationToken,
     conv: Conversation,
+    /// Defaults to the canonical worker path; phase scripts override this to
+    /// isolate their process-global collector samples from dispatcher tests.
+    role_name: &'static str,
 }
 
 type ReplyLoopResult = (anyhow::Result<()>, ParsedAgentOutput, i64, i64, i64, i64);
@@ -257,6 +265,7 @@ impl ReplyLoopHarness {
             session_id,
             cancel,
             conv,
+            role_name: "worker",
         }
     }
 
@@ -312,6 +321,7 @@ impl ReplyLoopHarness {
             session_id,
             cancel,
             conv,
+            role_name: "worker",
         }
     }
 
@@ -378,7 +388,7 @@ impl ReplyLoopHarness {
                 session_id: &self.session_id,
                 project_path: &self.project_path,
                 worktree_path: &worktree_path,
-                role_name: "worker",
+                role_name: self.role_name,
                 finalize_tool_names: &["submit_work", "request_planner"],
                 context_window,
                 model_id,
@@ -5042,4 +5052,452 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
              closing backtick/paren, got: {trimmed:?}"
         );
     }
+}
+
+// The phase tracker is intentionally exercised only through the canonical reply
+// loop below. The scripts advance SlotContext's monotonic clock at provider
+// boundaries, making the exported counter delta deterministic without sleeps.
+static PHASE_METRIC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const PHASE_METRIC_ROLE: &str = "refinement";
+static PHASE_TOOL_CLOCK: std::sync::Mutex<Option<Arc<TestClock>>> = std::sync::Mutex::new(None);
+
+struct PhaseEvent {
+    advance: Duration,
+    event: anyhow::Result<StreamEvent>,
+}
+
+enum PhaseTurn {
+    InitError {
+        advance: Duration,
+    },
+    Stream {
+        init_advance: Duration,
+        events: Vec<PhaseEvent>,
+    },
+    EmptyAssistant {
+        init_advance: Duration,
+        stream_advance: Duration,
+        stream_polled: Arc<tokio::sync::Notify>,
+    },
+    Pending {
+        init_advance: Duration,
+        stream_polled: Arc<tokio::sync::Notify>,
+    },
+}
+
+struct PhaseScriptedProvider {
+    clock: Arc<TestClock>,
+    turns: Mutex<VecDeque<PhaseTurn>>,
+}
+
+impl PhaseScriptedProvider {
+    fn new(clock: Arc<TestClock>, turns: Vec<PhaseTurn>) -> Self {
+        Self {
+            clock,
+            turns: Mutex::new(turns.into()),
+        }
+    }
+}
+
+impl LlmProvider for PhaseScriptedProvider {
+    fn name(&self) -> &str {
+        "phase-script"
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _conversation: &'a Conversation,
+        _tools: &'a [serde_json::Value],
+        _tool_choice: Option<ToolChoice>,
+    ) -> Pin<
+        Box<
+            dyn futures::Future<
+                    Output = anyhow::Result<
+                        Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let turn = self
+            .turns
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("scripted provider turn");
+        let clock = Arc::clone(&self.clock);
+        Box::pin(async move {
+            match turn {
+                PhaseTurn::InitError { advance } => {
+                    clock.advance_mono(advance);
+                    Err(anyhow::anyhow!("scripted provider initialization failure"))
+                }
+                PhaseTurn::Stream {
+                    init_advance,
+                    events,
+                } => {
+                    clock.advance_mono(init_advance);
+                    let stream = async_stream::stream! {
+                        for event in events {
+                            clock.advance_mono(event.advance);
+                            yield event.event;
+                        }
+                    };
+                    Ok(Box::pin(stream)
+                        as Pin<
+                            Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                        >)
+                }
+                PhaseTurn::EmptyAssistant {
+                    init_advance,
+                    stream_advance,
+                    stream_polled,
+                } => {
+                    clock.advance_mono(init_advance);
+                    let stream = async_stream::stream! {
+                        // The empty-assistant retry begins only after canonical
+                        // stream consumption observes this terminal event.
+                        stream_polled.notify_one();
+                        clock.advance_mono(stream_advance);
+                        yield Ok(StreamEvent::Done);
+                    };
+                    Ok(Box::pin(stream)
+                        as Pin<
+                            Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                        >)
+                }
+                PhaseTurn::Pending {
+                    init_advance,
+                    stream_polled,
+                } => {
+                    clock.advance_mono(init_advance);
+                    let stream = async_stream::stream! {
+                        // Signal only once canonical stream consumption polls
+                        // this pending stream. This keeps externally advanced
+                        // fake time inside the active provider interval.
+                        stream_polled.notify_one();
+                        futures::future::pending::<()>().await;
+                        yield Ok(StreamEvent::Done);
+                    };
+                    Ok(Box::pin(stream)
+                        as Pin<
+                            Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                        >)
+                }
+            }
+        })
+    }
+}
+
+fn phase_counter(rendered: &str, phase: &str, role: &str) -> u64 {
+    rendered
+        .lines()
+        .find_map(|line| {
+            (line.starts_with("djinn_agent_session_phase_seconds_total")
+                && line.contains(&format!("phase=\"{phase}\""))
+                && line.contains(&format!("role=\"{role}\"")))
+            .then(|| {
+                line.rsplit_once(' ')
+                    .and_then(|(_, value)| value.parse().ok())
+            })
+            .flatten()
+        })
+        .unwrap_or_else(|| panic!("missing {role} {phase} phase sample:\n{rendered}"))
+}
+
+fn phase_delta(before: &str, after: &str, phase: &str, role: &str) -> u64 {
+    phase_counter(after, phase, role) - phase_counter(before, phase, role)
+}
+
+fn final_turn(init: u64, delta: u64) -> PhaseTurn {
+    PhaseTurn::Stream {
+        init_advance: Duration::from_secs(init),
+        events: vec![
+            PhaseEvent {
+                advance: Duration::from_secs(delta),
+                event: Ok(StreamEvent::Delta(ContentBlock::ToolUse {
+                    id: "finish".into(),
+                    name: "submit_work".into(),
+                    input: serde_json::json!({"task_id":"t1"}),
+                })),
+            },
+            PhaseEvent {
+                advance: Duration::ZERO,
+                event: Ok(StreamEvent::Done),
+            },
+        ],
+    }
+}
+
+async fn run_phase_script(turns: Vec<PhaseTurn>) -> anyhow::Result<()> {
+    let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    let provider = PhaseScriptedProvider::new(Arc::clone(&clock), turns);
+    let mut harness = ReplyLoopHarness::new().await;
+    harness.slot_ctx.clock = clock;
+    harness.role_name = PHASE_METRIC_ROLE;
+    let tools = vec![dummy_tool_schema("submit_work")];
+    harness.run(&provider, &tools).await.0
+}
+
+async fn phase_harness(clock: Arc<TestClock>) -> ReplyLoopHarness {
+    let mut harness = ReplyLoopHarness::new().await;
+    harness.slot_ctx.clock = clock;
+    harness.role_name = PHASE_METRIC_ROLE;
+    harness
+}
+
+fn phase_side_tool(
+    _: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    PHASE_TOOL_CLOCK
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("phase side-tool clock installed")
+        .advance_mono(Duration::from_secs(5));
+    Ok(serde_json::json!({"side":"done"}))
+}
+
+async fn provider_phase_scenario_counts_stream_init_consumption_and_errors() {
+    let before = render().expect("render phase metrics");
+    assert!(run_phase_script(vec![final_turn(2, 3)]).await.is_ok());
+    let after = render().expect("render phase metrics");
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        5
+    );
+    assert_eq!(
+        phase_delta(&before, &after, "tool_execution", PHASE_METRIC_ROLE),
+        0
+    );
+    let before = after;
+    assert!(
+        run_phase_script(vec![PhaseTurn::InitError {
+            advance: Duration::from_secs(7)
+        }])
+        .await
+        .is_err()
+    );
+    let after = render().expect("render phase metrics");
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        7
+    );
+    let before = after;
+    assert!(
+        run_phase_script(vec![PhaseTurn::Stream {
+            init_advance: Duration::from_secs(2),
+            events: vec![PhaseEvent {
+                advance: Duration::from_secs(4),
+                event: Err(anyhow::anyhow!("scripted stream failure"))
+            }]
+        }])
+        .await
+        .is_err()
+    );
+    let after = render().expect("render phase metrics");
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        6
+    );
+}
+
+async fn provider_phase_scenario_counts_empty_assistant_backoff_not_local_time() {
+    let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    let empty_assistant_polled = Arc::new(tokio::sync::Notify::new());
+    let provider = PhaseScriptedProvider::new(
+        Arc::clone(&clock),
+        vec![
+            PhaseTurn::EmptyAssistant {
+                init_advance: Duration::from_secs(2),
+                stream_advance: Duration::from_secs(3),
+                stream_polled: Arc::clone(&empty_assistant_polled),
+            },
+            final_turn(4, 2),
+        ],
+    );
+    let mut harness = phase_harness(Arc::clone(&clock)).await;
+    clock.advance_mono(Duration::from_secs(11)); // unrelated local setup time
+    let before = render().expect("render phase metrics");
+    let tools = vec![dummy_tool_schema("submit_work")];
+    // Empty-assistant retries are enabled only for Codex/OpenAI-family models.
+    // Use that canonical model branch so advancing Tokio's retry sleep below
+    // proves the provider-owned backoff interval, rather than a terminal error.
+    let run = harness.run_with_model(&provider, &tools, "openai/gpt-5.4");
+    tokio::pin!(run);
+    let polled = empty_assistant_polled.notified();
+    tokio::pin!(polled);
+    tokio::select! {
+        _ = &mut run => panic!("empty-assistant provider unexpectedly finished"),
+        _ = &mut polled => {}
+    }
+    assert!(
+        futures::poll!(&mut run).is_pending(),
+        "empty-assistant retry backoff must be pending"
+    );
+    // Advance the complete production empty-assistant provider-loop backoff on
+    // both clocks only after canonical consumption has registered the retry
+    // sleep. Polling the reply-loop future above is essential: yielding this
+    // task alone would not poll `run` into the provider-owned backoff.
+    // The phase stays provider-owned for this real sleep, so the exact delta
+    // below includes all three backoff seconds.
+    let backoff = empty_turn_backoff(1);
+    clock.advance_mono(backoff);
+    // Pause the Tokio clock only now (after all DB-backed harness setup) so
+    // that `tokio::time::advance` can resolve the provider-owned empty-assistant
+    // backoff sleep deterministically. The resume before `run.await` restores
+    // real time for the remaining DB persistence in the reply loop.
+    tokio::time::pause();
+    tokio::time::advance(backoff).await;
+    tokio::time::resume();
+    assert!(run.await.0.is_ok());
+    let after = render().expect("render phase metrics");
+    let expected_provider_wait = 2 + 3 + backoff.as_secs() + 4 + 2;
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        expected_provider_wait
+    );
+    assert_eq!(
+        phase_delta(&before, &after, "tool_execution", PHASE_METRIC_ROLE),
+        0
+    );
+}
+
+async fn provider_phase_scenario_hands_streaming_side_tool_back_to_provider() {
+    let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    *PHASE_TOOL_CLOCK.lock().unwrap() = Some(Arc::clone(&clock));
+    let provider = PhaseScriptedProvider::new(
+        Arc::clone(&clock),
+        vec![
+            PhaseTurn::Stream {
+                init_advance: Duration::from_secs(2),
+                events: vec![
+                    PhaseEvent {
+                        advance: Duration::from_secs(1),
+                        event: Ok(StreamEvent::Delta(ContentBlock::ToolUse {
+                            id: "side".into(),
+                            name: "side_query".into(),
+                            input: serde_json::json!({}),
+                        })),
+                    },
+                    PhaseEvent {
+                        advance: Duration::ZERO,
+                        event: Ok(StreamEvent::Done),
+                    },
+                ],
+            },
+            final_turn(4, 2),
+        ],
+    );
+    let mut harness = phase_harness(clock).await;
+    harness.slot_ctx.tool_dispatcher =
+        Some(Arc::new(test_helpers::ConfigurableToolDispatcher::new(
+            vec![],
+            std::collections::HashMap::from([(
+                "side_query".to_string(),
+                phase_side_tool as test_helpers::ToolHandlerFn,
+            )]),
+        )));
+    let tools = vec![
+        serde_json::json!({"name":"side_query","readOnly":true,"idempotent":true,"concurrent_safe":true}),
+        dummy_tool_schema("submit_work"),
+    ];
+    let before = render().expect("render phase metrics");
+    assert!(harness.run(&provider, &tools).await.0.is_ok());
+    *PHASE_TOOL_CLOCK.lock().unwrap() = None;
+    let after = render().expect("render phase metrics");
+    // The tool-use delta triggers an immediate concurrent-safe side-tool
+    // dispatch, then the stream terminates with a zero-advance Done event.
+    // Provider time is therefore 2 + 1 before the handoff and 4 + 2 after it,
+    // with the five tool seconds kept disjoint.
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        9
+    );
+    assert_eq!(
+        phase_delta(&before, &after, "tool_execution", PHASE_METRIC_ROLE),
+        5
+    );
+}
+
+async fn provider_phase_scenario_cancellation_and_drop_flush_active_interval_once() {
+    let tools = vec![dummy_tool_schema("submit_work")];
+    let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    let stream_polled = Arc::new(tokio::sync::Notify::new());
+    let provider = PhaseScriptedProvider::new(
+        Arc::clone(&clock),
+        vec![PhaseTurn::Pending {
+            init_advance: Duration::from_secs(2),
+            stream_polled: Arc::clone(&stream_polled),
+        }],
+    );
+    let mut harness = phase_harness(Arc::clone(&clock)).await;
+    let before = render().expect("render phase metrics");
+    let cancel = harness.cancel.clone();
+    let mut run = Box::pin(harness.run(&provider, &tools));
+    let polled = stream_polled.notified();
+    tokio::pin!(polled);
+    tokio::select! {
+        _ = &mut run => panic!("pending provider unexpectedly finished"),
+        _ = &mut polled => {}
+    }
+    clock.advance_mono(Duration::from_secs(7));
+    cancel.cancel();
+    assert!(run.await.0.is_err());
+    let after = render().expect("render phase metrics");
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        9
+    );
+    let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    let stream_polled = Arc::new(tokio::sync::Notify::new());
+    let provider = PhaseScriptedProvider::new(
+        Arc::clone(&clock),
+        vec![PhaseTurn::Pending {
+            init_advance: Duration::from_secs(3),
+            stream_polled: Arc::clone(&stream_polled),
+        }],
+    );
+    let mut harness = phase_harness(Arc::clone(&clock)).await;
+    let before = after;
+    {
+        let mut run = Box::pin(harness.run(&provider, &tools));
+        let polled = stream_polled.notified();
+        tokio::pin!(polled);
+        tokio::select! {
+            _ = &mut run => panic!("pending provider unexpectedly finished"),
+            _ = &mut polled => {}
+        }
+        clock.advance_mono(Duration::from_secs(8));
+        drop(run); // drop the active reply-loop future; tracker Drop is the backstop
+    }
+    let after = render().expect("render phase metrics");
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        11
+    );
+}
+
+#[tokio::test]
+async fn provider_phase_scripted_reply_loop_scenarios() {
+    // Keep every database-backed harness and process-global refinement-role
+    // collector snapshot in one CI-shard unit. The scenarios must remain
+    // sequential: each one measures an exact before/after counter delta. The
+    // dedicated refinement label also isolates these snapshots from the
+    // worker-role dispatcher phase metric tests running in parallel.
+    //
+    // This entry point deliberately avoids `start_paused = true` because every
+    // scenario spins up a real database-backed `ReplyLoopHarness`. Pausing the
+    // Tokio clock at process start prevents the sqlx pool from establishing
+    // its first connection - the acquire timeout fires before real TCP I/O
+    // completes, producing a spurious `PoolTimedOut`. Only the empty-assistant
+    // backoff scenario manually pauses/resumes the clock around its
+    // `tokio::time::advance`, leaving all other DB work under real time.
+    let _lock = PHASE_METRIC_LOCK.lock().unwrap();
+    djinn_telemetry::init().expect("telemetry init");
+
+    provider_phase_scenario_counts_stream_init_consumption_and_errors().await;
+    provider_phase_scenario_counts_empty_assistant_backoff_not_local_time().await;
+    provider_phase_scenario_hands_streaming_side_tool_back_to_provider().await;
+    provider_phase_scenario_cancellation_and_drop_flush_active_interval_once().await;
 }
