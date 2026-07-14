@@ -218,6 +218,21 @@ pub struct TimelineActivity {
     pub timestamp: String,
 }
 
+/// A canonical extension-load diagnostic placed on a task timeline.
+///
+/// The diagnostic remains the shared V1 wire object rather than a timeline-
+/// specific copy of its fields. `session_id` and `timestamp` provide the
+/// placement metadata needed by timeline renderers.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TimelineExtensionLoadDiagnosticEvent {
+    /// Fixed discriminator for extension-load diagnostic timeline events.
+    pub kind: String,
+    pub session_id: String,
+    pub timestamp: String,
+    #[schemars(with = "super::json_object::AnyJson")]
+    pub diagnostic: ExtensionLoadDiagnosticV1,
+}
+
 fn render_timeline_activity(e: &djinn_core::models::ActivityEntry) -> TimelineActivity {
     let payload_value: serde_json::Value =
         serde_json::from_str(&e.payload).unwrap_or_else(|_| serde_json::json!({}));
@@ -243,6 +258,10 @@ pub struct TaskTimelineResponse {
     pub messages: Option<Vec<TimelineMessage>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<Vec<TimelineActivity>>,
+    /// Canonical session-associated extension-load diagnostics, including as
+    /// an empty array on successful timeline lookups.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_load_diagnostic_events: Option<Vec<TimelineExtensionLoadDiagnosticEvent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -626,6 +645,7 @@ impl DjinnMcpServer {
                 sessions: None,
                 messages: None,
                 activity: None,
+                extension_load_diagnostic_events: None,
                 error: Some(e),
             })
         };
@@ -661,6 +681,30 @@ impl DjinnMcpServer {
         };
 
         let session_ids: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
+
+        // Diagnostics are task-owned and must be read under the task's owning
+        // project. Keep only rows associated with one of the sessions already
+        // returned by this timeline: this excludes doctor-only rows and stale
+        // or otherwise unrelated session associations.
+        let diagnostic_repo = ExtensionLoadDiagnosticRepository::new(self.state.db().clone());
+        let extension_load_diagnostic_events =
+            match diagnostic_repo.list_for_task(&project_id, &task.id).await {
+                Ok(diagnostics) => diagnostics
+                    .into_iter()
+                    .filter_map(|diagnostic| {
+                        let session_id = diagnostic.session_id.clone()?;
+                        session_ids.contains(&session_id).then(|| {
+                            TimelineExtensionLoadDiagnosticEvent {
+                                kind: "extension_load_diagnostic".to_owned(),
+                                session_id,
+                                timestamp: diagnostic.last_seen_at.clone(),
+                                diagnostic,
+                            }
+                        })
+                    })
+                    .collect(),
+                Err(e) => return err(e.to_string()),
+            };
 
         // Build a lookup map: session_id → (agent_type, model_id)
         let session_info: std::collections::HashMap<String, (&str, &str)> = sessions
@@ -722,6 +766,7 @@ impl DjinnMcpServer {
             sessions: Some(sessions_out),
             messages: Some(messages),
             activity: Some(activity),
+            extension_load_diagnostic_events: Some(extension_load_diagnostic_events),
             error: None,
         })
     }
