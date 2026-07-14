@@ -140,14 +140,13 @@ fn scan_base(
                 disposition,
             };
         let incremental_path = root.join("incremental");
-        match safe_directory(&incremental_path, &actual_base)? {
-            Some(path) => incremental.push(profile_unit(
+        if let Some(path) = safe_directory(&incremental_path, &actual_base)? {
+            incremental.push(profile_unit(
                 PressureRung::Incremental,
                 path.clone(),
                 allocated_tree_bytes(&path)?,
                 PressurePlanDisposition::Eligible,
-            )),
-            None => {}
+            ));
         }
         let disposition = match base.effective_latest_activity {
             Some(activity)
