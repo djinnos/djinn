@@ -1,5 +1,12 @@
 use super::*;
 
+// Regression evidence for the direct agent-side mutation callers that previously
+// failed in CI with `memory_write dispatch should succeed: "missing field
+// `reason`"` or `memory_edit dispatch should succeed: "missing field
+// `reason`"`. Keep the explicit non-blank reasons in the roadmap, brief, and
+// requirement-worktree fixtures below: they exercise the same extension bridge
+// as live MCP calls and must not rely on a compatibility default.
+
 #[tokio::test]
 async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
     let db = create_test_db();
