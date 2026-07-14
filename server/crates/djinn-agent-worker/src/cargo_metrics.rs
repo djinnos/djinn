@@ -7,6 +7,90 @@
 
 use tracing::info;
 
+/// Closed classification for incremental-prune failures. These values are
+/// structured-event data only; none are Prometheus labels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WarmIncrementalPruneErrorKind {
+    Scan,
+    Permission,
+    Remove,
+    TargetMismatch,
+    InvalidProjectId,
+    Symlink,
+    LockOpen,
+    LockProbe,
+    LockAcquire,
+}
+
+impl WarmIncrementalPruneErrorKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scan => "scan",
+            Self::Permission => "permission",
+            Self::Remove => "remove",
+            Self::TargetMismatch => "target_mismatch",
+            Self::InvalidProjectId => "invalid_project_id",
+            Self::Symlink => "symlink",
+            Self::LockOpen => "lock_open",
+            Self::LockProbe => "lock_probe",
+            Self::LockAcquire => "lock_acquire",
+        }
+    }
+}
+
+/// The complete returned result surface for a warm incremental-prune attempt.
+/// Keeping the error kind in this enum prevents callers from supplying a
+/// free-form error string to metrics or the structured event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WarmIncrementalPruneResult {
+    Pruned {
+        pruned_bytes: u64,
+    },
+    AlreadyAbsent,
+    UnsafePath {
+        error_kind: WarmIncrementalPruneErrorKind,
+    },
+    Failed {
+        error_kind: WarmIncrementalPruneErrorKind,
+    },
+}
+
+/// Emit the terminal event and metric deltas for one returned warm
+/// incremental-prune result.
+///
+/// Every result increments exactly one attempt. Logical bytes are added only
+/// after a successful prune; absent, unsafe, and failed results add zero.
+pub fn record_warm_incremental_prune(project_id: &str, result: WarmIncrementalPruneResult) {
+    use djinn_telemetry::cargo_warm_incremental_prune::{self, Outcome};
+
+    let (outcome, pruned_bytes, error_kind) = match result {
+        WarmIncrementalPruneResult::Pruned { pruned_bytes } => {
+            (Outcome::Pruned, pruned_bytes, None)
+        }
+        WarmIncrementalPruneResult::AlreadyAbsent => (Outcome::AlreadyAbsent, 0, None),
+        WarmIncrementalPruneResult::UnsafePath { error_kind } => {
+            (Outcome::UnsafePath, 0, Some(error_kind))
+        }
+        WarmIncrementalPruneResult::Failed { error_kind } => (Outcome::Failed, 0, Some(error_kind)),
+    };
+    let metric_attempt = 1_u64;
+    let metric_bytes = pruned_bytes;
+
+    info!(
+        project_id,
+        outcome = outcome.as_label(),
+        pruned_bytes,
+        metric_attempt,
+        metric_bytes,
+        error_kind = error_kind.map(WarmIncrementalPruneErrorKind::as_str),
+        "cargo_metrics: warm incremental prune"
+    );
+    cargo_warm_incremental_prune::increment_attempt(project_id, outcome);
+    if matches!(outcome, Outcome::Pruned) {
+        cargo_warm_incremental_prune::add_pruned_bytes(project_id, pruned_bytes);
+    }
+}
+
 /// Log + metric for a successful warm-base seed.
 pub fn record_seed_hit(project_id: &str) {
     info!(
@@ -98,6 +182,95 @@ mod tests {
         TEST_MUTEX
             .lock()
             .expect("cargo_metrics test mutex poisoned")
+    }
+
+    fn metric_value(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with(metric)
+                    && labels
+                        .iter()
+                        .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")))
+            })
+            .unwrap_or_else(|| panic!("missing {metric}{labels:?} in:\n{rendered}"))
+            .rsplit_once(' ')
+            .and_then(|(_, value)| value.parse().ok())
+            .expect("metric sample should end with a number")
+    }
+
+    #[test]
+    fn warm_incremental_prune_records_exact_deltas_for_outcomes_and_error_kinds() {
+        let _guard = test_guard();
+        djinn_telemetry::init().unwrap();
+
+        let project_id = "worker-warm-incremental-prune-metrics";
+        record_warm_incremental_prune(
+            project_id,
+            WarmIncrementalPruneResult::Pruned { pruned_bytes: 4096 },
+        );
+        record_warm_incremental_prune(project_id, WarmIncrementalPruneResult::AlreadyAbsent);
+        record_warm_incremental_prune(
+            project_id,
+            WarmIncrementalPruneResult::UnsafePath {
+                error_kind: WarmIncrementalPruneErrorKind::TargetMismatch,
+            },
+        );
+
+        // Exercise every closed error kind. Error strings cannot enter metric
+        // labels because the wrapper accepts this enum rather than `&str`.
+        for error_kind in [
+            WarmIncrementalPruneErrorKind::Scan,
+            WarmIncrementalPruneErrorKind::Permission,
+            WarmIncrementalPruneErrorKind::Remove,
+            WarmIncrementalPruneErrorKind::TargetMismatch,
+            WarmIncrementalPruneErrorKind::InvalidProjectId,
+            WarmIncrementalPruneErrorKind::Symlink,
+            WarmIncrementalPruneErrorKind::LockOpen,
+            WarmIncrementalPruneErrorKind::LockProbe,
+            WarmIncrementalPruneErrorKind::LockAcquire,
+        ] {
+            record_warm_incremental_prune(
+                project_id,
+                WarmIncrementalPruneResult::Failed { error_kind },
+            );
+        }
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let attempts = djinn_telemetry::cargo_warm_incremental_prune::TOTAL;
+        for (outcome, expected) in [
+            ("pruned", 1.0),
+            ("already_absent", 1.0),
+            ("unsafe_path", 1.0),
+            ("failed", 9.0),
+        ] {
+            assert_eq!(
+                metric_value(
+                    &rendered,
+                    attempts,
+                    &[("project_id", project_id), ("outcome", outcome)],
+                ),
+                expected,
+                "unexpected attempt delta for {outcome}",
+            );
+        }
+        assert_eq!(
+            metric_value(
+                &rendered,
+                djinn_telemetry::cargo_warm_incremental_prune::PRUNED_BYTES_TOTAL,
+                &[("project_id", project_id)],
+            ),
+            4096.0,
+            "absent, unsafe, and failed attempts must add zero logical bytes",
+        );
+        for line in rendered.lines() {
+            if line.starts_with(attempts) {
+                assert!(
+                    !line.contains("error_kind="),
+                    "incremental-prune errors must not be metric labels: {line}"
+                );
+            }
+        }
     }
 
     #[test]
