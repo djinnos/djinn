@@ -2958,6 +2958,7 @@ fn gate_snapshot(task_id: &str, head_sha: &str, ci_status: CiStatus) -> TaskPrCi
         last_seen_at: "2026-01-01T00:00:00.000Z".to_owned(),
         same_signature_count: 0,
         last_remediation_base_sha: None,
+        merge_queue: None,
     }
 }
 
@@ -3996,6 +3997,7 @@ fn durable_snapshot(
         last_seen_at: "2026-07-01T00:00:00.000Z".to_owned(),
         same_signature_count,
         last_remediation_base_sha: Some(head_sha.to_owned()),
+        merge_queue: None,
     }
 }
 
