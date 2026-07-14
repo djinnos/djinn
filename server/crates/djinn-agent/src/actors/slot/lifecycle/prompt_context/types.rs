@@ -7,6 +7,7 @@ use djinn_core::models::Task;
 use djinn_core::models::task_attempt::TaskAttemptPromptSummary;
 
 use crate::actors::slot::MergeConflictMetadata;
+use crate::actors::slot::lifecycle::memory_intent_planner::PlannedQuery;
 use crate::context::AgentContext;
 use crate::roles::AgentRole;
 use crate::skills::ResolvedSkill;
@@ -68,6 +69,9 @@ pub(crate) struct PromptContextInputs<'a> {
     pub resolved_skills: &'a [ResolvedSkill],
     pub app_state: &'a AgentContext,
     pub knowledge_identity: Option<KnowledgeContextIdentity<'a>>,
+    /// Validated planner queries from the attributed host call. `None` keeps
+    /// the legacy scope-only rendering path byte-for-byte unchanged.
+    pub planned_queries: Option<&'a [PlannedQuery]>,
     pub read_sources: &'a [ReadSourceInfo],
     pub worker_resume_note: Option<&'a str>,
     pub arbiter_directive: Option<&'a str>,

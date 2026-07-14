@@ -949,6 +949,21 @@ impl SupervisorServices for RpcServices {
             },
         }
     }
+
+    async fn plan_memory_intents(
+        &self,
+        request: crate::services::wire::AttributedPlannerRequest,
+    ) -> Result<crate::services::wire::PlannerAttemptResult, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::PlanMemoryIntents { request })
+            .await
+        {
+            Ok(ServiceRpcResponse::PlanMemoryIntents(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -1333,6 +1348,15 @@ impl SupervisorServices for UnimplementedRpcServices {
     ) -> BranchPublicationResult {
         unimplemented!(
             "UnimplementedRpcServices::publish_branch_to_github — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn plan_memory_intents(
+        &self,
+        _request: crate::services::wire::AttributedPlannerRequest,
+    ) -> Result<crate::services::wire::PlannerAttemptResult, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::plan_memory_intents — construct RpcServices for real RPC"
         )
     }
 }

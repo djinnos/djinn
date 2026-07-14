@@ -984,6 +984,7 @@ pub(crate) async fn execute_stage(
             created_by_user_id: task.created_by_user_id.as_deref(),
             resume_progress_summary: spec.resume_lifecycle_metadata.as_ref().and_then(|metadata| metadata.last_durable_progress_summary.as_deref()),
         }),
+        planned_queries: None,
         read_sources: &read_sources,
         worker_resume_note: worker_resume_note.as_deref(),
         arbiter_directive: arbiter_directive.as_deref(),
