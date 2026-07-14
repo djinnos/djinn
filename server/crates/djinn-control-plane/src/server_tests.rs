@@ -3,11 +3,11 @@
 mod tests {
     use std::{sync::Arc, time::Duration};
 
+    use djinn_core::models::DispatchPause;
     use djinn_core::{
         auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
         events::{DjinnEventEnvelope, EventBus},
     };
-    use djinn_core::models::DispatchPause;
     use djinn_db::repositories::dispatch_pause::{DispatchPauseRepository, DispatchPauseTarget};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use rmcp::{Json, ServerHandler, handler::server::wrapper::Parameters};
@@ -24,15 +24,27 @@ mod tests {
 
     impl std::ops::Deref for TestMcpServer {
         type Target = DjinnMcpServer;
-        fn deref(&self) -> &Self::Target { &self.0 }
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
     }
 
     impl TestMcpServer {
-        async fn memory_write(&self, params: Parameters<WriteParams>) -> Json<crate::tools::memory_tools::MemoryNoteResponse> {
-            REVISION_CALLER_CONTEXT.scope(test_revision_caller(), self.0.memory_write(params)).await
+        async fn memory_write(
+            &self,
+            params: Parameters<WriteParams>,
+        ) -> Json<crate::tools::memory_tools::MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT
+                .scope(test_revision_caller(), self.0.memory_write(params))
+                .await
         }
-        async fn memory_edit(&self, params: Parameters<EditParams>) -> Json<crate::tools::memory_tools::MemoryNoteResponse> {
-            REVISION_CALLER_CONTEXT.scope(test_revision_caller(), self.0.memory_edit(params)).await
+        async fn memory_edit(
+            &self,
+            params: Parameters<EditParams>,
+        ) -> Json<crate::tools::memory_tools::MemoryNoteResponse> {
+            REVISION_CALLER_CONTEXT
+                .scope(test_revision_caller(), self.0.memory_edit(params))
+                .await
         }
     }
 

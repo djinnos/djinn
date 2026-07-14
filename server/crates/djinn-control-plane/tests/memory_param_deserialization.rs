@@ -16,12 +16,13 @@ use djinn_control_plane::tools::memory_tools::{
 #[test]
 fn write_params_deserialize() {
     let p: WriteParams = serde_json::from_value(
-        serde_json::json!({"project":"/tmp/p","title":"T","content":"C","type":"adr"}),
+        serde_json::json!({"project":"/tmp/p","title":"T","content":"C","reason":"record architecture decision","type":"adr"}),
     )
     .unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.title, "T");
     assert_eq!(p.content, "C");
+    assert_eq!(p.reason, "record architecture decision");
     assert_eq!(p.note_type, "adr");
     assert!(p.tags.is_none());
 }
@@ -29,10 +30,11 @@ fn write_params_deserialize() {
 #[test]
 fn write_and_move_params_accept_mergeable_case_and_pitfall_types() {
     let write: WriteParams = serde_json::from_value(
-        serde_json::json!({"project":"/tmp/p","title":"T","content":"C","type":"case"}),
+        serde_json::json!({"project":"/tmp/p","title":"T","content":"C","reason":"record case study","type":"case"}),
     )
     .unwrap();
     assert_eq!(write.note_type, "case");
+    assert_eq!(write.reason, "record case study");
 
     let moved: MoveParams = serde_json::from_value(
         serde_json::json!({"project":"/tmp/p","identifier":"a","type":"pitfall"}),
@@ -63,13 +65,14 @@ fn search_params_deserialize() {
 #[test]
 fn edit_params_deserialize() {
     let p: EditParams = serde_json::from_value(
-        serde_json::json!({"project":"/tmp/p","identifier":"a","operation":"append","content":"x"}),
+        serde_json::json!({"project":"/tmp/p","identifier":"a","operation":"append","content":"x","reason":"append supporting detail"}),
     )
     .unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.identifier, "a");
     assert_eq!(p.operation, "append");
     assert_eq!(p.content, "x");
+    assert_eq!(p.reason, "append supporting detail");
 }
 
 #[test]
@@ -86,10 +89,81 @@ fn move_params_deserialize() {
 
 #[test]
 fn delete_params_deserialize() {
-    let p: DeleteParams =
-        serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"a"})).unwrap();
+    let p: DeleteParams = serde_json::from_value(
+        serde_json::json!({"project":"/tmp/p","identifier":"a","reason":"remove obsolete note"}),
+    )
+    .unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.identifier, "a");
+    assert_eq!(p.reason, "remove obsolete note");
+}
+
+#[test]
+fn write_params_require_reason_and_reject_unknown_attribution() {
+    assert!(
+        serde_json::from_value::<WriteParams>(serde_json::json!({
+            "project": "/tmp/p",
+            "title": "T",
+            "content": "C",
+            "type": "adr"
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<WriteParams>(serde_json::json!({
+            "project": "/tmp/p",
+            "title": "T",
+            "content": "C",
+            "reason": "record architecture decision",
+            "type": "adr",
+            "actor_id": "spoofed"
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn edit_params_require_reason_and_reject_unknown_provenance() {
+    assert!(
+        serde_json::from_value::<EditParams>(serde_json::json!({
+            "project": "/tmp/p",
+            "identifier": "a",
+            "operation": "append",
+            "content": "x"
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<EditParams>(serde_json::json!({
+            "project": "/tmp/p",
+            "identifier": "a",
+            "operation": "append",
+            "content": "x",
+            "reason": "append supporting detail",
+            "provenance": "spoofed"
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn delete_params_require_reason_and_reject_unknown_session() {
+    assert!(
+        serde_json::from_value::<DeleteParams>(serde_json::json!({
+            "project": "/tmp/p",
+            "identifier": "a"
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<DeleteParams>(serde_json::json!({
+            "project": "/tmp/p",
+            "identifier": "a",
+            "reason": "remove obsolete note",
+            "session_id": "spoofed"
+        }))
+        .is_err()
+    );
 }
 
 #[test]
