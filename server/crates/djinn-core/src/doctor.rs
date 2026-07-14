@@ -45,6 +45,16 @@ use thiserror::Error;
 
 pub mod checks;
 
+// Keep the live retrieval-health check available through the framework's
+// top-level API. Doctor MCP consumers intentionally import these types from
+// `djinn_core::doctor` rather than reaching into the nested check module.
+pub use checks::retrieval::{
+    DEFAULT_QUERY_FLOOR, DEFAULT_WINDOW_HOURS, DEFAULT_ZERO_RESULT_THRESHOLD, EntryPointCounts,
+    MAX_QUERY_FLOOR, MAX_WINDOW_HOURS, MAX_ZERO_RESULT_THRESHOLD, MIN_QUERY_FLOOR,
+    MIN_WINDOW_HOURS, MIN_ZERO_RESULT_THRESHOLD, RETRIEVAL_ZERO_RESULT_NAME, RetrievalHealthConfig,
+    RetrievalHealthConfigError, RetrievalHealthDataSource, RetrievalHealthSnapshot,
+    RetrievalProjectWindowSnapshot, RetrievalZeroResultCheck,
+};
 
 /// Errors that a [`DoctorCheck`] can surface from `run` or `fix`.
 #[derive(Debug, Error)]

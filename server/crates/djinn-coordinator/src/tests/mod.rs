@@ -1410,7 +1410,6 @@ mod i3mv_regression_tests;
 #[cfg(test)]
 mod operator_explanation_tests;
 
-
 #[cfg(test)]
 mod tripwire_planner_escalation;
 

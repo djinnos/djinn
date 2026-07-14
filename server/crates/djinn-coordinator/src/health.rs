@@ -335,11 +335,9 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
             let task = match task_repo.get_by_short_id(short_id).await {
                 Ok(Some(task)) => Some(task),
                 Ok(None) => {
-                    // Task not found. For the sweep, a missing task with an open
-                    // PR is considered stale — the PR is orphaned. We create a
-                    // synthetic minimal task record for the guardrail check.
-                    // Use epoch as timestamps so the grace period check passes
-                    // (the task is considered long-closed).
+                    // A missing task makes the open PR orphaned. The lightweight
+                    // cleanup target below uses epoch timestamps so the grace
+                    // period guard treats the orphan as long-closed.
                     tracing::info!(
                         project_id = %project.id,
                         pr = pr.number,
@@ -365,14 +363,13 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
                 }
             };
 
-            // Only reap PRs for tasks that are closed (or we created a synthetic
-            // closed one above).
-            if task.as_ref().is_some_and(|task| task.status != "closed") {
+            // Only reap PRs for closed tasks or orphaned PRs.
+            if let Some(open_task) = task.as_ref().filter(|task| task.status != "closed") {
                 tracing::debug!(
                     project_id = %project.id,
                     pr = pr.number,
                     head = %head_branch,
-                    task_status = %task.as_ref().expect("present task was checked").status,
+                    task_status = %open_task.status,
                     "CoordinatorActor: stale PR sweep skipping PR whose task is still open"
                 );
                 stats.prs_skipped += 1;
@@ -383,7 +380,14 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
             }
 
             // Run guardrail checks via PrCleanupPolicy.
-            let cleanup_target = task.as_ref().map(super::pr_poller::pr_cleanup::PrCleanupTarget::from).unwrap_or_else(|| super::pr_poller::pr_cleanup::PrCleanupTarget { short_id: short_id.to_owned(), closed_at: Some("1970-01-01T00:00:00Z".to_owned()), updated_at: "1970-01-01T00:00:00Z".to_owned() });
+            let cleanup_target = task
+                .as_ref()
+                .map(super::pr_poller::pr_cleanup::PrCleanupTarget::from)
+                .unwrap_or_else(|| super::pr_poller::pr_cleanup::PrCleanupTarget {
+                    short_id: short_id.to_owned(),
+                    closed_at: Some("1970-01-01T00:00:00Z".to_owned()),
+                    updated_at: "1970-01-01T00:00:00Z".to_owned(),
+                });
             match cleanup_policy.should_cleanup_pr(&cleanup_target, pr).await {
                 Ok(true) => {
                     // Guardrails passed — proceed with cleanup.
@@ -523,7 +527,16 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
             // ── Task activity log entry (orphaned PRs have no task row).
             if let Some(task) = task.as_ref() {
                 let activity_payload = serde_json::json!({ "event": "stale_pr_swept", "pr_number": pr.number, "pr_url": pr.html_url, "branch": head_branch, "project_id": project.id });
-                if let Err(e) = task_repo.log_activity(Some(&task.id), "system", "system", "stale_pr_swept", &activity_payload.to_string()).await {
+                if let Err(e) = task_repo
+                    .log_activity(
+                        Some(&task.id),
+                        "system",
+                        "system",
+                        "stale_pr_swept",
+                        &activity_payload.to_string(),
+                    )
+                    .await
+                {
                     tracing::warn!(error = %e, project_id = %project.id, task_id = %task.id, pr = pr.number, "CoordinatorActor: stale PR sweep failed to write activity log; continuing");
                 }
             }

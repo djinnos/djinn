@@ -22,12 +22,18 @@ pub(crate) struct PrCleanupTarget {
 
 impl From<&Task> for PrCleanupTarget {
     fn from(task: &Task) -> Self {
-        Self { short_id: task.short_id.clone(), closed_at: task.closed_at.clone(), updated_at: task.updated_at.clone() }
+        Self {
+            short_id: task.short_id.clone(),
+            closed_at: task.closed_at.clone(),
+            updated_at: task.updated_at.clone(),
+        }
     }
 }
 
 impl From<&PrCleanupTarget> for PrCleanupTarget {
-    fn from(task: &PrCleanupTarget) -> Self { task.clone() }
+    fn from(task: &PrCleanupTarget) -> Self {
+        task.clone()
+    }
 }
 
 /// GitHub operations needed by PR/branch cleanup guardrails.
@@ -174,7 +180,11 @@ impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
     ///
     /// Emits `djinn_inline_cleanup_skipped_total` metrics for each skip reason
     /// and `djinn_inline_pr_closed_total` when the PR would be closed.
-    pub(crate) async fn should_cleanup_pr<T: Into<PrCleanupTarget>>(&self, task: T, pr: &PullRequest) -> Result<bool> {
+    pub(crate) async fn should_cleanup_pr<T: Into<PrCleanupTarget>>(
+        &self,
+        task: T,
+        pr: &PullRequest,
+    ) -> Result<bool> {
         let task = task.into();
         if !self.config.enabled {
             tracing::info!(task_id = %task.short_id, pr = pr.number, "PR cleanup disabled; skipping PR cleanup");
@@ -249,7 +259,11 @@ impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
     /// Return true when it is safe and intended to delete `branch`.
     ///
     /// Emits `djinn_inline_cleanup_skipped_total` metrics for each skip reason.
-    pub(crate) async fn should_delete_branch(&self, task: &PrCleanupTarget, branch: &str) -> Result<bool> {
+    pub(crate) async fn should_delete_branch(
+        &self,
+        task: &PrCleanupTarget,
+        branch: &str,
+    ) -> Result<bool> {
         if !self.config.enabled {
             tracing::info!(task_id = %task.short_id, branch, "PR cleanup disabled; skipping branch deletion");
             djinn_telemetry::inline_cleanup::increment_skipped(
@@ -258,7 +272,7 @@ impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
             return Ok(false);
         }
 
-        if self.within_grace_period(&task)? {
+        if self.within_grace_period(task)? {
             tracing::info!(task_id = %task.short_id, branch, "Branch cleanup skipped during grace period");
             djinn_telemetry::inline_cleanup::increment_skipped(
                 djinn_telemetry::inline_cleanup::REASON_GRACE_PERIOD,
@@ -421,7 +435,10 @@ impl CoordinatorActor {
             {
                 Ok((pr, _checks)) => {
                     if pr.state == PrState::Open {
-                        match policy.should_cleanup_pr(&PrCleanupTarget::from(task), &pr).await {
+                        match policy
+                            .should_cleanup_pr(&PrCleanupTarget::from(task), &pr)
+                            .await
+                        {
                             Ok(true) if policy.config().dry_run => {
                                 self.log_inline_cleanup_activity(
                                     task,
@@ -508,7 +525,10 @@ impl CoordinatorActor {
             }
         }
 
-        match policy.delete_branch_if_allowed(&PrCleanupTarget::from(task), &task_branch).await {
+        match policy
+            .delete_branch_if_allowed(&PrCleanupTarget::from(task), &task_branch)
+            .await
+        {
             Ok(BranchCleanupOutcome::Deleted) => {
                 self.log_inline_cleanup_activity(
                     task,
