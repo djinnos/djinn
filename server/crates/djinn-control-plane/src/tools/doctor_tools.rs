@@ -425,7 +425,7 @@ async fn prefetch_retrieval_check(server: &DjinnMcpServer) -> Result<Arc<dyn Doc
                             entry.as_str().to_owned(),
                             EntryPointCounts {
                                 total_queries: evidence.trace_count.max(0) as u64,
-                                zero_result_queries: evidence.zero_result_count.max(0) as u64,
+                                zero_result_queries: evidence.zero_result_trace_count.max(0) as u64,
                             },
                         )
                     })
