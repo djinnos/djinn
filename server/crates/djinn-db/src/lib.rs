@@ -159,8 +159,8 @@ pub use repositories::{
     },
     session_message::SessionMessageRepository,
     settings::SettingsRepository,
-    task::TaskRepository,
     task::EffectiveCreatorProvenance,
+    task::TaskRepository,
     task::{
         ActivityQuery, BlockerRef, ChildDisposition, CountQuery, CreateTaskInProjectParams,
         CreateTaskParams, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
