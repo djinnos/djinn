@@ -665,6 +665,17 @@ impl CoordinatorActor {
         )
         .await;
 
+        // Fold the merge-queue lane facts (run id, failing checks,
+        // same-signature count) into the CI failure sections when the task's CI
+        // snapshot carries a merge-queue rejection, so both the visibility
+        // comment and the Planner remediation reason name why the PR keeps
+        // getting dequeued despite a green PR head.
+        let mut ci_failure_sections: Vec<String> = ci_failure_sections.to_vec();
+        if let Some(mq_section) = super::merge_queue_lane_escalation_section(task) {
+            ci_failure_sections.push(mq_section);
+        }
+        let ci_failure_sections = ci_failure_sections;
+
         let sections_text = if ci_failure_sections.is_empty() {
             String::new()
         } else {

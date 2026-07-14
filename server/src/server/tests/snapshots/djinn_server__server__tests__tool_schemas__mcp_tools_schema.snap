@@ -21835,6 +21835,17 @@ expression: signatures
                 "null"
               ]
             },
+            "merge_queue": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CiMergeQueueLane"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Merge-queue (`merge_group`) failure lane for the current PR head.\n\nPresent only when GitHub's merge queue rejected the PR at dequeue time\n(a PR head whose own required checks are green can still be dequeued if\nthe heavy `merge_group` stages fail). Populated from the `mq_*` columns\nof `task_pr_ci_snapshots`; omitted entirely when no merge-queue failure\nhas been recorded for the current head."
+            },
             "mirror_head_sha": {
               "description": "Head SHA of the internal mirror branch, when known.",
               "type": [
@@ -21901,6 +21912,69 @@ expression: signatures
               "type": "string"
             }
           ]
+        },
+        "CiMergeQueueLane": {
+          "description": "The merge-queue (`merge_group`) failure lane surfaced in a\n[`CiGateSnapshot`].\n\nMirrors `djinn_core::models::MergeQueueLane` in serialized form. GitHub's\nmerge queue runs the heavy CI stages on the ephemeral `merge_group` ref, so\na PR whose own head checks pass can still be rejected by the queue. This\nlane records that queue verdict with its own failure fingerprint and\nsame-signature counting, independent of the PR-head lane.",
+          "properties": {
+            "failed_check_names": {
+              "description": "Names of the merge-group check runs that failed.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "failure_fingerprint": {
+              "description": "Stable fingerprint of the merge-group failure signature.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "first_seen_at": {
+              "description": "ISO-8601 timestamp when this merge-queue lane state was first observed.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head_sha": {
+              "description": "The `head_sha` of the failed merge-group run (the ephemeral queue ref\nhead), when known.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_seen_at": {
+              "description": "ISO-8601 timestamp when this merge-queue lane state was last observed.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_id": {
+              "description": "The `merge_group` Actions run id that failed, when known.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "same_signature_count": {
+              "description": "How many consecutive dequeue observations carried the same\n`failure_fingerprint` in this lane.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "state": {
+              "description": "Lane state, e.g. `\"dequeued_failure\"`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "failed_check_names",
+            "same_signature_count"
+          ],
+          "type": "object"
         },
         "CiStatus": {
           "description": "Required-CI status for the current PR head.\n\nSerializes/deserializes to/from the exact wire strings consumed by the\nbackend DTOs and (eventually) the frontend. These values are intentionally\nindependent of `TaskStatus`; lifecycle policy (e.g. `awaiting_ci`) is\nderived downstream, not encoded here.",
