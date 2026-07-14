@@ -108,6 +108,22 @@ mod tests {
     }
 
     #[test]
+    fn counts_each_hardlinked_regular_file_entry() {
+        let (_temp, root, base) = tree();
+        let first = base.join("debug/incremental/first");
+        fs::write(&first, vec![0; 13]).unwrap();
+        fs::hard_link(&first, base.join("debug/incremental/second")).unwrap();
+
+        assert_eq!(
+            prune_derived_base(&base, &root).unwrap(),
+            PruneResult {
+                outcome: PruneOutcome::Pruned,
+                logical_bytes: 26,
+            }
+        );
+    }
+
+    #[test]
     fn scan_does_not_follow_nested_links() {
         let (_temp, root, base) = tree();
         let outside = root.join("outside");
@@ -145,6 +161,52 @@ mod tests {
         let error =
             prune_warm_incremental_for_target("project", Path::new("/somewhere-else")).unwrap_err();
         assert_eq!(error.kind, PruneErrorKind::TargetMismatch);
+    }
+
+    #[test]
+    fn rejects_derived_base_lexically_outside_cache_root_without_mutation() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("cache");
+        let base = temp.path().join("outside/project");
+        let incremental = base.join("debug/incremental");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&incremental).unwrap();
+        fs::write(incremental.join("keep"), b"outside").unwrap();
+
+        let error = prune_derived_base_with_operations(
+            &base,
+            &root,
+            |_| panic!("outside base must not be scanned"),
+            |_| panic!("outside base must not be removed"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, PruneErrorKind::Scan);
+        assert_eq!(fs::read(incremental.join("keep")).unwrap(), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_canonical_base_escape_through_intermediate_symlink_without_mutation() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("cache");
+        let outside = temp.path().join("outside");
+        let base = root.join("linked/project");
+        let incremental = base.join("debug/incremental");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+        fs::create_dir_all(&incremental).unwrap();
+        fs::write(incremental.join("keep"), b"outside").unwrap();
+
+        let error = prune_derived_base_with_operations(
+            &base,
+            &root,
+            |_| panic!("escaped base must not be scanned"),
+            |_| panic!("escaped base must not be removed"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, PruneErrorKind::Symlink);
+        assert_eq!(fs::read(incremental.join("keep")).unwrap(), b"outside");
     }
 
     #[test]
