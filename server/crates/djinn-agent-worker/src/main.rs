@@ -66,6 +66,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod cargo_cache_policy;
+mod cargo_incremental_prune;
 pub mod cargo_metrics;
 mod cargo_target_seed;
 mod checkpoint;

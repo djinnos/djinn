@@ -1,0 +1,499 @@
+//! Safe removal of Cargo's disposable warm-base incremental state.
+//!
+//! This module deliberately derives its deletion root from
+//! [`crate::cargo_target_seed::warm_base_dir`].  It is not a general purpose
+//! directory remover: callers cannot supply an arbitrary production path.
+
+use std::ffi::OsStr;
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::os::fd::AsRawFd;
+use std::path::{Component, Path, PathBuf};
+
+use thiserror::Error;
+
+use crate::cargo_target_seed::{WARM_BASE_ROOT, warm_base_dir};
+
+const CARGO_TARGET_DIR: &str = "CARGO_TARGET_DIR";
+const LOCK_DIRECTORY: &str = ".warm-locks";
+
+/// The bounded reason used by orchestration and telemetry for a failed prune.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PruneErrorKind {
+    Scan,
+    Permission,
+    Remove,
+    TargetMismatch,
+    InvalidProjectId,
+    Symlink,
+    LockOpen,
+    LockProbe,
+    LockAcquire,
+}
+
+impl PruneErrorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scan => "scan",
+            Self::Permission => "permission",
+            Self::Remove => "remove",
+            Self::TargetMismatch => "target_mismatch",
+            Self::InvalidProjectId => "invalid_project_id",
+            Self::Symlink => "symlink",
+            Self::LockOpen => "lock_open",
+            Self::LockProbe => "lock_probe",
+            Self::LockAcquire => "lock_acquire",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn tree() -> (TempDir, PathBuf, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("cache");
+        let base = root.join("project");
+        fs::create_dir_all(base.join("debug/incremental/nested")).unwrap();
+        (temp, root, base)
+    }
+
+    #[test]
+    fn rejects_non_component_project_ids() {
+        for id in ["", ".", "..", "a/b", "/absolute"] {
+            assert_eq!(
+                validate_project_id(id).unwrap_err().kind,
+                PruneErrorKind::InvalidProjectId
+            );
+        }
+        validate_project_id("project-1").unwrap();
+    }
+
+    #[test]
+    fn absent_base_and_partial_trees_are_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("cache");
+        fs::create_dir_all(&root).unwrap();
+        let base = root.join("project");
+        assert_eq!(
+            prune_derived_base(&base, &root).unwrap().outcome,
+            PruneOutcome::AlreadyAbsent
+        );
+        fs::create_dir_all(base.join("debug")).unwrap();
+        assert_eq!(
+            prune_derived_base(&base, &root).unwrap().outcome,
+            PruneOutcome::AlreadyAbsent
+        );
+    }
+
+    #[test]
+    fn counts_logical_regular_file_lengths_and_changes_no_sibling() {
+        let (_temp, root, base) = tree();
+        fs::write(base.join("debug/incremental/a"), vec![0; 7]).unwrap();
+        fs::write(base.join("debug/incremental/nested/b"), vec![0; 11]).unwrap();
+        fs::write(base.join("debug/keep"), b"unchanged").unwrap();
+        let result = prune_derived_base(&base, &root).unwrap();
+        assert_eq!(
+            result,
+            PruneResult {
+                outcome: PruneOutcome::Pruned,
+                logical_bytes: 18
+            }
+        );
+        assert!(!base.join("debug/incremental").exists());
+        assert_eq!(fs::read(base.join("debug/keep")).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn scan_does_not_follow_nested_links() {
+        let (_temp, root, base) = tree();
+        let outside = root.join("outside");
+        fs::write(&outside, b"outside").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, base.join("debug/incremental/link")).unwrap();
+        let result = prune_derived_base(&base, &root).unwrap();
+        assert_eq!(result.logical_bytes, 0);
+        assert_eq!(fs::read(outside).unwrap(), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinks_at_delete_components() {
+        for component in ["project", "debug", "incremental"] {
+            let (_temp, root, base) = tree();
+            let outside = root.join("outside");
+            fs::create_dir_all(&outside).unwrap();
+            let path = match component {
+                "project" => base.clone(),
+                "debug" => base.join("debug"),
+                _ => base.join("debug/incremental"),
+            };
+            fs::remove_dir_all(&path).unwrap();
+            std::os::unix::fs::symlink(&outside, &path).unwrap();
+            assert_eq!(
+                prune_derived_base(&base, &root).unwrap_err().kind,
+                PruneErrorKind::Symlink
+            );
+        }
+    }
+
+    #[test]
+    fn target_must_be_exact_derived_path() {
+        let error =
+            prune_warm_incremental_for_target("project", Path::new("/somewhere-else")).unwrap_err();
+        assert_eq!(error.kind, PruneErrorKind::TargetMismatch);
+    }
+
+    #[test]
+    fn scanner_counts_sparse_logical_bytes() {
+        let (_temp, root, base) = tree();
+        let mut file = File::create(base.join("debug/incremental/sparse")).unwrap();
+        file.set_len(1024 * 1024).unwrap();
+        file.write_all(b"x").unwrap();
+        assert_eq!(
+            prune_derived_base(&base, &root).unwrap().logical_bytes,
+            1024 * 1024
+        );
+    }
+}
+
+/// A fail-closed pruning or locking error.  The free-form detail is for logs,
+/// never for a metric label.
+#[derive(Debug, Error)]
+#[error("cargo incremental prune {kind}: {detail}", kind = .kind.as_str())]
+pub struct PruneError {
+    pub kind: PruneErrorKind,
+    detail: String,
+}
+
+impl PruneError {
+    fn new(kind: PruneErrorKind, error: impl std::fmt::Display) -> Self {
+        Self {
+            kind,
+            detail: error.to_string(),
+        }
+    }
+}
+
+/// Terminal result of a successful prune attempt.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct PruneResult {
+    /// `pruned` when an existing incremental directory was removed.
+    pub outcome: PruneOutcome,
+    /// Sum of regular-file logical lengths scanned before removal.
+    pub logical_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PruneOutcome {
+    Pruned,
+    AlreadyAbsent,
+}
+
+impl PruneOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pruned => "pruned",
+            Self::AlreadyAbsent => "already_absent",
+        }
+    }
+}
+
+/// An exclusive PVC lock. Dropping it closes the file descriptor, releasing
+/// the advisory lock; process death has the same kernel-guaranteed effect.
+pub struct WarmBaseLock {
+    _file: File,
+}
+
+impl WarmBaseLock {
+    /// Probe the repository-local filesystem and wait for the per-project lock.
+    /// A lock open/probe/acquisition error intentionally fails closed.
+    pub fn acquire(project_id: &str) -> Result<Self, PruneError> {
+        validate_project_id(project_id)?;
+        let lock_dir = Path::new(WARM_BASE_ROOT).join(LOCK_DIRECTORY);
+        fs::create_dir_all(&lock_dir)
+            .map_err(|error| PruneError::new(PruneErrorKind::LockOpen, error))?;
+        probe_advisory_lock(&lock_dir)?;
+
+        let path = lock_dir.join(format!("{project_id}.lock"));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)
+            .map_err(|error| PruneError::new(PruneErrorKind::LockOpen, error))?;
+        flock_exclusive(&file)
+            .map_err(|error| PruneError::new(PruneErrorKind::LockAcquire, error))?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// Validate the configured warm target and remove only `debug/incremental`.
+///
+/// The target must exactly equal `warm_base_dir(project_id)` rather than merely
+/// canonically resolving to it. This catches accidental task-run target dirs
+/// before any filesystem mutation.
+pub fn prune_warm_incremental(project_id: &str) -> Result<PruneResult, PruneError> {
+    let configured = std::env::var_os(CARGO_TARGET_DIR).ok_or_else(|| {
+        PruneError::new(PruneErrorKind::TargetMismatch, "CARGO_TARGET_DIR is unset")
+    })?;
+    prune_warm_incremental_for_target(project_id, Path::new(&configured))
+}
+
+/// Same production derivation with an explicit environment value seam for
+/// deterministic callers/tests. `base` is still always derived internally.
+pub(crate) fn prune_warm_incremental_for_target(
+    project_id: &str,
+    configured_target: &Path,
+) -> Result<PruneResult, PruneError> {
+    validate_project_id(project_id)?;
+    let base = warm_base_dir(project_id);
+    if configured_target != base {
+        return Err(PruneError::new(
+            PruneErrorKind::TargetMismatch,
+            format!(
+                "configured {} does not exactly match {}",
+                configured_target.display(),
+                base.display()
+            ),
+        ));
+    }
+    prune_derived_base(&base, Path::new(WARM_BASE_ROOT))
+}
+
+fn validate_project_id(project_id: &str) -> Result<(), PruneError> {
+    let mut components = Path::new(project_id).components();
+    let valid = matches!(components.next(), Some(Component::Normal(part)) if part == OsStr::new(project_id))
+        && components.next().is_none()
+        && !project_id.is_empty();
+    if valid {
+        Ok(())
+    } else {
+        Err(PruneError::new(
+            PruneErrorKind::InvalidProjectId,
+            "project id must be one normal path component",
+        ))
+    }
+}
+
+fn prune_derived_base(base: &Path, cache_root: &Path) -> Result<PruneResult, PruneError> {
+    let canonical_root = checked_directory(cache_root, PruneErrorKind::Scan)?;
+    // This check is redundant for the production derivation, but makes the
+    // containment invariant explicit before inspecting descendants.
+    if !base.starts_with(cache_root) {
+        return Err(PruneError::new(
+            PruneErrorKind::Scan,
+            "derived base escapes cache root",
+        ));
+    }
+
+    let base_state = component_state(base, &canonical_root)?;
+    if base_state == ComponentState::Absent {
+        return Ok(absent());
+    }
+    let debug = base.join("debug");
+    if component_state(&debug, &canonical_root)? == ComponentState::Absent {
+        return Ok(absent());
+    }
+    let incremental = debug.join("incremental");
+    if component_state(&incremental, &canonical_root)? == ComponentState::Absent {
+        return Ok(absent());
+    }
+
+    let bytes = scan_regular_file_bytes(&incremental)?;
+    remove_incremental_dir(&incremental)?;
+    Ok(PruneResult {
+        outcome: PruneOutcome::Pruned,
+        logical_bytes: bytes,
+    })
+}
+
+#[derive(Eq, PartialEq)]
+enum ComponentState {
+    Present,
+    Absent,
+}
+
+/// Reject links/non-directories, then prove each existing component remains
+/// below the canonical cache root. For a missing component the nearest existing
+/// parent is canonicalized and checked instead.
+fn component_state(path: &Path, canonical_root: &Path) -> Result<ComponentState, PruneError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(PruneError::new(
+                    PruneErrorKind::Symlink,
+                    format!("{} is a symlink", path.display()),
+                ));
+            }
+            if !metadata.is_dir() {
+                return Err(PruneError::new(
+                    PruneErrorKind::Scan,
+                    format!("{} is not a directory", path.display()),
+                ));
+            }
+            let canonical = fs::canonicalize(path).map_err(classify_scan_error)?;
+            require_contained(&canonical, canonical_root)?;
+            Ok(ComponentState::Present)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = nearest_existing_parent(path)?;
+            require_contained(&parent, canonical_root)?;
+            Ok(ComponentState::Absent)
+        }
+        Err(error) => Err(classify_scan_error(error)),
+    }
+}
+
+fn checked_directory(path: &Path, kind: PruneErrorKind) -> Result<PathBuf, PruneError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| PruneError::new(kind, error))?;
+    if metadata.file_type().is_symlink() {
+        return Err(PruneError::new(
+            PruneErrorKind::Symlink,
+            format!("{} is a symlink", path.display()),
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(PruneError::new(
+            kind,
+            format!("{} is not a directory", path.display()),
+        ));
+    }
+    fs::canonicalize(path).map_err(classify_scan_error)
+}
+
+fn nearest_existing_parent(path: &Path) -> Result<PathBuf, PruneError> {
+    let mut parent = path.parent();
+    while let Some(candidate) = parent {
+        match fs::symlink_metadata(candidate) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(PruneError::new(
+                        PruneErrorKind::Symlink,
+                        format!("{} is a symlink", candidate.display()),
+                    ));
+                }
+                if !metadata.is_dir() {
+                    return Err(PruneError::new(
+                        PruneErrorKind::Scan,
+                        format!("{} is not a directory", candidate.display()),
+                    ));
+                }
+                return fs::canonicalize(candidate).map_err(classify_scan_error);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => parent = candidate.parent(),
+            Err(error) => return Err(classify_scan_error(error)),
+        }
+    }
+    Err(PruneError::new(PruneErrorKind::Scan, "no existing parent"))
+}
+
+fn require_contained(candidate: &Path, canonical_root: &Path) -> Result<(), PruneError> {
+    if candidate.starts_with(canonical_root) {
+        Ok(())
+    } else {
+        Err(PruneError::new(
+            PruneErrorKind::Symlink,
+            format!(
+                "{} escapes {}",
+                candidate.display(),
+                canonical_root.display()
+            ),
+        ))
+    }
+}
+
+fn scan_regular_file_bytes(root: &Path) -> Result<u64, PruneError> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut bytes = 0_u64;
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).map_err(classify_scan_error)? {
+            let entry = entry.map_err(classify_scan_error)?;
+            // `file_type` is lstat-like: do not call metadata on symlinks.
+            let file_type = entry.file_type().map_err(classify_scan_error)?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                let metadata = fs::symlink_metadata(entry.path()).map_err(classify_scan_error)?;
+                if metadata.is_file() {
+                    bytes = bytes.checked_add(metadata.len()).ok_or_else(|| {
+                        PruneError::new(PruneErrorKind::Scan, "logical byte count overflow")
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+// Kept as a small seam so deterministic tests can exercise remove failures;
+// production invokes exactly this one `remove_dir_all` call after scanning.
+fn remove_incremental_dir(path: &Path) -> Result<(), PruneError> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(PruneError::new(PruneErrorKind::Remove, error)),
+    }
+}
+
+fn absent() -> PruneResult {
+    PruneResult {
+        outcome: PruneOutcome::AlreadyAbsent,
+        logical_bytes: 0,
+    }
+}
+
+fn classify_scan_error(error: io::Error) -> PruneError {
+    let kind = if error.kind() == io::ErrorKind::PermissionDenied {
+        PruneErrorKind::Permission
+    } else {
+        PruneErrorKind::Scan
+    };
+    PruneError::new(kind, error)
+}
+
+fn probe_advisory_lock(lock_dir: &Path) -> Result<(), PruneError> {
+    let path = lock_dir.join(format!(".capability-{}.probe", std::process::id()));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+        .map_err(|error| PruneError::new(PruneErrorKind::LockProbe, error))?;
+    flock_exclusive_nonblocking(&file)
+        .map_err(|error| PruneError::new(PruneErrorKind::LockProbe, error))?;
+    // Explicit unlock verifies both lock operations on this filesystem. Closing
+    // the descriptor is also a release fallback if unlock itself fails.
+    flock_unlock(&file).map_err(|error| PruneError::new(PruneErrorKind::LockProbe, error))
+}
+
+fn flock_exclusive(file: &File) -> io::Result<()> {
+    flock(file, libc::LOCK_EX)
+}
+fn flock_exclusive_nonblocking(file: &File) -> io::Result<()> {
+    flock(file, libc::LOCK_EX | libc::LOCK_NB)
+}
+fn flock_unlock(file: &File) -> io::Result<()> {
+    flock(file, libc::LOCK_UN)
+}
+
+fn flock(file: &File, operation: libc::c_int) -> io::Result<()> {
+    loop {
+        // SAFETY: `file` owns a valid descriptor for the duration of this call;
+        // flock neither takes ownership nor requires aliasing guarantees.
+        let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
