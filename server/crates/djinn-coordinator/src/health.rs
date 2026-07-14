@@ -1747,6 +1747,17 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
     config: &crate::context::CacheCleanupConfig,
 ) -> CargoTargetRunDirSweepStats {
     let caps = djinn_core::cargo_target_runs::cargo_target_runs_caps_from_env();
+    sweep_orphaned_cargo_target_run_dirs_under_with_caps(db, root, config, caps).await
+}
+
+/// The cap-bearing implementation is separate so coordinator regressions can
+/// exercise a small deterministic budget without mutating process environment.
+async fn sweep_orphaned_cargo_target_run_dirs_under_with_caps(
+    db: &djinn_db::Database,
+    root: &Path,
+    config: &crate::context::CacheCleanupConfig,
+    caps: djinn_core::cargo_target_runs::CargoTargetRunsCaps,
+) -> CargoTargetRunDirSweepStats {
     let mode_label = config.mode.as_metric_label();
     let protected = match protected_cargo_target_run_ids(db).await {
         Ok(ids) => ids,
@@ -2124,40 +2135,18 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
     .await
     {
         Ok(Ok(trim)) => {
-            stats.cap_trimmed = trim.deleted;
-            stats.cap_errors = trim.errors;
-            stats.cap_final_allocated_bytes = Some(trim.final_allocated_bytes);
-            stats.cap_final_directory_count = Some(trim.final_top_level_directory_count);
-            stats.cap_protected = trim.protected;
-            stats.cap_outcome = Some(trim.outcome.as_str());
-            djinn_telemetry::cache_cleanup::increment_cleanup_total(
-                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
-                trim.outcome.as_str(),
-                mode_label,
-            );
+            record_cargo_target_run_trim(&mut stats, trim, mode_label);
             tracing::info!(root = %root.display(), max_dirs = caps.max_dirs, max_bytes = caps.max_bytes,
                 final_allocated_bytes = trim.final_allocated_bytes, final_top_level_directory_count = trim.final_top_level_directory_count,
                 removed = trim.deleted, protected = trim.protected, errors = trim.errors, cap_outcome = trim.outcome.as_str(),
                 "CoordinatorActor: cargo target run-dir joint cap completed");
         }
         Ok(Err(e)) => {
-            stats.cap_errors += 1;
-            stats.cap_outcome = Some("error");
-            djinn_telemetry::cache_cleanup::increment_cleanup_total(
-                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
-                djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
-                mode_label,
-            );
+            record_cargo_target_run_trim_failure(&mut stats, mode_label);
             tracing::warn!(error = %e, root = %root.display(), max_dirs = caps.max_dirs, max_bytes = caps.max_bytes, "CoordinatorActor: cargo target run-dir joint cap failed");
         }
         Err(e) => {
-            stats.cap_errors += 1;
-            stats.cap_outcome = Some("error");
-            djinn_telemetry::cache_cleanup::increment_cleanup_total(
-                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
-                djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
-                mode_label,
-            );
+            record_cargo_target_run_trim_failure(&mut stats, mode_label);
             tracing::warn!(error = %e, root = %root.display(), max_dirs = caps.max_dirs, max_bytes = caps.max_bytes, "CoordinatorActor: cargo target run-dir joint cap task join failed");
         }
     }
@@ -2165,6 +2154,43 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
     report_cargo_target_run_sweep(root, config, caps, &stats);
 
     stats
+}
+
+/// Preserve the engine's exact postcondition and bounded outcome as the
+/// coordinator's cap result. Only the bounded outcome becomes a metric label;
+/// IDs, paths, and budget values stay in structured logs.
+fn record_cargo_target_run_trim(
+    stats: &mut CargoTargetRunDirSweepStats,
+    trim: djinn_core::cargo_target_runs::CargoTargetRunsTrimResult,
+    mode_label: &'static str,
+) {
+    stats.cap_trimmed = trim.deleted;
+    stats.cap_errors = trim.errors;
+    stats.cap_final_allocated_bytes = Some(trim.final_allocated_bytes);
+    stats.cap_final_directory_count = Some(trim.final_top_level_directory_count);
+    stats.cap_protected = trim.protected;
+    stats.cap_outcome = Some(trim.outcome.as_str());
+    djinn_telemetry::cache_cleanup::increment_cleanup_total(
+        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+        trim.outcome.as_str(),
+        mode_label,
+    );
+}
+
+/// Record engine root-read failures and blocking-task join failures as terminal
+/// cap errors. No exact inventory can safely be claimed on either path.
+fn record_cargo_target_run_trim_failure(
+    stats: &mut CargoTargetRunDirSweepStats,
+    mode_label: &'static str,
+) {
+    stats.errors += 1;
+    stats.cap_errors += 1;
+    stats.cap_outcome = Some(djinn_telemetry::cache_cleanup::OUTCOME_ERROR);
+    djinn_telemetry::cache_cleanup::increment_cleanup_total(
+        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+        djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+        mode_label,
+    );
 }
 
 async fn protected_cargo_target_run_ids(
@@ -2958,6 +2984,52 @@ mod cache_cleanup_cross_path_tests {
                 .status()
                 .unwrap()
                 .success()
+        );
+    }
+
+    #[test]
+    fn joint_cap_result_propagates_exact_totals_and_every_bounded_outcome() {
+        use djinn_core::cargo_target_runs::{
+            CargoTargetRunsTrimOutcome as Outcome, CargoTargetRunsTrimResult,
+        };
+
+        for (outcome, deleted, errors, protected) in [
+            (Outcome::WithinBudget, 0, 0, 0),
+            (Outcome::TrimmedWithinBudget, 2, 0, 0),
+            (Outcome::OverBudgetProtected, 0, 0, 3),
+            (Outcome::OverBudgetError, 0, 4, 0),
+            (Outcome::OverBudgetProtectedAndError, 0, 5, 6),
+        ] {
+            let mut stats = CargoTargetRunDirSweepStats::default();
+            record_cargo_target_run_trim(
+                &mut stats,
+                CargoTargetRunsTrimResult {
+                    final_allocated_bytes: 12_345,
+                    final_top_level_directory_count: 7,
+                    deleted,
+                    errors,
+                    protected,
+                    outcome,
+                },
+                CacheCleanupMode::DryRun.as_metric_label(),
+            );
+            assert_eq!(stats.cap_final_allocated_bytes, Some(12_345));
+            assert_eq!(stats.cap_final_directory_count, Some(7));
+            assert_eq!(stats.cap_trimmed, deleted);
+            assert_eq!(stats.cap_errors, errors);
+            assert_eq!(stats.cap_protected, protected);
+            assert_eq!(stats.cap_outcome, Some(outcome.as_str()));
+        }
+
+        let mut stats = CargoTargetRunDirSweepStats::default();
+        record_cargo_target_run_trim_failure(
+            &mut stats,
+            CacheCleanupMode::DryRun.as_metric_label(),
+        );
+        assert_eq!((stats.errors, stats.cap_errors), (1, 1));
+        assert_eq!(
+            stats.cap_outcome,
+            Some(djinn_telemetry::cache_cleanup::OUTCOME_ERROR)
         );
     }
 
