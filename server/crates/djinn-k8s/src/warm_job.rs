@@ -680,7 +680,7 @@ mod tests {
         let cache_mount = mounts
             .get(crate::job::VOLUME_CACHE)
             .expect("shared cache mount");
-        assert_eq!(cache_mount.mount_path, "/cache");
+        assert_eq!(cache_mount.mount_path, crate::job::CACHE_MOUNT_DIR);
         assert_eq!(cache_mount.read_only, Some(false));
 
         let volumes: BTreeMap<&str, &Volume> = pod
@@ -711,12 +711,22 @@ mod tests {
                 )
             })
             .collect();
-        // The warm target and the advisory-lock directory both resolve under
-        // the writable cache mount. The remaining values are fingerprint and
-        // execution parity with the task-run cache environment.
+        // The warm target and the worker's advisory-lock directory both resolve
+        // under the writable cache mount. Keep the containment assertion in
+        // addition to the exact target value: this is the filesystem handoff
+        // the l15u/t6g0 worker contract requires, not merely matching strings.
+        let target_dir = env
+            .get("CARGO_TARGET_DIR")
+            .copied()
+            .expect("CARGO_TARGET_DIR");
+        assert!(
+            std::path::Path::new(target_dir).starts_with(&cache_mount.mount_path),
+            "warm target {target_dir} must reside under writable cache mount {}",
+            cache_mount.mount_path
+        );
         assert_eq!(
-            env.get("CARGO_TARGET_DIR").copied(),
-            Some("/cache/cargo-target/lock-project")
+            target_dir,
+            format!("{}/cargo-target/lock-project", crate::job::CACHE_MOUNT_DIR)
         );
         assert_eq!(env.get("CARGO_INCREMENTAL").copied(), Some("1"));
         assert_eq!(env.get("CARGO_HOME").copied(), Some("/cache/cargo"));
