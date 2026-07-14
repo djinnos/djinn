@@ -5343,7 +5343,13 @@ async fn provider_phase_scenario_counts_empty_assistant_backoff_not_local_time()
     // below includes all three backoff seconds.
     let backoff = empty_turn_backoff(1);
     clock.advance_mono(backoff);
+    // Pause the Tokio clock only now (after all DB-backed harness setup) so
+    // that `tokio::time::advance` can resolve the provider-owned empty-assistant
+    // backoff sleep deterministically. The resume before `run.await` restores
+    // real time for the remaining DB persistence in the reply loop.
+    tokio::time::pause();
     tokio::time::advance(backoff).await;
+    tokio::time::resume();
     assert!(run.await.0.is_ok());
     let after = render().expect("render phase metrics");
     let expected_provider_wait = 2 + 3 + backoff.as_secs() + 4 + 2;
@@ -5375,7 +5381,7 @@ async fn provider_phase_scenario_hands_streaming_side_tool_back_to_provider() {
                         })),
                     },
                     PhaseEvent {
-                        advance: Duration::from_secs(3),
+                        advance: Duration::ZERO,
                         event: Ok(StreamEvent::Done),
                     },
                 ],
@@ -5400,10 +5406,10 @@ async fn provider_phase_scenario_hands_streaming_side_tool_back_to_provider() {
     assert!(harness.run(&provider, &tools).await.0.is_ok());
     *PHASE_TOOL_CLOCK.lock().unwrap() = None;
     let after = render().expect("render phase metrics");
-    // The tool-use delta ends the first stream. Its later scripted `Done`
-    // event is intentionally not consumed: dispatch resumes with the second
-    // provider turn. Provider time is therefore 2 + 1 before the handoff and
-    // 4 + 2 after it, with the five tool seconds kept disjoint.
+    // The tool-use delta triggers an immediate concurrent-safe side-tool
+    // dispatch, then the stream terminates with a zero-advance Done event.
+    // Provider time is therefore 2 + 1 before the handoff and 4 + 2 after it,
+    // with the five tool seconds kept disjoint.
     assert_eq!(
         phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
         9
@@ -5472,13 +5478,21 @@ async fn provider_phase_scenario_cancellation_and_drop_flush_active_interval_onc
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn provider_phase_scripted_reply_loop_scenarios() {
     // Keep every database-backed harness and process-global refinement-role
     // collector snapshot in one CI-shard unit. The scenarios must remain
     // sequential: each one measures an exact before/after counter delta. The
     // dedicated refinement label also isolates these snapshots from the
     // worker-role dispatcher phase metric tests running in parallel.
+    //
+    // This entry point deliberately avoids `start_paused = true` because every
+    // scenario spins up a real database-backed `ReplyLoopHarness`. Pausing the
+    // Tokio clock at process start prevents the sqlx pool from establishing
+    // its first connection - the acquire timeout fires before real TCP I/O
+    // completes, producing a spurious `PoolTimedOut`. Only the empty-assistant
+    // backoff scenario manually pauses/resumes the clock around its
+    // `tokio::time::advance`, leaving all other DB work under real time.
     let _lock = PHASE_METRIC_LOCK.lock().unwrap();
     djinn_telemetry::init().expect("telemetry init");
 
