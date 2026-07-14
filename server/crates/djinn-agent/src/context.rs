@@ -69,11 +69,12 @@ impl Default for MemoryIntentPlannerConfig {
 impl MemoryIntentPlannerConfig {
     /// Build deployment configuration while preserving the safe disabled default.
     pub fn from_env() -> Self {
-        let mut config = Self::default();
-        config.enabled = std::env::var("DJINN_MEMORY_INTENT_PLANNER_ENABLED")
-            .map(|value| parse_bool_env(&value))
-            .unwrap_or(false);
-        config
+        Self {
+            enabled: std::env::var("DJINN_MEMORY_INTENT_PLANNER_ENABLED")
+                .map(|value| parse_bool_env(&value))
+                .unwrap_or(false),
+            ..Self::default()
+        }
     }
 
     /// Gate to evaluate before rendering the prompt or invoking a planner.

@@ -994,7 +994,7 @@ pub(crate) async fn execute_stage(
     // explicitly opt in through the dispatch context.
     let planner_config = &agent_context.memory_intent_planner;
     let planned_queries = if let Some(request) = prepare_planner_request(
-        &planner_config,
+        planner_config,
         PlannerInput {
             title: task.title.clone(),
             description: task.description.clone(),

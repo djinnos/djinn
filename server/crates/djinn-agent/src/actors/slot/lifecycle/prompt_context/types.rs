@@ -53,8 +53,10 @@ pub(crate) struct ReadSourceInfo {
 pub(crate) struct KnowledgeContextIdentity<'a> {
     pub session_id: &'a str,
     pub task_run_id: &'a str,
+    #[allow(dead_code)]
     pub created_by_user_id: Option<&'a str>,
     /// This remains untruncated; it is not the worker-facing resume note.
+    #[allow(dead_code)]
     pub resume_progress_summary: Option<&'a str>,
 }
 

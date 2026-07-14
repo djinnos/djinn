@@ -1,3 +1,4 @@
+// djinn:allow-oversize — cohesive prompt assembly; split only with dedicated regression coverage.
 //! Role-specific prompt-context assembly: conflict, activity, epic, knowledge,
 //! code-graph, and CI directives → rendered system prompt with extensions + skills.
 
@@ -739,6 +740,7 @@ struct KnowledgeTraceDurations {
 
 /// Persist a `LoadKnowledgeContext` retrieval trace row. Fail-open: logs and
 /// swallows all errors, never propagating them to the caller.
+#[allow(clippy::too_many_arguments)]
 async fn persist_knowledge_trace(
     task: &Task,
     task_paths: &[String],
