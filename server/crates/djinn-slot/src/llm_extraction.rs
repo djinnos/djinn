@@ -99,6 +99,7 @@ const EXTRACTION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 const NO_LLM_PROVIDER_WARNING: &str =
     "llm_extraction: no LLM provider available; skipping extraction";
+const EXTRACTION_SKIPPED_REASON: &str = "extraction completed without durable note output";
 
 enum LlmExtractionProviderResolution {
     Provider(Box<dyn LlmProvider>),
@@ -661,6 +662,50 @@ pub(crate) trait ExtractionNoteRepository: Send + Sync {
     ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>>;
 }
 
+/// Record the sole terminal event for a run that committed no canonical note
+/// revision. Invalid loaded provenance must not be replaced with anonymous
+/// attribution.
+async fn record_extraction_skipped(
+    note_repo: &dyn ExtractionNoteRepository,
+    project_id: &str,
+    session_id: &str,
+    task_id: &str,
+    task_run_id: Option<&str>,
+) {
+    let provenance = match TrustedNoteRevisionProvenance::new(
+        Some(session_id.to_owned()),
+        Some(task_id.to_owned()),
+        task_run_id.map(ToOwned::to_owned),
+    ) {
+        Ok(provenance) => provenance,
+        Err(error) => {
+            tracing::error!(%session_id, %task_id, %error, "llm_extraction: invalid trusted extraction provenance");
+            return;
+        }
+    };
+    let reason = match NoteRevisionReason::new(EXTRACTION_SKIPPED_REASON) {
+        Ok(reason) => reason,
+        Err(error) => {
+            tracing::error!(%session_id, %error, "llm_extraction: invalid extraction-skipped reason");
+            return;
+        }
+    };
+    if let Err(error) = note_repo
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project_id.to_owned(),
+            note_id: None,
+            event_kind: NoteRevisionEventKind::ExtractionSkipped,
+            desired: NoteRevisionDesiredState::ExtractionSkipped,
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction),
+            provenance,
+            reason,
+        })
+        .await
+    {
+        tracing::warn!(%session_id, %error, "llm_extraction: failed to record no-output extraction revision");
+    }
+}
+
 #[async_trait::async_trait]
 impl ExtractionNoteRepository for NoteRepository {
     async fn mutate_with_revision(
@@ -1097,6 +1142,15 @@ async fn run_llm_extraction_inner(
                 error = %e,
                 "llm_extraction: LLM completion failed; skipping extraction"
             );
+            let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            record_extraction_skipped(
+                &note_repo,
+                &project.id,
+                &session_id,
+                &task.id,
+                session.task_run_id.as_deref(),
+            )
+            .await;
             return;
         }
         Err(_) => {
@@ -1105,6 +1159,15 @@ async fn run_llm_extraction_inner(
                 timeout_secs = EXTRACTION_LLM_TIMEOUT.as_secs(),
                 "llm_extraction: LLM completion timed out; skipping extraction"
             );
+            let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            record_extraction_skipped(
+                &note_repo,
+                &project.id,
+                &session_id,
+                &task.id,
+                session.task_run_id.as_deref(),
+            )
+            .await;
             return;
         }
     };
@@ -1121,6 +1184,15 @@ async fn run_llm_extraction_inner(
                 raw_response = %response.text,
                 "llm_extraction: LLM response parse FAILED; skipping (extraction error, not empty)"
             );
+            let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            record_extraction_skipped(
+                &note_repo,
+                &project.id,
+                &session_id,
+                &task.id,
+                session.task_run_id.as_deref(),
+            )
+            .await;
             return;
         }
     };
@@ -1137,32 +1209,15 @@ async fn run_llm_extraction_inner(
     // EMPTY (success) case: the call + parse succeeded, but after dedup there is
     // nothing novel to record. This is normal — log at debug, not warn.
     if total == 0 {
-        if let (Ok(provenance), Ok(reason)) = (
-            TrustedNoteRevisionProvenance::new(
-                Some(session_id.clone()),
-                Some(task.id.clone()),
-                session.task_run_id.clone(),
-            ),
-            NoteRevisionReason::new("extraction completed with no candidate notes"),
-        ) {
-            let repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-            if let Err(error) = repo
-                .mutate_with_revision(NoteRevisionMutation {
-                    project_id: project.id.clone(),
-                    note_id: None,
-                    event_kind: NoteRevisionEventKind::ExtractionSkipped,
-                    desired: NoteRevisionDesiredState::ExtractionSkipped,
-                    attribution: TrustedNoteRevisionAttribution::system(
-                        NoteRevisionSubsystem::Extraction,
-                    ),
-                    provenance,
-                    reason,
-                })
-                .await
-            {
-                tracing::warn!(session_id = %session_id, %error, "llm_extraction: failed to record no-output extraction revision");
-            }
-        }
+        let repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+        record_extraction_skipped(
+            &repo,
+            &project.id,
+            &session_id,
+            &task.id,
+            session.task_run_id.as_deref(),
+        )
+        .await;
         persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
         tracing::debug!(
             session_id = %session_id,
@@ -1247,22 +1302,14 @@ async fn run_llm_extraction_inner(
         .await;
     }
     if durable_output_count == 0 {
-        let skipped = NoteRevisionMutation {
-            project_id: project.id.clone(),
-            note_id: None,
-            event_kind: NoteRevisionEventKind::ExtractionSkipped,
-            desired: NoteRevisionDesiredState::ExtractionSkipped,
-            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction),
-            provenance: extraction_context.revision_provenance().unwrap_or_else(|error| {
-                tracing::error!(session_id = %session_id, %error, "llm_extraction: invalid trusted extraction provenance");
-                TrustedNoteRevisionProvenance::default()
-            }),
-            reason: NoteRevisionReason::new("extraction completed without durable note output")
-                .unwrap_or_else(|_| unreachable!()),
-        };
-        if let Err(error) = note_repo.mutate_with_revision(skipped).await {
-            tracing::warn!(session_id = %session_id, %error, "llm_extraction: failed to record no-output extraction revision");
-        }
+        record_extraction_skipped(
+            &note_repo,
+            &project.id,
+            &session_id,
+            &task.id,
+            session.task_run_id.as_deref(),
+        )
+        .await;
     }
     taxonomy.extraction_quality = extraction_quality;
     persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
@@ -3181,8 +3228,21 @@ mod evidence_merge_regression_tests {
         },
     }
 
+    #[derive(Debug, Clone)]
+    struct RevisionRecord {
+        mutation: NoteRevisionMutation,
+        before_content: Option<String>,
+        before_confidence: Option<f64>,
+        after_content: Option<String>,
+        after_confidence: Option<f64>,
+        changed: bool,
+        committed_note_id: Option<String>,
+        revision_id: Option<String>,
+    }
+
     struct RecordingExtractionRepository {
         ops: Arc<Mutex<Vec<RepoOp>>>,
+        revisions: Arc<Mutex<Vec<RevisionRecord>>>,
         existing: Arc<Mutex<Option<djinn_memory::Note>>>,
         fail_updates: bool,
     }
@@ -3191,6 +3251,7 @@ mod evidence_merge_regression_tests {
         fn with_existing(existing: djinn_memory::Note) -> Self {
             Self {
                 ops: Arc::new(Mutex::new(Vec::new())),
+                revisions: Arc::new(Mutex::new(Vec::new())),
                 existing: Arc::new(Mutex::new(Some(existing))),
                 fail_updates: false,
             }
@@ -3199,6 +3260,7 @@ mod evidence_merge_regression_tests {
         fn with_update_failure(existing: djinn_memory::Note) -> Self {
             Self {
                 ops: Arc::new(Mutex::new(Vec::new())),
+                revisions: Arc::new(Mutex::new(Vec::new())),
                 existing: Arc::new(Mutex::new(Some(existing))),
                 fail_updates: true,
             }
@@ -3206,6 +3268,10 @@ mod evidence_merge_regression_tests {
 
         fn ops(&self) -> Vec<RepoOp> {
             self.ops.lock().unwrap().clone()
+        }
+
+        fn revisions(&self) -> Vec<RevisionRecord> {
+            self.revisions.lock().unwrap().clone()
         }
 
         fn existing_content(&self) -> String {
@@ -3225,46 +3291,54 @@ mod evidence_merge_regression_tests {
             &self,
             mutation: NoteRevisionMutation,
         ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
-            let mut existing = self.existing.lock().unwrap();
-            let note = existing
-                .as_mut()
-                .ok_or_else(|| djinn_db::Error::Internal("missing test note".to_owned()))?;
-            let NoteRevisionDesiredState::Existing {
-                content,
-                confidence,
-            } = mutation.desired
-            else {
-                return Err(djinn_db::Error::Internal(
-                    "unsupported test mutation".to_owned(),
-                ));
-            };
-            match mutation.event_kind {
-                NoteRevisionEventKind::ConfidenceChanged => {
-                    self.ops.lock().unwrap().push(RepoOp::UpdateConfidence {
-                        id: note.id.clone(),
-                        signal: confidence,
-                    });
-                }
-                _ => self.ops.lock().unwrap().push(RepoOp::Update {
-                    id: note.id.clone(),
-                    title: note.title.clone(),
-                    content: content.clone(),
-                    tags: note.tags.clone(),
-                }),
-            }
+            // Controlled failure happens before either fake state or the
+            // committed-revision log changes.
             if self.fail_updates {
                 return Err(djinn_db::Error::Internal(
                     "controlled revision update failure".to_owned(),
                 ));
             }
-            let changed = note.content != content || note.confidence != confidence;
-            note.content = content;
-            note.confidence = confidence;
+            let mut existing = self.existing.lock().unwrap();
+            let before_content = existing.as_ref().map(|note| note.content.clone());
+            let before_confidence = existing.as_ref().map(|note| note.confidence);
+            let (changed, committed_note) = match &mutation.desired {
+                NoteRevisionDesiredState::Existing {
+                    content,
+                    confidence,
+                } => {
+                    let note = existing
+                        .as_mut()
+                        .ok_or_else(|| djinn_db::Error::Internal("missing test note".to_owned()))?;
+                    let changed = note.content != *content || note.confidence != *confidence;
+                    if changed {
+                        note.content.clone_from(content);
+                        note.confidence = *confidence;
+                    }
+                    (changed, Some(note.clone()))
+                }
+                NoteRevisionDesiredState::ExtractionSkipped => (true, None),
+                _ => {
+                    return Err(djinn_db::Error::Internal(
+                        "unsupported test mutation".to_owned(),
+                    ));
+                }
+            };
+            let revision_id = changed.then(|| "test-revision".to_owned());
+            self.revisions.lock().unwrap().push(RevisionRecord {
+                mutation,
+                before_content,
+                before_confidence,
+                after_content: committed_note.as_ref().map(|note| note.content.clone()),
+                after_confidence: committed_note.as_ref().map(|note| note.confidence),
+                changed,
+                committed_note_id: committed_note.as_ref().map(|note| note.id.clone()),
+                revision_id: revision_id.clone(),
+            });
             Ok(djinn_db::NoteRevisionMutationResult {
                 changed,
-                note: Some(note.clone()),
+                note: committed_note,
                 note_seq: changed.then_some(1),
-                revision_id: changed.then(|| "test-revision".to_owned()),
+                revision_id,
             })
         }
         async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
@@ -3530,13 +3604,13 @@ mod evidence_merge_regression_tests {
         let mut quality = ExtractionQuality::default();
         process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
 
-        let ops = repo.ops();
-        let update_pos = ops
+        let revisions = repo.revisions();
+        let update_pos = revisions
             .iter()
-            .position(|op| matches!(op, RepoOp::Update { .. }));
-        let confidence_pos = ops
+            .position(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated);
+        let confidence_pos = revisions
             .iter()
-            .position(|op| matches!(op, RepoOp::UpdateConfidence { .. }));
+            .position(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged);
         assert!(update_pos.is_some(), "content update must be recorded");
         assert!(
             confidence_pos.is_some(),
@@ -3547,12 +3621,10 @@ mod evidence_merge_regression_tests {
             "content update must complete before confidence update"
         );
 
-        let updated_content = ops
+        let updated_content = revisions
             .iter()
-            .find_map(|op| match op {
-                RepoOp::Update { content, .. } => Some(content.clone()),
-                _ => None,
-            })
+            .find(|revision| revision.mutation.event_kind == NoteRevisionEventKind::Updated)
+            .and_then(|revision| revision.after_content.clone())
             .expect("update op must include content");
         assert!(
             updated_content
@@ -3597,21 +3669,21 @@ mod evidence_merge_regression_tests {
 
         assert_eq!(quality.evidence_merged, 0);
         assert_eq!(quality.boost_fallback, 1);
-        assert_eq!(quality.novelty_skipped, 1);
+        assert_eq!(quality.novelty_skipped, 0);
+        assert_eq!(quality.merged, 0);
+        let revisions = repo.revisions();
         assert_eq!(
-            quality.merged, 1,
-            "fallback remains a successful terminal path"
-        );
-        let ops = repo.ops();
-        assert_eq!(
-            ops.iter()
-                .filter(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+            revisions
+                .iter()
+                .filter(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged)
                 .count(),
             1,
             "transport failure must retain exactly one confidence-only boost"
         );
         assert!(
-            !ops.iter().any(|op| matches!(op, RepoOp::Update { .. })),
+            !revisions
+                .iter()
+                .any(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated),
             "transport failure must not persist content"
         );
     }
@@ -3646,24 +3718,23 @@ mod evidence_merge_regression_tests {
 
         assert_eq!(quality.evidence_merged, 0);
         assert_eq!(quality.boost_fallback, 1);
-        assert_eq!(quality.novelty_skipped, 1);
+        assert_eq!(quality.novelty_skipped, 0);
+        assert_eq!(quality.merged, 0);
+        let revisions = repo.revisions();
         assert_eq!(
-            quality.merged, 1,
-            "fallback remains a successful terminal path"
-        );
-        let ops = repo.ops();
-        assert_eq!(
-            ops.iter()
-                .filter(|op| matches!(op, RepoOp::Update { .. }))
+            revisions
+                .iter()
+                .filter(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated)
                 .count(),
-            1,
+            0,
             "the controlled repository must receive the failed persistence attempt"
         );
         assert_eq!(
-            ops.iter()
-                .filter(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+            revisions
+                .iter()
+                .filter(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged)
                 .count(),
-            1,
+            0,
             "update failure must retain exactly one confidence-only boost"
         );
         assert_eq!(
@@ -3702,20 +3773,18 @@ mod evidence_merge_regression_tests {
 
         assert_eq!(quality.evidence_merged, 0);
         assert_eq!(quality.boost_fallback, 1);
-        assert_eq!(
-            quality.novelty_skipped, 1,
-            "fallback remains a successful terminal path"
-        );
+        assert_eq!(quality.novelty_skipped, 0);
+        assert_eq!(quality.merged, 0);
         assert!(
-            repo.ops()
+            repo.revisions()
                 .iter()
-                .any(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+                .any(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged)
         );
         assert!(
             !repo
-                .ops()
+                .revisions()
                 .iter()
-                .any(|op| matches!(op, RepoOp::Update { .. }))
+                .any(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated)
         );
     }
 
@@ -3750,15 +3819,15 @@ mod evidence_merge_regression_tests {
         assert_eq!(quality.evidence_merged, 0);
         assert_eq!(quality.boost_fallback, 1);
         assert!(
-            repo.ops()
+            repo.revisions()
                 .iter()
-                .any(|op| matches!(op, RepoOp::UpdateConfidence { .. }))
+                .any(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged)
         );
         assert!(
             !repo
-                .ops()
+                .revisions()
                 .iter()
-                .any(|op| matches!(op, RepoOp::Update { .. }))
+                .any(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated)
         );
     }
 }
