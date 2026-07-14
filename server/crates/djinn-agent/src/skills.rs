@@ -35,6 +35,10 @@ pub struct ResolvedSkill {
 #[derive(Debug)]
 pub(crate) struct DetailedSkillsLoad {
     pub skills: Vec<ResolvedSkill>,
+    #[allow(
+        dead_code,
+        reason = "session load-attempt correlation consumes project-skill facts in a follow-up integration"
+    )]
     pub diagnostics: Vec<ExtensionDiagnosticFact>,
 }
 

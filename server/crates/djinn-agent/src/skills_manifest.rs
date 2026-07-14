@@ -132,6 +132,10 @@ fn push_unique_fact(diagnostics: &mut Vec<ExtensionDiagnosticFact>, fact: Extens
 #[derive(Debug)]
 pub(crate) struct DetailedVerifiedSkillsLoad {
     pub skills: Vec<ResolvedSkill>,
+    #[allow(
+        dead_code,
+        reason = "session load-attempt correlation consumes manifest verification facts in a follow-up integration"
+    )]
     pub diagnostics: Vec<ExtensionDiagnosticFact>,
     pub error: Option<RuntimeSkillManifestError>,
 }
@@ -412,6 +416,10 @@ pub(crate) fn load_verified_skills_detailed(
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "manifest-aware source loading is retained for the progressive-disclosure reader"
+)]
 pub(crate) fn load_verified_skills_with_sources(
     project_root: &Path,
     names: &[String],
