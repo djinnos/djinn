@@ -496,18 +496,23 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
 #[tokio::test]
 async fn mcp_memory_health_orphans_and_broken_links_shapes() {
     let harness = McpTestHarness::new().await;
-    // Use a slug-shaped reference that isn't seeded; the tool still resolves
-    // and errors silently, and we only assert the response shape below.
+    // Use a slug-shaped reference that isn't seeded. Mutations now propagate
+    // the handler's project-resolution failure through the dispatch boundary.
     let project = "test/mcp-memory-health";
 
-    // No project seeded: memory_write resolves and errors silently; the test
-    // only asserts the shape of the three health / orphans / broken_links
-    // responses, so that's fine.
-    call_memory_tool(&harness,
+    // The health/read tools below still return their empty response shapes for
+    // an unseeded project, while the rejected mutation must be a dispatch error.
+    let write_error = call_memory_tool(
+        &harness,
         "memory_write",
-        json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "type": "reference", "reason": "test"}))
-        .await
-        .expect("memory_write should dispatch");
+        json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "type": "reference", "reason": "test"}),
+    )
+    .await
+    .expect_err("memory_write for an unseeded project should fail dispatch");
+    assert_eq!(
+        write_error.to_string(),
+        "tool 'memory_write' failed: project not found: test/mcp-memory-health"
+    );
 
     let health = harness
         .call_tool("memory_health", json!({"project": project}))
