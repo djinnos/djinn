@@ -3,16 +3,13 @@
   "labels": ["mode", "rung", "outcome"],
   "rungs": ["incremental", "profile", "base"],
   "outcomes": ["planned", "post_lock_eligible", "retained", "attempted", "deleted", "failed"],
-  "byte_metrics": {
-    "projected": "djinn_cache_pressure_projected_allocated_bytes_total",
-    "reclaimed": "djinn_cache_pressure_reclaimed_allocated_bytes_total"
-  },
+  "byte_metrics": {"projected": "djinn_cache_pressure_projected_allocated_bytes_total", "reclaimed": "djinn_cache_pressure_reclaimed_allocated_bytes_total"},
   "terminations": ["completed", "reached_high", "remeasure_failed"],
   "cases": {
-    "dry_run": "planned and projected only",
-    "pre_attempt_measurement_failure": "failed, remeasure_failed, zero attempted/deleted/reclaimed",
-    "post_success_remeasurement_failure": "attempted/deleted/reclaimed then remeasure_failed",
-    "removal_failure": "attempted then failed",
-    "successful_deletion": "attempted, deleted, reclaimed"
+    "dry_run": {"planned": 3, "projected": 60, "attempted": 0, "deleted": 0, "failed": 0, "reclaimed": 0, "termination": "completed"},
+    "pre_attempt_measurement_failure": {"planned": 1, "post_lock_eligible": 0, "retained": 1, "attempted": 0, "deleted": 0, "failed": 1, "projected": 10, "reclaimed": 0, "termination": "remeasure_failed"},
+    "removal_failure": {"planned": 1, "post_lock_eligible": 1, "retained": 1, "attempted": 1, "deleted": 0, "failed": 1, "projected": 20, "reclaimed": 0, "termination": "completed"},
+    "successful_deletion": {"planned": 1, "post_lock_eligible": 1, "retained": 0, "attempted": 1, "deleted": 1, "failed": 0, "projected": 30, "reclaimed": 30, "termination": "completed"},
+    "post_success_remeasurement_failure": {"planned": 1, "post_lock_eligible": 1, "retained": 0, "attempted": 1, "deleted": 1, "failed": 1, "projected": 30, "reclaimed": 30, "termination": "remeasure_failed"}
   }
 }

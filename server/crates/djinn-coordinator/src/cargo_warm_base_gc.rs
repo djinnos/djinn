@@ -259,7 +259,7 @@ pub async fn execute_three_rung_pressure_plan(
                             .extend(plan.units[index + 1..].iter().cloned());
                         metrics::increment_pressure_termination(
                             PressureMode::Delete,
-                            PressureTermination::RemeasureFailed,
+                            PressureTermination::ReachedHigh,
                         );
                         break;
                     }
@@ -274,6 +274,10 @@ pub async fn execute_three_rung_pressure_plan(
                         result
                             .retained
                             .extend(plan.units[index + 1..].iter().cloned());
+                        metrics::increment_pressure_termination(
+                            PressureMode::Delete,
+                            PressureTermination::RemeasureFailed,
+                        );
                         break;
                     }
                 }
