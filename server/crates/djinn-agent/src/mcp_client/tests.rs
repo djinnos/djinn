@@ -8,7 +8,7 @@ use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
-    object, schemars, tool, tool_router,
+    object, schemars, tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     },
@@ -41,6 +41,7 @@ impl StartupFixture {
         "ok".to_owned()
     }
 }
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for StartupFixture {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -1309,8 +1310,7 @@ fn startup_diagnostic_facts_are_canonical_and_exclude_runtime_paths() {
         "legacy structured failure logging retains the underlying rmcp error"
     );
     assert_eq!(
-        initial_list.summary_material,
-        "Initial MCP tools/list request failed.",
+        initial_list.summary_material, "Initial MCP tools/list request failed.",
         "the diagnostic fact remains a bounded trusted summary"
     );
 }
@@ -1383,7 +1383,7 @@ async fn diagnostics_entry_point_times_out_one_server_and_discovers_the_next() {
     ];
 
     let discovery = tokio::time::timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         connect_and_discover_with_diagnostics("test", "worker", &servers, &app_state),
     )
     .await

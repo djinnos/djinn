@@ -97,11 +97,10 @@ pub(super) async fn connect_to_server(
 ) -> Result<Peer<RoleClient>, McpStartupFailure> {
     let mut custom_headers = HashMap::new();
     for (name, value) in headers {
-        let header_name = HeaderName::try_from(name.as_str()).map_err(|error| {
-            McpStartupFailure::Transport {
+        let header_name =
+            HeaderName::try_from(name.as_str()).map_err(|error| McpStartupFailure::Transport {
                 error: error.to_string(),
-            }
-        })?;
+            })?;
         let header_value = HeaderValue::try_from(value.as_str()).map_err(|error| {
             McpStartupFailure::Transport {
                 error: error.to_string(),

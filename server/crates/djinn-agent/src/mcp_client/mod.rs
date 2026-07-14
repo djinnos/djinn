@@ -24,13 +24,16 @@ use crate::context::AgentContext;
 use crate::extension::shared_schemas;
 use crate::extension_diagnostics::ExtensionDiagnosticFact;
 use crate::mcp_settings::McpServerConfig;
+use djinn_core::extension_diagnostics::{ExtensionLoadPhase, ExtensionLoadRemedyCode};
+#[cfg(test)]
+use djinn_core::extension_diagnostics::{ExtensionLoadSeverity, ExtensionLoadSourceKind};
 
 mod config;
 mod startup;
 use config::{McpTransportKind, resolve_server_config};
-use startup::{mcp_diagnostic, startup_and_list};
 #[cfg(test)]
-use startup::McpStartupFailure;
+use startup::{McpStartupFailure, connect_to_server};
+use startup::{mcp_diagnostic, startup_and_list};
 
 /// Maximum length of the advertised provider-facing MCP namespaced tool name,
 /// including the `mcp__` prefix and both `__` separators.
@@ -340,7 +343,7 @@ impl rmcp::ClientHandler for McpNotificationHandler {
 /// A failure from a post-discovery `tools/list_changed` refresh.
 /// This remains separate from startup observations.
 enum RefreshToolsListFailure {
-    Request(rmcp::ErrorData),
+    Request(rmcp::service::ServiceError),
     Timeout,
 }
 
@@ -887,7 +890,7 @@ fn call_tool_result_to_json(result: CallToolResult) -> Result<serde_json::Value,
 /// carries bounded facts to the shared diagnostic producer.
 pub(crate) struct McpDiscoveryResult {
     pub registry: Option<McpToolRegistry>,
-    #[expect(
+    #[allow(
         dead_code,
         reason = "lifecycle consumes diagnostics when it owns attempt persistence"
     )]
