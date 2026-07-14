@@ -234,6 +234,10 @@ fn summary_fingerprint(summary: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        CreateSessionParams, Database, ProjectRepository, SessionRepository, TaskRepository,
+    };
 
     fn fact(summary_material: impl Into<String>) -> ExtensionDiagnosticFact {
         ExtensionDiagnosticFact {
@@ -346,5 +350,122 @@ mod tests {
             second.remedy,
             remedy_template(ExtensionLoadRemedyCode::CheckSkillFrontmatter)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_correlation_fixture_persists_two_sources_retries_and_attempts() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/extension_diagnostics/session_two_sources.json"
+        ))
+        .unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let events = EventBus::noop();
+        let project = ProjectRepository::new(db.clone(), events.clone())
+            .create_with_id(
+                fixture["project_id"].as_str().unwrap(),
+                "extension-diagnostics-correlation",
+                "test",
+                "extension-diagnostics-correlation",
+            )
+            .await
+            .unwrap();
+        let task = TaskRepository::new(db.clone(), events.clone())
+            .create_in_project(
+                &project.id,
+                None,
+                "diagnostic correlation",
+                "",
+                "",
+                "task",
+                1,
+                "",
+                Some("open"),
+                None,
+            )
+            .await
+            .unwrap();
+        let session = SessionRepository::new(db.clone(), events)
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&task.id),
+                model: "test-model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        let associations = ExtensionDiagnosticAssociations {
+            project_id: project.id.clone(),
+            task_id: Some(task.id.clone()),
+            session_id: Some(session.id.clone()),
+            load_attempt_id: fixture["first_attempt_id"].as_str().unwrap().to_owned(),
+        };
+        let mcp = ExtensionDiagnosticFact {
+            source_kind: ExtensionLoadSourceKind::ProjectMcp,
+            source_key: fixture["facts"][0]["source_key"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            phase: ExtensionLoadPhase::ToolsList,
+            severity: ExtensionLoadSeverity::Error,
+            remedy_code: ExtensionLoadRemedyCode::CheckServer,
+            summary_material: fixture["facts"][0]["summary_material"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        };
+        let skill = ExtensionDiagnosticFact {
+            source_kind: ExtensionLoadSourceKind::ProjectSkill,
+            source_key: fixture["facts"][1]["source_key"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            phase: ExtensionLoadPhase::Frontmatter,
+            severity: ExtensionLoadSeverity::Warning,
+            remedy_code: ExtensionLoadRemedyCode::CheckSkillFrontmatter,
+            summary_material: fixture["facts"][1]["summary_material"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        };
+        let repository = ExtensionLoadDiagnosticRepository::new(db);
+        let first = persist_extension_diagnostic(&repository, associations.clone(), mcp.clone())
+            .await
+            .unwrap();
+        let retry = persist_extension_diagnostic(&repository, associations.clone(), mcp.clone())
+            .await
+            .unwrap();
+        let second_source = persist_extension_diagnostic(&repository, associations.clone(), skill)
+            .await
+            .unwrap();
+        let canonical = repository
+            .list_for_load_attempt(&project.id, &associations.load_attempt_id)
+            .await
+            .unwrap();
+        let later = persist_extension_diagnostic(
+            &repository,
+            ExtensionDiagnosticAssociations {
+                load_attempt_id: fixture["later_attempt_id"].as_str().unwrap().to_owned(),
+                ..associations.clone()
+            },
+            mcp,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.project_id, project.id);
+        assert_eq!(first.task_id.as_deref(), Some(task.id.as_str()));
+        assert_eq!(first.session_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(first.diagnostic_id, retry.diagnostic_id);
+        assert_eq!(retry.occurrence_count, 2);
+        assert_eq!(canonical.len(), 2);
+        assert_eq!(canonical[0].diagnostic_id, first.diagnostic_id);
+        assert_eq!(canonical[0].occurrence_count, 2);
+        assert_eq!(canonical[1].diagnostic_id, second_source.diagnostic_id);
+        assert_ne!(first.source_kind, second_source.source_kind);
+        assert_ne!(first.load_attempt_id, later.load_attempt_id);
+        assert_ne!(first.diagnostic_id, later.diagnostic_id);
     }
 }
