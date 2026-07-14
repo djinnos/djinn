@@ -215,7 +215,11 @@ async fn load_project_skills(
     }
 }
 
-async fn persist_load_diagnostics(
+/// Persist a lifecycle load pass and return its canonical scoped rows.
+///
+/// This is crate-visible for the post-discovery integration regression, which
+/// drives the same session-associated persistence/read boundary as stage.
+pub(crate) async fn persist_load_diagnostics(
     project_id: &str,
     task_id: &str,
     session_id: &str,
