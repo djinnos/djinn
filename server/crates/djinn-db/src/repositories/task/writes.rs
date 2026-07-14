@@ -452,27 +452,37 @@ impl TaskRepository {
         short_id: &str,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
+        // This direct fixture insert preserves its caller-provided short id,
+        // but must still produce a concretely attributable task. Unlike the
+        // normal fixture helper it does not enter the provenance resolver, so
+        // establish the durable fixture user explicitly before inserting.
+        let fixture_creator = crate::repositories::user::UserRepository::new(self.db.clone())
+            .upsert_from_github(9_999_999, "task-fixture-creator", None, None)
+            .await?
+            .id;
         let empty = "";
         let epic_id_none: Option<&str> = None;
         let issue_type = "task";
         let priority = 1_i64;
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO tasks
                 (id, project_id, short_id, epic_id, title, description, design,
-                 issue_type, priority, owner, status, continuation_count, memory_refs)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, '[]'::jsonb)",
-            id,
-            project_id,
-            short_id,
-            epic_id_none,
-            title,
-            empty,
-            empty,
-            issue_type,
-            priority,
-            empty,
-            status
+                 issue_type, priority, owner, status, continuation_count, memory_refs,
+                 created_by_user_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, '[]'::jsonb, $12)",
         )
+        .bind(id)
+        .bind(project_id)
+        .bind(short_id)
+        .bind(epic_id_none)
+        .bind(title)
+        .bind(empty)
+        .bind(empty)
+        .bind(issue_type)
+        .bind(priority)
+        .bind(empty)
+        .bind(status)
+        .bind(fixture_creator)
         .execute(self.db.pool())
         .await?;
         let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
