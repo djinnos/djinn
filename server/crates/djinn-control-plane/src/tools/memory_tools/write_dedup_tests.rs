@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_decider_can_merge_existing_candidate() {
+    async fn merge_persists_title_tags_and_dedup_revision() {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let project = create_project(&db, tmp.path()).await;
@@ -238,6 +238,48 @@ mod tests {
         assert_eq!(revisions[0].content_after.as_deref(), Some("tokio spawn"));
         assert_eq!(revisions[0].confidence_before, Some(existing.confidence));
         assert_eq!(revisions[0].confidence_after, Some(existing.confidence));
+        assert_eq!(revisions[0].reason, "dedup:merge_into_existing");
+    }
+
+    #[tokio::test]
+    async fn title_only_merge_persists_a_dedup_revision() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let project = create_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let existing = repo
+            .create(&project.id, "Old", "same", "pattern", "[]")
+            .await
+            .unwrap();
+
+        let response = apply_dedup_decision(
+            &repo,
+            PendingWriteDedup {
+                project_path: tmp.path().to_str().unwrap(),
+                project_id: &project.id,
+                title: "New",
+                content: "same",
+                note_type: "pattern",
+                status: None,
+                tags_json: "[]",
+            },
+            MemoryWriteDedupDecision::MergeIntoExisting {
+                candidate_id: existing.id.clone(),
+                merged_title: "New".to_owned(),
+                merged_content: "same".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(response, WriteDedupOutcome::Respond(_)));
+        let updated = repo.get(&existing.id).await.unwrap().unwrap();
+        assert_eq!(updated.title, "New");
+        assert_eq!(updated.content, "same");
+        assert_eq!(updated.tags, "[]");
+        let revisions = repo.revision_events_for_test(&project.id).await.unwrap();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].event_kind, "updated");
         assert_eq!(revisions[0].reason, "dedup:merge_into_existing");
     }
 
