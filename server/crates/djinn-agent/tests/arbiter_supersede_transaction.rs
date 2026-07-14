@@ -21,7 +21,9 @@ use djinn_core::models::{Task, TransitionAction};
 use djinn_db::repositories::task_arbitration::{
     ArbitrationState, CreateArbitrationParams, TaskArbitrationRepository,
 };
-use djinn_db::{Database, EpicCreateInput, EpicRepository, ProjectRepository, TaskRepository};
+use djinn_db::{
+    Database, EpicCreateInput, EpicRepository, ProjectRepository, TaskRepository, UserRepository,
+};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -92,10 +94,19 @@ async fn create_project_and_epic(db: &Database) -> (String, String) {
 
 async fn create_task(db: &Database, project_id: &str, epic_id: &str, title: &str) -> Task {
     let events = EventBus::noop();
+    let creator_id = UserRepository::new(db.clone())
+        .upsert_from_github(999_703, "arbiter-supersede-test-user", None, None)
+        .await
+        .expect("create test user")
+        .id;
     TaskRepository::new(db.clone(), events)
-        .create_in_project(
+        .create_in_project_with_provenance(
             project_id,
             Some(epic_id),
+            djinn_db::repositories::task::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                ..Default::default()
+            },
             title,
             "task description",
             "task design",

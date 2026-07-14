@@ -47,7 +47,7 @@ use djinn_core::events::EventBus;
 use djinn_core::models::TaskRunTrigger;
 use djinn_db::{
     Database, EpicCreateInput, EpicRepository, ProjectRepository, SessionMessageRepository,
-    SessionRepository, TaskRepository, TaskRunRepository,
+    SessionRepository, TaskRepository, TaskRunRepository, UserRepository,
 };
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::message::{ContentBlock, Conversation, Role};
@@ -58,6 +58,14 @@ use tempfile::TempDir;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+async fn create_test_creator(db: &Database) -> String {
+    UserRepository::new(db.clone())
+        .upsert_from_github(999_701, "phase1-test-user", None, None)
+        .await
+        .expect("create test user")
+        .id
+}
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::prelude::*;
@@ -276,10 +284,15 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
         .await
         .expect("create epic");
     let task_repo = TaskRepository::new(db.clone(), events.clone());
+    let creator_id = create_test_creator(&db).await;
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::repositories::task::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                ..Default::default()
+            },
             "phase1-task",
             "phase1 test task description",
             "phase1 test task design",
@@ -531,13 +544,18 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
         .await
         .expect("create epic");
     let task_repo = TaskRepository::new(db.clone(), events.clone());
+    let creator_id = create_test_creator(&db).await;
     // `spike` issue_type so the coordinator-side flow-for-task rules would
     // also pick SupervisorFlow::Spike — we set the spec.flow explicitly below
     // regardless, but keep the row consistent.
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::repositories::task::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                ..Default::default()
+            },
             "phase1-stub-task",
             "phase1 stub task description",
             "phase1 stub task design",
@@ -837,10 +855,15 @@ async fn proactive_sync_merges_advanced_base_into_behind_task_branch() {
         .await
         .expect("create epic");
     let task_repo = TaskRepository::new(db.clone(), events.clone());
+    let creator_id = create_test_creator(&db).await;
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::repositories::task::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                ..Default::default()
+            },
             "sync-task",
             "sync task description",
             "sync task design",
