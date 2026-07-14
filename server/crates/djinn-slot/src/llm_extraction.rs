@@ -3250,6 +3250,15 @@ mod evidence_merge_regression_tests {
     }
 
     impl RecordingExtractionRepository {
+        fn empty() -> Self {
+            Self {
+                ops: Arc::new(Mutex::new(Vec::new())),
+                revisions: Arc::new(Mutex::new(Vec::new())),
+                existing: Arc::new(Mutex::new(None)),
+                fail_next_kind: Arc::new(Mutex::new(None)),
+            }
+        }
+
         fn with_existing(existing: djinn_memory::Note) -> Self {
             Self {
                 ops: Arc::new(Mutex::new(Vec::new())),
@@ -3296,31 +3305,87 @@ mod evidence_merge_regression_tests {
             &self,
             mutation: NoteRevisionMutation,
         ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
-            if self.fail_next_kind.lock().unwrap().take_if(|kind| *kind == mutation.event_kind).is_some() {
-                return Err(djinn_db::Error::Internal("controlled revision mutation failure".to_owned()));
+            if self
+                .fail_next_kind
+                .lock()
+                .unwrap()
+                .take_if(|kind| *kind == mutation.event_kind)
+                .is_some()
+            {
+                return Err(djinn_db::Error::Internal(
+                    "controlled revision mutation failure".to_owned(),
+                ));
             }
             let mut existing = self.existing.lock().unwrap();
-            let (before_content, before_confidence, changed, committed_note) = match &mutation.desired {
-                NoteRevisionDesiredState::Create(desired) => {
-                    let note = djinn_memory::Note {
-                        id: mutation.note_id.clone().expect("create has note id"), project_id: mutation.project_id.clone(), permalink: desired.permalink.clone(), title: desired.title.clone(), file_path: String::new(), storage: "db".to_owned(), note_type: desired.note_type.clone(), folder: desired.folder.clone(), status: desired.status.clone(), tags: desired.tags.clone(), content: desired.content.clone(), retrieval_anchor: desired.retrieval_anchor.clone(), created_at: "2026-01-01T00:00:00Z".to_owned(), updated_at: "2026-01-01T00:00:00Z".to_owned(), last_accessed: "2026-01-01T00:00:00Z".to_owned(), access_count: 0, confidence: desired.confidence, abstract_: None, overview: None, scope_paths: desired.scope_paths.clone(),
-                    };
-                    *existing = Some(note.clone());
-                    (None, None, true, Some(note))
-                }
-                NoteRevisionDesiredState::Existing { content, confidence } => {
-                    let note = existing.as_mut().ok_or_else(|| djinn_db::Error::Internal("missing test note".to_owned()))?;
-                    let before_content = note.content.clone(); let before_confidence = note.confidence;
-                    let changed = note.content != *content || note.confidence != *confidence;
-                    if changed { note.content.clone_from(content); note.confidence = *confidence; }
-                    (Some(before_content), Some(before_confidence), changed, Some(note.clone()))
-                }
-                NoteRevisionDesiredState::ExtractionSkipped => (None, None, true, None),
-                NoteRevisionDesiredState::Delete => unreachable!("not used by extraction"),
-            };
+            let (before_content, before_confidence, changed, committed_note) =
+                match &mutation.desired {
+                    NoteRevisionDesiredState::Create(desired) => {
+                        let note = djinn_memory::Note {
+                            id: mutation.note_id.clone().expect("create has note id"),
+                            project_id: mutation.project_id.clone(),
+                            permalink: desired.permalink.clone(),
+                            title: desired.title.clone(),
+                            file_path: String::new(),
+                            storage: "db".to_owned(),
+                            note_type: desired.note_type.clone(),
+                            folder: desired.folder.clone(),
+                            status: desired.status.clone(),
+                            tags: desired.tags.clone(),
+                            content: desired.content.clone(),
+                            retrieval_anchor: desired.retrieval_anchor.clone(),
+                            created_at: "2026-01-01T00:00:00Z".to_owned(),
+                            updated_at: "2026-01-01T00:00:00Z".to_owned(),
+                            last_accessed: "2026-01-01T00:00:00Z".to_owned(),
+                            access_count: 0,
+                            confidence: desired.confidence,
+                            abstract_: None,
+                            overview: None,
+                            scope_paths: desired.scope_paths.clone(),
+                        };
+                        *existing = Some(note.clone());
+                        (None, None, true, Some(note))
+                    }
+                    NoteRevisionDesiredState::Existing {
+                        content,
+                        confidence,
+                    } => {
+                        let note = existing.as_mut().ok_or_else(|| {
+                            djinn_db::Error::Internal("missing test note".to_owned())
+                        })?;
+                        let before_content = note.content.clone();
+                        let before_confidence = note.confidence;
+                        let changed = note.content != *content || note.confidence != *confidence;
+                        if changed {
+                            note.content.clone_from(content);
+                            note.confidence = *confidence;
+                        }
+                        (
+                            Some(before_content),
+                            Some(before_confidence),
+                            changed,
+                            Some(note.clone()),
+                        )
+                    }
+                    NoteRevisionDesiredState::ExtractionSkipped => (None, None, true, None),
+                    NoteRevisionDesiredState::Delete => unreachable!("not used by extraction"),
+                };
             let revision_id = changed.then(|| "test-revision".to_owned());
-            self.revisions.lock().unwrap().push(RevisionRecord { mutation, before_content, before_confidence, after_content: committed_note.as_ref().map(|note| note.content.clone()), after_confidence: committed_note.as_ref().map(|note| note.confidence), changed, committed_note_id: committed_note.as_ref().map(|note| note.id.clone()), revision_id: revision_id.clone() });
-            Ok(djinn_db::NoteRevisionMutationResult { changed, note: committed_note, note_seq: changed.then_some(1), revision_id })
+            self.revisions.lock().unwrap().push(RevisionRecord {
+                mutation,
+                before_content,
+                before_confidence,
+                after_content: committed_note.as_ref().map(|note| note.content.clone()),
+                after_confidence: committed_note.as_ref().map(|note| note.confidence),
+                changed,
+                committed_note_id: committed_note.as_ref().map(|note| note.id.clone()),
+                revision_id: revision_id.clone(),
+            });
+            Ok(djinn_db::NoteRevisionMutationResult {
+                changed,
+                note: committed_note,
+                note_seq: changed.then_some(1),
+                revision_id,
+            })
         }
         async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
             self.ops.lock().unwrap().push(RepoOp::Get(id.to_string()));
@@ -3339,7 +3404,7 @@ mod evidence_merge_regression_tests {
                 content: content.to_string(),
                 tags: tags.to_string(),
             });
-                        let mut note = self.existing.lock().unwrap().clone().unwrap();
+            let mut note = self.existing.lock().unwrap().clone().unwrap();
             note.title = title.to_string();
             note.content = content.to_string();
             note.tags = tags.to_string();
@@ -3551,6 +3616,96 @@ mod evidence_merge_regression_tests {
         vec![test_candidate()]
     }
 
+    fn assert_extraction_identity(record: &RevisionRecord, reason: &str) {
+        assert_eq!(
+            record.mutation.attribution,
+            TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction)
+        );
+        assert_eq!(record.mutation.provenance.session_id(), Some("new"));
+        assert_eq!(record.mutation.provenance.task_id(), Some("task-1"));
+        assert_eq!(record.mutation.provenance.task_run_id(), Some("run-1"));
+        assert_eq!(record.mutation.reason.as_str(), reason);
+        assert!(record.changed);
+        assert!(record.revision_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn atomic_extracted_note_create_records_exact_revision_contract() {
+        let provider = ScriptedProvider::new(vec![]);
+        let repo = RecordingExtractionRepository::empty();
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_id: "task-1",
+            task_run_id: Some("run-1"),
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "footer",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let result = context
+            .create_extracted_note(
+                "Created extraction",
+                "created body",
+                "case",
+                r#"["src/lib.rs"]"#,
+                Some("created retrieval anchor"),
+            )
+            .await
+            .expect("atomic extraction create succeeds");
+        assert_eq!(usize::from(result.changed), 1);
+
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 1);
+        let created = &revisions[0];
+        assert_eq!(created.mutation.event_kind, NoteRevisionEventKind::Created);
+        assert_extraction_identity(created, "created note from completed session extraction");
+        assert_eq!(created.before_content, None);
+        assert_eq!(created.before_confidence, None);
+        assert_eq!(created.after_content.as_deref(), Some("created body"));
+        assert_eq!(created.after_confidence, Some(0.5));
+        assert!(created.committed_note_id.is_some());
+        assert!(
+            result
+                .note
+                .as_ref()
+                .is_some_and(|note| note.confidence == 0.5)
+        );
+        assert!(result.revision_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn extraction_skipped_records_exact_revision_contract() {
+        let repo = RecordingExtractionRepository::empty();
+        record_extraction_skipped(&repo, "project-1", "new", "task-1", Some("run-1")).await;
+
+        let revisions = repo.revisions();
+        assert_eq!(revisions.len(), 1);
+        let skipped = &revisions[0];
+        assert_eq!(
+            skipped.mutation.event_kind,
+            NoteRevisionEventKind::ExtractionSkipped
+        );
+        assert_eq!(skipped.mutation.note_id, None);
+        assert_eq!(
+            skipped.mutation.desired,
+            NoteRevisionDesiredState::ExtractionSkipped
+        );
+        assert_extraction_identity(skipped, EXTRACTION_SKIPPED_REASON);
+        assert_eq!(skipped.before_content, None);
+        assert_eq!(skipped.before_confidence, None);
+        assert_eq!(skipped.after_content, None);
+        assert_eq!(skipped.after_confidence, None);
+        assert_eq!(skipped.committed_note_id, None);
+    }
+
     #[tokio::test]
     async fn evidence_merge_persists_content_before_confidence() {
         let provider = ScriptedProvider::new(vec![
@@ -3568,7 +3723,7 @@ mod evidence_merge_regression_tests {
             knowledge_branch_target: &KnowledgeBranchTarget::Main,
             session_id: "new",
             task_id: "task-1",
-            task_run_id: None,
+            task_run_id: Some("run-1"),
             task_short_id: "t1",
             task_title: "Test task",
             task_description: "Test task description",
@@ -3615,6 +3770,34 @@ mod evidence_merge_regression_tests {
         );
         assert_eq!(quality.evidence_merged, 1);
         assert_eq!(quality.boost_fallback, 0);
+
+        let updated = &revisions[update_pos.unwrap()];
+        assert_extraction_identity(updated, "merged extracted evidence into existing note");
+        assert_eq!(
+            updated.before_content.as_deref(),
+            Some(test_existing_note().content.as_str())
+        );
+        assert_eq!(updated.before_confidence, Some(0.5));
+        assert_eq!(
+            updated.after_content.as_deref(),
+            Some(updated_content.as_str())
+        );
+        assert_eq!(updated.after_confidence, Some(0.5));
+        assert!(updated.committed_note_id.is_some());
+
+        let confidence = &revisions[confidence_pos.unwrap()];
+        assert_extraction_identity(confidence, "confirmed duplicate extracted knowledge");
+        assert_eq!(
+            confidence.before_content.as_deref(),
+            Some(updated_content.as_str())
+        );
+        assert_eq!(
+            confidence.after_content.as_deref(),
+            Some(updated_content.as_str())
+        );
+        assert_eq!(confidence.before_confidence, Some(0.5));
+        assert_eq!(confidence.after_confidence, Some(0.65));
+        assert!(confidence.committed_note_id.is_some());
     }
 
     #[tokio::test]
@@ -3671,7 +3854,10 @@ mod evidence_merge_regression_tests {
             r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
             r#"{"content":"Merged evidence that cannot be persisted because the controlled repository update fails."}"#.to_string(),
         ]);
-        let repo = RecordingExtractionRepository::with_mutation_failure(test_existing_note(), NoteRevisionEventKind::Updated);
+        let repo = RecordingExtractionRepository::with_mutation_failure(
+            test_existing_note(),
+            NoteRevisionEventKind::Updated,
+        );
         let context = ExtractionContext {
             note_repo: &repo,
             provider: &provider,
@@ -3710,7 +3896,7 @@ mod evidence_merge_regression_tests {
                 .iter()
                 .filter(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged)
                 .count(),
-            0,
+            1,
             "update failure must retain exactly one confidence-only boost"
         );
         assert_eq!(
