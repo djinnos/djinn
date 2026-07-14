@@ -1266,9 +1266,18 @@ fn startup_diagnostic_facts_are_canonical_and_exclude_runtime_paths() {
         ExtensionLoadRemedyCode::CheckPlaceholder,
         "A configured MCP placeholder value is unavailable.",
     );
-    let transport = McpStartupFailure::Transport.diagnostic("project-server");
-    let handshake = McpStartupFailure::Handshake.diagnostic("project-server");
-    let initial_list = McpStartupFailure::ToolsList.diagnostic("project-server");
+    let transport = McpStartupFailure::Transport {
+        error: "invalid header name".to_owned(),
+    }
+    .diagnostic("project-server");
+    let handshake = McpStartupFailure::Handshake {
+        error: "server refused initialization".to_owned(),
+    }
+    .diagnostic("project-server");
+    let initial_list_failure = McpStartupFailure::ToolsList {
+        error: "remote tools/list protocol error".to_owned(),
+    };
+    let initial_list = initial_list_failure.diagnostic("project-server");
 
     for fact in [&placeholder, &transport, &handshake, &initial_list] {
         assert_eq!(fact.source_kind, ExtensionLoadSourceKind::ProjectMcp);
@@ -1293,6 +1302,16 @@ fn startup_diagnostic_facts_are_canonical_and_exclude_runtime_paths() {
     assert_eq!(
         initial_list.remedy_code,
         ExtensionLoadRemedyCode::CheckServer
+    );
+    assert_eq!(
+        initial_list_failure.to_string(),
+        "remote tools/list protocol error",
+        "legacy structured failure logging retains the underlying rmcp error"
+    );
+    assert_eq!(
+        initial_list.summary_material,
+        "Initial MCP tools/list request failed.",
+        "the diagnostic fact remains a bounded trusted summary"
     );
 }
 

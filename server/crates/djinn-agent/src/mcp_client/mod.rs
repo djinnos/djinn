@@ -899,38 +899,41 @@ pub(crate) struct McpDiscoveryResult {
 }
 
 /// The reachable startup boundaries exposed by this HTTP-only loader.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum McpStartupFailure {
-    Transport,
+    Transport { error: String },
     // rmcp serves connection and initialize at the same boundary.
-    Handshake,
-    ToolsList,
+    Handshake { error: String },
+    ToolsList { error: String },
 }
 
 impl std::fmt::Display for McpStartupFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Transport => "MCP transport configuration failed",
-            Self::Handshake => "MCP transport handshake failed",
-            Self::ToolsList => "MCP tools/list failed",
-        })
+        match self {
+            // Preserve the underlying startup error in the existing structured
+            // log field. The fact intentionally has only a bounded, trusted
+            // summary because transport errors can contain remote data.
+            Self::Transport { error } | Self::Handshake { error } | Self::ToolsList { error } => {
+                formatter.write_str(error)
+            }
+        }
     }
 }
 
 impl McpStartupFailure {
-    fn diagnostic(self, server_name: &str) -> ExtensionDiagnosticFact {
+    fn diagnostic(&self, server_name: &str) -> ExtensionDiagnosticFact {
         let (phase, remedy_code, summary_material) = match self {
-            Self::Transport => (
+            Self::Transport { .. } => (
                 ExtensionLoadPhase::Transport,
                 ExtensionLoadRemedyCode::CheckTransport,
                 "MCP transport configuration could not be initialized.",
             ),
-            Self::Handshake => (
+            Self::Handshake { .. } => (
                 ExtensionLoadPhase::Handshake,
                 ExtensionLoadRemedyCode::CheckServer,
                 "MCP connection or initialization failed.",
             ),
-            Self::ToolsList => (
+            Self::ToolsList { .. } => (
                 ExtensionLoadPhase::ToolsList,
                 ExtensionLoadRemedyCode::CheckServer,
                 "Initial MCP tools/list request failed.",
@@ -1273,10 +1276,16 @@ async fn connect_to_server(
 ) -> Result<Peer<RoleClient>, McpStartupFailure> {
     let mut custom_headers = HashMap::new();
     for (name, value) in headers {
-        let header_name =
-            HeaderName::try_from(name.as_str()).map_err(|_| McpStartupFailure::Transport)?;
-        let header_value =
-            HeaderValue::try_from(value.as_str()).map_err(|_| McpStartupFailure::Transport)?;
+        let header_name = HeaderName::try_from(name.as_str()).map_err(|error| {
+            McpStartupFailure::Transport {
+                error: error.to_string(),
+            }
+        })?;
+        let header_value = HeaderValue::try_from(value.as_str()).map_err(|error| {
+            McpStartupFailure::Transport {
+                error: error.to_string(),
+            }
+        })?;
         custom_headers.insert(header_name, header_value);
     }
 
@@ -1292,7 +1301,9 @@ async fn connect_to_server(
     let service = handler
         .serve(transport)
         .await
-        .map_err(|_| McpStartupFailure::Handshake)?;
+        .map_err(|error| McpStartupFailure::Handshake {
+            error: error.to_string(),
+        })?;
     let peer = service.peer().clone();
     // Keep the service alive in the background so notification processing
     // continues for the lifetime of the connection.
@@ -1322,7 +1333,9 @@ async fn startup_and_list(
     let result = peer
         .list_tools(None)
         .await
-        .map_err(|_| McpStartupFailure::ToolsList)?;
+        .map_err(|error| McpStartupFailure::ToolsList {
+            error: error.to_string(),
+        })?;
     Ok((peer, result))
 }
 
