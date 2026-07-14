@@ -43,10 +43,12 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
+use djinn_core::doctor::checks::retrieval::{
+    EntryPointCounts, RETRIEVAL_ZERO_RESULT_NAME, RetrievalHealthDataSource,
+    RetrievalHealthSnapshot, RetrievalProjectWindowSnapshot, RetrievalZeroResultCheck,
+};
 use djinn_core::doctor::{
-    DoctorCheck, DoctorRegistry, EntryPointCounts, Finding, FindingSeverity,
-    RETRIEVAL_ZERO_RESULT_NAME, ResolverSnapshot, RetrievalHealthDataSource,
-    RetrievalHealthSnapshot, RetrievalProjectWindowSnapshot, RetrievalZeroResultCheck, registry,
+    DoctorCheck, DoctorRegistry, Finding, FindingSeverity, ResolverSnapshot, registry,
 };
 use djinn_db::repositories::retrieval_trace::RetrievalTraceRepository;
 use djinn_db::{DoctorFindingRepository, ProjectRepository, RecentDoctorFindings};
