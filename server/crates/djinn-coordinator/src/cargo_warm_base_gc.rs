@@ -834,6 +834,13 @@ pub struct PressureEvictionResult {
 /// Emit the pressure sweep completion event without exposing per-project
 /// identifiers. Retention reasons are enums, preserving bounded diagnostics
 /// while callers retain the detailed result for control flow.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "legacy pressure eviction remains additive while health consumes the three-rung executor"
+    )
+)]
 pub(crate) fn log_pressure_eviction_completion(
     pressure: &PressureEvictionResult,
     mode: crate::context::CacheCleanupMode,
