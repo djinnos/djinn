@@ -5298,7 +5298,11 @@ async fn provider_phase_script_counts_empty_assistant_backoff_not_local_time() {
     tokio::time::advance(backoff).await;
     assert!(run.await.0.is_ok());
     let after = render().expect("render phase metrics");
-    assert_eq!(phase_delta(&before, &after, "provider_wait"), 14);
+    let expected_provider_wait = 2 + 3 + backoff.as_secs() + 4 + 2;
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait"),
+        expected_provider_wait
+    );
     assert_eq!(phase_delta(&before, &after, "tool_execution"), 0);
 }
 
