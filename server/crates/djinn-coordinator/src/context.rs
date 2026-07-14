@@ -434,6 +434,7 @@ mod tests {
         assert!(config.cargo_debris_enabled);
         assert_eq!(config.cargo_debris_max_age_days, 7);
         assert_eq!(config.warm_base_idle_retention_days, 14);
+        assert_eq!(config.warm_profile_min_idle_hours, 24);
         assert_eq!(config.warm_base_grace_period, Duration::from_secs(300));
         assert!((config.warm_base_low_free_ratio - 0.15).abs() < f64::EPSILON);
         assert!((config.warm_base_high_free_ratio - 0.25).abs() < f64::EPSILON);
@@ -570,5 +571,31 @@ mod tests {
         assert!(!parse_bool_env("no"));
         assert!(!parse_bool_env(""));
         assert!(!parse_bool_env("random"));
+    }
+}
+
+#[cfg(test)]
+mod warm_profile_idle_config_tests {
+    use super::*;
+
+    #[test]
+    fn warm_profile_idle_accepts_zero_and_rejects_non_decimal_values() {
+        let variable = "DJINN_CACHE_CLEANUP_WARM_PROFILE_MIN_IDLE_HOURS";
+        for (value, expected) in [
+            ("0", 0),
+            ("24", 24),
+            ("-1", 24),
+            ("24h", 24),
+            (" 24", 24),
+            ("+24", 24),
+            ("18446744073709551616", 24),
+        ] {
+            unsafe { std::env::set_var(variable, value) };
+            assert_eq!(
+                CacheCleanupConfig::from_env().warm_profile_min_idle_hours,
+                expected
+            );
+        }
+        unsafe { std::env::remove_var(variable) };
     }
 }

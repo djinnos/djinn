@@ -267,3 +267,204 @@ fn allocated_bytes(metadata: &std::fs::Metadata) -> u64 {
 fn allocated_bytes(metadata: &std::fs::Metadata) -> u64 {
     metadata.len()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::UNIX_EPOCH;
+
+    fn snapshot(base: &Path, id: &str, activity: Option<SystemTime>) -> PressureBaseSnapshot {
+        PressureBaseSnapshot {
+            project_id: id.into(),
+            canonical_base: fs::canonicalize(base).expect("canonical base"),
+            effective_latest_activity: activity,
+        }
+    }
+
+    fn mkdir(base: &Path, relative: &str) -> PathBuf {
+        let path = base.join(relative);
+        fs::create_dir_all(&path).expect("create directory");
+        path
+    }
+
+    #[test]
+    fn plans_top_level_and_triple_profiles_in_global_rung_order() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let older = mkdir(temp.path(), "older");
+        let newer = mkdir(temp.path(), "newer");
+        mkdir(&older, "debug/incremental");
+        mkdir(&older, "debug/sibling-preserved");
+        mkdir(&older, "release");
+        mkdir(&older, "aarch64-unknown-linux-gnu/debug/incremental");
+        mkdir(&older, "x86_64-unknown-linux-gnu/release/incremental");
+        mkdir(&newer, "test/incremental");
+        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        let plan = build_three_rung_pressure_plan(
+            vec![
+                snapshot(&newer, "newer", Some(UNIX_EPOCH + Duration::from_secs(2))),
+                snapshot(&older, "older", Some(UNIX_EPOCH)),
+            ],
+            now,
+            Duration::ZERO,
+        );
+
+        let rungs: Vec<_> = plan.units.iter().map(|unit| unit.rung).collect();
+        assert_eq!(
+            rungs,
+            vec![
+                PressureRung::Incremental,
+                PressureRung::Incremental,
+                PressureRung::Incremental,
+                PressureRung::Incremental,
+                PressureRung::StaleProfile,
+                PressureRung::StaleProfile,
+                PressureRung::StaleProfile,
+                PressureRung::StaleProfile,
+                PressureRung::StaleProfile,
+                PressureRung::WholeBase,
+                PressureRung::WholeBase,
+            ]
+        );
+        let targets: Vec<_> = plan
+            .units
+            .iter()
+            .filter(|unit| unit.rung == PressureRung::StaleProfile)
+            .map(|unit| {
+                unit.canonical_target
+                    .strip_prefix(&older)
+                    .ok()
+                    .map(Path::to_path_buf)
+            })
+            .collect();
+        assert_eq!(
+            targets[..4],
+            [
+                Some(PathBuf::from("aarch64-unknown-linux-gnu/debug")),
+                Some(PathBuf::from("debug")),
+                Some(PathBuf::from("release")),
+                Some(PathBuf::from("x86_64-unknown-linux-gnu/release")),
+            ]
+        );
+        let debug = plan
+            .units
+            .iter()
+            .find(|unit| {
+                unit.rung == PressureRung::StaleProfile
+                    && unit.canonical_target == older.join("debug")
+            })
+            .expect("debug profile");
+        assert_ne!(
+            debug.canonical_target,
+            older.join("debug/sibling-preserved")
+        );
+        assert_eq!(plan.units[9].canonical_target, older);
+        assert_eq!(plan.units[10].canonical_target, newer);
+    }
+
+    #[test]
+    fn profile_staleness_uses_activity_only_and_allocated_bytes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = mkdir(temp.path(), "base");
+        let incremental = mkdir(&base, "debug/incremental");
+        fs::write(incremental.join("artifact"), vec![7u8; 4096]).expect("artifact");
+        let now = UNIX_EPOCH + Duration::from_secs(48 * 60 * 60);
+        let active = build_three_rung_pressure_plan(
+            vec![snapshot(
+                &base,
+                "base",
+                Some(now - Duration::from_secs(60 * 60)),
+            )],
+            now,
+            Duration::from_secs(24 * 60 * 60),
+        );
+        assert!(matches!(
+            active.units[1].disposition,
+            PressurePlanDisposition::Retained(PressurePlanRetainReason::ProfileNotIdle)
+        ));
+        assert!(active.units[0].projected_allocated_bytes > 0);
+        let immediate = build_three_rung_pressure_plan(
+            vec![snapshot(&base, "base", Some(now))],
+            now,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            immediate.units[1].disposition,
+            PressurePlanDisposition::Eligible
+        );
+    }
+
+    #[test]
+    fn ties_are_deterministic_and_unsafe_layouts_fail_closed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let a = mkdir(temp.path(), "a");
+        let b = mkdir(temp.path(), "b");
+        mkdir(&a, "debug");
+        mkdir(&b, "debug");
+        let now = UNIX_EPOCH + Duration::from_secs(100);
+        let first = build_three_rung_pressure_plan(
+            vec![
+                snapshot(&b, "b", Some(UNIX_EPOCH)),
+                snapshot(&a, "a", Some(UNIX_EPOCH)),
+            ],
+            now,
+            Duration::ZERO,
+        );
+        let second = build_three_rung_pressure_plan(
+            vec![
+                snapshot(&a, "a", Some(UNIX_EPOCH)),
+                snapshot(&b, "b", Some(UNIX_EPOCH)),
+            ],
+            now,
+            Duration::ZERO,
+        );
+        assert_eq!(first, second);
+        assert_eq!(first.units.last().expect("whole base").canonical_target, b);
+
+        let file = temp.path().join("not-a-directory");
+        fs::write(&file, "x").expect("file");
+        let missing = temp.path().join("missing");
+        let rejected = build_three_rung_pressure_plan(
+            vec![
+                PressureBaseSnapshot {
+                    project_id: "file".into(),
+                    canonical_base: file,
+                    effective_latest_activity: Some(UNIX_EPOCH),
+                },
+                PressureBaseSnapshot {
+                    project_id: "missing".into(),
+                    canonical_base: missing,
+                    effective_latest_activity: Some(UNIX_EPOCH),
+                },
+            ],
+            now,
+            Duration::ZERO,
+        );
+        assert!(
+            rejected
+                .units
+                .iter()
+                .all(|unit| matches!(unit.disposition, PressurePlanDisposition::Retained(_)))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_profiles_and_tree_links_are_rejected_without_following_them() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = mkdir(temp.path(), "base");
+        let outside = mkdir(temp.path(), "outside");
+        mkdir(&outside, "incremental");
+        symlink(&outside, base.join("debug")).expect("profile link");
+        let plan = build_three_rung_pressure_plan(
+            vec![snapshot(&base, "base", Some(UNIX_EPOCH))],
+            UNIX_EPOCH + Duration::from_secs(1),
+            Duration::ZERO,
+        );
+        assert!(matches!(
+            plan.units[0].disposition,
+            PressurePlanDisposition::Retained(PressurePlanRetainReason::UnsafeProfile)
+        ));
+    }
+}
