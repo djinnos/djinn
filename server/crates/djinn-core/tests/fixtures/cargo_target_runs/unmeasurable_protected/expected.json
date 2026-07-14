@@ -1,1 +1,1 @@
-{"deleted":1,"errors":0,"protected":2,"final_directory_count":0,"outcome":"over_budget_protected","survivors":["unmeasurable-link","protected-sentinel"],"absent":["target"]}
+{"deleted":1,"errors":1,"protected":1,"final_directory_count":1,"final_allocated_bytes":8192,"outcome":"over_budget_protected_and_error","survivors":["unmeasurable"],"absent":["free"],"inventory":{"allocated_bytes":16384,"directories":2,"candidates":["free"],"protected":1,"errors":1,"top_level_non_directories":0,"sparse_logical_bytes":null}}

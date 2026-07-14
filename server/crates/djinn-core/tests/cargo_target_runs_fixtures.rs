@@ -15,7 +15,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 
 const FIXTURES: &str = concat!(
@@ -55,6 +55,8 @@ struct Expected {
     #[serde(default)]
     final_directory_count: Option<usize>,
     #[serde(default)]
+    final_allocated_bytes: Option<u64>,
+    #[serde(default)]
     outcome: Option<String>,
     #[serde(default)]
     survivors: Vec<String>,
@@ -74,9 +76,11 @@ struct Caps {
 
 #[derive(Debug, Deserialize)]
 struct InventoryExpected {
+    allocated_bytes: u64,
     directories: usize,
     candidates: Vec<String>,
     protected: usize,
+    errors: usize,
     top_level_non_directories: usize,
     sparse_logical_bytes: Option<u64>,
 }
@@ -159,6 +163,7 @@ fn run_fixture(case: &Path, fixture: &Fixture, expected: &Expected) {
             inventory_expected.candidates
         );
         assert_eq!(inventory.protected.len(), inventory_expected.protected);
+        assert_eq!(inventory.errors.len(), inventory_expected.errors);
         assert_eq!(
             inventory.top_level_non_directory_count,
             inventory_expected.top_level_non_directories
@@ -181,8 +186,11 @@ fn run_fixture(case: &Path, fixture: &Fixture, expected: &Expected) {
         // reusing the core inventory implementation.
         assert_eq!(
             inventory.total_allocated_bytes,
-            allocated_bytes_independently(root)
+            inventory_expected.allocated_bytes,
+            "committed initial allocated bytes {}",
+            case.display()
         );
+        assert_eq!(inventory.total_allocated_bytes, allocated_bytes_independently(root));
     }
 
     let caps = CargoTargetRunsCaps {
@@ -195,6 +203,11 @@ fn run_fixture(case: &Path, fixture: &Fixture, expected: &Expected) {
         None => trim_cargo_target_runs(root, &active, caps),
     }
     .expect("Linux trim capability is required");
+    if fixture.scenario == "unmeasurable" {
+        let mut permissions = fs::metadata(root.join("unmeasurable")).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(root.join("unmeasurable"), permissions).unwrap();
+    }
     assert_result(case, root, &result, expected);
 }
 
@@ -234,10 +247,15 @@ fn assert_result(
     );
     assert_eq!(
         result.final_allocated_bytes,
-        allocated_bytes_independently(root),
-        "exact final bytes {}",
+        expected
+            .final_allocated_bytes
+            .expect("final allocated-byte expectation"),
+        "committed exact final bytes {}",
         case.display()
     );
+    if result.errors == 0 {
+        assert_eq!(result.final_allocated_bytes, allocated_bytes_independently(root));
+    }
     for name in &expected.survivors {
         assert!(
             fs::symlink_metadata(root.join(name)).is_ok(),
@@ -298,12 +316,15 @@ fn materialize(root: &Path, scenario: &str) {
             run(root, "bbb-free");
         }
         "unmeasurable" => {
-            // A top-level symlink is deliberately unmeasurable as a run and is
-            // protected rather than followed. The non-directory sentinel keeps
-            // the byte cap over budget even on filesystems with zero-byte links.
-            run(root, "target");
-            symlink(root.join("target"), root.join("unmeasurable-link")).unwrap();
-            fs::write(root.join("protected-sentinel"), vec![1_u8; 4096]).unwrap();
+            // Materialize an actual recursive read failure. This must fail closed
+            // rather than treating the run as a removable candidate.
+            run(root, "unmeasurable");
+            run(root, "free");
+            let mut permissions = fs::metadata(root.join("unmeasurable"))
+                .unwrap()
+                .permissions();
+            permissions.set_mode(0o000);
+            fs::set_permissions(root.join("unmeasurable"), permissions).unwrap();
         }
         other => panic!("unknown fixture scenario {other}"),
     }
