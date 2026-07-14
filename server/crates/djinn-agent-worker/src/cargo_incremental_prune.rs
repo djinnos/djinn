@@ -198,6 +198,19 @@ mod tests {
     }
 
     #[test]
+    fn injected_remove_not_found_is_already_absent_with_zero_bytes() {
+        let (_temp, root, base) = tree();
+        let result = prune_derived_base_with_operations(
+            &base,
+            &root,
+            |_| Ok(37),
+            |_| Err(io::Error::from(io::ErrorKind::NotFound)),
+        )
+        .unwrap();
+        assert_eq!(result, absent());
+    }
+
+    #[test]
     fn injected_lock_errors_are_classified() {
         let lock_open = WarmBaseLock::acquire_with_operations(
             "project",
@@ -423,11 +436,13 @@ where
     }
 
     let bytes = scan(&incremental).map_err(classify_scan_error)?;
-    remove_incremental_dir_with(&incremental, remove)?;
-    Ok(PruneResult {
-        outcome: PruneOutcome::Pruned,
-        logical_bytes: bytes,
-    })
+    match remove_incremental_dir_with(&incremental, remove)? {
+        RemovalOutcome::Removed => Ok(PruneResult {
+            outcome: PruneOutcome::Pruned,
+            logical_bytes: bytes,
+        }),
+        RemovalOutcome::AlreadyAbsent => Ok(absent()),
+    }
 }
 
 #[derive(Eq, PartialEq)]
@@ -551,14 +566,22 @@ fn scan_regular_file_bytes(root: &Path) -> io::Result<u64> {
     Ok(bytes)
 }
 
+enum RemovalOutcome {
+    Removed,
+    AlreadyAbsent,
+}
+
 // Production supplies exactly one `remove_dir_all` call after scanning.
-fn remove_incremental_dir_with<Remove>(path: &Path, remove: Remove) -> Result<(), PruneError>
+fn remove_incremental_dir_with<Remove>(
+    path: &Path,
+    remove: Remove,
+) -> Result<RemovalOutcome, PruneError>
 where
     Remove: FnOnce(&Path) -> io::Result<()>,
 {
     match remove(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => Ok(RemovalOutcome::Removed),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(RemovalOutcome::AlreadyAbsent),
         Err(error) => Err(PruneError::new(PruneErrorKind::Remove, error)),
     }
 }
