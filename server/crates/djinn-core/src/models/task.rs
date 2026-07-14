@@ -493,6 +493,38 @@ pub struct Task {
     // (`None`) when no error is known.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub ci_head_observation_error: Option<String>,
+    // ── Merge-queue lane (mq_* columns of task_pr_ci_snapshots) ─────────
+    //
+    // These promote the flat `mq_*` columns of the current-head CI snapshot
+    // (written exclusively by the PR-poller dequeue path) so DTO builders can
+    // reconstruct the [`MergeQueueLane`]. The lane is present iff
+    // `ci_mq_state` is `Some` (`mq_state IS NOT NULL`); every other `ci_mq_*`
+    // field is nullable and cleared together with the state on a new PR head.
+    /// Merge-queue lane state, e.g. `"dequeued_failure"`. `None` when no
+    /// merge-queue failure has been recorded for the current head.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_mq_state: Option<String>,
+    /// The `merge_group` Actions run id that failed, when known.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_mq_run_id: Option<i64>,
+    /// The `head_sha` of the failed merge-group run, when known.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_mq_head_sha: Option<String>,
+    /// JSON array (text) of the merge-group check runs that failed.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_mq_failed_check_names: Option<String>,
+    /// Stable fingerprint of the merge-group failure signature.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_mq_failure_fingerprint: Option<String>,
+    /// Consecutive dequeue observations carrying the same lane fingerprint.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_mq_same_signature_count: Option<i64>,
+    /// ISO-8601 timestamp when this lane state was first observed.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_mq_first_seen_at: Option<String>,
+    /// ISO-8601 timestamp when this lane state was last observed.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_mq_last_seen_at: Option<String>,
     /// Number of unresolved blocker tasks (blocking tasks not yet closed).
     /// Populated by list queries via subquery; defaults to 0 elsewhere.
     #[cfg_attr(feature = "sqlx", sqlx(default))]

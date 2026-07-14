@@ -2015,6 +2015,125 @@ async fn escalate_ci_failure_with_empty_sections_omits_details() {
     );
 }
 
+/// `escalate_ci_failure_and_park` folds the merge-queue lane facts into the CI
+/// Failure Details even when the caller passes no head sections — a green PR
+/// head rejected by the merge queue must still explain WHY.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn escalate_ci_failure_includes_merge_queue_lane_facts() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let mut task = make_task_with_reopen_count(&db, &tx, 0).await;
+    task.ci_mq_state = Some("dequeued_failure".into());
+    task.ci_mq_run_id = Some(556677);
+    task.ci_mq_failed_check_names = Some(r#"["Integration Tests"]"#.into());
+    task.ci_mq_failure_fingerprint = Some("mq-fp".into());
+    task.ci_mq_same_signature_count = Some(3);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let reason = "Merge queue repeatedly rejected PR #42: 3 consecutive same-signature rejections.";
+    let sections: Vec<String> = vec![];
+    let pr_url = "https://github.com/owner/repo/pull/42";
+
+    actor
+        .escalate_ci_failure_and_park(&task, pr_url, reason, &sections)
+        .await;
+
+    let comments = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("comment".to_string()),
+            actor_role: None,
+            project_id: None,
+            from_time: None,
+            to_time: None,
+            limit: 100,
+            offset: 0,
+        })
+        .await
+        .unwrap();
+
+    let escalation_comment = comments
+        .iter()
+        .find(|c| c.payload.contains("**PR CI Escalation**"))
+        .expect("PR CI Escalation comment must be logged");
+    for needle in [
+        "**CI Failure Details:**",
+        "Merge-queue rejection",
+        "556677",
+        "Integration Tests",
+        "3 consecutive same-signature",
+    ] {
+        assert!(
+            escalation_comment.payload.contains(needle),
+            "escalation comment must include merge-queue fact {needle:?}; got: {}",
+            escalation_comment.payload
+        );
+    }
+
+    let planner_comment = comments
+        .iter()
+        .find(|c| c.payload.contains("PLANNER_PARK_ESCALATION"))
+        .expect("PLANNER_PARK_ESCALATION comment must be logged");
+    assert!(
+        planner_comment.payload.contains("Merge-queue rejection"),
+        "planner escalation reason must include merge-queue lane facts; got: {}",
+        planner_comment.payload
+    );
+}
+
+/// `route_planner_intervention` appends the merge-queue lane facts even when the
+/// caller passes `ci_failure_sections = None`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn route_planner_intervention_appends_merge_queue_lane_facts() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let mut task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    task.ci_mq_state = Some("dequeued_failure".into());
+    task.ci_mq_run_id = Some(998877);
+    task.ci_mq_failed_check_names = Some(r#"["Server Tests"]"#.into());
+    task.ci_mq_same_signature_count = Some(3);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let reason = "Merge queue repeatedly rejected PR.";
+    let handled = actor
+        .route_planner_intervention(&task, "worker", reason, None, task.reopen_count)
+        .await;
+    assert!(handled, "route_planner_intervention must handle the task");
+
+    let comments = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("comment".to_string()),
+            actor_role: None,
+            project_id: None,
+            from_time: None,
+            to_time: None,
+            limit: 100,
+            offset: 0,
+        })
+        .await
+        .unwrap();
+
+    let planner_comment = comments
+        .iter()
+        .find(|c| c.payload.contains("PLANNER_ESCALATION"))
+        .expect("PLANNER_ESCALATION comment must be logged");
+    for needle in [
+        "**CI Failure Details:**",
+        "Merge-queue rejection",
+        "998877",
+        "Server Tests",
+    ] {
+        assert!(
+            planner_comment.payload.contains(needle),
+            "planner escalation reason must include merge-queue fact {needle:?}; got: {}",
+            planner_comment.payload
+        );
+    }
+}
+
 /// `route_planner_intervention` appends CI failure sections to the escalation
 /// reason when `ci_failure_sections` is `Some(...)`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

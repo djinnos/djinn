@@ -1,0 +1,8 @@
+{
+  "environment_config": {
+    "schema_version": 1,
+    "agent_mcp_defaults": { "doctor": ["missing-placeholder"] },
+    "global_skills": ["missing-skill"]
+  },
+  "mcp_json": "{\"mcpServers\":{\"missing-placeholder\":{\"url\":\"${DOCTOR_PROBE_UNSET}\"}}}"
+}
