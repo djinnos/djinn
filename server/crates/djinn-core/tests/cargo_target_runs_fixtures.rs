@@ -8,14 +8,14 @@
 #![cfg(unix)]
 
 use djinn_core::cargo_target_runs::{
-    inventory_cargo_target_runs, resolve_cargo_target_runs_caps, trim_cargo_target_runs,
-    trim_cargo_target_runs_with_fs, CargoTargetRunsCaps, CargoTargetRunsInventoryError, Filesystem,
+    CargoTargetRunsCaps, CargoTargetRunsInventoryError, Filesystem, inventory_cargo_target_runs,
+    resolve_cargo_target_runs_caps, trim_cargo_target_runs, trim_cargo_target_runs_with_fs,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 
 const FIXTURES: &str = concat!(
