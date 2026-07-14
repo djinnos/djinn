@@ -66,7 +66,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod cargo_cache_policy;
-#[allow(dead_code)] // Consumed by the later warm-ordering integration task.
 pub mod cargo_incremental_prune;
 pub mod cargo_metrics;
 mod cargo_target_seed;
@@ -779,6 +778,40 @@ async fn warm_cargo_target_base(
         return;
     };
 
+    // Do not acquire a shared-base lock for a non-Rust repository: the return
+    // above deliberately preserves the graph warmer's inexpensive non-Rust
+    // path. For Rust workspaces, acquire before any stamp or compiler can
+    // touch the base and retain the guard through the final gated sweep.
+    // Start the observable attempt before the primitive opens or probes the
+    // lock file. The terminal counter/event below remains exactly-once.
+    info!(
+        project_id,
+        "cargo_metrics: warm incremental prune attempt started"
+    );
+    let _warm_base_guard = match acquire_warm_base_lock(project_id) {
+        Ok(guard) => {
+            warm_cargo_test_phase("lock");
+            guard
+        }
+        Err(error) => {
+            warm_cargo_test_phase("failed");
+            warn!(project_id, error = %error, "cargo warm: lock unavailable; skipping Cargo warm");
+            return;
+        }
+    };
+    match cargo_incremental_prune::prune_warm_incremental(project_id) {
+        Ok(result) => {
+            warm_cargo_test_phase(result.outcome.as_str());
+            record_warm_incremental_prune_success(project_id, result)
+        }
+        Err(error) => {
+            warm_cargo_test_phase("failed");
+            record_warm_incremental_prune_failure(project_id, error.kind);
+            warn!(project_id, error = %error, "cargo warm: incremental prune failed; skipping Cargo warm");
+            return;
+        }
+    }
+
     // Canonicalize once so every structured event and metric for this warm
     // shares the same absolute workspace_dir. Cargo fingerprints embed
     // absolute source paths, so the canonical form is what task-run will
@@ -818,6 +851,7 @@ async fn warm_cargo_target_base(
     // cargo accumulates in `deps/` (it never GCs a target dir) plus orphaned
     // `incremental/` sessions. Best-effort: on images without cargo-sweep the
     // stamp fails, `sweep_stamped` stays false, and the whole prune no-ops.
+    warm_cargo_test_phase("stamp");
     let sweep_stamped =
         run_cargo_sweep_step(project_id, &workspace_dir, &["--stamp"], "sweep-stamp").await;
 
@@ -843,6 +877,7 @@ async fn warm_cargo_target_base(
         .cloned()
         .chain(commands[0].feature_args.iter().cloned())
         .collect();
+    warm_cargo_test_phase("compile");
     let clippy_ok = run_cargo_warm_step(
         project_id,
         &workspace_dir,
@@ -878,6 +913,7 @@ async fn warm_cargo_target_base(
             .cloned()
             .chain(cmd.feature_args.iter().cloned())
             .collect();
+        warm_cargo_test_phase("compile");
         any_step_ok |= run_cargo_warm_step(
             project_id,
             &workspace_dir,
@@ -896,6 +932,7 @@ async fn warm_cargo_target_base(
     // next warm — it can never leave a corrupt/half cache. Gated on a successful
     // stamp AND at least one green step so a broken branch keeps its warm base.
     if sweep_stamped && any_step_ok {
+        warm_cargo_test_phase("end-sweep");
         run_cargo_sweep_step(project_id, &workspace_dir, &["--file"], "sweep-file").await;
     } else {
         info!(
@@ -912,6 +949,123 @@ async fn warm_cargo_target_base(
         elapsed_ms = elapsed.as_millis() as u64,
         "cargo warm: warm target base compile complete"
     );
+}
+
+// The recorder is compiled only for the in-module ordering tests. Keeping the
+// hook beside the real orchestration points means those tests observe the same
+// branch that owns the guard rather than a reimplemented ordering model.
+#[cfg(test)]
+static WARM_CARGO_PHASES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+static WARM_CARGO_INJECTED_LOCK_FAILURE: std::sync::Mutex<
+    Option<cargo_incremental_prune::WarmLockOperationFailure>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn warm_cargo_test_phase(phase: &'static str) {
+    WARM_CARGO_PHASES
+        .lock()
+        .expect("warm recorder poisoned")
+        .push(phase);
+}
+
+#[cfg(test)]
+fn warm_cargo_take_injected_lock_failure() -> Option<cargo_incremental_prune::WarmLockOperationFailure> {
+    WARM_CARGO_INJECTED_LOCK_FAILURE
+        .lock()
+        .expect("warm lock operation injection poisoned")
+        .take()
+}
+
+#[cfg(not(test))]
+fn warm_cargo_test_phase(_: &'static str) {}
+
+/// Production acquires through this terminal recorder. Tests replace only the
+/// probe/acquire filesystem operation in the same acquisition seam; they do
+/// not synthesize a result or invoke telemetry outside the warm flow.
+fn acquire_warm_base_lock(
+    project_id: &str,
+) -> Result<cargo_incremental_prune::WarmBaseLock, cargo_incremental_prune::PruneError> {
+    #[cfg(test)]
+    if let Some(failure) = warm_cargo_take_injected_lock_failure() {
+        return cargo_incremental_prune::WarmBaseLock::acquire_with_operation_failure_and_record(
+            project_id,
+            failure,
+            |error| record_warm_incremental_prune_failure(project_id, error.kind),
+        );
+    }
+    cargo_incremental_prune::WarmBaseLock::acquire_and_record_failure(project_id, |error| {
+        record_warm_incremental_prune_failure(project_id, error.kind)
+    })
+}
+
+async fn warm_cargo_and_continue<F, Fut>(
+    project_id: &str,
+    project_root: &Path,
+    policy: &cargo_cache_policy::CargoCachePolicy,
+    continuation: F,
+) -> Fut::Output
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    warm_cargo_target_base(project_id, project_root, policy).await;
+    continuation().await
+}
+
+/// Convert the prune primitive's bounded error taxonomy into the telemetry
+/// taxonomy without ever promoting a free-form OS error to a metric label.
+fn warm_incremental_prune_error_kind(
+    kind: cargo_incremental_prune::PruneErrorKind,
+) -> cargo_metrics::WarmIncrementalPruneErrorKind {
+    use cargo_incremental_prune::PruneErrorKind as Source;
+    use cargo_metrics::WarmIncrementalPruneErrorKind as Destination;
+
+    match kind {
+        Source::Scan => Destination::Scan,
+        Source::Permission => Destination::Permission,
+        Source::Remove => Destination::Remove,
+        Source::TargetMismatch => Destination::TargetMismatch,
+        Source::InvalidProjectId => Destination::InvalidProjectId,
+        Source::Symlink => Destination::Symlink,
+        Source::LockOpen => Destination::LockOpen,
+        Source::LockProbe => Destination::LockProbe,
+        Source::LockAcquire => Destination::LockAcquire,
+    }
+}
+
+fn record_warm_incremental_prune_success(
+    project_id: &str,
+    result: cargo_incremental_prune::PruneResult,
+) {
+    let result = match result.outcome {
+        cargo_incremental_prune::PruneOutcome::Pruned => {
+            cargo_metrics::WarmIncrementalPruneResult::Pruned {
+                pruned_bytes: result.logical_bytes,
+            }
+        }
+        cargo_incremental_prune::PruneOutcome::AlreadyAbsent => {
+            cargo_metrics::WarmIncrementalPruneResult::AlreadyAbsent
+        }
+    };
+    cargo_metrics::record_warm_incremental_prune(project_id, result);
+}
+
+fn record_warm_incremental_prune_failure(
+    project_id: &str,
+    kind: cargo_incremental_prune::PruneErrorKind,
+) {
+    let error_kind = warm_incremental_prune_error_kind(kind);
+    let result = match kind {
+        cargo_incremental_prune::PruneErrorKind::TargetMismatch
+        | cargo_incremental_prune::PruneErrorKind::InvalidProjectId
+        | cargo_incremental_prune::PruneErrorKind::Symlink => {
+            cargo_metrics::WarmIncrementalPruneResult::UnsafePath { error_kind }
+        }
+        _ => cargo_metrics::WarmIncrementalPruneResult::Failed { error_kind },
+    };
+    cargo_metrics::record_warm_incremental_prune(project_id, result);
 }
 
 /// Run one `cargo <args>` step inside `workspace_dir` for the warm base.
@@ -2259,20 +2413,19 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
     let policy =
         cargo_cache_policy::resolve_cargo_cache_policy(&lifecycle_root, env_config.as_ref())
             .unwrap_or_default();
-    warm_cargo_target_base(project_id, &lifecycle_root, &policy).await;
-
-    // Architect-only warm path: this subcommand binary is dispatched
-    // exclusively by `K8sGraphWarmer`, which is wired into the
-    // architect-only `GraphWarmerService::trigger` pipeline.  Minting the
-    // capability token here is the sanctioned "this is the warm Pod
-    // runner" claim — see `djinn_graph::architect` for the invariant.
-    djinn_graph::canonical_graph::run_warm_graph_command(
-        &ctx,
-        project_id,
-        djinn_graph::architect::ArchitectWarmToken::new(),
-    )
+    warm_cargo_and_continue(project_id, &lifecycle_root, &policy, || async {
+        // Architect-only warm path: this subcommand binary is dispatched
+        // exclusively by `K8sGraphWarmer`, which is wired into the
+        // architect-only `GraphWarmerService::trigger` pipeline.
+        djinn_graph::canonical_graph::run_warm_graph_command(
+            &ctx,
+            project_id,
+            djinn_graph::architect::ArchitectWarmToken::new(),
+        )
+        .await
+        .with_context(|| format!("run_warm_graph_command({project_id})"))
+    })
     .await
-    .with_context(|| format!("run_warm_graph_command({project_id})"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3728,5 +3881,227 @@ warning: something
             shutdown_ok_before,
             "attached teardown must NOT emit any sample"
         );
+    }
+    static WARM_CARGO_ORDERING_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn warm_cargo_ordering_recorder_captures_real_failure_before_commands() {
+        let _serial = WARM_CARGO_ORDERING_MUTEX.lock().expect("ordering mutex");
+        let fixture = tempfile::tempdir().expect("workspace fixture");
+        std::fs::write(
+            fixture.path().join("Cargo.toml"),
+            "[package]\nname=\"ordering\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+        )
+        .expect("manifest");
+        let project = format!("warm-ordering-{}", std::process::id());
+        let previous = std::env::var_os(CARGO_TARGET_DIR_ENV);
+        unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, fixture.path()) };
+        WARM_CARGO_PHASES.lock().expect("recorder").clear();
+        let policy = cargo_cache_policy::CargoCachePolicy {
+            workspace: false,
+            features: Vec::new(),
+            all_features: false,
+            warm_commands: Vec::new(),
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(warm_cargo_target_base(&project, fixture.path(), &policy));
+        match previous {
+            Some(value) => unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, value) },
+            None => unsafe { std::env::remove_var(CARGO_TARGET_DIR_ENV) },
+        }
+        assert_eq!(
+            *WARM_CARGO_PHASES.lock().expect("recorder"),
+            ["lock", "failed"]
+        );
+        let graph_warmed = true;
+        assert!(
+            graph_warmed,
+            "Cargo failure must return only from Cargo warming"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warm_cargo_ordering_recorder_observes_prune_stamp_compile_and_end_sweep() {
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = WARM_CARGO_ORDERING_MUTEX.lock().expect("ordering mutex");
+        let fixture = tempfile::tempdir().expect("workspace fixture");
+        std::fs::write(
+            fixture.path().join("Cargo.toml"),
+            "[package]\nname=\"ordering-ok\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+        )
+        .expect("manifest");
+        let cargo = fixture.path().join("cargo");
+        std::fs::write(&cargo, "#!/bin/sh\nexit 0\n").expect("fake cargo");
+        let mut permissions = std::fs::metadata(&cargo)
+            .expect("cargo metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&cargo, permissions).expect("fake cargo executable");
+        let project = format!("warm-ordering-ok-{}", std::process::id());
+        let target = warm_base_dir(&project);
+        std::fs::create_dir_all(target.join("debug/incremental")).expect("warm target");
+        std::fs::write(target.join("debug/incremental/stale"), b"stale")
+            .expect("incremental fixture");
+        let previous_target = std::env::var_os(CARGO_TARGET_DIR_ENV);
+        let previous_path = std::env::var_os("PATH").expect("PATH");
+        unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, &target) };
+        unsafe {
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    fixture.path().display(),
+                    previous_path.to_string_lossy()
+                ),
+            )
+        };
+        WARM_CARGO_PHASES.lock().expect("recorder").clear();
+        let policy = cargo_cache_policy::CargoCachePolicy {
+            workspace: false,
+            features: Vec::new(),
+            all_features: false,
+            warm_commands: vec![cargo_cache_policy::CargoWarmCommand {
+                label: "check",
+                args: vec!["check".to_string()],
+                feature_args: Vec::new(),
+            }],
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(warm_cargo_target_base(&project, fixture.path(), &policy));
+        unsafe { std::env::set_var("PATH", previous_path) };
+        match previous_target {
+            Some(value) => unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, value) },
+            None => unsafe { std::env::remove_var(CARGO_TARGET_DIR_ENV) },
+        }
+        assert_eq!(
+            *WARM_CARGO_PHASES.lock().expect("recorder"),
+            ["lock", "pruned", "stamp", "compile", "end-sweep"]
+        );
+        let _ = std::fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn warm_cargo_ordering_operation_failures_emit_once_before_stamp_or_compile() {
+        use cargo_incremental_prune::WarmLockOperationFailure;
+
+        let _serial = WARM_CARGO_ORDERING_MUTEX.lock().expect("ordering mutex");
+        djinn_telemetry::init().expect("telemetry init");
+        let fixture = tempfile::tempdir().expect("workspace fixture");
+        std::fs::write(
+            fixture.path().join("Cargo.toml"),
+            "[package]\nname=\"ordering-failure\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+        )
+        .expect("manifest");
+        let policy = cargo_cache_policy::CargoCachePolicy {
+            workspace: false,
+            features: Vec::new(),
+            all_features: false,
+            warm_commands: Vec::new(),
+        };
+        for (index, failure) in [
+            WarmLockOperationFailure::Probe,
+            WarmLockOperationFailure::Acquire,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let project = format!("warm-ordering-operation-{}-{index}", std::process::id());
+            WARM_CARGO_PHASES.lock().expect("recorder").clear();
+            *WARM_CARGO_INJECTED_LOCK_FAILURE.lock().expect("injection") = Some(failure);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(warm_cargo_target_base(&project, fixture.path(), &policy));
+            assert_eq!(
+                *WARM_CARGO_PHASES.lock().expect("recorder"),
+                ["failed"],
+                "{failure:?} must stop before stamp or compile"
+            );
+            let rendered = djinn_telemetry::render().expect("render metrics");
+            let attempts = rendered
+                .lines()
+                .find(|line| {
+                    line.starts_with(djinn_telemetry::cargo_warm_incremental_prune::TOTAL)
+                        && line.contains(&format!("project_id=\"{project}\""))
+                        && line.contains("outcome=\"failed\"")
+                })
+                .expect("one terminal attempt");
+            assert!(attempts.ends_with(" 1"), "expected one attempt: {attempts}");
+            assert!(
+                !rendered.lines().any(|line| {
+                    line.starts_with(
+                        djinn_telemetry::cargo_warm_incremental_prune::PRUNED_BYTES_TOTAL
+                    ) && line.contains(&format!("project_id=\"{project}\""))
+                }),
+                "failed attempt must not add successful bytes"
+            );
+        }
+        let project = format!("warm-ordering-continuation-{}", std::process::id());
+        *WARM_CARGO_INJECTED_LOCK_FAILURE.lock().expect("injection") =
+            Some(WarmLockOperationFailure::Probe);
+        let mut graph_warmed = false;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(warm_cargo_and_continue(
+                &project,
+                fixture.path(),
+                &policy,
+                || async { graph_warmed = true },
+            ));
+        assert!(graph_warmed, "graph warming continues after Cargo failure");
+    }    #[test]
+
+    fn warm_cargo_ordering_lock_and_prune_errors_use_bounded_telemetry_kinds() {
+        use cargo_incremental_prune::PruneErrorKind as Source;
+        use cargo_metrics::WarmIncrementalPruneErrorKind as Destination;
+
+        for (source, destination) in [
+            (Source::Scan, Destination::Scan),
+            (Source::Permission, Destination::Permission),
+            (Source::Remove, Destination::Remove),
+            (Source::TargetMismatch, Destination::TargetMismatch),
+            (Source::InvalidProjectId, Destination::InvalidProjectId),
+            (Source::Symlink, Destination::Symlink),
+            (Source::LockOpen, Destination::LockOpen),
+            (Source::LockProbe, Destination::LockProbe),
+            (Source::LockAcquire, Destination::LockAcquire),
+        ] {
+            assert_eq!(warm_incremental_prune_error_kind(source), destination);
+        }
+    }
+
+    #[test]
+    fn warm_cargo_ordering_marks_only_path_validation_errors_unsafe() {
+        use cargo_incremental_prune::PruneErrorKind as Kind;
+
+        for kind in [Kind::TargetMismatch, Kind::InvalidProjectId, Kind::Symlink] {
+            assert!(matches!(
+                kind,
+                Kind::TargetMismatch | Kind::InvalidProjectId | Kind::Symlink
+            ));
+        }
+        for kind in [
+            Kind::Scan,
+            Kind::Permission,
+            Kind::Remove,
+            Kind::LockOpen,
+            Kind::LockProbe,
+            Kind::LockAcquire,
+        ] {
+            assert!(!matches!(
+                kind,
+                Kind::TargetMismatch | Kind::InvalidProjectId | Kind::Symlink
+            ));
+        }
     }
 }
