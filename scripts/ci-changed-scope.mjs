@@ -9,7 +9,8 @@ import { appendFileSync, readFileSync } from 'node:fs';
 const EVENTS = new Set(['pull_request', 'merge_group', 'push', 'workflow_dispatch']);
 const JOB_NAMES = [
   'cargoDeny', 'clippy', 'aarch64', 'size', 'migrations', 'rawSql',
-  'capability', 'boundaries', 'serverTest', 'sqlxFreshness', 'memoryEval', 'ui',
+  'capability', 'boundaries', 'serverTest', 'sqlxFreshness', 'memoryEval',
+  'tiltContracts', 'ui',
 ];
 const PROTECTED_SERVER_JOBS = [
   'cargoDeny', 'clippy', 'size', 'migrations', 'rawSql', 'capability',
@@ -53,6 +54,20 @@ function isMigration(path) {
   return /^server\/crates\/[^/]+\/migrations_postgres\//.test(path);
 }
 
+function isTiltContract(path) {
+  return path === 'Tiltfile' ||
+    matches(path, 'scripts/tilt') ||
+    matches(path, 'scripts/kind') ||
+    new Set([
+      'scripts/test-tilt-warm-restart.sh',
+      'scripts/test-tiltfile-config.sh',
+      'scripts/test-wrap-agent-runtime-image.sh',
+    ]).has(path) ||
+    matches(path, 'server/docker') ||
+    path === 'deploy/helm/djinn/values.local.yaml' ||
+    matches(path, 'deploy/langfuse-local');
+}
+
 // Server-side files that are INPUTS to ui/ codegen (see
 // ui/scripts/generate-mcp-types.ts and ui/scripts/generate-usage-types.ts).
 // Changing one without regenerating the checked-in ui golden stales main for
@@ -64,10 +79,11 @@ const UI_CODEGEN_INPUTS = new Set([
 ]);
 
 function isUnclassifiedNonDocumentation(path) {
-  // Documentation is deliberately the sole narrow lane. Every other path must
-  // belong to a known product or workflow lane, including nested executable and
-  // configuration paths, or it receives fail-closed full validation.
-  return !isDocumentation(path) && !matches(path, 'ui') && !matches(path, 'server') && !matches(path, '.github/workflows');
+  // Documentation and the explicitly enumerated local-dev contract are the
+  // only narrow lanes. Every other executable/configuration path receives
+  // fail-closed full validation.
+  return !isDocumentation(path) && !matches(path, 'ui') && !matches(path, 'server') &&
+    !matches(path, '.github/workflows') && !isTiltContract(path);
 }
 
 /**
@@ -86,6 +102,7 @@ export function classifyChangedScope(files) {
     sqlx: false,
     sandboxAarch64: false,
     memoryRanking: false,
+    tiltContracts: false,
     workflowCi: false,
     unknown: false,
   };
@@ -102,11 +119,12 @@ export function classifyChangedScope(files) {
       path === 'server/rust-toolchain.toml'
     ) lanes.sandboxAarch64 = true;
     if (isMemoryRanking(path)) lanes.memoryRanking = true;
+    if (isTiltContract(path)) lanes.tiltContracts = true;
     if (matches(path, '.github/workflows')) lanes.workflowCi = true;
     if (isUnclassifiedNonDocumentation(path)) lanes.unknown = true;
   }
-  // A source/configuration path that isn't a recognized UI or server lane is
-  // unsafe to route narrowly. Documentation is the sole intentionally narrow lane.
+  // A source/configuration path that is not a recognized UI, server, or local
+  // Tilt contract is unsafe to route narrowly.
   if (normalizedFiles.length === 0 || normalizedFiles.some(isUnclassifiedNonDocumentation)) lanes.unknown = true;
   return { files: normalizedFiles, lanes };
 }
@@ -133,6 +151,7 @@ export function planChangedScope(input) {
   if (serverSelected) for (const name of PROTECTED_SERVER_JOBS) jobs[name] = true;
   if (lanes.sandboxAarch64 || lanes.workflowCi || fullValidation || lanes.unknown) jobs.aarch64 = true;
   if (lanes.memoryRanking || lanes.workflowCi || fullValidation || lanes.unknown) jobs.memoryEval = true;
+  if (lanes.tiltContracts || lanes.workflowCi || fullValidation || lanes.unknown) jobs.tiltContracts = true;
   if (lanes.ui || lanes.workflowCi || fullValidation || lanes.unknown) jobs.ui = true;
 
   // Merge queues must validate the server policy set even for docs-only changes;
