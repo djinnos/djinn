@@ -88,7 +88,6 @@ impl DjinnMcpServer {
                 content: &p.content,
                 note_type: &p.note_type,
                 status: p.status.as_deref(),
-                tags_json: &tags_json,
             },
         )
         .await
@@ -128,7 +127,7 @@ impl DjinnMcpServer {
             }
             WriteDedupOutcome::SupersedeExisting {
                 candidate_id,
-                reason,
+                reason: dedup_reason,
             } => {
                 observer.finish(RetrievalOutcome::Success, 1);
                 // Keep incoming creation exactly on the ordinary memory_write path.
@@ -145,9 +144,13 @@ impl DjinnMcpServer {
                 .await;
                 if let Some(new_note_id) = response.id.as_deref()
                     && response.error.is_none()
-                    && let Err(error) =
-                        apply_created_note_supersede(&repo, new_note_id, &candidate_id, &reason)
-                            .await
+                    && let Err(error) = apply_created_note_supersede(
+                        &repo,
+                        new_note_id,
+                        &candidate_id,
+                        &dedup_reason,
+                    )
+                    .await
                 {
                     // The new note has already been durably created. Keep its normal
                     // public creation response while making incomplete association

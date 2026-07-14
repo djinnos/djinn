@@ -9,7 +9,6 @@ pub(crate) struct PendingWriteDedup<'a> {
     pub(crate) content: &'a str,
     pub(crate) note_type: &'a str,
     pub(crate) status: Option<&'a str>,
-    pub(crate) tags_json: &'a str,
 }
 
 #[derive(Debug, Clone)]

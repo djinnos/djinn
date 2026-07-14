@@ -263,6 +263,7 @@ pub struct MemoryBuildContextParams {
 pub struct MemoryWriteParams {
     pub title: String,
     pub content: String,
+    pub reason: String,
     #[serde(rename = "type")]
     pub note_type: String,
     pub status: Option<String>,

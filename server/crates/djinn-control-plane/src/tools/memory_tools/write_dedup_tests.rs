@@ -172,7 +172,6 @@ mod tests {
                 content: "  Alpha\nBeta  ",
                 note_type: "research",
                 status: None,
-                tags_json: "[]",
             },
         )
         .await;
@@ -205,7 +204,6 @@ mod tests {
                 content: "tokio spawn joinset",
                 note_type: "pattern",
                 status: None,
-                tags_json: "[]",
             },
             MemoryWriteDedupDecision::MergeIntoExisting {
                 candidate_id: existing.id.clone(),
@@ -262,7 +260,6 @@ mod tests {
             content: "unchanged content",
             note_type: "pattern",
             status: None,
-            tags_json: "[]",
         };
 
         let merged = apply_dedup_decision(
@@ -312,7 +309,6 @@ mod tests {
                 content: "existing content",
                 note_type: "pattern",
                 status: None,
-                tags_json: "[]",
             },
             MemoryWriteDedupDecision::ReuseExisting {
                 candidate_id: existing.id.clone(),
@@ -347,7 +343,6 @@ mod tests {
                 content: "new content",
                 note_type: "pattern",
                 status: None,
-                tags_json: "[]",
             },
             MemoryWriteDedupDecision::CreateNew,
         )
@@ -494,7 +489,6 @@ mod tests {
                 content: "Use channels to coordinate background workers and shutdown.",
                 note_type: "pattern",
                 status: None,
-                tags_json: "[]",
             },
         )
         .await;

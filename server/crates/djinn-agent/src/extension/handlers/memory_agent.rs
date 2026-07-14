@@ -165,6 +165,7 @@ pub(super) async fn call_memory_write(
                 project: project_path,
                 title: p.title,
                 content: p.content,
+                reason: p.reason,
                 note_type: p.note_type,
                 status: p.status,
                 tags: p.tags,
