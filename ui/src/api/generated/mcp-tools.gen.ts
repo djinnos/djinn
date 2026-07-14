@@ -3725,6 +3725,10 @@ export namespace MemoryEditInputSchema {
   export interface MemoryEditInput {
   content: string
   /**
+   * Non-blank explanation recorded in the immutable revision ledger.
+   */
+  reason: string
+  /**
    * Required for find_replace: exact text to search for.
    */
   find_text?: string
@@ -3737,10 +3741,6 @@ export namespace MemoryEditInputSchema {
    */
   operation: string
   project: string
-  /**
-   * Non-blank explanation recorded in the immutable revision ledger.
-   */
-  reason: string
   /**
    * Replace the note's retrieval anchor without modifying the note body.
    * Also accepted as `applies_when`.
@@ -4654,13 +4654,13 @@ export namespace MemoryWriteInputSchema {
   export interface MemoryWriteInput {
   content: string
   /**
-   * Absolute path to the project directory.
-   */
-  project: string
-  /**
    * Non-blank explanation recorded in the immutable revision ledger.
    */
   reason: string
+  /**
+   * Absolute path to the project directory.
+   */
+  project: string
   /**
    * Objective situation where this note should be retrieved. Also accepted as
    * `applies_when` for prompt/API language compatibility.
