@@ -400,62 +400,70 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    let created = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "memory_write",
-        Some(
-            serde_json::json!({
-                "project": project.slug(),
-                "title": "Project Roadmap",
-                "content": "tracks [[ADR-043 Repo Graph]]",
-                "type": "roadmap",
-                "reason": "Create the roadmap fixture"
-            })
-            .as_object()
-            .expect("memory_write args object")
-            .clone(),
-        ),
-        &worktree,
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_write dispatch should succeed");
+    let created = djinn_core::auth_context::REVISION_CALLER_CONTEXT
+        .scope(
+            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner"),
+            call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "memory_write",
+                Some(
+                    serde_json::json!({
+                        "project": project.slug(),
+                        "title": "Project Roadmap",
+                        "content": "tracks [[ADR-043 Repo Graph]]",
+                        "type": "roadmap",
+                        "reason": "Create the roadmap fixture"
+                    })
+                    .as_object()
+                    .expect("memory_write args object")
+                    .clone(),
+                ),
+                &worktree,
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
+            ),
+        )
+        .await
+        .expect("memory_write dispatch should succeed");
 
     assert_eq!(
         created.get("permalink").and_then(|v| v.as_str()),
         Some("roadmap")
     );
 
-    let edited = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "memory_edit",
-        Some(
-            serde_json::json!({
-                "project": project.slug(),
-                "identifier": "roadmap",
-                "operation": "append",
-                "content": "next wave",
-                "reason": "Append the next wave"
-            })
-            .as_object()
-            .expect("memory_edit args object")
-            .clone(),
-        ),
-        &worktree,
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_edit dispatch should succeed");
+    let edited = djinn_core::auth_context::REVISION_CALLER_CONTEXT
+        .scope(
+            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner"),
+            call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "memory_edit",
+                Some(
+                    serde_json::json!({
+                        "project": project.slug(),
+                        "identifier": "roadmap",
+                        "operation": "append",
+                        "content": "next wave",
+                        "reason": "Append the next wave"
+                    })
+                    .as_object()
+                    .expect("memory_edit args object")
+                    .clone(),
+                ),
+                &worktree,
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
+            ),
+        )
+        .await
+        .expect("memory_edit dispatch should succeed");
 
     assert!(
         edited
@@ -503,62 +511,70 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    let created = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "memory_write",
-        Some(
-            serde_json::json!({
-                "project": project.slug(),
-                "title": "Project Brief",
-                "content": "tracks [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]]",
-                "type": "brief",
-                "reason": "Create the brief fixture"
-            })
-            .as_object()
-            .expect("memory_write args object")
-            .clone(),
-        ),
-        &worktree,
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_write dispatch should succeed");
+    let created = djinn_core::auth_context::REVISION_CALLER_CONTEXT
+        .scope(
+            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner"),
+            call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "memory_write",
+                Some(
+                    serde_json::json!({
+                        "project": project.slug(),
+                        "title": "Project Brief",
+                        "content": "tracks [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]]",
+                        "type": "brief",
+                        "reason": "Create the brief fixture"
+                    })
+                    .as_object()
+                    .expect("memory_write args object")
+                    .clone(),
+                ),
+                &worktree,
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
+            ),
+        )
+        .await
+        .expect("memory_write dispatch should succeed");
 
     assert_eq!(
         created.get("permalink").and_then(|v| v.as_str()),
         Some("brief")
     );
 
-    let edited = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "memory_edit",
-        Some(
-            serde_json::json!({
-                "project": project.slug(),
-                "identifier": "brief",
-                "operation": "append",
-                "content": "next wave",
-                "reason": "Append the next wave"
-            })
-            .as_object()
-            .expect("memory_edit args object")
-            .clone(),
-        ),
-        &worktree,
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_edit dispatch should succeed");
+    let edited = djinn_core::auth_context::REVISION_CALLER_CONTEXT
+        .scope(
+            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner"),
+            call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "memory_edit",
+                Some(
+                    serde_json::json!({
+                        "project": project.slug(),
+                        "identifier": "brief",
+                        "operation": "append",
+                        "content": "next wave",
+                        "reason": "Append the next wave"
+                    })
+                    .as_object()
+                    .expect("memory_edit args object")
+                    .clone(),
+                ),
+                &worktree,
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
+            ),
+        )
+        .await
+        .expect("memory_edit dispatch should succeed");
 
     assert!(
         edited
@@ -672,32 +688,36 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    let edited = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "memory_edit",
-        Some(
-            serde_json::json!({
-                "project": project.slug(),
-                "identifier": "requirements/v1-requirements",
-                "operation": "find_replace",
-                "find_text": "[[Cognitive Memory Scope]]",
-                "content": "[[reference/cognitive-memory-scope]]",
-                "reason": "Canonicalize the requirement link"
-            })
-            .as_object()
-            .expect("memory_edit args object")
-            .clone(),
-        ),
-        &worktree,
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_edit dispatch should succeed");
+    let edited = djinn_core::auth_context::REVISION_CALLER_CONTEXT
+        .scope(
+            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner"),
+            call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "memory_edit",
+                Some(
+                    serde_json::json!({
+                        "project": project.slug(),
+                        "identifier": "requirements/v1-requirements",
+                        "operation": "find_replace",
+                        "find_text": "[[Cognitive Memory Scope]]",
+                        "content": "[[reference/cognitive-memory-scope]]",
+                        "reason": "Canonicalize the requirement link"
+                    })
+                    .as_object()
+                    .expect("memory_edit args object")
+                    .clone(),
+                ),
+                &worktree,
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
+            ),
+        )
+        .await
+        .expect("memory_edit dispatch should succeed");
 
     assert!(
         edited
