@@ -1876,39 +1876,3 @@ fn oversized_diagnostics_leave_platform_and_task_bytes_identical() {
     assert_eq!(wp, format!("{platform}\n\nTrusted extension."));
     assert!(dp.starts_with(wp) && dp.contains(EXTENSION_DIAGNOSTICS_HEADING));
 }
-
-#[tokio::test]
-async fn post_discovery_disconnect_empty_rows_leave_live_prompt_unchanged() {
-    let db = Database::ephemeral().await.unwrap();
-    let events = EventBus::noop();
-    let task = create_project_epic_task(&db, &events, "MCP prompt epic", "MCP prompt task").await;
-    let skills = [skill(
-        "existing-skill",
-        "Existing skill",
-        "Skill body.",
-        false,
-    )];
-    let sources = [source("existing-source", "Existing source")];
-    let prompt = super::test_support::assemble_for_role_with_extension_diagnostics(
-        db,
-        &task,
-        &LeadRole,
-        None,
-        "",
-        &skills,
-        &sources,
-        &[],
-    )
-    .await
-    .system_prompt;
-    assert!(!prompt.contains(EXTENSION_DIAGNOSTICS_HEADING));
-    assert_contains_all(
-        &prompt,
-        &[
-            "## Available Skills",
-            "existing-skill",
-            "## Related repositories (read-only)",
-            "existing-source",
-        ],
-    );
-}

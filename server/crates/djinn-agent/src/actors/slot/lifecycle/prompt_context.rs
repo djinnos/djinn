@@ -1332,7 +1332,7 @@ fn source_kind_label(kind: djinn_runtime::ResumeSourceKind) -> &'static str {
 
 #[cfg(test)]
 #[path = "test_support.rs"]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 #[path = "prompt_context_tests.rs"]
