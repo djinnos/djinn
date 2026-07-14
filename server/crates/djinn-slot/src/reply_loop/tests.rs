@@ -245,6 +245,9 @@ struct ReplyLoopHarness {
     session_id: String,
     cancel: CancellationToken,
     conv: Conversation,
+    /// Defaults to the canonical worker path; phase scripts override this to
+    /// isolate their process-global collector samples from dispatcher tests.
+    role_name: &'static str,
 }
 
 type ReplyLoopResult = (anyhow::Result<()>, ParsedAgentOutput, i64, i64, i64, i64);
@@ -262,6 +265,7 @@ impl ReplyLoopHarness {
             session_id,
             cancel,
             conv,
+            role_name: "worker",
         }
     }
 
@@ -317,6 +321,7 @@ impl ReplyLoopHarness {
             session_id,
             cancel,
             conv,
+            role_name: "worker",
         }
     }
 
@@ -383,7 +388,7 @@ impl ReplyLoopHarness {
                 session_id: &self.session_id,
                 project_path: &self.project_path,
                 worktree_path: &worktree_path,
-                role_name: "worker",
+                role_name: self.role_name,
                 finalize_tool_names: &["submit_work", "request_planner"],
                 context_window,
                 model_id,
@@ -5053,6 +5058,7 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
 // loop below. The scripts advance SlotContext's monotonic clock at provider
 // boundaries, making the exported counter delta deterministic without sleeps.
 static PHASE_METRIC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const PHASE_METRIC_ROLE: &str = "refinement";
 static PHASE_TOOL_CLOCK: std::sync::Mutex<Option<Arc<TestClock>>> = std::sync::Mutex::new(None);
 
 struct PhaseEvent {
@@ -5183,24 +5189,24 @@ impl LlmProvider for PhaseScriptedProvider {
     }
 }
 
-fn phase_counter(rendered: &str, phase: &str) -> u64 {
+fn phase_counter(rendered: &str, phase: &str, role: &str) -> u64 {
     rendered
         .lines()
         .find_map(|line| {
             (line.starts_with("djinn_agent_session_phase_seconds_total")
                 && line.contains(&format!("phase=\"{phase}\""))
-                && line.contains("role=\"worker\""))
+                && line.contains(&format!("role=\"{role}\"")))
             .then(|| {
                 line.rsplit_once(' ')
                     .and_then(|(_, value)| value.parse().ok())
             })
             .flatten()
         })
-        .unwrap_or_else(|| panic!("missing worker {phase} phase sample:\n{rendered}"))
+        .unwrap_or_else(|| panic!("missing {role} {phase} phase sample:\n{rendered}"))
 }
 
-fn phase_delta(before: &str, after: &str, phase: &str) -> u64 {
-    phase_counter(after, phase) - phase_counter(before, phase)
+fn phase_delta(before: &str, after: &str, phase: &str, role: &str) -> u64 {
+    phase_counter(after, phase, role) - phase_counter(before, phase, role)
 }
 
 fn final_turn(init: u64, delta: u64) -> PhaseTurn {
@@ -5228,6 +5234,7 @@ async fn run_phase_script(turns: Vec<PhaseTurn>) -> anyhow::Result<()> {
     let provider = PhaseScriptedProvider::new(Arc::clone(&clock), turns);
     let mut harness = ReplyLoopHarness::new().await;
     harness.slot_ctx.clock = clock;
+    harness.role_name = PHASE_METRIC_ROLE;
     let tools = vec![dummy_tool_schema("submit_work")];
     harness.run(&provider, &tools).await.0
 }
@@ -5235,6 +5242,7 @@ async fn run_phase_script(turns: Vec<PhaseTurn>) -> anyhow::Result<()> {
 async fn phase_harness(clock: Arc<TestClock>) -> ReplyLoopHarness {
     let mut harness = ReplyLoopHarness::new().await;
     harness.slot_ctx.clock = clock;
+    harness.role_name = PHASE_METRIC_ROLE;
     harness
 }
 
@@ -5257,8 +5265,14 @@ async fn provider_phase_script_counts_stream_init_consumption_and_errors() {
     let before = render().expect("render phase metrics");
     assert!(run_phase_script(vec![final_turn(2, 3)]).await.is_ok());
     let after = render().expect("render phase metrics");
-    assert_eq!(phase_delta(&before, &after, "provider_wait"), 5);
-    assert_eq!(phase_delta(&before, &after, "tool_execution"), 0);
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        5
+    );
+    assert_eq!(
+        phase_delta(&before, &after, "tool_execution", PHASE_METRIC_ROLE),
+        0
+    );
     let before = after;
     assert!(
         run_phase_script(vec![PhaseTurn::InitError {
@@ -5268,7 +5282,10 @@ async fn provider_phase_script_counts_stream_init_consumption_and_errors() {
         .is_err()
     );
     let after = render().expect("render phase metrics");
-    assert_eq!(phase_delta(&before, &after, "provider_wait"), 7);
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        7
+    );
     let before = after;
     assert!(
         run_phase_script(vec![PhaseTurn::Stream {
@@ -5282,7 +5299,10 @@ async fn provider_phase_script_counts_stream_init_consumption_and_errors() {
         .is_err()
     );
     let after = render().expect("render phase metrics");
-    assert_eq!(phase_delta(&before, &after, "provider_wait"), 6);
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        6
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -5328,10 +5348,13 @@ async fn provider_phase_script_counts_empty_assistant_backoff_not_local_time() {
     let after = render().expect("render phase metrics");
     let expected_provider_wait = 2 + 3 + backoff.as_secs() + 4 + 2;
     assert_eq!(
-        phase_delta(&before, &after, "provider_wait"),
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
         expected_provider_wait
     );
-    assert_eq!(phase_delta(&before, &after, "tool_execution"), 0);
+    assert_eq!(
+        phase_delta(&before, &after, "tool_execution", PHASE_METRIC_ROLE),
+        0
+    );
 }
 
 #[tokio::test]
@@ -5384,8 +5407,14 @@ async fn provider_phase_script_hands_streaming_side_tool_back_to_provider() {
     // event is intentionally not consumed: dispatch resumes with the second
     // provider turn. Provider time is therefore 2 + 1 before the handoff and
     // 4 + 2 after it, with the five tool seconds kept disjoint.
-    assert_eq!(phase_delta(&before, &after, "provider_wait"), 9);
-    assert_eq!(phase_delta(&before, &after, "tool_execution"), 5);
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        9
+    );
+    assert_eq!(
+        phase_delta(&before, &after, "tool_execution", PHASE_METRIC_ROLE),
+        5
+    );
 }
 
 #[tokio::test]
@@ -5416,7 +5445,10 @@ async fn provider_phase_script_cancellation_and_drop_flush_active_interval_once(
     cancel.cancel();
     assert!(run.await.0.is_err());
     let after = render().expect("render phase metrics");
-    assert_eq!(phase_delta(&before, &after, "provider_wait"), 9);
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        9
+    );
     let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
     let stream_polled = Arc::new(tokio::sync::Notify::new());
     let provider = PhaseScriptedProvider::new(
@@ -5440,5 +5472,8 @@ async fn provider_phase_script_cancellation_and_drop_flush_active_interval_once(
         drop(run); // drop the active reply-loop future; tracker Drop is the backstop
     }
     let after = render().expect("render phase metrics");
-    assert_eq!(phase_delta(&before, &after, "provider_wait"), 11);
+    assert_eq!(
+        phase_delta(&before, &after, "provider_wait", PHASE_METRIC_ROLE),
+        11
+    );
 }
