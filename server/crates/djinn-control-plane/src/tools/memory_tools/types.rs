@@ -6,11 +6,14 @@ use crate::tools::json_object::AnyJson;
 // ── Param structs ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WriteParams {
     /// Absolute path to the project directory.
     pub project: String,
     pub title: String,
     pub content: String,
+    /// Non-blank explanation recorded in the immutable revision ledger.
+    pub reason: String,
     /// Note type: adr, pattern, case, pitfall, research, requirement,
     /// reference, design, session, persona, journey, design_spec,
     /// competitive, tech_spike, brief (singleton), roadmap (singleton).

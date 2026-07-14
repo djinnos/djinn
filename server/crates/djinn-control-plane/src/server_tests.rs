@@ -103,6 +103,7 @@ mod tests {
                 project: project.slug(),
                 title: "Summary Note".to_string(),
                 content: "Sentence one. Sentence two.\n\nMore context follows here.".to_string(),
+                reason: "test mutation".to_string(),
                 note_type: "reference".to_string(),
                 status: None,
                 tags: None,

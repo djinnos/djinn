@@ -10,6 +10,61 @@ mod tests {
         std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
         tempfile::tempdir_in(base).expect("create server crate tempdir")
     }
+
+    #[tokio::test]
+    async fn production_create_new_records_the_caller_owned_created_revision() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(test_mcp_state(db.clone()));
+        let caller =
+            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_human("caller-1")
+                .unwrap();
+
+        let Json(response) = djinn_core::auth_context::REVISION_CALLER_CONTEXT
+            .scope(
+                Some(caller),
+                server.memory_write_with_decider(
+                    Parameters(WriteParams {
+                        project: project.slug(),
+                        title: "Caller owned note".to_owned(),
+                        content: "caller content".to_owned(),
+                        reason: "mcp:create_note".to_owned(),
+                        note_type: "research".to_owned(),
+                        status: None,
+                        tags: None,
+                        scope_paths: None,
+                        retrieval_anchor: None,
+                    }),
+                    &StaticDecider {
+                        decision: MemoryWriteDedupDecision::CreateNew,
+                    },
+                ),
+            )
+            .await;
+
+        assert!(
+            response.error.is_none(),
+            "create error: {:?}",
+            response.error
+        );
+        let revisions = NoteRepository::new(db, EventBus::noop())
+            .revision_events_for_test(&project.id)
+            .await
+            .unwrap();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].actor_kind, "human");
+        assert_eq!(revisions[0].subsystem, None);
+        assert_eq!(revisions[0].event_kind, "created");
+        assert_eq!(revisions[0].content_before, None);
+        assert_eq!(
+            revisions[0].content_after.as_deref(),
+            Some("caller content")
+        );
+        assert_eq!(revisions[0].confidence_before, None);
+        assert_eq!(revisions[0].confidence_after, Some(0.5));
+        assert_eq!(revisions[0].reason, "mcp:create_note");
+    }
     use async_trait::async_trait;
     use djinn_core::events::EventBus;
     use djinn_db::{
@@ -18,7 +73,11 @@ mod tests {
     use djinn_provider::provider::AuthMethod;
     use djinn_provider::repos::CredentialRepository;
     use djinn_provider::{CompletionRequest, CompletionResponse};
+    use rmcp::{Json, handler::server::wrapper::Parameters};
 
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use crate::tools::memory_tools::WriteParams;
     use crate::tools::memory_tools::write_dedup::{
         LlmMemoryWriteDedupDecider, WriteDedupOutcome, apply_created_note_supersede,
         apply_dedup_decision, maybe_apply_write_dedup,
