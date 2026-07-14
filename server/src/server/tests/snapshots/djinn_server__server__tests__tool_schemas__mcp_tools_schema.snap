@@ -20746,6 +20746,9 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "agent_type": {
@@ -20769,6 +20772,16 @@ expression: signatures
         "error": {
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "extension_load_diagnostics": {
+          "description": "Canonical extension-load failures associated with this session. Present\non successful lookups, including as an empty array.",
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },
