@@ -11,7 +11,10 @@ use std::sync::Arc;
 use crate::events::EventBus;
 use crate::server::AppState;
 use djinn_db::repositories::session::CreateSessionParams;
-use djinn_db::{Database, SessionRepository, TaskRepository, TaskRunRepository};
+use djinn_db::{
+    Database, EffectiveCreatorProvenance, SessionRepository, TaskRepository, TaskRunRepository,
+    UserRepository,
+};
 use djinn_supervisor::ConnectionRegistry;
 
 fn create_test_db() -> Database {
@@ -57,9 +60,29 @@ async fn seed_running_session_with_task_run(
         .await
         .expect("create test epic");
 
+    let user = UserRepository::new(db.clone())
+        .upsert_from_github(9_999_998, "reconnectability-fixture", None, None)
+        .await
+        .expect("create reconnectability fixture user");
     let task_repo = TaskRepository::new(db.clone(), events.clone());
     let task = task_repo
-        .create(&epic.id, "test-task", "", "", "task", 0, "", Some("open"))
+        .create_in_project_with_provenance(
+            &project.id,
+            Some(&epic.id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&user.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
+            "test-task",
+            "",
+            "",
+            "task",
+            0,
+            "",
+            Some("open"),
+            None,
+        )
         .await
         .expect("create test task");
 

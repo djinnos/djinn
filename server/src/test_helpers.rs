@@ -11,8 +11,8 @@ use djinn_core::models::{Epic, Project, SessionRecord, Task};
 use djinn_core::paths::project_dir;
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::{
-    Database, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository,
-    SessionRepository, TaskRepository,
+    Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository, NoteRepository,
+    ProjectRepository, SessionRepository, TaskRepository, UserRepository,
 };
 use djinn_memory::Note;
 
@@ -136,11 +136,20 @@ pub async fn create_test_epic(db: &Database, project_id: &str) -> Epic {
 }
 
 pub async fn create_test_task(db: &Database, project_id: &str, epic_id: &str) -> Task {
+    let user = UserRepository::new(db.clone())
+        .upsert_from_github(9_999_997, "server-task-fixture", None, None)
+        .await
+        .expect("failed to create test task fixture user");
     let repo = TaskRepository::new(db.clone(), test_events());
     let task = repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             project_id,
             Some(epic_id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&user.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "test-task",
             "test task description",
             "test task design",
