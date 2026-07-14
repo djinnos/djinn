@@ -175,7 +175,10 @@ pub fn inventory_cargo_target_runs(
             });
         } else if metadata.is_dir() {
             inventory.top_level_directory_count += 1;
-            if entry.file_name().is_empty() || entry.file_name().to_str().is_none() {
+            let valid_contained_name = entry.file_name().to_str().is_some_and(|name| {
+                run_dir_within(root, name).as_deref() == Some(entry.path().as_path())
+            });
+            if !valid_contained_name {
                 inventory.protected.push(InventoryIssue {
                     top_level_name: Some(raw_name.clone()),
                     kind: InventoryIssueKind::MalformedTopLevelName,
@@ -997,6 +1000,42 @@ mod tests {
             Err(CargoTargetRunsInventoryError::RootRead(error))
                 if error.kind() == io::ErrorKind::InvalidInput
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn joint_trim_protects_whitespace_name_rejected_by_containment() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join(" ")).unwrap();
+        fs::write(tmp.path().join(" ").join("artifact"), vec![0_u8; 4096]).unwrap();
+
+        let inventory = inventory_cargo_target_runs(tmp.path()).unwrap();
+        assert!(inventory.candidates.is_empty());
+        assert_eq!(
+            inventory.protected,
+            vec![InventoryIssue {
+                top_level_name: Some(b" ".to_vec()),
+                kind: InventoryIssueKind::MalformedTopLevelName,
+            }]
+        );
+
+        let result = trim_cargo_target_runs(
+            tmp.path(),
+            &HashSet::new(),
+            CargoTargetRunsCaps {
+                max_dirs: 0,
+                max_bytes: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.deleted, 0);
+        assert_eq!(result.errors, 0);
+        assert_eq!(result.protected, 1);
+        assert_eq!(
+            result.outcome,
+            CargoTargetRunsTrimOutcome::OverBudgetProtected
+        );
+        assert!(tmp.path().join(" ").is_dir());
     }
 
     #[cfg(unix)]
