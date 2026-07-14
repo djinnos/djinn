@@ -16,6 +16,7 @@ use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
 use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
+use crate::actors::slot::lifecycle::memory_intent_planner::PlannedQuery;
 use tracing::Instrument;
 
 mod types;
@@ -338,6 +339,7 @@ pub(crate) async fn load_knowledge_context(
     epic_context: Option<&str>,
     app_state: &AgentContext,
     identity: Option<KnowledgeContextIdentity<'_>>,
+    planned_queries: Option<&[PlannedQuery]>,
 ) -> Option<String> {
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_paths = derive_task_scope_paths(task, epic_context);
@@ -423,7 +425,7 @@ pub(crate) async fn load_knowledge_context(
     let trace_candidates_final = apply_budget_outcomes(classified, &packed, &notes);
     let estimated_injected_tokens = packed.total_injected_tokens as i32;
 
-    let rendered = if notes.is_empty() {
+    let scope_rendered = if notes.is_empty() {
         None
     } else {
         Some(packed.rendered)
@@ -448,7 +450,7 @@ pub(crate) async fn load_knowledge_context(
     )
     .await;
 
-    rendered
+    scope_rendered
 }
 
 /// Classify trace candidates into `TraceCandidate` DTOs with deterministic outcomes.
@@ -704,6 +706,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         resolved_skills,
         app_state,
         knowledge_identity,
+        planned_queries,
         read_sources,
         worker_resume_note,
         arbiter_directive,
@@ -787,7 +790,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             );
             async move {
                 let child_start = tokio::time::Instant::now();
-                let result = load_knowledge_context(task, epic_context_ref, app_state, knowledge_identity).await;
+                let result = load_knowledge_context(task, epic_context_ref, app_state, knowledge_identity, planned_queries).await;
                 (result, child_start.elapsed())
             }
             .instrument(span)

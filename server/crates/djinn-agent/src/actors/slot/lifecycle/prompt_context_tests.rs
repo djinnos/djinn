@@ -269,7 +269,7 @@ async fn load_knowledge_context_returns_none_when_no_notes() {
         create_project_epic_task(&db, &events, "Knowledge test epic", "Knowledge task").await;
     let app_state = agent_context_from_db(db, CancellationToken::new());
     assert!(
-        load_knowledge_context(&task, None, &app_state, None)
+        load_knowledge_context(&task, None, &app_state, None, None)
             .await
             .is_none()
     );

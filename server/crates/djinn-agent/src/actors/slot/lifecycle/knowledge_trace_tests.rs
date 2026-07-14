@@ -108,7 +108,7 @@ async fn load_knowledge_context_prompt_output_unchanged_with_tracing() {
     set_note_confidence(&db, &global.id, 0.9).await;
 
     // Build a task that has no specific scope paths so global notes match.
-    let result = load_knowledge_context(&task, None, &app_state, None).await;
+    let result = load_knowledge_context(&task, None, &app_state, None, None).await;
 
     // Verify the prompt is produced and contains the note.
     assert!(result.is_some(), "knowledge context should be Some");
@@ -136,7 +136,7 @@ async fn load_knowledge_context_returns_none_when_no_matching_notes() {
     let task = create_project_epic_task(&db, &events, "Empty epic", "Empty task").await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let result = load_knowledge_context(&task, None, &app_state, None).await;
+    let result = load_knowledge_context(&task, None, &app_state, None, None).await;
     assert!(result.is_none(), "should return None when no notes match");
 }
 
@@ -158,7 +158,7 @@ async fn trace_classifies_below_threshold_as_min_confidence() {
     set_note_confidence(&db, &below.id, 0.1).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let _ = load_knowledge_context(&task, None, &app_state, None).await;
+    let _ = load_knowledge_context(&task, None, &app_state, None, None).await;
 
     let trace = latest_trace(&db, &project_id)
         .await
@@ -200,7 +200,7 @@ async fn trace_classifies_over_limit_as_not_top_k() {
     }
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let _ = load_knowledge_context(&task, None, &app_state, None).await;
+    let _ = load_knowledge_context(&task, None, &app_state, None, None).await;
 
     let trace = latest_trace(&db, &project_id)
         .await
@@ -251,7 +251,7 @@ async fn trace_classifies_injected_and_budget_pruned() {
     }
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let _ = load_knowledge_context(&task, None, &app_state, None).await;
+    let _ = load_knowledge_context(&task, None, &app_state, None, None).await;
 
     let trace = latest_trace(&db, &project_id)
         .await
@@ -292,7 +292,7 @@ async fn trace_includes_estimated_injected_tokens_and_cap_metadata() {
     set_note_confidence(&db, &note.id, 0.9).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let _ = load_knowledge_context(&task, None, &app_state, None).await;
+    let _ = load_knowledge_context(&task, None, &app_state, None, None).await;
 
     let trace = latest_trace(&db, &project_id)
         .await
@@ -353,7 +353,7 @@ async fn trace_persistence_failure_does_not_change_prompt_output() {
     // fails. The same code path produces the same packed string from the same
     // production note set, so a byte-for-byte comparison is the right regression
     // guard against accidental injection of extra trace-related text.
-    let expected = load_knowledge_context(&task, None, &app_state, None)
+    let expected = load_knowledge_context(&task, None, &app_state, None, None)
         .await
         .expect("baseline prompt should be produced");
 
@@ -361,7 +361,7 @@ async fn trace_persistence_failure_does_not_change_prompt_output() {
     // The prompt output should still be byte-identical to the baseline.
     djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
 
-    let result = load_knowledge_context(&task, None, &app_state, None).await;
+    let result = load_knowledge_context(&task, None, &app_state, None, None).await;
 
     // Prompt should still be produced correctly despite trace persistence failure.
     assert!(result.is_some(), "prompt should still be produced");
@@ -388,7 +388,7 @@ async fn trace_trigger_uses_scope_paths_shape() {
     set_note_confidence(&db, &note.id, 0.9).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let _ = load_knowledge_context(&task, None, &app_state, None).await;
+    let _ = load_knowledge_context(&task, None, &app_state, None, None).await;
 
     let trace = latest_trace(&db, &project_id)
         .await
@@ -576,7 +576,7 @@ async fn trace_candidate_search_failure_does_not_change_prompt_output() {
     // Fail-open: the trace-candidate search failure must not change the
     // returned knowledge context. The production query still succeeds and
     // returns note B.
-    let result = load_knowledge_context(&task, None, &app_state, None).await;
+    let result = load_knowledge_context(&task, None, &app_state, None, None).await;
     assert!(result.is_some(), "prompt should still be produced");
     let prompt = result.unwrap();
     assert!(
@@ -619,7 +619,7 @@ async fn production_search_error_returns_none_fail_open() {
     // Fail-open: the production search error must not panic or propagate.
     // The function returns None (the original pre-instrumentation behavior
     // for search errors), even though the trace-candidate query also fails.
-    let result = load_knowledge_context(&task, None, &app_state, None).await;
+    let result = load_knowledge_context(&task, None, &app_state, None, None).await;
     assert!(
         result.is_none(),
         "production search error must return None (fail-open)"
@@ -673,7 +673,7 @@ async fn load_knowledge_context_rendered_matches_pack_knowledge_notes() {
     set_note_confidence(&db, &low_note.id, 0.5).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let rendered = load_knowledge_context(&task, None, &app_state, None)
+    let rendered = load_knowledge_context(&task, None, &app_state, None, None)
         .await
         .expect("knowledge context should be Some");
 
