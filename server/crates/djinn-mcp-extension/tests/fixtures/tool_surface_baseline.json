@@ -900,6 +900,10 @@
           "description": "Edit operation: append, prepend, find_replace, replace_section",
           "type": "string"
         },
+        "reason": {
+          "description": "Non-blank explanation for this mutation.",
+          "type": "string"
+        },
         "section": {
           "description": "Required for replace_section: heading text identifying the section",
           "type": "string"
@@ -912,7 +916,8 @@
       "required": [
         "identifier",
         "operation",
-        "content"
+        "content",
+        "reason"
       ],
       "type": "object"
     },
@@ -1259,6 +1264,10 @@
           "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes.",
           "type": "string"
         },
+        "reason": {
+          "description": "Non-blank explanation for this mutation.",
+          "type": "string"
+        },
         "status": {
           "description": "Optional explicit status. For ADRs, use \"proposed\" to mark it as an in-flight proposal.",
           "type": "string"
@@ -1282,7 +1291,8 @@
       "required": [
         "title",
         "content",
-        "type"
+        "type",
+        "reason"
       ],
       "type": "object"
     },
