@@ -1,5 +1,5 @@
 use super::error_handling::{
-    empty_turn_backoff, supports_tool_choice_required, BudgetWindDownIgnored,
+    BudgetWindDownIgnored, empty_turn_backoff, supports_tool_choice_required,
 };
 // djinn:allow-oversize — integration tests for the entire reply_loop module.
 // The file already exceeded the 1500-line / 51.2KB size-guard thresholds
@@ -9,7 +9,7 @@ use super::error_handling::{
 // reply-loop coverage.
 use super::loop_guard::{LoopGuardError, LoopGuardKind};
 use super::persistence::serialize_llm_input;
-use super::turn::{run_reply_loop, ReplyLoopContext, WindDownReason};
+use super::turn::{ReplyLoopContext, WindDownReason, run_reply_loop};
 use crate::finalize_handlers::handle_budget_park;
 use crate::finalize_handlers::record_rejected_integrity_entry;
 use crate::helpers::extract_worker_context;
@@ -2996,8 +2996,7 @@ async fn second_strike_no_progress_submission_settles_session() {
 async fn gs37_no_edit_submit_after_rejection_keeps_one_quality_strike_and_prompt_carries_rejection()
 {
     // The verbatim reviewer rejection the redispatch prompt must carry forward.
-    const NEWEST_REJECTION: &str =
-        "AC-2 unmet: the handler is implemented but never registered with the \
+    const NEWEST_REJECTION: &str = "AC-2 unmet: the handler is implemented but never registered with the \
          service. Wire it into `build_router` before resubmitting.";
 
     let worktree = init_git_repo_with_dirty_file();
@@ -5071,6 +5070,7 @@ enum PhaseTurn {
     },
     Pending {
         init_advance: Duration,
+        stream_polled: Arc<tokio::sync::Notify>,
     },
 }
 
@@ -5137,9 +5137,16 @@ impl LlmProvider for PhaseScriptedProvider {
                             Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
                         >)
                 }
-                PhaseTurn::Pending { init_advance } => {
+                PhaseTurn::Pending {
+                    init_advance,
+                    stream_polled,
+                } => {
                     clock.advance_mono(init_advance);
                     let stream = async_stream::stream! {
+                        // Signal only once canonical stream consumption polls
+                        // this pending stream. This keeps externally advanced
+                        // fake time inside the active provider interval.
+                        stream_polled.notify_one();
                         futures::future::pending::<()>().await;
                         yield Ok(StreamEvent::Done);
                     };
@@ -5230,23 +5237,27 @@ async fn provider_phase_script_counts_stream_init_consumption_and_errors() {
     assert_eq!(phase_delta(&before, &after, "provider_wait"), 5);
     assert_eq!(phase_delta(&before, &after, "tool_execution"), 0);
     let before = after;
-    assert!(run_phase_script(vec![PhaseTurn::InitError {
-        advance: Duration::from_secs(7)
-    }])
-    .await
-    .is_err());
+    assert!(
+        run_phase_script(vec![PhaseTurn::InitError {
+            advance: Duration::from_secs(7)
+        }])
+        .await
+        .is_err()
+    );
     let after = render().expect("render phase metrics");
     assert_eq!(phase_delta(&before, &after, "provider_wait"), 7);
     let before = after;
-    assert!(run_phase_script(vec![PhaseTurn::Stream {
-        init_advance: Duration::from_secs(2),
-        events: vec![PhaseEvent {
-            advance: Duration::from_secs(4),
-            event: Err(anyhow::anyhow!("scripted stream failure"))
-        }]
-    }])
-    .await
-    .is_err());
+    assert!(
+        run_phase_script(vec![PhaseTurn::Stream {
+            init_advance: Duration::from_secs(2),
+            events: vec![PhaseEvent {
+                advance: Duration::from_secs(4),
+                event: Err(anyhow::anyhow!("scripted stream failure"))
+            }]
+        }])
+        .await
+        .is_err()
+    );
     let after = render().expect("render phase metrics");
     assert_eq!(phase_delta(&before, &after, "provider_wait"), 6);
 }
@@ -5347,19 +5358,23 @@ async fn provider_phase_script_cancellation_and_drop_flush_active_interval_once(
     djinn_telemetry::init().expect("telemetry init");
     let tools = vec![dummy_tool_schema("submit_work")];
     let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    let stream_polled = Arc::new(tokio::sync::Notify::new());
     let provider = PhaseScriptedProvider::new(
         Arc::clone(&clock),
         vec![PhaseTurn::Pending {
             init_advance: Duration::from_secs(2),
+            stream_polled: Arc::clone(&stream_polled),
         }],
     );
     let mut harness = phase_harness(Arc::clone(&clock)).await;
     let before = render().expect("render phase metrics");
     let cancel = harness.cancel.clone();
     let mut run = Box::pin(harness.run(&provider, &tools));
+    let polled = stream_polled.notified();
+    tokio::pin!(polled);
     tokio::select! {
         _ = &mut run => panic!("pending provider unexpectedly finished"),
-        _ = tokio::task::yield_now() => {}
+        _ = &mut polled => {}
     }
     clock.advance_mono(Duration::from_secs(7));
     cancel.cancel();
@@ -5367,19 +5382,23 @@ async fn provider_phase_script_cancellation_and_drop_flush_active_interval_once(
     let after = render().expect("render phase metrics");
     assert_eq!(phase_delta(&before, &after, "provider_wait"), 9);
     let clock = Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()));
+    let stream_polled = Arc::new(tokio::sync::Notify::new());
     let provider = PhaseScriptedProvider::new(
         Arc::clone(&clock),
         vec![PhaseTurn::Pending {
             init_advance: Duration::from_secs(3),
+            stream_polled: Arc::clone(&stream_polled),
         }],
     );
     let mut harness = phase_harness(Arc::clone(&clock)).await;
     let before = after;
     {
         let mut run = Box::pin(harness.run(&provider, &tools));
+        let polled = stream_polled.notified();
+        tokio::pin!(polled);
         tokio::select! {
             _ = &mut run => panic!("pending provider unexpectedly finished"),
-            _ = tokio::task::yield_now() => {}
+            _ = &mut polled => {}
         }
         clock.advance_mono(Duration::from_secs(8));
         drop(run); // drop the active reply-loop future; tracker Drop is the backstop
