@@ -848,6 +848,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         worker_resume_note,
         arbiter_directive,
         mcp_server_instructions,
+        extension_diagnostics,
     } = inputs;
 
     // ── Phase 0: synchronous work with no data dependencies ──
@@ -1116,6 +1117,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         system_prompt,
         system_prompt_hash,
         prompt_setup_commands,
+        extension_diagnostics: extension_diagnostics.to_vec(),
     }
 }
 

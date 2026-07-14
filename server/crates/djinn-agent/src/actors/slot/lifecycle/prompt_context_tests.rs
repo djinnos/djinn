@@ -1064,6 +1064,7 @@ async fn concurrent_assembly_is_deterministic() {
         worker_resume_note: note.as_deref(),
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
+        extension_diagnostics: &[],
     })
     .await;
 
@@ -1085,6 +1086,7 @@ async fn concurrent_assembly_is_deterministic() {
         worker_resume_note: note.as_deref(),
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
+        extension_diagnostics: &[],
     })
     .await;
 
@@ -1407,6 +1409,7 @@ async fn ci_blocking_appears_before_resume_context_in_prompt() {
         worker_resume_note: note.as_deref(),
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
+        extension_diagnostics: &[],
     })
     .await;
 
@@ -1554,6 +1557,7 @@ async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
         worker_resume_note: note_ref,
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
+        extension_diagnostics: &[],
     })
     .await;
 
@@ -1809,6 +1813,7 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         worker_resume_note: note.as_deref(),
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
+        extension_diagnostics: &[],
     })
     .await;
 
@@ -1830,6 +1835,7 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         worker_resume_note: note.as_deref(),
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
+        extension_diagnostics: &[],
     })
     .await;
 
