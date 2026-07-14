@@ -1315,49 +1315,7 @@ fn startup_diagnostic_facts_are_canonical_and_exclude_runtime_paths() {
     );
 }
 
-#[tokio::test]
-async fn diagnostics_entry_point_keeps_runtime_disconnect_invocation_and_refresh_out_of_facts() {
-    let app_state = test_context();
-    let (url, shutdown) = spawn_startup_fixture().await;
-    let servers = vec![(
-        "fixture-server".to_owned(),
-        McpServerConfig {
-            url: Some(url),
-            ..Default::default()
-        },
-    )];
-    let discovery =
-        connect_and_discover_with_diagnostics("test", "worker", &servers, &app_state).await;
-    assert!(
-        discovery.diagnostics.is_empty(),
-        "successful startup has no facts"
-    );
-    let registry = discovery
-        .registry
-        .expect("initial discovery supplies a registry");
-    let tool = mcp_namespaced_name("fixture-server", "fixture_tool");
-    assert!(
-        registry.has_tool(&tool),
-        "initial tools/list discovers the fixture tool"
-    );
-    shutdown.cancel();
-    tokio::time::sleep(Duration::from_millis(25)).await;
-    assert!(
-        registry.call_tool(&tool, None).await.is_err(),
-        "post-discovery invocation fails"
-    );
-    let peer = registry.routing.read().unwrap().peers["fixture-server"].clone();
-    assert!(
-        refresh_tools_list(&peer, Duration::from_millis(100))
-            .await
-            .is_err(),
-        "post-discovery refresh fails"
-    );
-    assert!(
-        discovery.diagnostics.is_empty(),
-        "runtime failures do not create startup observations"
-    );
-}
+mod post_discovery_prompt_tests;
 
 #[tokio::test]
 async fn diagnostics_entry_point_times_out_one_server_and_discovers_the_next() {
