@@ -38,6 +38,11 @@ const CARGO_WARM_STEP_OUTCOMES: [&str; 3] = ["ok", "failed", "spawn_error"];
 const CARGO_WARM_STEP_WORKSPACE_PATH_HASH: &str = "djinn_cargo_warm_step_workspace_path_hash";
 const CARGO_WARM_STEP_FRESH_COUNT: &str = "djinn_cargo_warm_step_fresh_count";
 const CARGO_WARM_STEP_COMPILING_COUNT: &str = "djinn_cargo_warm_step_compiling_count";
+const CARGO_WARM_INCREMENTAL_PRUNE_TOTAL: &str = "djinn_cargo_warm_incremental_prune_total";
+const CARGO_WARM_INCREMENTAL_PRUNED_BYTES_TOTAL: &str =
+    "djinn_cargo_warm_incremental_pruned_bytes_total";
+const CARGO_WARM_INCREMENTAL_PRUNE_OUTCOMES: [&str; 4] =
+    ["pruned", "already_absent", "failed", "unsafe_path"];
 const SLOT_POOL_STATES: [&str; 2] = ["free", "busy"];
 const JIT_PITFALL_HINTS_TOTAL: &str = "djinn_jit_pitfall_hints_total";
 const JIT_PITFALL_OUTCOMES: [&str; 7] = [
@@ -485,6 +490,63 @@ pub mod cargo_warm_step {
     }
 }
 
+/// Bounded telemetry for removing Cargo's warm-base `debug/incremental` tree.
+///
+/// Errors are deliberately not metric labels. The worker records its closed
+/// error kind in its structured event instead, preventing filesystem error
+/// strings from creating unbounded Prometheus series.
+pub mod cargo_warm_incremental_prune {
+    pub const OUTCOME_PRUNED: &str = "pruned";
+    pub const OUTCOME_ALREADY_ABSENT: &str = "already_absent";
+    pub const OUTCOME_FAILED: &str = "failed";
+    pub const OUTCOME_UNSAFE_PATH: &str = "unsafe_path";
+
+    pub const TOTAL: &str = super::CARGO_WARM_INCREMENTAL_PRUNE_TOTAL;
+    pub const PRUNED_BYTES_TOTAL: &str = super::CARGO_WARM_INCREMENTAL_PRUNED_BYTES_TOTAL;
+
+    /// The four outcomes accepted by the metric surface. This enum rather
+    /// than a caller-provided string keeps the metric label cardinality closed.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Outcome {
+        Pruned,
+        AlreadyAbsent,
+        Failed,
+        UnsafePath,
+    }
+
+    impl Outcome {
+        pub const fn as_label(self) -> &'static str {
+            match self {
+                Self::Pruned => OUTCOME_PRUNED,
+                Self::AlreadyAbsent => OUTCOME_ALREADY_ABSENT,
+                Self::Failed => OUTCOME_FAILED,
+                Self::UnsafePath => OUTCOME_UNSAFE_PATH,
+            }
+        }
+    }
+
+    /// Increment exactly one incremental-prune attempt for a project/outcome.
+    pub fn increment_attempt(project_id: &str, outcome: Outcome) {
+        metrics::counter!(
+            super::CARGO_WARM_INCREMENTAL_PRUNE_TOTAL,
+            "project_id" => project_id.to_owned(),
+            "outcome" => outcome.as_label(),
+        )
+        .increment(1);
+    }
+
+    /// Add successful *logical* regular-file bytes removed from the incremental
+    /// tree. This is not allocated disk space and must only be called for a
+    /// successful [`Outcome::Pruned`] attempt.
+    pub fn add_pruned_bytes(project_id: &str, logical_bytes: u64) {
+        metrics::counter!(
+            super::CARGO_WARM_INCREMENTAL_PRUNED_BYTES_TOTAL,
+            "project_id" => project_id.to_owned(),
+        )
+        .increment(logical_bytes);
+    }
+}
+
 pub mod cargo_target_seed {
     pub const FALLBACK_REASON_BASE_MISSING: &str = "base_missing";
     pub const FALLBACK_REASON_BASE_NOT_DIRECTORY: &str = "base_not_directory";
@@ -742,6 +804,23 @@ fn register_metrics() {
         )
         .absolute(0);
     }
+    metrics::describe_counter!(
+        CARGO_WARM_INCREMENTAL_PRUNE_TOTAL,
+        "Cargo warm incremental-prune attempts partitioned by project_id and the fixed outcome values pruned, already_absent, failed, and unsafe_path. Error strings are intentionally not labels."
+    );
+    for outcome in CARGO_WARM_INCREMENTAL_PRUNE_OUTCOMES {
+        metrics::counter!(
+            CARGO_WARM_INCREMENTAL_PRUNE_TOTAL,
+            "project_id" => "",
+            "outcome" => outcome,
+        )
+        .absolute(0);
+    }
+    metrics::describe_counter!(
+        CARGO_WARM_INCREMENTAL_PRUNED_BYTES_TOTAL,
+        "Logical regular-file bytes successfully removed from Cargo warm incremental trees, partitioned by project_id; this is not allocated disk space."
+    );
+    metrics::counter!(CARGO_WARM_INCREMENTAL_PRUNED_BYTES_TOTAL, "project_id" => "").absolute(0);
     metrics::describe_gauge!(
         CARGO_WARM_STEP_WORKSPACE_PATH_HASH,
         "Stable 64-bit FNV-1a hash of the absolute workspace directory the worker resolved for the most recent cargo warm step, partitioned by project_id. Pair with the worker's structured tracing event to recover the actual path without unbounded label cardinality."
@@ -2286,6 +2365,60 @@ mod tests {
             .and_then(|(_, value)| value.parse::<f64>().ok())
             .expect("freshness gauge sample should end with a number");
         assert!(value > 0.0, "freshness gauge must be positive: {sample}");
+    }
+
+    #[test]
+    fn cargo_warm_incremental_prune_counters_render_fixed_outcomes_and_logical_bytes() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let project_id = "project-warm-incremental-prune-test";
+        for outcome in [
+            cargo_warm_incremental_prune::Outcome::Pruned,
+            cargo_warm_incremental_prune::Outcome::AlreadyAbsent,
+            cargo_warm_incremental_prune::Outcome::Failed,
+            cargo_warm_incremental_prune::Outcome::UnsafePath,
+        ] {
+            cargo_warm_incremental_prune::increment_attempt(project_id, outcome);
+        }
+        cargo_warm_incremental_prune::add_pruned_bytes(project_id, 1234);
+
+        let rendered = render().unwrap();
+        for outcome in [
+            cargo_warm_incremental_prune::OUTCOME_PRUNED,
+            cargo_warm_incremental_prune::OUTCOME_ALREADY_ABSENT,
+            cargo_warm_incremental_prune::OUTCOME_FAILED,
+            cargo_warm_incremental_prune::OUTCOME_UNSAFE_PATH,
+        ] {
+            assert_eq!(
+                labeled_sample_value(
+                    &rendered,
+                    cargo_warm_incremental_prune::TOTAL,
+                    &[("project_id", project_id), ("outcome", outcome)],
+                ),
+                1.0,
+                "unexpected incremental-prune attempt sample for {outcome}",
+            );
+        }
+        assert_eq!(
+            labeled_sample_value(
+                &rendered,
+                cargo_warm_incremental_prune::PRUNED_BYTES_TOTAL,
+                &[("project_id", project_id)],
+            ),
+            1234.0,
+        );
+        assert!(rendered.contains(
+            "# HELP djinn_cargo_warm_incremental_pruned_bytes_total Logical regular-file bytes"
+        ));
+        for line in rendered.lines() {
+            if line.starts_with(cargo_warm_incremental_prune::TOTAL) {
+                assert!(
+                    !line.contains("error_kind="),
+                    "incremental-prune errors must not become labels: {line}"
+                );
+            }
+        }
     }
 
     #[test]
