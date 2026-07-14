@@ -1,4 +1,5 @@
 use super::*;
+use djinn_core::models::TaskPrCiSnapshotMqLaneInput;
 
 impl CoordinatorActor {
     #[allow(clippy::too_many_arguments)]
@@ -330,6 +331,56 @@ impl CoordinatorActor {
                                     repo,
                                 )
                                 .await;
+
+                                // Durably record the merge-queue failure lane on
+                                // the CI snapshot. Without this the snapshot's
+                                // PR-head lane still reads `passing` (the PR
+                                // head's own checks are green — the heavy stages
+                                // run only on `merge_group`), so same-signature
+                                // counting / 3-strike escalation was blind to
+                                // merge-queue rejections. The fingerprint is
+                                // computed from the failing merge-group check
+                                // names (empty sections — the check-run names are
+                                // the stable signal we have in hand here), mirror-
+                                // ing the PR-head lane's fingerprinting. Non-fatal
+                                // on error (warn + continue), matching
+                                // `persist_ci_snapshot`'s posture.
+                                let mq_fingerprint = compute_ci_failure_fingerprint(&failed, &[]);
+                                let mq_failed_names: Vec<String> =
+                                    failed.iter().map(|cr| cr.name.clone()).collect();
+                                match self
+                                    .task_repo()
+                                    .upsert_ci_snapshot_mq_lane(TaskPrCiSnapshotMqLaneInput {
+                                        task_id: task_id.to_owned(),
+                                        pr_number: pull_number as i64,
+                                        state: "dequeued_failure".to_owned(),
+                                        run_id: i64::try_from(run.id).ok(),
+                                        head_sha: Some(run.head_sha.clone()),
+                                        failed_check_names: mq_failed_names,
+                                        failure_fingerprint: Some(mq_fingerprint.clone()),
+                                    })
+                                    .await
+                                {
+                                    Ok(snap) => tracing::info!(
+                                        task_id = %task_short_id,
+                                        pr = pull_number,
+                                        run_id = run.id,
+                                        fingerprint = %mq_fingerprint,
+                                        mq_same_signature_count = snap
+                                            .merge_queue
+                                            .as_ref()
+                                            .map(|l| l.same_signature_count)
+                                            .unwrap_or(0),
+                                        "PR poller: recorded merge-queue failure lane on CI snapshot"
+                                    ),
+                                    Err(e) => tracing::warn!(
+                                        task_id = %task_short_id,
+                                        pr = pull_number,
+                                        run_id = run.id,
+                                        error = %e,
+                                        "PR poller: failed to record merge-queue failure lane on CI snapshot (non-fatal)"
+                                    ),
+                                }
                             }
                         }
                         Err(e) => tracing::warn!(
