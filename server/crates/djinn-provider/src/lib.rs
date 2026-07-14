@@ -17,7 +17,7 @@ pub mod repos;
 pub use completion::{
     CompletionRequest, CompletionResponse, complete, resolve_memory_provider,
     resolve_memory_provider_config, resolve_memory_provider_config_for_user,
-    resolve_memory_provider_for_user,
+    resolve_memory_provider_config_for_user_db, resolve_memory_provider_for_user,
 };
 
 pub use error_classify::{

@@ -299,6 +299,7 @@ fn planned_merge_is_scope_first_deduplicated_capped_and_stable() {
         vec![
             planner_row("a", "a", "first", "one"),
             planner_row("b", "b", "second", "two"),
+            planner_row("overflow", "overflow", "per-query overflow", "ignored"),
         ],
         vec![
             planner_row("a", "other", "duplicate id", "ignored"),
@@ -325,6 +326,10 @@ fn planned_merge_is_scope_first_deduplicated_capped_and_stable() {
     );
     assert!(!first.contains("duplicate id"));
     assert!(!first.contains("duplicate permalink"));
+    assert!(
+        !first.contains("per-query overflow"),
+        "each planner bucket is capped at two ranked rows"
+    );
     assert_eq!(first.matches("- **[").count(), 6, "global cap is six notes");
 }
 

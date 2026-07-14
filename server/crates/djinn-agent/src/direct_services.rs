@@ -41,6 +41,7 @@ use djinn_supervisor::{
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
 
+use crate::actors::slot::lifecycle::memory_intent_planner::parse_planned_queries;
 use crate::context::AgentContext;
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
 use djinn_provider::catalog::builtin::classify_provider;
@@ -1029,35 +1030,28 @@ impl SupervisorServices for DirectServices {
         let mut outcome = LlmCallOutcome::ProviderError;
         let mut diagnostic: Option<String> = None;
 
-        // Host-owned timeout around the stream; cancellation outside this
-        // boundary cannot erase the terminal write.
-        let stream_fut = provider.stream(&conversation, &tools, request.tool_choice);
-        let stream_result = match timeout(timeout_dur, stream_fut).await {
-            Ok(Ok(mut stream)) => {
-                let mut stream_err: Option<String> = None;
-                while let Some(ev) = stream.next().await {
-                    match ev {
-                        Ok(StreamEvent::Delta(block)) => response.content.push(block),
-                        Ok(StreamEvent::Thinking(s)) => response.thinking.push_str(&s),
-                        Ok(StreamEvent::Usage(u)) => response.usage = u,
-                        Ok(StreamEvent::Done) => break,
-                        Err(e) => {
-                            // Retain the latest observed usage across a late
-                            // stream error without dropping it.
-                            stream_err = Some(format!("provider stream error: {e}"));
-                            break;
-                        }
-                    }
-                }
-                if let Some(err) = stream_err {
-                    diagnostic = Some(err);
-                    Err(())
-                } else {
-                    Ok(())
+        // The host timeout covers stream creation and every collection await.
+        // `response` lives outside the future so the latest usage survives a
+        // timeout or late provider error and can still be finalized durably.
+        let collect_fut = async {
+            let mut stream = provider
+                .stream(&conversation, &tools, request.tool_choice)
+                .await
+                .map_err(|e| format!("provider stream init failed: {e}"))?;
+            loop {
+                match stream.next().await {
+                    Some(Ok(StreamEvent::Delta(block))) => response.content.push(block),
+                    Some(Ok(StreamEvent::Thinking(s))) => response.thinking.push_str(&s),
+                    Some(Ok(StreamEvent::Usage(u))) => response.usage = u,
+                    Some(Ok(StreamEvent::Done)) | None => return Ok::<(), String>(()),
+                    Some(Err(e)) => return Err(format!("provider stream error: {e}")),
                 }
             }
-            Ok(Err(e)) => {
-                diagnostic = Some(format!("provider stream init failed: {e}"));
+        };
+        let stream_result = match timeout(timeout_dur, collect_fut).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                diagnostic = Some(error);
                 Err(())
             }
             Err(_) => {
@@ -1081,13 +1075,11 @@ impl SupervisorServices for DirectServices {
             .collect::<String>();
 
         if stream_result.is_ok() {
-            // Validate completed payload before finalizing success. For the
-            // memory-intent planner, valid output is non-empty JSON. More
-            // specific contract validation lives in the lifecycle planner
-            // boundary; here we gate the primitive on well-formed payload.
+            // Validate completed planner content with the shared strict
+            // contract before recording success in the durable ledger.
             let valid = !content_text.trim().is_empty()
                 && (request.operation != "memory_intent_planner"
-                    || serde_json::from_str::<serde_json::Value>(&content_text).is_ok());
+                    || parse_planned_queries(&content_text).is_ok());
             if valid {
                 outcome = LlmCallOutcome::Success;
             } else {

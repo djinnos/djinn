@@ -247,6 +247,16 @@ pub async fn resolve_memory_provider_for_user(
     db: &Database,
     user_id: Option<&str>,
 ) -> Result<Box<dyn LlmProvider>> {
+    let (provider_config, _) = resolve_memory_provider_config_for_user_db(db, user_id).await?;
+    Ok(create_provider(provider_config))
+}
+
+/// Resolve the memory provider configuration and selected catalog model id
+/// under an explicit caller credential scope without constructing a provider.
+pub async fn resolve_memory_provider_config_for_user_db(
+    db: &Database,
+    user_id: Option<&str>,
+) -> Result<(ProviderConfig, String)> {
     let event_bus = EventBus::noop();
     let settings_repo = SettingsRepository::new(db.clone(), event_bus.clone());
 
@@ -288,7 +298,8 @@ pub async fn resolve_memory_provider_for_user(
     )
     .await?;
 
-    Ok(create_provider(provider_config))
+    let model_id = provider_config.model_id.clone();
+    Ok((provider_config, model_id))
 }
 
 pub async fn resolve_memory_provider_config(
