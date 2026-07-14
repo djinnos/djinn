@@ -192,8 +192,12 @@ pub(crate) fn load_skills_with_sources_detailed(
 
         match load_skill_detailed(&path, &requested_name) {
             Ok(skill) => skills.push((requested_name, skill, path)),
-            Err(LoadSkillFailure::Frontmatter) => diagnostics.push(frontmatter_fact(&requested_name)),
-            Err(LoadSkillFailure::MissingFile) => diagnostics.push(missing_file_fact(&requested_name)),
+            Err(LoadSkillFailure::Frontmatter) => {
+                diagnostics.push(frontmatter_fact(&requested_name))
+            }
+            Err(LoadSkillFailure::MissingFile) => {
+                diagnostics.push(missing_file_fact(&requested_name))
+            }
         }
     }
 
@@ -229,7 +233,8 @@ enum LoadSkillFailure {
 fn load_skill_detailed(path: &Path, default_name: &str) -> Result<ResolvedSkill, LoadSkillFailure> {
     let content = fs::read_to_string(path).map_err(|_| LoadSkillFailure::MissingFile)?;
     let references = skill_references_content(path);
-    parse_skill_file(default_name, &content, references.as_deref()).ok_or(LoadSkillFailure::Frontmatter)
+    parse_skill_file(default_name, &content, references.as_deref())
+        .ok_or(LoadSkillFailure::Frontmatter)
 }
 
 pub(crate) fn frontmatter_fact(requested_name: &str) -> ExtensionDiagnosticFact {
@@ -681,10 +686,12 @@ mod tests {
                 ),
             ]
         );
-        assert!(detailed
-            .diagnostics
-            .iter()
-            .all(|fact| fact.source_kind == ExtensionLoadSourceKind::ProjectSkill));
+        assert!(
+            detailed
+                .diagnostics
+                .iter()
+                .all(|fact| fact.source_kind == ExtensionLoadSourceKind::ProjectSkill)
+        );
         assert!(detailed.diagnostics.iter().all(|fact| {
             !fact.summary_material.contains(tmp.path().to_str().unwrap())
                 && !fact.summary_material.contains("not frontmatter")
@@ -705,7 +712,10 @@ mod tests {
 
         assert!(detailed.skills.is_empty());
         assert!(detailed.diagnostics.is_empty());
-        assert_eq!(project_skill_identifier("./nested/skill"), Some("nested/skill".to_string()));
+        assert_eq!(
+            project_skill_identifier("./nested/skill"),
+            Some("nested/skill".to_string())
+        );
         assert!(skill_path(tmp.path(), "/private/skill").is_none());
         assert!(skill_path(tmp.path(), "../outside-skill").is_none());
     }
