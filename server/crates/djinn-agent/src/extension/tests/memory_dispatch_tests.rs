@@ -394,6 +394,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
                 "project": project.slug(),
                 "title": "Project Roadmap",
                 "content": "tracks [[ADR-043 Repo Graph]]",
+                "reason": "record project roadmap",
                 "type": "roadmap"
             })
             .as_object()
@@ -495,6 +496,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
                 "project": project.slug(),
                 "title": "Project Brief",
                 "content": "tracks [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]]",
+                "reason": "record project brief",
                 "type": "brief"
             })
             .as_object()
