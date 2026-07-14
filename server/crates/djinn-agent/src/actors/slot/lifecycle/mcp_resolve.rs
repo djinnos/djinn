@@ -234,7 +234,24 @@ pub(crate) async fn persist_load_diagnostics(
         session_id: Some(session_id.to_owned()),
         load_attempt_id: load_attempt_id.to_owned(),
     };
-    match persist_extension_diagnostic_batch(&repository, associations, facts).await {
+    match persist_extension_diagnostic_batch(
+        |error| {
+            tracing::error!(
+                project_id,
+                task_id,
+                session_id,
+                load_attempt_id,
+                error = %error,
+                "Lifecycle: failed to persist extension diagnostic"
+            );
+            true
+        },
+        &repository,
+        associations,
+        facts,
+    )
+    .await
+    {
         Ok(rows) => rows,
         Err(error) => {
             tracing::error!(project_id, task_id, session_id, load_attempt_id, error = %error, "Lifecycle: failed to read persisted extension diagnostics");
