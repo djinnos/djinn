@@ -282,7 +282,7 @@ pub async fn backdate_task_open_transition_and_updated_at(
     db.ensure_initialized().await.unwrap();
     let mut tx = db.pool().begin().await.unwrap();
 
-    sqlx::query(
+    let task_update = sqlx::query(
         "UPDATE tasks SET updated_at = to_char(
              now() AT TIME ZONE 'utc' - $1::interval,
              'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
@@ -293,8 +293,13 @@ pub async fn backdate_task_open_transition_and_updated_at(
     .execute(&mut *tx)
     .await
     .unwrap();
+    assert_eq!(
+        task_update.rows_affected(),
+        1,
+        "backdate helper requires exactly one matching task"
+    );
 
-    sqlx::query(
+    let transition_update = sqlx::query(
         "UPDATE activity_log SET created_at = to_char(
              now() AT TIME ZONE 'utc' - $1::interval,
              'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
@@ -310,6 +315,11 @@ pub async fn backdate_task_open_transition_and_updated_at(
     .execute(&mut *tx)
     .await
     .unwrap();
+    assert_eq!(
+        transition_update.rows_affected(),
+        1,
+        "backdate helper requires exactly one latest open status transition"
+    );
 
     tx.commit().await.unwrap();
 }

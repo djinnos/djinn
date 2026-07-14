@@ -455,6 +455,20 @@ async fn board_health_stranded_ready_matches_seeded_task() {
         .await
         .expect("attribute stranded-ready task");
 
+    // Creation itself does not write a status lifecycle row. Exercise a real
+    // open transition so the fixture can prove board health's high-confidence
+    // open-transition precedence rather than silently falling back to
+    // `updated_at`.
+    let tasks = TaskRepository::new(harness.db().clone(), common::test_events());
+    tasks
+        .set_status(&task.id, "in_progress")
+        .await
+        .expect("create pre-open lifecycle transition");
+    tasks
+        .set_status(&task.id, "open")
+        .await
+        .expect("create open lifecycle transition");
+
     // Backdate both updated_at and the latest open transition. Board health
     // deliberately gives that transition precedence as high-confidence
     // unclaimed evidence.
