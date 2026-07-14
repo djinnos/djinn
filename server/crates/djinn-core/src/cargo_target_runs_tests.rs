@@ -344,10 +344,12 @@ fn inventory_error_affected_directory_is_never_a_candidate() {
         modified: None,
         created: None,
     };
-    assert!(inventory
-        .errors
-        .iter()
-        .any(|issue| { issue.top_level_name.as_deref() == Some(candidate.name.as_slice()) }));
+    assert!(
+        inventory
+            .errors
+            .iter()
+            .any(|issue| { issue.top_level_name.as_deref() == Some(candidate.name.as_slice()) })
+    );
 }
 
 #[cfg(unix)]

@@ -282,6 +282,7 @@ mod tests {
             |_| Err(io::Error::other("cannot create lock directory")),
             |_| Ok(()),
             |_| -> io::Result<File> { unreachable!("lock file should not be opened") },
+            || {},
             |_| Ok(()),
         )
         .err()
@@ -293,6 +294,7 @@ mod tests {
             |_| Ok(()),
             |_| Err(io::Error::other("locking unsupported")),
             |_| -> io::Result<File> { unreachable!("lock file should not be opened") },
+            || {},
             |_| Ok(()),
         )
         .err()
@@ -306,6 +308,7 @@ mod tests {
             |_| Ok(()),
             |_| Ok(()),
             |_| Ok(lock_file),
+            || {},
             |_| Err(io::Error::other("lock acquisition failed")),
         )
         .err()
@@ -353,7 +356,7 @@ mod tests {
         let mut holder = contract_child("holder", &project, fixture.path());
         wait_for(&fixture.path().join("holder-acquired"));
         let mut killed_waiter = contract_child("killed-waiter", &project, fixture.path());
-        thread::sleep(Duration::from_millis(150));
+        wait_for(&fixture.path().join("killed-waiter-lock-attempt"));
         assert!(!fixture.path().join("killed-waiter-acquired").exists());
         killed_waiter.kill().expect("kill waiting process");
         killed_waiter.wait().expect("reap waiting process");
@@ -381,9 +384,12 @@ mod tests {
         // This is the same returned-error recorder boundary the warm flow uses.
         // A SIGKILL while flock is blocked cannot reach this terminal callback.
         let terminal = fixture.join(format!("{role}-terminal"));
-        let guard = WarmBaseLock::acquire_and_record_failure(&project, |error| {
-            fs::write(&terminal, error.kind.as_str()).expect("terminal observation")
-        })
+        let lock_attempt = fixture.join(format!("{role}-lock-attempt"));
+        let guard = WarmBaseLock::acquire_and_record_failure_with_attempt_observer(
+            &project,
+            || fs::write(&lock_attempt, b"attempting").expect("lock-attempt observation"),
+            |error| fs::write(&terminal, error.kind.as_str()).expect("terminal observation"),
+        )
         .expect("shared filesystem lock");
         fs::write(fixture.join(format!("{role}-acquired")), b"acquired").expect("acquired marker");
         if role == "holder" {
@@ -499,6 +505,7 @@ impl WarmBaseLock {
                     .create(true)
                     .open(path)
             },
+            || {},
             flock_exclusive,
         )
     }
@@ -513,6 +520,39 @@ impl WarmBaseLock {
         Record: FnOnce(&PruneError),
     {
         let result = Self::acquire(project_id);
+        if let Err(error) = &result {
+            record_failure(error);
+        }
+        result
+    }
+
+    /// Test-only observation from the shared warm lock-attempt/recorder seam.
+    /// It runs immediately before the blocking filesystem acquisition, proving
+    /// a killed subprocess reached the actual wait rather than merely starting.
+    #[cfg(test)]
+    pub(crate) fn acquire_and_record_failure_with_attempt_observer<Record, Observe>(
+        project_id: &str,
+        observe_attempt: Observe,
+        record_failure: Record,
+    ) -> Result<Self, PruneError>
+    where
+        Record: FnOnce(&PruneError),
+        Observe: FnOnce(),
+    {
+        let result = Self::acquire_with_operations(
+            project_id,
+            |lock_dir| fs::create_dir_all(lock_dir),
+            probe_advisory_lock,
+            |path| {
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(path)
+            },
+            observe_attempt,
+            flock_exclusive,
+        );
         if let Err(error) = &result {
             record_failure(error);
         }
@@ -547,6 +587,7 @@ impl WarmBaseLock {
                     .create(true)
                     .open(path)
             },
+            || {},
             |file| match failure {
                 WarmLockOperationFailure::Probe => flock_exclusive(file),
                 WarmLockOperationFailure::Acquire => {
@@ -567,6 +608,7 @@ impl WarmBaseLock {
         create_lock_dir: Create,
         probe: Probe,
         open_lock: Open,
+        before_acquire: impl FnOnce(),
         acquire_lock: Acquire,
     ) -> Result<Self, PruneError>
     where
@@ -584,6 +626,7 @@ impl WarmBaseLock {
         let path = lock_dir.join(format!("{project_id}.lock"));
         let file =
             open_lock(&path).map_err(|error| PruneError::new(PruneErrorKind::LockOpen, error))?;
+        before_acquire();
         acquire_lock(&file).map_err(|error| PruneError::new(PruneErrorKind::LockAcquire, error))?;
         Ok(Self { _file: file })
     }

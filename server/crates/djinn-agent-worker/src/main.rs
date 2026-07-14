@@ -971,7 +971,8 @@ fn warm_cargo_test_phase(phase: &'static str) {
 }
 
 #[cfg(test)]
-fn warm_cargo_take_injected_lock_failure() -> Option<cargo_incremental_prune::WarmLockOperationFailure> {
+fn warm_cargo_take_injected_lock_failure()
+-> Option<cargo_incremental_prune::WarmLockOperationFailure> {
     WARM_CARGO_INJECTED_LOCK_FAILURE
         .lock()
         .expect("warm lock operation injection poisoned")
@@ -4038,7 +4039,7 @@ warning: something
             assert!(
                 !rendered.lines().any(|line| {
                     line.starts_with(
-                        djinn_telemetry::cargo_warm_incremental_prune::PRUNED_BYTES_TOTAL
+                        djinn_telemetry::cargo_warm_incremental_prune::PRUNED_BYTES_TOTAL,
                     ) && line.contains(&format!("project_id=\"{project}\""))
                 }),
                 "failed attempt must not add successful bytes"
@@ -4059,7 +4060,8 @@ warning: something
                 || async { graph_warmed = true },
             ));
         assert!(graph_warmed, "graph warming continues after Cargo failure");
-    }    #[test]
+    }
+    #[test]
 
     fn warm_cargo_ordering_lock_and_prune_errors_use_bounded_telemetry_kinds() {
         use cargo_incremental_prune::PruneErrorKind as Source;
