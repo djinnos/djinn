@@ -141,6 +141,19 @@ pub(crate) async fn persist_extension_diagnostic(
         .await
 }
 
+pub(crate) async fn persist_extension_diagnostic_batch(
+    repository: &ExtensionLoadDiagnosticRepository,
+    associations: ExtensionDiagnosticAssociations,
+    facts: Vec<ExtensionDiagnosticFact>,
+) -> djinn_db::Result<Vec<ExtensionLoadDiagnosticV1>> {
+    for fact in facts {
+        persist_extension_diagnostic(repository, associations.clone(), fact).await?;
+    }
+    repository
+        .list_for_load_attempt(&associations.project_id, &associations.load_attempt_id)
+        .await
+}
+
 /// Djinn-owned prose. Extension and detector text never selects this value.
 pub(crate) fn remedy_template(code: ExtensionLoadRemedyCode) -> &'static str {
     match code {
