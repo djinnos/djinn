@@ -1,6 +1,6 @@
 use djinn_db::{
     NoteRepository, NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation,
-    NoteRevisionReason, NoteRevisionSubsystem, NoteStatus, TrustedNoteRevisionAttribution,
+    NoteRevisionReason, NoteRevisionSubsystem, TrustedNoteRevisionAttribution,
     TrustedNoteRevisionProvenance, folder_for_type_with_status, note_hash::note_content_hash,
 };
 use djinn_memory::{Note, NoteDedupCandidate};
@@ -18,7 +18,6 @@ use super::write_dedup_types::{
 
 const MEMORY_WRITE_DEDUP_MAX_TOKENS: u32 = 768;
 const MEMORY_WRITE_DEDUP_CANDIDATE_LIMIT: usize = 5;
-const SUPERSEDES_WEIGHT: f64 = 1.0;
 
 pub(crate) struct LlmMemoryWriteDedupDecider {
     runtime: Box<dyn MemoryWriteProviderRuntime>,
@@ -219,28 +218,40 @@ pub(crate) async fn apply_dedup_decision(
     }
 }
 
-/// Complete a supersede after the ordinary creation path has made the canonical
-/// incoming note. A guarded active→deprecated transition intentionally treats
-/// archived, deprecated, and concurrently superseded targets as successful
-/// no-ops; association upsert keeps repeated decisions idempotent.
+/// Complete a supersede after ordinary creation through a Dedup-attributed revision.
 pub(crate) async fn apply_created_note_supersede(
     repo: &NoteRepository,
     new_note_id: &str,
     candidate_id: &str,
     reason: &str,
 ) -> Result<(), String> {
-    let status_changed = repo
-        .set_note_status(candidate_id, NoteStatus::Active, NoteStatus::Deprecated)
+    let candidate = repo
+        .get(candidate_id)
         .await
         .map_err(|error| error.to_string())?;
-    repo.record_supersedes(new_note_id, candidate_id, SUPERSEDES_WEIGHT)
+    let project_id = candidate
+        .ok_or_else(|| format!("dedup candidate not found: {candidate_id}"))?
+        .project_id;
+    let result = repo
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id,
+            note_id: Some(candidate_id.to_owned()),
+            event_kind: NoteRevisionEventKind::Updated,
+            desired: NoteRevisionDesiredState::Supersede {
+                canonical_note_id: new_note_id.to_owned(),
+            },
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Dedup),
+            provenance: TrustedNoteRevisionProvenance::default(),
+            reason: NoteRevisionReason::new("dedup:supersede_existing")
+                .expect("dedup reason is non-blank"),
+        })
         .await
         .map_err(|error| error.to_string())?;
     tracing::info!(
         decision_kind = "supersede_existing",
         new_note_id,
         candidate_id,
-        status_changed,
+        changed = result.changed,
         reason,
         "memory_write supersede mutation applied"
     );

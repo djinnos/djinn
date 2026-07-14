@@ -450,6 +450,18 @@ mod tests {
                     .unwrap(),
                 Some((1.0, "supersedes".to_string()))
             );
+            let revisions = repo.revision_events_for_test(&project.id).await.unwrap();
+            assert_eq!(revisions.len(), match status { "active" => 1, "archived" => 2, "deprecated" => 3, _ => unreachable!() });
+            for revision in revisions {
+                assert_eq!(revision.actor_kind, "system");
+                assert_eq!(revision.subsystem.as_deref(), Some("dedup"));
+                assert_eq!(revision.event_kind, "updated");
+                assert_eq!(revision.content_before.as_deref(), Some("prior coverage"));
+                assert_eq!(revision.content_after.as_deref(), Some("prior coverage"));
+                assert_eq!(revision.confidence_before, Some(0.5));
+                assert_eq!(revision.confidence_after, Some(0.5));
+                assert_eq!(revision.reason, "dedup:supersede_existing");
+            }
         }
     }
 }

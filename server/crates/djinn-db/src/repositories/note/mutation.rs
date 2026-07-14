@@ -14,7 +14,7 @@ use super::{
 };
 use crate::error::{DbError as Error, DbResult as Result};
 use crate::note_hash::note_content_hash;
-use djinn_memory::Note;
+use djinn_memory::{Note, canonical_pair};
 
 /// Test-only projection of a persisted revision event.
 ///
@@ -59,6 +59,11 @@ pub enum NoteRevisionDesiredState {
     Existing {
         content: String,
         confidence: f64,
+    },
+    /// Deprecate this note and atomically attach its `supersedes` association
+    /// to the incoming canonical note.
+    Supersede {
+        canonical_note_id: String,
     },
     /// Delete the locked note after retaining its before snapshot in the ledger.
     Delete,
@@ -205,14 +210,30 @@ impl NoteRepository {
     ) -> Result<NoteRevisionMutationResult> {
         let note_id = command.note_id.as_deref().expect("validated note identity");
         let before = locked_note(tx, note_id, &command.project_id).await?;
-        let NoteRevisionDesiredState::Existing {
-            content,
-            confidence,
-        } = &command.desired
-        else {
-            unreachable!("validated update command")
+        let (content, confidence, status, canonical_note_id) = match &command.desired {
+            NoteRevisionDesiredState::Existing {
+                content,
+                confidence,
+            } => (content.as_str(), *confidence, before.status.as_str(), None),
+            NoteRevisionDesiredState::Supersede { canonical_note_id } => (
+                before.content.as_str(),
+                before.confidence,
+                "deprecated",
+                Some(canonical_note_id.as_str()),
+            ),
+            _ => unreachable!("validated update command"),
         };
-        if before.content == *content && before.confidence == *confidence {
+        let association_changed = if let Some(canonical_note_id) = canonical_note_id {
+            let (note_a_id, note_b_id) = canonical_pair(canonical_note_id, note_id);
+            !sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM note_associations WHERE note_a_id = $1 AND note_b_id = $2 AND kind = 'supersedes' AND source = 'session_co_access')").bind(note_a_id).bind(note_b_id).fetch_one(&mut **tx).await?
+        } else {
+            false
+        };
+        if before.content == content
+            && before.confidence == confidence
+            && before.status == status
+            && !association_changed
+        {
             return Ok(NoteRevisionMutationResult {
                 changed: false,
                 note: Some(before),
@@ -221,14 +242,18 @@ impl NoteRepository {
             });
         }
         if command.event_kind == NoteRevisionEventKind::ConfidenceChanged
-            && before.content != *content
+            && before.content != content
         {
             return Err(Error::InvalidData(
                 "confidence_changed must not alter content".to_owned(),
             ));
         }
-        sqlx::query("UPDATE notes SET content = $1, confidence = $2, content_hash = $3, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $4")
-            .bind(content).bind(confidence).bind(note_content_hash(content)).bind(note_id).execute(&mut **tx).await?;
+        sqlx::query("UPDATE notes SET content = $1, confidence = $2, content_hash = $3, status = $4, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $5").bind(content).bind(confidence).bind(note_content_hash(content)).bind(status).bind(note_id).execute(&mut **tx).await?;
+        if let Some(canonical_note_id) = canonical_note_id {
+            let (note_a_id, note_b_id) = canonical_pair(canonical_note_id, note_id);
+            sqlx::query("DELETE FROM note_associations WHERE note_a_id = $1 AND note_b_id = $2 AND kind = 'co_access' AND source = 'session_co_access'").bind(note_a_id).bind(note_b_id).execute(&mut **tx).await?;
+            sqlx::query("INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind, source) VALUES ($1, $2, 1.0, 0, to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), 'supersedes', 'session_co_access') ON CONFLICT (note_a_id, note_b_id, kind, source) DO UPDATE SET weight = GREATEST(note_associations.weight, EXCLUDED.weight), last_co_access = EXCLUDED.last_co_access").bind(note_a_id).bind(note_b_id).execute(&mut **tx).await?;
+        }
         let note = locked_note(tx, note_id, &command.project_id).await?;
         let seq = next_sequence(tx, &command.project_id, note_id).await?;
         let (content_before, content_after) =
@@ -388,6 +413,9 @@ fn validate_command(command: &NoteRevisionMutation) -> Result<()> {
         ) | (
             NoteRevisionEventKind::Updated | NoteRevisionEventKind::ConfidenceChanged,
             NoteRevisionDesiredState::Existing { .. }
+        ) | (
+            NoteRevisionEventKind::Updated,
+            NoteRevisionDesiredState::Supersede { .. }
         ) | (
             NoteRevisionEventKind::Deleted,
             NoteRevisionDesiredState::Delete
