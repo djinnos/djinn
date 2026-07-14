@@ -392,6 +392,21 @@ impl TaskRepository {
         .await
     }
 
+    /// Test-only fixture helper for dispatch and refinement tests that need to
+    /// exercise creator-specific behavior after constructing a shared task.
+    /// Production attribution is resolved before insertion by the provenance
+    /// creation boundary and must not use this mutation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn set_created_by_user_id(&self, id: &str, user_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE tasks SET created_by_user_id = $1 WHERE id = $2")
+            .bind(user_id)
+            .bind(id)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Production creation boundary: producers supply facts and this repository resolves a concrete creator in the insert transaction.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_in_project_with_provenance(
