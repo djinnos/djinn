@@ -1681,6 +1681,10 @@ pub(super) struct CargoTargetRunDirSweepStats {
     pub(super) cap_trimmed: usize,
     /// Per-entry errors during the hard-cap trim.
     pub(super) cap_errors: usize,
+    pub(super) cap_final_allocated_bytes: Option<u64>,
+    pub(super) cap_final_directory_count: Option<usize>,
+    pub(super) cap_protected: usize,
+    pub(super) cap_outcome: Option<&'static str>,
     // ── Debris / age-sweep counters (n5cp) ──────────────────────────────
     /// Non-UUID directories older than the retention window that were
     /// deleted (or counted as dry-run candidates).
@@ -1696,6 +1700,29 @@ pub(super) struct CargoTargetRunDirSweepStats {
     pub(super) retained_non_utf8: usize,
     /// Total bytes reclaimed by debris deletion (dirs + files).
     pub(super) debris_bytes_deleted: u64,
+}
+
+/// Emit the bounded terminal record for a cargo-target-runs sweep, including
+/// fail-closed setup paths that never reach the blocking trim engine.
+fn report_cargo_target_run_sweep(
+    root: &Path,
+    config: &crate::context::CacheCleanupConfig,
+    caps: djinn_core::cargo_target_runs::CargoTargetRunsCaps,
+    stats: &CargoTargetRunDirSweepStats,
+) {
+    tracing::info!(
+        root = %root.display(), scanned = stats.scanned, deleted = stats.deleted,
+        retained = stats.retained, errors = stats.errors, cap_trimmed = stats.cap_trimmed,
+        cap_errors = stats.cap_errors, cap_final_allocated_bytes = ?stats.cap_final_allocated_bytes,
+        cap_final_directory_count = ?stats.cap_final_directory_count, cap_protected = stats.cap_protected,
+        cap_outcome = ?stats.cap_outcome, cap_max_dirs = caps.max_dirs, cap_max_bytes = caps.max_bytes,
+        malformed_dir_deleted = stats.malformed_dir_deleted, loose_file_deleted = stats.loose_file_deleted,
+        retained_fresh_malformed = stats.retained_fresh_malformed, retained_non_utf8 = stats.retained_non_utf8,
+        debris_bytes_deleted = stats.debris_bytes_deleted, mode = %config.mode.as_metric_label(),
+        cargo_debris_enabled = config.cargo_debris_enabled, cargo_debris_max_age_days = config.cargo_debris_max_age_days,
+        cleanup_outcome = stats.cap_outcome.unwrap_or(if stats.errors == 0 { "completed" } else { "error" }),
+        "CoordinatorActor: cargo target run-dir sweep completed"
+    );
 }
 
 async fn sweep_orphaned_cargo_target_run_dirs(
@@ -1719,7 +1746,72 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
     root: &Path,
     config: &crate::context::CacheCleanupConfig,
 ) -> CargoTargetRunDirSweepStats {
-    let protected = match protected_cargo_target_run_ids(db).await {
+    let caps = djinn_core::cargo_target_runs::cargo_target_runs_caps_from_env();
+    sweep_orphaned_cargo_target_run_dirs_under_with_caps_and_seams(
+        db,
+        root,
+        config,
+        caps,
+        CargoTargetRunSweepSeams::production(),
+    )
+    .await
+}
+
+type ProtectedIdLookup =
+    fn(djinn_db::Database) -> futures::future::BoxFuture<'static, Result<Vec<String>, String>>;
+type JointCapEngine =
+    fn(
+        std::path::PathBuf,
+        HashSet<String>,
+        djinn_core::cargo_target_runs::CargoTargetRunsCaps,
+    ) -> Result<djinn_core::cargo_target_runs::CargoTargetRunsTrimResult, String>;
+
+#[derive(Clone, Copy)]
+struct CargoTargetRunSweepSeams {
+    task_run_ids: ProtectedIdLookup,
+    session_task_run_ids: ProtectedIdLookup,
+    joint_cap_engine: JointCapEngine,
+}
+
+impl CargoTargetRunSweepSeams {
+    fn production() -> Self {
+        Self {
+            task_run_ids: |db| {
+                Box::pin(async move {
+                    djinn_db::TaskRunRepository::new(db)
+                        .running_ids()
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+            },
+            session_task_run_ids: |db| {
+                Box::pin(async move {
+                    djinn_db::SessionRepository::new(db, djinn_core::events::EventBus::noop())
+                        .running_task_run_ids()
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+            },
+            joint_cap_engine: |root, protected, caps| {
+                djinn_core::cargo_target_runs::trim_cargo_target_runs(&root, &protected, caps)
+                    .map_err(|error| error.to_string())
+            },
+        }
+    }
+}
+
+/// The cap-bearing implementation and its private seams let coordinator
+/// regressions deterministically fail either lookup and the blocking engine
+/// without changing the accepted production path.
+async fn sweep_orphaned_cargo_target_run_dirs_under_with_caps_and_seams(
+    db: &djinn_db::Database,
+    root: &Path,
+    config: &crate::context::CacheCleanupConfig,
+    caps: djinn_core::cargo_target_runs::CargoTargetRunsCaps,
+    seams: CargoTargetRunSweepSeams,
+) -> CargoTargetRunDirSweepStats {
+    let mode_label = config.mode.as_metric_label();
+    let protected = match protected_cargo_target_run_ids(db, seams).await {
         Ok(ids) => ids,
         Err(e) => {
             tracing::warn!(
@@ -1727,21 +1819,43 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                 root = %root.display(),
                 "CoordinatorActor: cargo target run-dir sweep failed to load protected task_run ids"
             );
-            return CargoTargetRunDirSweepStats {
+            let stats = CargoTargetRunDirSweepStats {
                 errors: 1,
+                cap_errors: 1,
+                cap_outcome: Some(djinn_telemetry::cache_cleanup::OUTCOME_ERROR),
                 ..Default::default()
             };
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+                mode_label,
+            );
+            report_cargo_target_run_sweep(root, config, caps, &stats);
+            return stats;
         }
     };
 
     let mut entries = match tokio::fs::read_dir(root).await {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::debug!(
+            tracing::warn!(
                 root = %root.display(),
-                "CoordinatorActor: cargo target run-dir root does not exist; skipping sweep"
+                cleanup_outcome = "error",
+                "CoordinatorActor: cargo target run-dir root does not exist; retaining data"
             );
-            return CargoTargetRunDirSweepStats::default();
+            let stats = CargoTargetRunDirSweepStats {
+                errors: 1,
+                cap_errors: 1,
+                cap_outcome: Some(djinn_telemetry::cache_cleanup::OUTCOME_ERROR),
+                ..Default::default()
+            };
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+                mode_label,
+            );
+            report_cargo_target_run_sweep(root, config, caps, &stats);
+            return stats;
         }
         Err(e) => {
             tracing::warn!(
@@ -1749,10 +1863,19 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                 root = %root.display(),
                 "CoordinatorActor: cargo target run-dir sweep failed to enumerate root"
             );
-            return CargoTargetRunDirSweepStats {
+            let stats = CargoTargetRunDirSweepStats {
                 errors: 1,
+                cap_errors: 1,
+                cap_outcome: Some(djinn_telemetry::cache_cleanup::OUTCOME_ERROR),
                 ..Default::default()
             };
+            djinn_telemetry::cache_cleanup::increment_cleanup_total(
+                djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+                djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+                mode_label,
+            );
+            report_cargo_target_run_sweep(root, config, caps, &stats);
+            return stats;
         }
     };
 
@@ -1767,11 +1890,6 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
         } else {
             None
         };
-    let mode_label = if config.mode.is_delete() {
-        djinn_telemetry::cache_cleanup::MODE_DELETE
-    } else {
-        djinn_telemetry::cache_cleanup::MODE_DRY_RUN
-    };
     loop {
         let entry = match entries.next_entry().await {
             Ok(Some(entry)) => entry,
@@ -2060,92 +2178,97 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
         }
     }
 
-    // Hard backstop: LRU-trim the runs root below an absolute count cap,
-    // independent of task-run state. Even if both the deterministic teardown
-    // and the orphan sweep above regress (e.g. the protected-ids query starts
-    // over-protecting, or a new keying bug leaves rows "running"), this still
-    // bounds worst-case disk so a reaping regression can't refill the PVC and
-    // re-trigger node DiskPressure eviction. Runs in `spawn_blocking` since the
-    // trim is synchronous `std::fs`.
-    let cap = djinn_core::cargo_target_runs::hard_cap_dirs_from_env();
-    let trim_root = root.to_path_buf();
-    match tokio::task::spawn_blocking(move || {
-        djinn_core::cargo_target_runs::trim_run_dirs_to_cap(&trim_root, cap)
-    })
-    .await
-    {
-        Ok(Ok(trim)) => {
-            stats.cap_trimmed = trim.trimmed;
-            stats.cap_errors = trim.errors;
-            if trim.trimmed > 0 || trim.errors > 0 {
-                tracing::warn!(
-                    root = %root.display(),
-                    cap,
-                    scanned = trim.scanned,
-                    trimmed = trim.trimmed,
-                    retained = trim.retained,
-                    errors = trim.errors,
-                    "CoordinatorActor: cargo target run-dir hard cap trimmed dirs \
-                     (orphan sweep is not keeping the runs root bounded)"
-                );
-            }
-        }
-        Ok(Err(e)) => {
-            stats.cap_errors += 1;
-            tracing::warn!(
-                error = %e,
-                root = %root.display(),
-                cap,
-                "CoordinatorActor: cargo target run-dir hard cap trim failed"
-            );
-        }
-        Err(e) => {
-            stats.cap_errors += 1;
-            tracing::warn!(
-                error = %e,
-                root = %root.display(),
-                cap,
-                "CoordinatorActor: cargo target run-dir hard cap trim task join failed"
-            );
-        }
-    }
+    // Joint count-and-byte cap. The active-id snapshot above is mandatory.
+    let cap_stats =
+        run_cargo_target_run_joint_cap(root, caps, mode_label, protected, seams.joint_cap_engine)
+            .await;
+    stats.errors += cap_stats.errors;
+    stats.cap_trimmed = cap_stats.cap_trimmed;
+    stats.cap_errors = cap_stats.cap_errors;
+    stats.cap_final_allocated_bytes = cap_stats.cap_final_allocated_bytes;
+    stats.cap_final_directory_count = cap_stats.cap_final_directory_count;
+    stats.cap_protected = cap_stats.cap_protected;
+    stats.cap_outcome = cap_stats.cap_outcome;
 
-    tracing::info!(
-        root = %root.display(),
-        scanned = stats.scanned,
-        deleted = stats.deleted,
-        retained = stats.retained,
-        errors = stats.errors,
-        cap_trimmed = stats.cap_trimmed,
-        cap_errors = stats.cap_errors,
-        malformed_dir_deleted = stats.malformed_dir_deleted,
-        loose_file_deleted = stats.loose_file_deleted,
-        retained_fresh_malformed = stats.retained_fresh_malformed,
-        retained_non_utf8 = stats.retained_non_utf8,
-        debris_bytes_deleted = stats.debris_bytes_deleted,
-        mode = %config.mode.as_metric_label(),
-        cargo_debris_enabled = config.cargo_debris_enabled,
-        cargo_debris_max_age_days = config.cargo_debris_max_age_days,
-        cleanup_outcome = if stats.errors == 0 && stats.cap_errors == 0 {
-            "completed"
-        } else {
-            "completed_with_errors"
-        },
-        "CoordinatorActor: cargo target run-dir sweep completed"
-    );
+    report_cargo_target_run_sweep(root, config, caps, &stats);
 
     stats
 }
 
+async fn run_cargo_target_run_joint_cap(
+    root: &Path,
+    caps: djinn_core::cargo_target_runs::CargoTargetRunsCaps,
+    mode_label: &'static str,
+    protected: HashSet<String>,
+    engine: JointCapEngine,
+) -> CargoTargetRunDirSweepStats {
+    let trim_root = root.to_path_buf();
+    let mut stats = CargoTargetRunDirSweepStats::default();
+    match tokio::task::spawn_blocking(move || engine(trim_root, protected, caps)).await {
+        Ok(Ok(trim)) => {
+            record_cargo_target_run_trim(&mut stats, trim, mode_label);
+            tracing::info!(root = %root.display(), max_dirs = caps.max_dirs, max_bytes = caps.max_bytes,
+                final_allocated_bytes = trim.final_allocated_bytes, final_top_level_directory_count = trim.final_top_level_directory_count,
+                removed = trim.deleted, protected = trim.protected, errors = trim.errors, cap_outcome = trim.outcome.as_str(),
+                "CoordinatorActor: cargo target run-dir joint cap completed");
+        }
+        Ok(Err(error)) => {
+            record_cargo_target_run_trim_failure(&mut stats, mode_label);
+            tracing::warn!(error = %error, root = %root.display(), max_dirs = caps.max_dirs, max_bytes = caps.max_bytes, "CoordinatorActor: cargo target run-dir joint cap failed");
+        }
+        Err(error) => {
+            record_cargo_target_run_trim_failure(&mut stats, mode_label);
+            tracing::warn!(error = %error, root = %root.display(), max_dirs = caps.max_dirs, max_bytes = caps.max_bytes, "CoordinatorActor: cargo target run-dir joint cap task join failed");
+        }
+    }
+    stats
+}
+
+/// Preserve the engine's exact postcondition and bounded outcome as the
+/// coordinator's cap result. Only the bounded outcome becomes a metric label;
+/// IDs, paths, and budget values stay in structured logs.
+fn record_cargo_target_run_trim(
+    stats: &mut CargoTargetRunDirSweepStats,
+    trim: djinn_core::cargo_target_runs::CargoTargetRunsTrimResult,
+    mode_label: &'static str,
+) {
+    stats.cap_trimmed = trim.deleted;
+    stats.cap_errors = trim.errors;
+    stats.cap_final_allocated_bytes = Some(trim.final_allocated_bytes);
+    stats.cap_final_directory_count = Some(trim.final_top_level_directory_count);
+    stats.cap_protected = trim.protected;
+    stats.cap_outcome = Some(trim.outcome.as_str());
+    djinn_telemetry::cache_cleanup::increment_cleanup_total(
+        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+        trim.outcome.as_str(),
+        mode_label,
+    );
+}
+
+/// Record engine root-read failures and blocking-task join failures as terminal
+/// cap errors. No exact inventory can safely be claimed on either path.
+fn record_cargo_target_run_trim_failure(
+    stats: &mut CargoTargetRunDirSweepStats,
+    mode_label: &'static str,
+) {
+    stats.errors += 1;
+    stats.cap_errors += 1;
+    stats.cap_outcome = Some(djinn_telemetry::cache_cleanup::OUTCOME_ERROR);
+    djinn_telemetry::cache_cleanup::increment_cleanup_total(
+        djinn_telemetry::cache_cleanup::COMPONENT_CARGO_TARGET_RUNS,
+        djinn_telemetry::cache_cleanup::OUTCOME_ERROR,
+        mode_label,
+    );
+}
+
 async fn protected_cargo_target_run_ids(
     db: &djinn_db::Database,
-) -> djinn_db::Result<HashSet<String>> {
-    let task_run_repo = djinn_db::TaskRunRepository::new(db.clone());
-    let session_repo =
-        djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-
-    let task_run_ids = task_run_repo.running_ids().await?;
-    let session_task_run_ids = session_repo.running_task_run_ids().await?;
+    seams: CargoTargetRunSweepSeams,
+) -> Result<HashSet<String>, String> {
+    // Keep these sequential: neither the directory sweep nor cap engine may
+    // mutate the filesystem unless both fail-closed snapshots succeeded.
+    let task_run_ids = (seams.task_run_ids)(db.clone()).await?;
+    let session_task_run_ids = (seams.session_task_run_ids)(db.clone()).await?;
 
     Ok(task_run_ids
         .into_iter()
@@ -2928,6 +3051,314 @@ mod cache_cleanup_cross_path_tests {
                 .status()
                 .unwrap()
                 .success()
+        );
+    }
+
+    const RUN_A: &str = "019f5df4-06f6-7d71-b9c7-aa50090e4e18";
+    const RUN_B: &str = "019f5df4-06f6-7d71-b9c7-aa50090e4e19";
+    static ENGINE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn lookup_none(
+        _db: djinn_db::Database,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<String>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn lookup_task_active(
+        _db: djinn_db::Database,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<String>, String>> {
+        Box::pin(async { Ok(vec![RUN_A.to_owned()]) })
+    }
+
+    fn lookup_session_active(
+        _db: djinn_db::Database,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<String>, String>> {
+        Box::pin(async { Ok(vec![RUN_B.to_owned()]) })
+    }
+
+    fn lookup_failure(
+        _db: djinn_db::Database,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<String>, String>> {
+        Box::pin(async { Err("injected protected-id lookup failure".to_owned()) })
+    }
+
+    fn counting_engine(
+        root: std::path::PathBuf,
+        protected: HashSet<String>,
+        caps: djinn_core::cargo_target_runs::CargoTargetRunsCaps,
+    ) -> Result<djinn_core::cargo_target_runs::CargoTargetRunsTrimResult, String> {
+        ENGINE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        djinn_core::cargo_target_runs::trim_cargo_target_runs(&root, &protected, caps)
+            .map_err(|error| error.to_string())
+    }
+
+    fn join_failure_engine(
+        _root: std::path::PathBuf,
+        _protected: HashSet<String>,
+        _caps: djinn_core::cargo_target_runs::CargoTargetRunsCaps,
+    ) -> Result<djinn_core::cargo_target_runs::CargoTargetRunsTrimResult, String> {
+        std::panic::resume_unwind(Box::new("injected blocking task panic"))
+    }
+
+    #[cfg(unix)]
+    struct RemoveFailureFilesystem;
+
+    #[cfg(unix)]
+    impl djinn_core::cargo_target_runs::Filesystem for RemoveFailureFilesystem {
+        fn symlink_metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+            std::fs::symlink_metadata(path)
+        }
+
+        fn remove_dir_all(&self, _path: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected removal failure",
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    fn removal_failure_engine(
+        root: std::path::PathBuf,
+        protected: HashSet<String>,
+        caps: djinn_core::cargo_target_runs::CargoTargetRunsCaps,
+    ) -> Result<djinn_core::cargo_target_runs::CargoTargetRunsTrimResult, String> {
+        djinn_core::cargo_target_runs::trim_cargo_target_runs_with_fs(
+            &root,
+            &protected,
+            caps,
+            &RemoveFailureFilesystem,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn create_run_root(ids: &[&str]) -> tempfile::TempDir {
+        let root = tempfile::TempDir::new().unwrap();
+        for id in ids {
+            std::fs::create_dir(root.path().join(id)).unwrap();
+            std::fs::write(root.path().join(id).join("artifact"), id.as_bytes()).unwrap();
+        }
+        root
+    }
+
+    fn assert_exact_inventory(stats: &CargoTargetRunDirSweepStats, root: &Path) {
+        let inventory = djinn_core::cargo_target_runs::inventory_cargo_target_runs(root).unwrap();
+        assert_eq!(
+            stats.cap_final_allocated_bytes,
+            Some(inventory.total_allocated_bytes)
+        );
+        assert_eq!(
+            stats.cap_final_directory_count,
+            Some(inventory.top_level_directory_count)
+        );
+    }
+
+    #[tokio::test]
+    async fn active_task_run_and_running_session_are_joint_cap_protected() {
+        let db = crate::test_helpers::create_test_db();
+        let root = create_run_root(&[RUN_A, RUN_B]);
+        let stats = sweep_orphaned_cargo_target_run_dirs_under_with_caps_and_seams(
+            &db,
+            root.path(),
+            &CacheCleanupConfig::default(),
+            djinn_core::cargo_target_runs::CargoTargetRunsCaps {
+                max_dirs: 1,
+                max_bytes: 0,
+            },
+            CargoTargetRunSweepSeams {
+                task_run_ids: lookup_task_active,
+                session_task_run_ids: lookup_session_active,
+                joint_cap_engine: counting_engine,
+            },
+        )
+        .await;
+
+        assert!(root.path().join(RUN_A).is_dir());
+        assert!(root.path().join(RUN_B).is_dir());
+        assert_eq!((stats.scanned, stats.retained), (2, 2));
+        assert_eq!(stats.cap_protected, 2);
+        assert_eq!(stats.cap_errors, 0);
+        assert_eq!(stats.cap_trimmed, 0);
+        assert_eq!(stats.cap_outcome, Some("over_budget_protected"));
+        assert_exact_inventory(&stats, root.path());
+    }
+
+    #[tokio::test]
+    async fn each_protected_id_lookup_failure_aborts_before_mutation() {
+        for (task_run_ids, session_task_run_ids) in [
+            (
+                lookup_failure as ProtectedIdLookup,
+                lookup_none as ProtectedIdLookup,
+            ),
+            (
+                lookup_none as ProtectedIdLookup,
+                lookup_failure as ProtectedIdLookup,
+            ),
+        ] {
+            ENGINE_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+            let db = crate::test_helpers::create_test_db();
+            let root = create_run_root(&[RUN_A]);
+            let artifact = root.path().join(RUN_A).join("artifact");
+            let before = std::fs::read(&artifact).unwrap();
+            let stats = sweep_orphaned_cargo_target_run_dirs_under_with_caps_and_seams(
+                &db,
+                root.path(),
+                &CacheCleanupConfig::default(),
+                djinn_core::cargo_target_runs::CargoTargetRunsCaps {
+                    max_dirs: 1,
+                    max_bytes: 1,
+                },
+                CargoTargetRunSweepSeams {
+                    task_run_ids,
+                    session_task_run_ids,
+                    joint_cap_engine: counting_engine,
+                },
+            )
+            .await;
+
+            assert_eq!(std::fs::read(&artifact).unwrap(), before);
+            assert_eq!(ENGINE_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert_eq!((stats.errors, stats.cap_errors), (1, 1));
+            assert_eq!(stats.cap_outcome, Some("error"));
+            assert_eq!(stats.cap_final_allocated_bytes, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn blocking_join_failure_is_a_terminal_bounded_error() {
+        let root = create_run_root(&[]);
+        let stats = run_cargo_target_run_joint_cap(
+            root.path(),
+            djinn_core::cargo_target_runs::CargoTargetRunsCaps {
+                max_dirs: 1,
+                max_bytes: 0,
+            },
+            CacheCleanupMode::DryRun.as_metric_label(),
+            HashSet::new(),
+            join_failure_engine,
+        )
+        .await;
+
+        assert_eq!((stats.errors, stats.cap_errors), (1, 1));
+        assert_eq!(stats.cap_outcome, Some("error"));
+        assert_eq!(stats.cap_final_allocated_bytes, None);
+        assert_eq!(stats.cap_final_directory_count, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_joint_cap_engine_propagates_all_five_bounded_outcomes() {
+        use djinn_core::cargo_target_runs::CargoTargetRunsCaps;
+
+        let within = create_run_root(&[]);
+        let stats = run_cargo_target_run_joint_cap(
+            within.path(),
+            CargoTargetRunsCaps {
+                max_dirs: 1,
+                max_bytes: 0,
+            },
+            CacheCleanupMode::DryRun.as_metric_label(),
+            HashSet::new(),
+            counting_engine,
+        )
+        .await;
+        assert_eq!(stats.cap_outcome, Some("within_budget"));
+        assert_exact_inventory(&stats, within.path());
+
+        let trimmed = create_run_root(&[RUN_A, RUN_B]);
+        let stats = run_cargo_target_run_joint_cap(
+            trimmed.path(),
+            CargoTargetRunsCaps {
+                max_dirs: 1,
+                max_bytes: 0,
+            },
+            CacheCleanupMode::DryRun.as_metric_label(),
+            HashSet::new(),
+            counting_engine,
+        )
+        .await;
+        assert_eq!(stats.cap_outcome, Some("trimmed_within_budget"));
+        assert_eq!(stats.cap_trimmed, 1);
+        assert_exact_inventory(&stats, trimmed.path());
+
+        let protected = create_run_root(&[RUN_A, RUN_B]);
+        let stats = run_cargo_target_run_joint_cap(
+            protected.path(),
+            CargoTargetRunsCaps {
+                max_dirs: 1,
+                max_bytes: 0,
+            },
+            CacheCleanupMode::DryRun.as_metric_label(),
+            HashSet::from([RUN_A.to_owned(), RUN_B.to_owned()]),
+            counting_engine,
+        )
+        .await;
+        assert_eq!(stats.cap_outcome, Some("over_budget_protected"));
+        assert_eq!(stats.cap_protected, 2);
+        assert_exact_inventory(&stats, protected.path());
+
+        let errored = create_run_root(&[RUN_A, RUN_B]);
+        let stats = run_cargo_target_run_joint_cap(
+            errored.path(),
+            CargoTargetRunsCaps {
+                max_dirs: 1,
+                max_bytes: 0,
+            },
+            CacheCleanupMode::DryRun.as_metric_label(),
+            HashSet::new(),
+            removal_failure_engine,
+        )
+        .await;
+        assert_eq!(stats.cap_outcome, Some("over_budget_error"));
+        assert_eq!(stats.cap_errors, 2);
+        assert_exact_inventory(&stats, errored.path());
+
+        let both = create_run_root(&[RUN_A, RUN_B]);
+        let stats = run_cargo_target_run_joint_cap(
+            both.path(),
+            CargoTargetRunsCaps {
+                max_dirs: 1,
+                max_bytes: 0,
+            },
+            CacheCleanupMode::DryRun.as_metric_label(),
+            HashSet::from([RUN_A.to_owned()]),
+            removal_failure_engine,
+        )
+        .await;
+        assert_eq!(stats.cap_outcome, Some("over_budget_protected_and_error"));
+        assert_eq!((stats.cap_protected, stats.cap_errors), (1, 1));
+        assert_exact_inventory(&stats, both.path());
+    }
+
+    #[tokio::test]
+    async fn missing_runs_root_is_a_fail_closed_error_outcome() {
+        use djinn_telemetry::cache_cleanup as metrics;
+
+        djinn_telemetry::init().unwrap();
+        let db = crate::test_helpers::create_test_db();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing_root = tmp.path().join("missing-cargo-target-runs");
+        let stats = sweep_orphaned_cargo_target_run_dirs_under(
+            &db,
+            &missing_root,
+            &CacheCleanupConfig::default(),
+        )
+        .await;
+
+        assert_eq!(stats.errors, 1);
+        assert_eq!(stats.cap_errors, 1);
+        assert_eq!(stats.cap_outcome, Some(metrics::OUTCOME_ERROR));
+        assert_eq!(stats.cap_final_allocated_bytes, None);
+        assert_eq!(stats.cap_final_directory_count, None);
+        assert!(
+            cache_metric_value(
+                "djinn_cache_cleanup_total",
+                &[
+                    ("component", metrics::COMPONENT_CARGO_TARGET_RUNS),
+                    ("outcome", metrics::OUTCOME_ERROR),
+                    ("mode", metrics::MODE_DRY_RUN),
+                ],
+            ) >= 1.0
         );
     }
 
