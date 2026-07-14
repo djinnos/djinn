@@ -36,6 +36,33 @@ async fn seed_project(db: &Database) -> String {
     project_id
 }
 
+/// Seed nullable-era provenance which references a user row that has since
+/// disappeared. PostgreSQL normally prevents this with an FK, but production
+/// data from before the attribution contract can contain it. Keep the bypass
+/// connection-local so parallel integration tests never observe disabled FKs.
+async fn set_legacy_dangling_user_reference(
+    db: &Database,
+    statement: &str,
+    row_id: &str,
+    missing_user_id: &str,
+) {
+    let mut connection = db.pool().acquire().await.unwrap();
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(statement)
+        .bind(missing_user_id)
+        .bind(row_id)
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+}
+
 async fn seed_user(db: &Database, github_id: i64, login: &str, is_member: bool) -> String {
     let user_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
@@ -127,6 +154,58 @@ async fn created_by(db: &Database, task_id: &str) -> Option<String> {
         .fetch_one(db.pool())
         .await
         .unwrap()
+}
+
+/// Cause the blocker FK to fail only for an explicitly resolved creator.
+/// A broken implementation that retried resolution under an epic fallback
+/// would enter the next attempt with an intact blocker and successfully commit,
+/// making that forbidden retry observable to this test.
+async fn install_explicit_creator_blocker_fk_failure(
+    db: &Database,
+    explicit_user_id: &str,
+    blocker_id: &str,
+) -> (String, String) {
+    let suffix = uuid::Uuid::now_v7().simple().to_string();
+    let function_name = format!("ecr_remove_blocker_{suffix}");
+    let trigger_name = format!("ecr_remove_blocker_trigger_{suffix}");
+    let create_function = format!(
+        "CREATE FUNCTION {function_name}() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.created_by_user_id = TG_ARGV[0] THEN
+             DELETE FROM tasks WHERE id = TG_ARGV[1];
+           END IF;
+           RETURN NEW;
+         END;
+         $$"
+    );
+    let create_trigger = format!(
+        "CREATE TRIGGER {trigger_name} AFTER INSERT ON tasks
+         FOR EACH ROW EXECUTE FUNCTION {function_name}('{explicit_user_id}', '{blocker_id}')"
+    );
+    sqlx::query(&create_function)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query(&create_trigger)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    (function_name, trigger_name)
+}
+
+async fn remove_explicit_creator_blocker_fk_failure(
+    db: &Database,
+    function_name: &str,
+    trigger_name: &str,
+) {
+    sqlx::query(&format!("DROP TRIGGER {trigger_name} ON tasks"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query(&format!("DROP FUNCTION {function_name}()"))
+        .execute(db.pool())
+        .await
+        .unwrap();
 }
 
 // ── Precedence tier tests ─────────────────────────────────────────────────
@@ -327,12 +406,10 @@ async fn proposal_author_wins_last() {
     );
 }
 
-/// Missing/absent source-task creator advances to epic creator.
-/// The source task exists but its created_by_user_id is NULL (the FK prevents
-/// inserting a reference to a non-existent user, so NULL represents the
-/// "absent/invalid candidate" case).
+/// A source task whose nullable-era creator references a missing user advances
+/// to the epic creator.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_source_creator_advances_to_epic() {
+async fn dangling_source_creator_advances_to_epic() {
     let db = Database::open_in_memory().unwrap();
     let project_id = seed_project(&db).await;
 
@@ -341,12 +418,13 @@ async fn missing_source_creator_advances_to_epic() {
 
     let repo = TaskRepository::new(db.clone(), EventBus::noop());
     let source_task = seed_source_task(&repo, &project_id, &epic_creator).await;
-    // NULL out the source task's creator — the resolver must advance past it.
-    sqlx::query("UPDATE tasks SET created_by_user_id = NULL WHERE id = $1")
-        .bind(&source_task)
-        .execute(db.pool())
-        .await
-        .unwrap();
+    set_legacy_dangling_user_reference(
+        &db,
+        "UPDATE tasks SET created_by_user_id = $1 WHERE id = $2",
+        &source_task,
+        "missing-source-user",
+    )
+    .await;
 
     let task = repo
         .create_in_project_with_provenance(
@@ -372,22 +450,27 @@ async fn missing_source_creator_advances_to_epic() {
     assert_eq!(
         created_by(&db, &task.id).await,
         Some(epic_creator),
-        "missing source creator must advance to epic creator"
+        "a dangling source creator must advance to epic creator"
     );
 }
 
-/// Missing/absent epic creator advances to proposal build-owner.
-/// The epic's created_by_user_id is NULL (FK prevents ghost references), so
-/// the resolver must advance past it to the proposal.
+/// An epic whose nullable-era creator references a missing user advances to
+/// the proposal build-owner.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_epic_creator_advances_to_proposal() {
+async fn dangling_epic_creator_advances_to_proposal() {
     let db = Database::open_in_memory().unwrap();
     let project_id = seed_project(&db).await;
 
     let build_owner = seed_user(&db, 701, "build-owner-2", true).await;
     let proposal_id = seed_proposal(&db, Some(&build_owner), None).await;
-    // Epic has NO creator but is linked to the proposal.
     let epic_id = seed_epic(&db, &project_id, None, Some(&proposal_id)).await;
+    set_legacy_dangling_user_reference(
+        &db,
+        "UPDATE epics SET created_by_user_id = $1 WHERE id = $2",
+        &epic_id,
+        "missing-epic-user",
+    )
+    .await;
 
     let repo = TaskRepository::new(db.clone(), EventBus::noop());
     let task = repo
@@ -410,7 +493,7 @@ async fn missing_epic_creator_advances_to_proposal() {
     assert_eq!(
         created_by(&db, &task.id).await,
         Some(build_owner),
-        "missing epic creator must advance to proposal build-owner"
+        "a dangling epic creator must advance to proposal build-owner"
     );
 }
 
@@ -578,25 +661,30 @@ async fn total_provenance_exhaustion_returns_structured_failure() {
     );
 }
 
-/// Proposal with NULL build-owner and NULL author; provenance exhaustion.
-/// The FK on proposals prevents inserting ghost references, so NULL represents
-/// the "no attributable user on the proposal" case.
+/// A proposal build-owner whose nullable-era ID dangles advances to its author.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn proposal_with_ghost_users_exhausts() {
+async fn dangling_proposal_build_owner_advances_to_author() {
     let db = Database::open_in_memory().unwrap();
     let project_id = seed_project(&db).await;
 
-    // Both build_owner and author are NULL — no attributable user.
-    let proposal_id = seed_proposal(&db, None, None).await;
+    let author = seed_user(&db, 1051, "proposal-author-fallback", true).await;
+    let proposal_id = seed_proposal(&db, None, Some(&author)).await;
+    set_legacy_dangling_user_reference(
+        &db,
+        "UPDATE proposals SET build_owner_user_id = $1 WHERE id = $2",
+        &proposal_id,
+        "missing-build-owner-user",
+    )
+    .await;
     let epic_id = seed_epic(&db, &project_id, None, Some(&proposal_id)).await;
 
     let repo = TaskRepository::new(db.clone(), EventBus::noop());
-    let err = repo
+    let task = repo
         .create_in_project_with_provenance(
             &project_id,
             Some(&epic_id),
             EffectiveCreatorProvenance::default(),
-            "GhostProposal",
+            "DanglingProposalBuildOwner",
             "",
             "",
             "task",
@@ -606,11 +694,12 @@ async fn proposal_with_ghost_users_exhausts() {
             None,
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(
-        err.to_string().contains(UNAVAILABLE),
-        "ghost proposal users must exhaust, got: {err}"
+    assert_eq!(
+        created_by(&db, &task.id).await,
+        Some(author),
+        "a dangling proposal build-owner must advance to proposal author"
     );
 }
 
@@ -678,11 +767,12 @@ async fn every_successful_insert_has_concrete_created_by() {
 
 // ── Transactional rollback tests ──────────────────────────────────────────
 
-/// A failed insert (FK violation on blockers) rolls back both the task row and
-/// the blocker edge. The creator resolution is NOT retried under a lower-
-/// precedence identity.
+/// An FK failure after a task insert rolls back both the task row and blocker
+/// edge without retrying resolution under a lower-precedence identity. The
+/// trigger makes an incorrect fallback retry succeed, so a no-write result is
+/// an observable assertion rather than a second identical FK failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fk_failure_rolls_back_task_and_blocker_without_retry() {
+async fn fk_failure_rolls_back_task_and_blocker_without_lower_identity_retry() {
     let db = Database::open_in_memory().unwrap();
     let project_id = seed_project(&db).await;
 
@@ -691,21 +781,15 @@ async fn fk_failure_rolls_back_task_and_blocker_without_retry() {
 
     let repo = TaskRepository::new(db.clone(), EventBus::noop());
     let blocker_id = seed_source_task(&repo, &project_id, &epic_creator).await;
-
-    // Delete the blocker so the blocker-edge INSERT hits an FK violation
-    // AFTER creator resolution succeeds.
-    sqlx::query("DELETE FROM tasks WHERE id = $1")
-        .bind(&blocker_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
-
+    let epic_id = seed_epic(&db, &project_id, Some(&epic_creator), None).await;
+    let (function_name, trigger_name) =
+        install_explicit_creator_blocker_fk_failure(&db, &explicit_user, &blocker_id).await;
     let before = task_count(&db).await;
 
-    let err = repo
+    let result = repo
         .create_in_project_with_blockers(
             &project_id,
-            None,
+            Some(&epic_id),
             EffectiveCreatorProvenance {
                 explicit_user_id: Some(&explicit_user),
                 ..Default::default()
@@ -720,9 +804,10 @@ async fn fk_failure_rolls_back_task_and_blocker_without_retry() {
             None,
             std::slice::from_ref(&blocker_id),
         )
-        .await
-        .unwrap_err();
+        .await;
 
+    remove_explicit_creator_blocker_fk_failure(&db, &function_name, &trigger_name).await;
+    let err = result.unwrap_err();
     assert!(
         !err.to_string().contains(UNAVAILABLE),
         "FK failure must not be masked as creator-unavailable, got: {err}"
@@ -730,7 +815,7 @@ async fn fk_failure_rolls_back_task_and_blocker_without_retry() {
     assert_eq!(
         before,
         task_count(&db).await,
-        "FK failure must roll back the task row"
+        "FK failure must roll back the task row instead of retrying as the epic creator"
     );
 
     let edge_count: i64 =
@@ -740,6 +825,11 @@ async fn fk_failure_rolls_back_task_and_blocker_without_retry() {
             .await
             .unwrap();
     assert_eq!(edge_count, 0, "FK failure must roll back the blocker edge");
+    assert_eq!(
+        created_by(&db, &blocker_id).await,
+        Some(epic_creator),
+        "the failed transaction must restore the blocker removed to induce its FK failure"
+    );
 }
 
 /// When an explicit identity resolves but the INSERT fails, the resolver does
