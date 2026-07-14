@@ -248,6 +248,7 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
 /// (`is_subscription_provider` / `governable_subscription_for_model`) remain an
 /// additional signal so e.g. a `zai-coding-plan/...` API-key session is still
 /// `SubscriptionPlan`.
+#[cfg(test)]
 fn derive_billing_signal(
     provider_id: &str,
     model_name: &str,
@@ -290,6 +291,7 @@ fn derive_billing_signal(
 /// `openai` → `chatgpt_codex`), and its builtin `credential_class` is
 /// authoritative. A provider whose OAuth flow is NOT a subscription returns
 /// `false` — this is what keeps OAuth transport alone from implying a plan.
+#[cfg(test)]
 fn oauth_is_subscription_plan(provider_id: &str) -> bool {
     use djinn_provider::catalog::builtin::{is_subscription_provider, resolve_oauth_provider};
     let effective = match provider_id {
