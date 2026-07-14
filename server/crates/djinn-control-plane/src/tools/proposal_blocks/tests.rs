@@ -407,31 +407,35 @@ fn validate_ids_fails_on_duplicate() {
 }
 
 #[test]
-fn test_validate_question_form_missing() {
+fn test_validate_question_form_missing_ok() {
+    // The question-form block is OPTIONAL: a proposal with zero of them (no open
+    // questions) must be accepted.
     let body = r#"# Proposal
 
 <FileTree id="schema" name="repo" />"#;
 
-    let err = validate_question_form_placement(body).unwrap_err();
-    assert_eq!(
-        err,
-        "Exactly one question-form block is required in MDX proposals (found 0)"
-    );
+    assert!(validate_question_form_placement(body).is_ok());
 }
 
 #[test]
-fn test_validate_question_form_multiple() {
+fn test_validate_question_form_none_at_all_ok() {
+    // A body with no registered blocks at all is likewise accepted.
+    let body = "# Proposal\n\nJust some prose, no blocks.";
+
+    assert!(validate_question_form_placement(body).is_ok());
+}
+
+#[test]
+fn test_validate_question_form_multiple_last_ok() {
+    // Multiple question-form blocks are allowed as long as the final block is a
+    // question-form (open questions render at the end).
     let body = r#"# Proposal
 
 <QuestionForm id="questions-a" title="Open questions" />
 
 <QuestionForm id="questions-b" title="More questions" />"#;
 
-    let err = validate_question_form_placement(body).unwrap_err();
-    assert_eq!(
-        err,
-        "Exactly one question-form block is required in MDX proposals (found 2)"
-    );
+    assert!(validate_question_form_placement(body).is_ok());
 }
 
 #[test]
