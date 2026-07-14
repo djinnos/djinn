@@ -1,11 +1,37 @@
 use super::*;
+use djinn_provider::github_api::{ActionsJob, WorkflowRun};
 
-/// Fetch a GitHub Actions job log, optionally filtered to a specific step.
+/// How many workflow runs to request when scanning a PR head for the failing
+/// run. The relevant run is always the newest one, so a small page is plenty;
+/// the extra entries only cover the (rare) case where the newest run is still
+/// in-progress and an older one already concluded failed.
+const RUN_SCAN_PER_PAGE: u32 = 20;
+/// The `merge_group` event needs a wider window: many PRs share the queue, and
+/// the run for *this* PR may be several entries back. Mirrors the PR poller's
+/// dequeue-enrichment page size (`pr_commands.rs`).
+const MERGE_GROUP_SCAN_PER_PAGE: u32 = 50;
+
+/// Fetch the failing GitHub Actions CI log for a task's PR.
+///
+/// Discovery is snapshot/project-driven — owner/repo come from the task's
+/// project, and the failing jobs are discovered from the task's recorded CI
+/// state (PR-head lane, then the merge-queue lane) plus a live GitHub read. The
+/// legacy activity-scan path (which broke for planner escalation tasks and went
+/// stale on every push) has been removed.
+///
+/// Resolution:
+///   1. `job_id` given → fetch that job's log directly (repo-scoped API, so a
+///      foreign job id simply 404s — no activity-based authorization needed).
+///   2. no `job_id` → discover the currently-failing jobs for the target PR
+///      (`pr_number` param, else `task.ci_pr_number`) across two lanes:
+///        - PR-head lane: newest failed workflow run for the PR head SHA.
+///        - merge-queue lane: `task.ci_mq_run_id`, else the newest failed
+///          `merge_group` run whose branch carries this PR's marker.
 ///
 /// The raw log is cleaned (timestamps stripped, group markers removed) and
-/// returned as-is. When the result exceeds the tool-result size limit, the
-/// reply-loop automatically stashes the full output and the worker can
-/// paginate with `output_view` / `output_grep`.
+/// returned as a plain string. When the result exceeds the tool-result size
+/// limit, the reply-loop automatically stashes the full output and the worker
+/// can paginate with `output_view` / `output_grep`.
 pub(crate) async fn call_ci_job_log(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -15,64 +41,32 @@ pub(crate) async fn call_ci_job_log(
 
     let task_id = session_task_id.ok_or("ci_job_log requires a task context (session_task_id)")?;
 
-    // Find the CI failure activity entry that contains the owner/repo context.
-    // The PR poller stores this alongside the body when logging CI failures.
     let task_repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
-
-    let (owner, repo) = {
-        let entries = task_repo
-            .list_activity(task_id)
-            .await
-            .map_err(|e| format!("failed to list activity: {e}"))?;
-
-        let mut found = None;
-        for entry in entries.iter().rev() {
-            if entry.event_type != "comment" || entry.actor_role != "verification" {
-                continue;
-            }
-            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
-                && let Some(ci_jobs) = payload.get("ci_jobs").and_then(|v| v.as_array())
-            {
-                let has_job = ci_jobs
-                    .iter()
-                    .any(|j| j.get("job_id").and_then(|v| v.as_u64()) == Some(p.job_id));
-                if has_job {
-                    let o = payload
-                        .get("owner")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let r = payload
-                        .get("repo")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if !o.is_empty() && !r.is_empty() {
-                        found = Some((o, r));
-                        break;
-                    }
-                }
-            }
-        }
-        found.ok_or_else(|| {
-            format!(
-                "Could not find CI job metadata for job_id={} in task {} activity.  \
-                 This tool can only fetch logs for jobs recorded in the task activity log.",
-                p.job_id, task_id
-            )
-        })?
-    };
-
-    // ci_job_log runs in background (worker) scope, so we cannot read the
-    // session-user task-local. Resolve an installation-scoped client via
-    // the task's project, or fall back to the owner/repo extracted from
-    // activity metadata (covers legacy projects where `project_id` on the
-    // task row is set but the project's `installation_id` column is NULL).
     let project_repo = djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+
+    let task = task_repo
+        .get(task_id)
+        .await
+        .map_err(|e| format!("failed to load task {task_id}: {e}"))?
+        .ok_or_else(|| format!("ci_job_log: task {task_id} not found"))?;
+
+    // Owner/repo come from the task's project — durable and correct even for
+    // planner escalation tasks whose CI metadata lives on a *source* task.
+    let (owner, repo) = project_repo
+        .get_github_coords(&task.project_id)
+        .await
+        .map_err(|e| format!("failed to resolve project GitHub coordinates: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "ci_job_log: project {} has no GitHub owner/repo coordinates recorded. \
+                 Re-register the project through the GitHub App flow.",
+                task.project_id
+            )
+        })?;
+
     let gh_client = match resolve_installation_client_for_task(
-        &task_repo,
         &project_repo,
-        task_id,
+        &task.project_id,
         &owner,
         &repo,
     )
@@ -82,51 +76,281 @@ pub(crate) async fn call_ci_job_log(
         None => {
             return Err(format!(
                 "ci_job_log: no GitHub App installation found for task {task_id} (owner={owner}, repo={repo}). \
-                 Re-register the project through the GitHub App flow to enable background log fetches."
+                     Re-register the project through the GitHub App flow to enable background log fetches."
             ));
         }
     };
 
-    let raw_log = gh_client
-        .get_job_logs(&owner, &repo, p.job_id)
-        .await
-        .map_err(|e| format!("failed to fetch job log: {e}"))?;
+    // ── Escape hatch: explicit job id ──────────────────────────────────────
+    // The GitHub logs endpoint is repo-scoped, so a foreign job id 404s here;
+    // no activity-based authorization is needed.
+    if let Some(job_id) = p.job_id {
+        let raw_log = gh_client
+            .get_job_logs(&owner, &repo, job_id)
+            .await
+            .map_err(|e| format!("failed to fetch job log for job_id={job_id}: {e}"))?;
+        return Ok(serde_json::Value::String(render_log(
+            &raw_log,
+            p.step.as_deref(),
+        )));
+    }
 
-    let cleaned = clean_actions_log(&raw_log);
+    // ── Discovery mode ─────────────────────────────────────────────────────
+    let pr_number = p
+        .pr_number
+        .or_else(|| task.ci_pr_number.and_then(|n| u64::try_from(n).ok()))
+        .ok_or(
+            "ci_job_log: this task has no recorded PR number to discover CI from. \
+             Pass `pr_number` naming the PR whose failing CI you want to read.",
+        )?;
 
-    // Optionally filter to just the requested step.
-    let output = if let Some(ref step_name) = p.step {
-        extract_step_log(&cleaned, step_name).unwrap_or_else(|| {
-            format!(
-                "Step '{}' not found in the job log. Returning full cleaned log.\n\n{}",
-                step_name, cleaned
-            )
-        })
+    // PR-head SHA: the recorded snapshot head when the task's own PR is the
+    // target, otherwise resolve the PR head live via the GitHub API.
+    let head_sha = if task.ci_pr_number == Some(pr_number as i64) {
+        task.ci_head_sha.clone().filter(|s| !s.is_empty())
     } else {
-        cleaned
+        None
+    };
+    let head_sha = match head_sha {
+        Some(s) => s,
+        None => {
+            let (pr, _checks) = gh_client
+                .get_pull_request(&owner, &repo, pr_number)
+                .await
+                .map_err(|e| format!("failed to fetch PR #{pr_number}: {e}"))?;
+            pr.head.sha
+        }
+    };
+
+    // ── PR-head lane ───────────────────────────────────────────────────────
+    let mut lane = DiscoveryLane::None;
+    let mut failing_jobs: Vec<ActionsJob> = Vec::new();
+
+    let head_runs = gh_client
+        .list_workflow_runs_for_head_sha(&owner, &repo, &head_sha, RUN_SCAN_PER_PAGE)
+        .await
+        .map_err(|e| format!("failed to list workflow runs for head {head_sha}: {e}"))?;
+    if let Some(run) = select_failing_run(&head_runs) {
+        let jobs = gh_client
+            .list_run_jobs(&owner, &repo, run.id)
+            .await
+            .map_err(|e| format!("failed to list jobs for run {}: {e}", run.id))?;
+        let selected = select_failing_jobs(&jobs);
+        if !selected.is_empty() {
+            failing_jobs = selected.into_iter().cloned().collect();
+            lane = DiscoveryLane::PrHead;
+        }
+    }
+
+    // ── Merge-queue lane fallback ──────────────────────────────────────────
+    if failing_jobs.is_empty() {
+        // Prefer the durable snapshot run id; otherwise scan the merge_group
+        // event for this PR's failed run (same logic as the PR poller's
+        // dequeue enrichment in `pr_commands.rs`).
+        let mq_run_id = match task.ci_mq_run_id.and_then(|v| u64::try_from(v).ok()) {
+            Some(id) => Some(id),
+            None => {
+                let mg_runs = gh_client
+                    .list_workflow_runs_for_event(
+                        &owner,
+                        &repo,
+                        "merge_group",
+                        MERGE_GROUP_SCAN_PER_PAGE,
+                    )
+                    .await
+                    .map_err(|e| format!("failed to list merge_group runs: {e}"))?;
+                select_merge_group_run(&mg_runs, pr_number).map(|r| r.id)
+            }
+        };
+        if let Some(run_id) = mq_run_id {
+            let jobs = gh_client
+                .list_run_jobs(&owner, &repo, run_id)
+                .await
+                .map_err(|e| format!("failed to list jobs for merge_group run {run_id}: {e}"))?;
+            let selected = select_failing_jobs(&jobs);
+            if !selected.is_empty() {
+                failing_jobs = selected.into_iter().cloned().collect();
+                lane = DiscoveryLane::MergeQueue;
+            }
+        }
+    }
+
+    if failing_jobs.is_empty() {
+        return Err(format!(
+            "ci_job_log: no failing jobs found for PR #{pr_number} \
+             (head lane: sha {head_sha}, merge-queue lane: none). \
+             CI may still be running, or it passed — re-check the PR status."
+        ));
+    }
+
+    // If a step was given and it uniquely identifies one of the failing jobs,
+    // treat it as an unambiguous single-job fetch.
+    if let Some(step) = p.step.as_deref()
+        && let Some(job) = select_job_for_step(&failing_jobs, step)
+    {
+        let raw_log = gh_client
+            .get_job_logs(&owner, &repo, job.id)
+            .await
+            .map_err(|e| format!("failed to fetch job log for job_id={}: {e}", job.id))?;
+        return Ok(serde_json::Value::String(render_log(&raw_log, Some(step))));
+    }
+
+    // Fetch the FIRST failing job's log. When several jobs failed, prepend a
+    // header enumerating all of them so the agent can request the others by id.
+    let first = &failing_jobs[0];
+    let raw_log = gh_client
+        .get_job_logs(&owner, &repo, first.id)
+        .await
+        .map_err(|e| format!("failed to fetch job log for job_id={}: {e}", first.id))?;
+    let body = render_log(&raw_log, p.step.as_deref());
+
+    let output = if failing_jobs.len() > 1 {
+        format!(
+            "{}\n\n{}",
+            format_failing_jobs_header(&failing_jobs, lane),
+            body
+        )
+    } else {
+        body
     };
 
     Ok(serde_json::Value::String(output))
 }
 
+/// Which lane discovery resolved the failing jobs from — surfaced in the
+/// multi-job header so the agent knows whether it is looking at the PR head or
+/// the merge-queue run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscoveryLane {
+    None,
+    PrHead,
+    MergeQueue,
+}
+
+impl DiscoveryLane {
+    fn label(self) -> &'static str {
+        match self {
+            DiscoveryLane::None => "unknown",
+            DiscoveryLane::PrHead => "PR-head",
+            DiscoveryLane::MergeQueue => "merge-queue",
+        }
+    }
+}
+
+/// True when a workflow-run / job / step conclusion is a failure flavor the
+/// worker must act on. GitHub reports `failure`, `timed_out`, and `cancelled`
+/// as distinct conclusions; all three keep a required gate red.
+fn is_failing_conclusion(conclusion: Option<&str>) -> bool {
+    matches!(
+        conclusion,
+        Some("failure") | Some("timed_out") | Some("cancelled")
+    )
+}
+
+/// Select the newest failed workflow run from a newest-first list.
+fn select_failing_run(runs: &[WorkflowRun]) -> Option<&WorkflowRun> {
+    runs.iter()
+        .find(|r| is_failing_conclusion(r.conclusion.as_deref()))
+}
+
+/// Select the newest failed `merge_group` run belonging to a specific PR.
+///
+/// Runs arrive newest-first. The merge-queue branch is ephemeral, but the run
+/// persists with `head_branch = gh-readonly-queue/.../pr-<number>-<sha>`, so we
+/// match on the `pr-<number>-` marker. Mirrors the PR poller's dequeue
+/// enrichment in `pr_commands.rs` (which matches conclusion `"failure"` only;
+/// here we accept the broader failure set for robustness).
+fn select_merge_group_run(runs: &[WorkflowRun], pr_number: u64) -> Option<&WorkflowRun> {
+    let marker = format!("pr-{pr_number}-");
+    runs.iter().find(|r| {
+        is_failing_conclusion(r.conclusion.as_deref())
+            && r.head_branch
+                .as_deref()
+                .is_some_and(|b| b.contains(&marker))
+    })
+}
+
+/// Select the failing jobs of a workflow run, preserving input order.
+fn select_failing_jobs(jobs: &[ActionsJob]) -> Vec<&ActionsJob> {
+    jobs.iter()
+        .filter(|j| is_failing_conclusion(j.conclusion.as_deref()))
+        .collect()
+}
+
+/// When a `step` filter is given, narrow the failing jobs to those that contain
+/// a failing step whose name matches (case-insensitive substring). Returns
+/// `Some(job)` only when exactly one job matches — an unambiguous single-job
+/// fetch — so an ambiguous `step` falls through to the multi-job header path.
+fn select_job_for_step<'a>(jobs: &'a [ActionsJob], step: &str) -> Option<&'a ActionsJob> {
+    let needle = step.to_lowercase();
+    let mut matched: Option<&ActionsJob> = None;
+    for job in jobs {
+        let hit = job.steps.iter().any(|s| {
+            s.name.to_lowercase().contains(&needle)
+                && is_failing_conclusion(s.conclusion.as_deref())
+        });
+        if hit {
+            if matched.is_some() {
+                return None; // ambiguous
+            }
+            matched = Some(job);
+        }
+    }
+    matched
+}
+
+/// Header prepended to the first failing job's log when several jobs failed, so
+/// the agent can request the others by `job_id`.
+fn format_failing_jobs_header(jobs: &[ActionsJob], lane: DiscoveryLane) -> String {
+    let mut lines = vec![format!(
+        "{} failing jobs on the {} lane for this PR. Showing the log for the first (**{}**, job_id={}). \
+         Request another with `ci_job_log(job_id=…)`:",
+        jobs.len(),
+        lane.label(),
+        jobs.first().map(|j| j.name.as_str()).unwrap_or("unknown"),
+        jobs.first().map(|j| j.id).unwrap_or(0),
+    )];
+    for job in jobs {
+        let conclusion = job.conclusion.as_deref().unwrap_or("unknown");
+        lines.push(format!(
+            "- {} (job_id={}) — {}",
+            job.name, job.id, conclusion
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Clean a raw job log and optionally narrow it to a single step.
+fn render_log(raw_log: &str, step: Option<&str>) -> String {
+    let cleaned = clean_actions_log(raw_log);
+    match step {
+        Some(step_name) => extract_step_log(&cleaned, step_name).unwrap_or_else(|| {
+            format!(
+                "Step '{step_name}' not found in the job log. Returning full cleaned log.\n\n{cleaned}"
+            )
+        }),
+        None => cleaned,
+    }
+}
+
 /// Build an installation-scoped GitHub API client for a `ci_job_log` call.
 ///
-/// Resolution order:
-/// 1. The task row's `project_id` → `projects.installation_id`.
-/// 2. Fallback: look up a project by the `owner/repo` pair recorded in the
-///    CI activity entry and read its `installation_id`.
+/// `ci_job_log` runs in background (worker) scope, so it cannot read the
+/// session-user task-local. Resolution order:
+///   1. The task's `project_id` → `projects.installation_id`.
+///   2. Fallback: look up a project by the project-derived `owner/repo` pair
+///      and read its `installation_id` (covers legacy rows where the task's
+///      `project_id` has a NULL `installation_id` but a sibling row for the
+///      same repo carries one).
 ///
 /// Returns `None` if neither path yields an installation.
 async fn resolve_installation_client_for_task(
-    task_repo: &TaskRepository,
     project_repo: &djinn_db::ProjectRepository,
-    task_id: &str,
+    project_id: &str,
     owner: &str,
     repo: &str,
 ) -> Option<GitHubApiClient> {
-    if let Ok(Some(task)) = task_repo.get(task_id).await
-        && let Ok(Some(id)) = project_repo.get_installation_id(&task.project_id).await
-    {
+    if let Ok(Some(id)) = project_repo.get_installation_id(project_id).await {
         return Some(GitHubApiClient::for_installation(id));
     }
 
@@ -219,5 +443,260 @@ fn extract_step_log(cleaned_log: &str, step_name: &str) -> Option<String> {
         None
     } else {
         Some(section.join("\n"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_provider::github_api::{ActionsJob, ActionsJobStep, WorkflowRun};
+
+    fn run(id: u64, conclusion: Option<&str>, head_branch: Option<&str>) -> WorkflowRun {
+        WorkflowRun {
+            id,
+            workflow_id: None,
+            name: None,
+            path: None,
+            head_branch: head_branch.map(str::to_string),
+            head_sha: format!("sha-{id}"),
+            status: Some("completed".to_string()),
+            conclusion: conclusion.map(str::to_string),
+        }
+    }
+
+    fn job(id: u64, name: &str, conclusion: Option<&str>) -> ActionsJob {
+        ActionsJob {
+            id,
+            run_id: Some(1),
+            name: name.to_string(),
+            status: "completed".to_string(),
+            conclusion: conclusion.map(str::to_string),
+            html_url: format!("https://example.test/job/{id}"),
+            workflow_name: None,
+            steps: Vec::new(),
+        }
+    }
+
+    fn step(name: &str, conclusion: Option<&str>) -> ActionsJobStep {
+        ActionsJobStep {
+            name: name.to_string(),
+            status: "completed".to_string(),
+            conclusion: conclusion.map(str::to_string),
+            number: 1,
+        }
+    }
+
+    // ── select_failing_run ────────────────────────────────────────────────
+    #[test]
+    fn select_failing_run_returns_newest_failure() {
+        // Newest-first: a passing run in front must not shadow the failing one.
+        let runs = vec![
+            run(30, Some("success"), None),
+            run(20, Some("failure"), None),
+            run(10, Some("failure"), None),
+        ];
+        assert_eq!(select_failing_run(&runs).map(|r| r.id), Some(20));
+    }
+
+    #[test]
+    fn select_failing_run_none_when_all_pass() {
+        let runs = vec![run(2, Some("success"), None), run(1, None, None)];
+        assert!(select_failing_run(&runs).is_none());
+    }
+
+    #[test]
+    fn select_failing_run_includes_timed_out_and_cancelled() {
+        assert_eq!(
+            select_failing_run(&[run(5, Some("timed_out"), None)]).map(|r| r.id),
+            Some(5)
+        );
+        assert_eq!(
+            select_failing_run(&[run(6, Some("cancelled"), None)]).map(|r| r.id),
+            Some(6)
+        );
+    }
+
+    // ── select_merge_group_run ────────────────────────────────────────────
+    #[test]
+    fn select_merge_group_run_matches_pr_marker() {
+        let runs = vec![
+            run(3, Some("failure"), Some("gh-readonly-queue/main/pr-99-abc")),
+            run(2, Some("failure"), Some("gh-readonly-queue/main/pr-42-def")),
+            run(1, Some("failure"), Some("gh-readonly-queue/main/pr-7-xyz")),
+        ];
+        assert_eq!(select_merge_group_run(&runs, 42).map(|r| r.id), Some(2));
+    }
+
+    #[test]
+    fn select_merge_group_run_ignores_passing_and_foreign_prs() {
+        let runs = vec![
+            run(3, Some("success"), Some("gh-readonly-queue/main/pr-42-abc")),
+            run(
+                2,
+                Some("failure"),
+                Some("gh-readonly-queue/main/pr-100-def"),
+            ),
+        ];
+        assert!(select_merge_group_run(&runs, 42).is_none());
+    }
+
+    #[test]
+    fn select_merge_group_run_does_not_confuse_pr_prefixes() {
+        // `pr-4-` must not match PR 42's `pr-42-` branch.
+        let runs = vec![run(
+            1,
+            Some("failure"),
+            Some("gh-readonly-queue/main/pr-42-abc"),
+        )];
+        assert!(select_merge_group_run(&runs, 4).is_none());
+    }
+
+    // ── select_failing_jobs ───────────────────────────────────────────────
+    #[test]
+    fn select_failing_jobs_filters_and_preserves_order() {
+        let jobs = vec![
+            job(1, "clippy", Some("success")),
+            job(2, "tests", Some("failure")),
+            job(3, "sqlx", Some("timed_out")),
+            job(4, "fmt", Some("cancelled")),
+            job(5, "docs", None),
+        ];
+        let selected = select_failing_jobs(&jobs);
+        assert_eq!(
+            selected.iter().map(|j| j.id).collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn select_failing_jobs_empty_when_all_green() {
+        let jobs = vec![job(1, "a", Some("success")), job(2, "b", None)];
+        assert!(select_failing_jobs(&jobs).is_empty());
+    }
+
+    // ── select_job_for_step ───────────────────────────────────────────────
+    #[test]
+    fn select_job_for_step_unique_match() {
+        let mut a = job(1, "quality", Some("failure"));
+        a.steps = vec![
+            step("Clippy", Some("success")),
+            step("Run tests", Some("failure")),
+        ];
+        let mut b = job(2, "build", Some("failure"));
+        b.steps = vec![step("compile", Some("failure"))];
+        let jobs = vec![a, b];
+        assert_eq!(select_job_for_step(&jobs, "tests").map(|j| j.id), Some(1));
+    }
+
+    #[test]
+    fn select_job_for_step_ambiguous_returns_none() {
+        let mut a = job(1, "a", Some("failure"));
+        a.steps = vec![step("Run tests", Some("failure"))];
+        let mut b = job(2, "b", Some("failure"));
+        b.steps = vec![step("More tests", Some("failure"))];
+        let jobs = vec![a, b];
+        assert!(select_job_for_step(&jobs, "tests").is_none());
+    }
+
+    #[test]
+    fn select_job_for_step_ignores_passing_steps() {
+        let mut a = job(1, "a", Some("failure"));
+        a.steps = vec![step("Tests", Some("success"))];
+        let jobs = vec![a];
+        assert!(select_job_for_step(&jobs, "tests").is_none());
+    }
+
+    // ── format_failing_jobs_header ─────────────────────────────────────────
+    #[test]
+    fn format_failing_jobs_header_lists_all_jobs() {
+        let jobs = vec![
+            job(11, "Server Clippy", Some("failure")),
+            job(22, "Server Tests", Some("timed_out")),
+        ];
+        let header = format_failing_jobs_header(&jobs, DiscoveryLane::MergeQueue);
+        assert!(header.contains("2 failing jobs"));
+        assert!(header.contains("merge-queue"));
+        assert!(header.contains("**Server Clippy**, job_id=11"));
+        assert!(header.contains("- Server Clippy (job_id=11) — failure"));
+        assert!(header.contains("- Server Tests (job_id=22) — timed_out"));
+    }
+
+    // ── clean_actions_log ─────────────────────────────────────────────────
+    #[test]
+    fn clean_actions_log_strips_timestamps_and_group_markers() {
+        let raw = "2026-03-24T17:10:50.0448487Z ##[group]Run cargo test\n\
+                   2026-03-24T17:10:51.0000000Z ##[error]boom\n\
+                   2026-03-24T17:10:52.0000000Z ##[endgroup]\n\
+                   2026-03-24T17:10:53.0000000Z plain line";
+        let cleaned = clean_actions_log(raw);
+        assert_eq!(cleaned, "Run cargo test\nboom\nplain line");
+    }
+
+    #[test]
+    fn clean_actions_log_preserves_non_timestamped_lines() {
+        let raw = "no timestamp here\n##[warning]watch out";
+        assert_eq!(clean_actions_log(raw), "no timestamp here\nwatch out");
+    }
+
+    // ── extract_step_log ──────────────────────────────────────────────────
+    #[test]
+    fn extract_step_log_returns_section_until_boundary() {
+        let cleaned = "Run cargo build\nbuilding...\nRun cargo test\ntest output\nFAILED\nPost Run actions/checkout\ncleanup";
+        let section = extract_step_log(cleaned, "cargo test").expect("step found");
+        assert!(section.contains("Run cargo test"));
+        assert!(section.contains("test output"));
+        assert!(section.contains("FAILED"));
+        assert!(!section.contains("cleanup"));
+        assert!(!section.contains("building..."));
+    }
+
+    #[test]
+    fn extract_step_log_none_when_step_absent() {
+        let cleaned = "Run cargo build\nbuilding...";
+        assert!(extract_step_log(cleaned, "nonexistent step").is_none());
+    }
+
+    #[test]
+    fn extract_step_log_runs_to_end_without_boundary() {
+        let cleaned = "Run cargo test\nline1\nline2";
+        let section = extract_step_log(cleaned, "cargo test").expect("found");
+        assert_eq!(section, "Run cargo test\nline1\nline2");
+    }
+
+    // ── render_log ────────────────────────────────────────────────────────
+    #[test]
+    fn render_log_without_step_returns_full_clean() {
+        let raw = "2026-03-24T17:10:50.0448487Z hello";
+        assert_eq!(render_log(raw, None), "hello");
+    }
+
+    #[test]
+    fn render_log_missing_step_falls_back_to_full_log() {
+        let raw = "Run a\nout";
+        let out = render_log(raw, Some("no such step"));
+        assert!(out.contains("not found in the job log"));
+        assert!(out.contains("Run a"));
+    }
+
+    // ── param deserialization ─────────────────────────────────────────────
+    #[test]
+    fn ci_job_log_params_all_optional() {
+        let empty: CiJobLogParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.job_id.is_none());
+        assert!(empty.pr_number.is_none());
+        assert!(empty.step.is_none());
+    }
+
+    #[test]
+    fn ci_job_log_params_parses_all_fields() {
+        let p: CiJobLogParams = serde_json::from_value(serde_json::json!({
+            "job_id": 12345,
+            "pr_number": 42,
+            "step": "Tests"
+        }))
+        .unwrap();
+        assert_eq!(p.job_id, Some(12345));
+        assert_eq!(p.pr_number, Some(42));
+        assert_eq!(p.step.as_deref(), Some("Tests"));
     }
 }
