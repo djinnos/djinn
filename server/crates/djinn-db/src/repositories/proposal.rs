@@ -2232,11 +2232,7 @@ impl ProposalRepository {
     /// Mirror a `proposal_epics` link change onto the denormalized
     /// `epics.proposal_id` column and re-emit the epic so live boards regroup
     /// the swimlane immediately.
-    async fn set_epic_proposal_link(
-        &self,
-        epic_id: &str,
-        proposal_id: Option<&str>,
-    ) -> Result<()> {
+    async fn set_epic_proposal_link(&self, epic_id: &str, proposal_id: Option<&str>) -> Result<()> {
         sqlx::query!(
             "UPDATE epics SET proposal_id = $1 WHERE id = $2",
             proposal_id,
