@@ -1,6 +1,7 @@
 use super::*;
 
 use djinn_core::events::EventBus;
+use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::{Epic, Task};
 use djinn_db::{Database, EpicCreateInput, EpicRepository, TaskRepository};
 use tokio_util::sync::CancellationToken;
@@ -79,6 +80,31 @@ pub(crate) async fn assemble_for_role(
     resolved_skills: &[ResolvedSkill],
     read_sources: &[ReadSourceInfo],
 ) -> PromptContext {
+    assemble_for_role_with_extension_diagnostics(
+        db,
+        task,
+        role,
+        conflict_ctx,
+        system_prompt_extensions,
+        resolved_skills,
+        read_sources,
+        &[],
+    )
+    .await
+}
+
+/// Assemble the live prompt path with canonical persisted diagnostic rows.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn assemble_for_role_with_extension_diagnostics(
+    db: Database,
+    task: &Task,
+    role: &dyn AgentRole,
+    conflict_ctx: Option<&MergeConflictMetadata>,
+    system_prompt_extensions: &str,
+    resolved_skills: &[ResolvedSkill],
+    read_sources: &[ReadSourceInfo],
+    extension_diagnostics: &[ExtensionLoadDiagnosticV1],
+) -> PromptContext {
     let app_state = agent_context_from_db(db, CancellationToken::new());
     let worktree = test_tempdir("prompt-context-worktree-");
     assemble_prompt_context(PromptContextInputs {
@@ -97,6 +123,7 @@ pub(crate) async fn assemble_for_role(
         worker_resume_note: None,
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
+        extension_diagnostics,
     })
     .await
 }
@@ -128,6 +155,7 @@ pub(crate) async fn assemble_for_role_with_mcp_instructions(
         worker_resume_note: None,
         arbiter_directive: None,
         mcp_server_instructions,
+        extension_diagnostics: &[],
     })
     .await
 }
@@ -158,6 +186,7 @@ pub(crate) async fn assemble_for_role_with_resume(
         worker_resume_note,
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
+        extension_diagnostics: &[],
     })
     .await
 }

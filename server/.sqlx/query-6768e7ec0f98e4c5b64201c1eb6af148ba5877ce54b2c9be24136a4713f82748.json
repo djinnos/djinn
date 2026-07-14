@@ -1,0 +1,119 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, project_id, short_id, title, description, emoji, color,\n                    status AS \"status!\", owner, created_at, updated_at, closed_at,\n                    memory_refs::text AS \"memory_refs!\", auto_breakdown AS \"auto_breakdown!: bool\",\n                    originating_adr_id, created_by_user_id, proposal_id\n             FROM epics WHERE id = $1 OR short_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "short_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "emoji",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "color",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "status!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "owner",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "closed_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "memory_refs!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "auto_breakdown!: bool",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 14,
+        "name": "originating_adr_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 15,
+        "name": "created_by_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 16,
+        "name": "proposal_id",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "6768e7ec0f98e4c5b64201c1eb6af148ba5877ce54b2c9be24136a4713f82748"
+}

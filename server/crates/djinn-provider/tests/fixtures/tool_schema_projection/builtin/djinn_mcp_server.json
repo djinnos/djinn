@@ -2609,6 +2609,41 @@
             "null"
           ]
         },
+        "proposal_id": {
+          "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_short_id": {
+          "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_title": {
+          "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_status": {
+          "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_build_owner_user_id": {
+          "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "error": {
           "type": [
             "string",
@@ -2870,6 +2905,41 @@
             "null"
           ]
         },
+        "proposal_id": {
+          "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_short_id": {
+          "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_title": {
+          "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_status": {
+          "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_build_owner_user_id": {
+          "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "error": {
           "type": [
             "string",
@@ -3048,6 +3118,41 @@
             },
             "created_by_user_id": {
               "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_id": {
+              "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_short_id": {
+              "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_title": {
+              "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_status": {
+              "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_build_owner_user_id": {
+              "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
               "type": [
                 "string",
                 "null"
@@ -3309,6 +3414,41 @@
             "null"
           ]
         },
+        "proposal_id": {
+          "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_short_id": {
+          "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_title": {
+          "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_status": {
+          "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_build_owner_user_id": {
+          "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "error": {
           "type": [
             "string",
@@ -3403,6 +3543,41 @@
         },
         "created_by_user_id": {
           "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_id": {
+          "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_short_id": {
+          "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_title": {
+          "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_status": {
+          "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_build_owner_user_id": {
+          "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
           "type": [
             "string",
             "null"
@@ -3828,6 +4003,41 @@
         },
         "created_by_user_id": {
           "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_id": {
+          "description": "Originating proposal id (denormalized from `proposal_epics` at\ngraduation). `None` for hand-created epics. The board groups its\nswimlanes by it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_short_id": {
+          "description": "Proposal short id, enriched on `epic_list` responses so the board can\nlabel and link proposal swimlanes without loading proposals.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_title": {
+          "description": "Proposal title, enriched on `epic_list` responses (see\n`proposal_short_id`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_status": {
+          "description": "Proposal status (`building`, `shipped`, …), enriched on `epic_list`\nresponses. The board only renders proposal swimlanes for `building`\nproposals so the kanban stays scoped to active work.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_build_owner_user_id": {
+          "description": "Build owner of the proposal (whose credentials the build consumes),\nenriched on `epic_list` responses. The board shows their avatar on the\nproposal swimlane.",
           "type": [
             "string",
             "null"
@@ -7728,6 +7938,13 @@
               "description": "Entity type discriminator: `\"note\"` for note rows, `\"proposal\"` for\nproposal rows. Defaults to `\"note\"` so existing serialized responses\nremain backward-compatible.",
               "type": "string",
               "default": "note"
+            },
+            "created_at": {
+              "description": "Creation time (ISO-8601 UTC string, as stored). Drives the graph\ncanvas time axis; optional so older serialized responses stay valid.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -22815,6 +23032,38 @@
               "default": []
             }
           }
+        },
+        "LaneMaxSessionsPayload": {
+          "description": "Per-user concurrency ceilings for each role lane.",
+          "type": "object",
+          "properties": {
+            "plan": {
+              "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "implement": {
+              "description": "Concurrent worker sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "review": {
+              "description": "Concurrent reviewer sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            }
+          },
+          "required": [
+            "plan",
+            "implement",
+            "review"
+          ]
         }
       },
       "type": "object",
@@ -22842,12 +23091,23 @@
           "type": "boolean"
         },
         "max_sessions": {
-          "description": "This user's per-model concurrency caps (`{ \"provider/model\": cap }`).\nThe sole admission control at dispatch; empty ⇒ default 1 per model.",
+          "description": "This user's per-model concurrency caps (`{ \"provider/model\": cap }`).\nPer-model admission ceilings at dispatch, composed with any per-lane\nceiling; empty ⇒ default 1 per model.",
           "type": "object",
           "additionalProperties": {
             "type": "integer",
             "format": "int64"
           }
+        },
+        "lane_max_sessions": {
+          "description": "Per-lane concurrency ceilings. `None` means this user has no\nlane-specific ceiling (legacy/unbounded behavior).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LaneMaxSessionsPayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "diverse_review": {
           "description": "Cross-model (\"Thorough\") review. When true (the default), a task\ndispatched to the reviewer role prefers a model id different from the one\nthat implemented it. A degenerate single-model selection falls back to\nsame-model review.",
@@ -22915,6 +23175,38 @@
               "default": []
             }
           }
+        },
+        "LaneMaxSessionsPayload": {
+          "description": "Per-user concurrency ceilings for each role lane.",
+          "type": "object",
+          "properties": {
+            "plan": {
+              "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "implement": {
+              "description": "Concurrent worker sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "review": {
+              "description": "Concurrent reviewer sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            }
+          },
+          "required": [
+            "plan",
+            "implement",
+            "review"
+          ]
         }
       },
       "type": "object",
@@ -22938,7 +23230,7 @@
           ]
         },
         "max_sessions": {
-          "description": "Per-model concurrency caps for THIS user (`{ \"provider/model\": cap }`).\nHow many sessions of each model may run concurrently for this user — the\nsole admission control (no global ceiling). Pass `{}` to clear (→ default\n1 per model). Omit to keep the current value.",
+          "description": "Per-model concurrency caps for THIS user (`{ \"provider/model\": cap }`).\nHow many sessions of each model may run concurrently for this user — the\nper-model admission ceiling (there is no global ceiling), composed with\nany per-lane ceiling. Pass `{}` to clear (→ default 1 per model). Omit to\nkeep the current value.",
           "type": [
             "object",
             "null"
@@ -22947,6 +23239,17 @@
             "type": "integer",
             "format": "int64"
           }
+        },
+        "lane_max_sessions": {
+          "description": "Per-lane concurrency ceilings for THIS user. Every value must be in\n1..=10. Omit to keep the current value.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LaneMaxSessionsPayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "diverse_review": {
           "description": "Enable or disable cross-model (\"Thorough\") review for THIS user. When on\n(the default), the reviewer prefers a model id different from the\nimplementer's. Omit to keep the current value.",
@@ -23004,6 +23307,38 @@
               "default": []
             }
           }
+        },
+        "LaneMaxSessionsPayload": {
+          "description": "Per-user concurrency ceilings for each role lane.",
+          "type": "object",
+          "properties": {
+            "plan": {
+              "description": "Concurrent autonomous planning and refinement sessions. Interactive\nchat is not subject to this ceiling.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "implement": {
+              "description": "Concurrent worker sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "review": {
+              "description": "Concurrent reviewer sessions.",
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 10
+            }
+          },
+          "required": [
+            "plan",
+            "implement",
+            "review"
+          ]
         }
       },
       "type": "object",
@@ -23041,6 +23376,17 @@
             "type": "integer",
             "format": "int64"
           }
+        },
+        "lane_max_sessions": {
+          "description": "The resulting per-lane concurrency ceilings after the patch. `None`\nmeans no lane-specific ceiling.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LaneMaxSessionsPayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "diverse_review": {
           "description": "The resulting cross-model review toggle after the patch.",

@@ -1,15 +1,102 @@
 use super::config::ResolvedMcpServerConfig;
 use super::*;
 use crate::test_helpers::{agent_context_from_db, create_test_db};
+use axum::Router;
 use djinn_core::events::EventBus;
 use djinn_provider::repos::CredentialRepository;
-use rmcp::object;
+use rmcp::{
+    ServerHandler,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{ServerCapabilities, ServerInfo},
+    object, schemars, tool, tool_handler, tool_router,
+    transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    },
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 fn test_context() -> AgentContext {
     agent_context_from_db(create_test_db(), CancellationToken::new())
+}
+
+#[derive(Clone)]
+struct StartupFixture {
+    tool_router: ToolRouter<Self>,
+}
+impl StartupFixture {
+    fn new() -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+        }
+    }
+}
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct FixtureArguments {}
+#[tool_router]
+impl StartupFixture {
+    #[tool(description = "fixture tool")]
+    fn fixture_tool(&self, Parameters(_): Parameters<FixtureArguments>) -> String {
+        "ok".to_owned()
+    }
+}
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for StartupFixture {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    }
+}
+async fn spawn_startup_fixture() -> (String, CancellationToken) {
+    let cancellation = CancellationToken::new();
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_json_response(true)
+        .with_sse_keep_alive(None)
+        .with_cancellation_token(cancellation.child_token());
+    let service: StreamableHttpService<StartupFixture, LocalSessionManager> =
+        StreamableHttpService::new(|| Ok(StartupFixture::new()), Default::default(), config);
+    let router = Router::new().nest_service("/mcp", service);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fixture");
+    let address = listener.local_addr().expect("fixture address");
+    let shutdown = cancellation.clone();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router)
+            .with_graceful_shutdown(async move { shutdown.cancelled_owned().await })
+            .await;
+    });
+    (format!("http://{address}/mcp"), cancellation)
+}
+
+/// Accept HTTP connections without replying, so the loader's startup timeout
+/// covers a real in-flight transport/initialize attempt.
+async fn spawn_unresponsive_http_fixture() -> (String, CancellationToken) {
+    let cancellation = CancellationToken::new();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind unresponsive fixture");
+    let address = listener.local_addr().expect("unresponsive fixture address");
+    let shutdown = cancellation.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _)) => {
+                        let connection_shutdown = shutdown.clone();
+                        tokio::spawn(async move {
+                            let _stream = stream;
+                            connection_shutdown.cancelled().await;
+                        });
+                    }
+                    Err(_) => break,
+                },
+            }
+        }
+    });
+    (format!("http://{address}/mcp"), cancellation)
 }
 
 #[test]
@@ -1170,4 +1257,113 @@ fn server_instructions_clone_shares_same_data() {
             .map(String::as_str),
         Some("Shared instructions.")
     );
+}
+
+#[test]
+fn startup_diagnostic_facts_are_canonical_and_exclude_runtime_paths() {
+    let placeholder = mcp_diagnostic(
+        "project-server",
+        ExtensionLoadPhase::PlaceholderResolution,
+        ExtensionLoadRemedyCode::CheckPlaceholder,
+        "A configured MCP placeholder value is unavailable.",
+    );
+    let transport = McpStartupFailure::Transport {
+        error: "invalid header name".to_owned(),
+    }
+    .diagnostic("project-server");
+    let handshake = McpStartupFailure::Handshake {
+        error: "server refused initialization".to_owned(),
+    }
+    .diagnostic("project-server");
+    let initial_list_failure = McpStartupFailure::ToolsList {
+        error: "remote tools/list protocol error".to_owned(),
+    };
+    let initial_list = initial_list_failure.diagnostic("project-server");
+
+    for fact in [&placeholder, &transport, &handshake, &initial_list] {
+        assert_eq!(fact.source_kind, ExtensionLoadSourceKind::ProjectMcp);
+        assert_eq!(fact.source_key, "project-server");
+        assert_eq!(fact.severity, ExtensionLoadSeverity::Warning);
+        assert!(!fact.summary_material.contains("Authorization"));
+        assert!(!fact.summary_material.contains("Bearer"));
+    }
+    assert_eq!(placeholder.phase, ExtensionLoadPhase::PlaceholderResolution);
+    assert_eq!(
+        placeholder.remedy_code,
+        ExtensionLoadRemedyCode::CheckPlaceholder
+    );
+    assert_eq!(transport.phase, ExtensionLoadPhase::Transport);
+    assert_eq!(
+        transport.remedy_code,
+        ExtensionLoadRemedyCode::CheckTransport
+    );
+    assert_eq!(handshake.phase, ExtensionLoadPhase::Handshake);
+    assert_eq!(handshake.remedy_code, ExtensionLoadRemedyCode::CheckServer);
+    assert_eq!(initial_list.phase, ExtensionLoadPhase::ToolsList);
+    assert_eq!(
+        initial_list.remedy_code,
+        ExtensionLoadRemedyCode::CheckServer
+    );
+    assert_eq!(
+        initial_list_failure.to_string(),
+        "remote tools/list protocol error",
+        "legacy structured failure logging retains the underlying rmcp error"
+    );
+    assert_eq!(
+        initial_list.summary_material, "Initial MCP tools/list request failed.",
+        "the diagnostic fact remains a bounded trusted summary"
+    );
+}
+
+mod post_discovery_prompt_tests;
+
+#[tokio::test]
+async fn diagnostics_entry_point_times_out_one_server_and_discovers_the_next() {
+    let app_state = test_context();
+    let (slow_url, slow_shutdown) = spawn_unresponsive_http_fixture().await;
+    let (good_url, good_shutdown) = spawn_startup_fixture().await;
+    let servers = vec![
+        (
+            "slow-server".to_owned(),
+            McpServerConfig {
+                url: Some(slow_url),
+                startup_timeout_ms: 25,
+                ..Default::default()
+            },
+        ),
+        (
+            "good-server".to_owned(),
+            McpServerConfig {
+                url: Some(good_url),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let discovery = tokio::time::timeout(
+        Duration::from_secs(5),
+        connect_and_discover_with_diagnostics("test", "worker", &servers, &app_state),
+    )
+    .await
+    .expect("short configured startup timeout bounds an unresponsive server");
+
+    assert_eq!(discovery.diagnostics.len(), 1);
+    let diagnostic = &discovery.diagnostics[0];
+    assert_eq!(diagnostic.source_kind, ExtensionLoadSourceKind::ProjectMcp);
+    assert_eq!(diagnostic.source_key, "slow-server");
+    assert_eq!(diagnostic.phase, ExtensionLoadPhase::Handshake);
+    assert_eq!(diagnostic.severity, ExtensionLoadSeverity::Warning);
+    assert_eq!(diagnostic.remedy_code, ExtensionLoadRemedyCode::CheckServer);
+    assert_eq!(
+        diagnostic.summary_material,
+        "MCP connection or initialization timed out."
+    );
+
+    let registry = discovery
+        .registry
+        .expect("a timed-out server does not prevent later discovery");
+    assert!(registry.has_tool(&mcp_namespaced_name("good-server", "fixture_tool")));
+
+    slow_shutdown.cancel();
+    good_shutdown.cancel();
 }

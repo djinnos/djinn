@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::Task;
 use djinn_core::models::task_attempt::TaskAttemptPromptSummary;
 
@@ -34,6 +35,9 @@ pub(crate) struct PromptContext {
     /// Hash of the exact UTF-8 bytes in `system_prompt`.
     pub system_prompt_hash: String,
     pub prompt_setup_commands: Option<String>,
+    /// Exact canonical rows returned by the repository for this session's
+    /// combined MCP + skill load attempt, retained for diagnostic rendering.
+    pub extension_diagnostics: Vec<ExtensionLoadDiagnosticV1>,
 }
 
 /// Sibling project flagged as relevant (read-only multi-repo, no eager checkout).
@@ -61,4 +65,6 @@ pub(crate) struct PromptContextInputs<'a> {
     pub worker_resume_note: Option<&'a str>,
     pub arbiter_directive: Option<&'a str>,
     pub mcp_server_instructions: &'a BTreeMap<String, String>,
+    /// Canonical rows returned for the session-associated extension load pass.
+    pub extension_diagnostics: &'a [ExtensionLoadDiagnosticV1],
 }

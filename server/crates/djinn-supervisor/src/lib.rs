@@ -35,10 +35,11 @@ use djinn_core::models::{Task, TaskRunStatus, TaskRunTrigger, TaskStatus};
 use djinn_runtime::{ResumeLifecycleMetadata, ResumeSourceKind};
 use djinn_workspace::{
     EphemeralWorkspaceError, GitIdentity, MergeOutcome, MergeParentOutcome, MirrorError,
-    MirrorManager,
+    MirrorManager, Workspace,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 pub mod services;
@@ -583,6 +584,162 @@ impl ResumeWorkspaceOutcome {
     }
 }
 
+// ── Workspace clone telemetry (proposal zp5t) ──────────────────────────────
+//
+// Every actual `clone_ephemeral` / `clone_ephemeral_at_ref` attempt in the
+// supervisor records exactly one `workspace_clone_seconds` sample with a
+// bounded `outcome=ok|error|cancelled` label. Cancellation is classified from
+// the shared `CancellationToken` at the terminal boundary (not from string
+// matching). A fallback clone is a *distinct* attempt — it starts a second
+// timing window only when the second operation actually begins.
+
+/// Classify the outcome of a clone attempt at the terminal boundary.
+///
+/// When the shared cancellation token is set at the moment the clone future
+/// resolves, the attempt is `cancelled` regardless of whether it returned
+/// `Ok` or `Err` (a clone racing a cancel can complete with a partial result
+/// or surface a transport error that is really the cancel). Otherwise `Ok` is
+/// `ok` and `Err` is `error`.
+fn classify_clone_outcome(
+    result: &Result<Workspace, MirrorError>,
+    cancel: &CancellationToken,
+) -> &'static str {
+    if cancel.is_cancelled() {
+        djinn_telemetry::workspace_clone::OUTCOME_CANCELLED
+    } else if result.is_ok() {
+        djinn_telemetry::workspace_clone::OUTCOME_OK
+    } else {
+        djinn_telemetry::workspace_clone::OUTCOME_ERROR
+    }
+}
+
+/// Time one clone attempt with the injected monotonic [`Clock`] and record
+/// exactly one `workspace_clone_seconds` sample.
+///
+/// The outcome is classified from the result + cancellation token at the
+/// terminal boundary. The original `Result` is passed through unchanged so
+/// fallback / error propagation behaviour is preserved exactly.
+async fn timed_clone_attempt<F>(
+    clock: &dyn Clock,
+    cancel: &CancellationToken,
+    attempt: F,
+) -> Result<Workspace, MirrorError>
+where
+    F: std::future::Future<Output = Result<Workspace, MirrorError>>,
+{
+    let start = clock.now_instant();
+    let result = attempt.await;
+    let elapsed = clock.now_instant().duration_since(start);
+    let outcome = classify_clone_outcome(&result, cancel);
+    djinn_telemetry::workspace_clone::record_seconds(outcome, elapsed);
+    result
+}
+
+// ── Workspace cleanup telemetry (proposal zp5t) ──────────────────────────────
+//
+// Every returned owned-workspace teardown attempt emits exactly one
+// `workspace_cleanup_seconds` sample after it returns, with a bounded
+// `trigger=complete|error|cancel|shutdown` and `outcome=ok|error`. The trigger
+// is classified at the terminal boundary from the actual result + cancellation
+// state — NOT from string matching. Timing begins immediately before teardown
+// and is recorded only after teardown returns. Attached workspaces are never
+// deleted or observed (their teardown_owned is a no-op).
+
+/// Terminal trigger classification for an owned-workspace teardown.
+///
+/// Pure enum so the classifier can be unit-tested without constructing a
+/// workspace or running the async teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CleanupTrigger {
+    /// The run completed normally (Ok result with a terminal outcome).
+    Complete,
+    /// The run returned an error (Err SupervisorError).
+    Error,
+    /// A handled cancellation was observed (cancel token set / Interrupted).
+    Cancel,
+    /// An orderly worker process shutdown, classified at the supervisor
+    /// owned-workspace teardown boundary.
+    Shutdown,
+}
+
+impl CleanupTrigger {
+    const fn as_str(self) -> &'static str {
+        match self {
+            CleanupTrigger::Complete => djinn_telemetry::workspace_cleanup::TRIGGER_COMPLETE,
+            CleanupTrigger::Error => djinn_telemetry::workspace_cleanup::TRIGGER_ERROR,
+            CleanupTrigger::Cancel => djinn_telemetry::workspace_cleanup::TRIGGER_CANCEL,
+            CleanupTrigger::Shutdown => djinn_telemetry::workspace_cleanup::TRIGGER_SHUTDOWN,
+        }
+    }
+}
+
+/// Classify the cleanup trigger from the supervisor `run` result, shared
+/// cancellation token, and orderly worker-shutdown state.
+///
+/// Cancellation wins over every other terminal condition. Returned errors
+/// win over the shutdown intent, preserving their existing propagation.
+fn classify_supervisor_cleanup_trigger(
+    result: &Result<TaskRunReport, SupervisorError>,
+    cancel: &CancellationToken,
+    orderly_shutdown: bool,
+) -> CleanupTrigger {
+    if cancel.is_cancelled() {
+        CleanupTrigger::Cancel
+    } else if result.is_err() {
+        CleanupTrigger::Error
+    } else if orderly_shutdown {
+        CleanupTrigger::Shutdown
+    } else {
+        CleanupTrigger::Complete
+    }
+}
+
+/// Time a returned cleanup operation and record its bounded result.
+///
+/// Recording happens only after `teardown` returns. The injected operation
+/// keeps the ordering and failure semantics testable without filesystem races.
+fn timed_cleanup_operation<F>(
+    clock: &dyn Clock,
+    trigger: CleanupTrigger,
+    teardown: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    let start = clock.now_instant();
+    let result = teardown();
+    let elapsed = clock.now_instant().duration_since(start);
+    let outcome = if result.is_ok() {
+        djinn_telemetry::workspace_cleanup::OUTCOME_OK
+    } else {
+        djinn_telemetry::workspace_cleanup::OUTCOME_ERROR
+    };
+    djinn_telemetry::workspace_cleanup::record_seconds(trigger.as_str(), outcome, elapsed);
+    result
+}
+
+/// Time one owned-workspace teardown attempt with the injected monotonic
+/// [`Clock`] and record exactly one `workspace_cleanup_seconds` sample with the
+/// classified trigger and `ok|error` outcome.
+///
+/// Timing begins immediately before `teardown_owned` and is recorded only after
+/// it returns. The original `Result` is passed through unchanged so error
+/// propagation / fallback behaviour is preserved exactly. Attached workspaces
+/// are never observed (teardown_owned returns Ok without deleting).
+fn timed_workspace_teardown(
+    clock: &dyn Clock,
+    workspace: Workspace,
+    trigger: CleanupTrigger,
+) -> std::io::Result<()> {
+    // Attached workspaces are never deleted or observed — their teardown_owned
+    // is a no-op. Skip timing and recording entirely so no spurious sample is
+    // emitted for externally-owned directories.
+    if !workspace.is_owned() {
+        return workspace.teardown_owned();
+    }
+    timed_cleanup_operation(clock, trigger, || workspace.teardown_owned())
+}
+
 /// Apply the coordinator-selected resume source to the worktree setup.
 ///
 /// Behaviour, per `spec.resume_lifecycle_metadata.source_kind`:
@@ -629,6 +786,8 @@ async fn prepare_resume_workspace(
     task_branch: &str,
     base_branch: &str,
     resume: Option<&ResumeLifecycleMetadata>,
+    clock: &dyn Clock,
+    cancel: &CancellationToken,
 ) -> Result<Option<ResumeWorkspaceOutcome>, SupervisorError> {
     let Some(meta) = resume else {
         return Ok(None);
@@ -683,7 +842,11 @@ async fn prepare_resume_workspace(
         // detached checkout has a populated alternates pool. Fall back to
         // base_branch if the task branch is missing (preserves existing
         // legacy semantics for first-cycle runs).
-        let workspace = match mirror.clone_ephemeral(project_id, task_branch).await {
+        let workspace = match timed_clone_attempt(clock, cancel, async {
+            mirror.clone_ephemeral(project_id, task_branch).await
+        })
+        .await
+        {
             Ok(ws) => ws,
             Err(
                 MirrorError::Missing(_)
@@ -696,7 +859,13 @@ async fn prepare_resume_workspace(
                     "resume: task branch not in mirror for safe checkpoint — \
                      cloning base_branch for checkout"
                 );
-                mirror.clone_ephemeral(project_id, base_branch).await?
+                // Distinct attempt: the base-branch fallback clone starts its
+                // own timing window only here (when the second operation
+                // actually begins).
+                timed_clone_attempt(clock, cancel, async {
+                    mirror.clone_ephemeral(project_id, base_branch).await
+                })
+                .await?
             }
         };
         // Stage 2: detach HEAD on the selected SHA. `Workspace::checkout_ref`
@@ -754,7 +923,11 @@ async fn prepare_resume_workspace(
             )));
         };
 
-        match mirror.clone_ephemeral_at_ref(project_id, &target_ref).await {
+        match timed_clone_attempt(clock, cancel, async {
+            mirror.clone_ephemeral_at_ref(project_id, &target_ref).await
+        })
+        .await
+        {
             Ok(_workspace_at_ref) => {
                 debug!(
                     task_branch,
@@ -852,6 +1025,24 @@ impl TaskRunSupervisor {
 
     /// Drive a task-run from start to terminal state.
     pub async fn run(&self, spec: TaskRunSpec) -> Result<TaskRunReport, SupervisorError> {
+        self.run_inner(spec, false).await
+    }
+
+    /// Drive a run whose successful terminal boundary is immediately followed
+    /// by orderly worker shutdown. Its owned-workspace teardown remains here,
+    /// before return; this only supplies the bounded `shutdown` trigger.
+    pub async fn run_for_orderly_shutdown(
+        &self,
+        spec: TaskRunSpec,
+    ) -> Result<TaskRunReport, SupervisorError> {
+        self.run_inner(spec, true).await
+    }
+
+    async fn run_inner(
+        &self,
+        spec: TaskRunSpec,
+        orderly_shutdown: bool,
+    ) -> Result<TaskRunReport, SupervisorError> {
         // Use the host-minted canonical id rather than minting our own — the
         // host's runtime, the `task_runs` row, every session, and the terminal
         // report must all share ONE id so post-session extraction can match
@@ -940,6 +1131,8 @@ impl TaskRunSupervisor {
             &spec.task_branch,
             &spec.base_branch,
             spec.resume_lifecycle_metadata.as_ref(),
+            &*self.clock,
+            self.services.cancel(),
         )
         .await?;
         if let Some(outcome) = resume_outcome.as_ref() {
@@ -964,10 +1157,12 @@ impl TaskRunSupervisor {
         // throwing away every prior cycle's worker progress. Observed on
         // task avoy: 3/3 ACs met in cycle 1, dropped to 1/3 in cycle 2 after
         // CI bounced the task back to open.
-        let workspace = match self
-            .mirror
-            .clone_ephemeral(&spec.project_id, &spec.task_branch)
-            .await
+        let workspace = match timed_clone_attempt(&*self.clock, self.services.cancel(), async {
+            self.mirror
+                .clone_ephemeral(&spec.project_id, &spec.task_branch)
+                .await
+        })
+        .await
         {
             Ok(ws) => {
                 debug!(
@@ -985,9 +1180,15 @@ impl TaskRunSupervisor {
                     error = %e,
                     "task_branch not in mirror; cloning on base_branch (first cycle)"
                 );
-                self.mirror
-                    .clone_ephemeral(&spec.project_id, &spec.base_branch)
-                    .await?
+                // Distinct attempt: the base-branch fallback clone starts its
+                // own timing window only here (when the second operation
+                // actually begins).
+                timed_clone_attempt(&*self.clock, self.services.cancel(), async {
+                    self.mirror
+                        .clone_ephemeral(&spec.project_id, &spec.base_branch)
+                        .await
+                })
+                .await?
             }
         };
 
@@ -1000,8 +1201,11 @@ impl TaskRunSupervisor {
                         error = %e,
                         "load_task failed during cancellation"
                     );
+                    let _ =
+                        timed_workspace_teardown(&*self.clock, workspace, CleanupTrigger::Cancel);
                     return self.finalize_interrupted(run_id, vec![]).await;
                 }
+                let _ = timed_workspace_teardown(&*self.clock, workspace, CleanupTrigger::Error);
                 return Err(SupervisorError::LoadTask(e));
             }
         };
@@ -1415,6 +1619,14 @@ impl TaskRunSupervisor {
                             result = Some(TaskRunOutcome::Interrupted);
                             break;
                         }
+                        // Best-effort teardown before the error return; the
+                        // workspace is owned and must not be implicitly dropped
+                        // without emitting exactly one cleanup sample.
+                        let _ = timed_workspace_teardown(
+                            &*self.clock,
+                            workspace,
+                            CleanupTrigger::Error,
+                        );
                         return Err(SupervisorError::from(e));
                     }
                 };
@@ -2692,6 +2904,7 @@ impl TaskRunSupervisor {
                      proceeding with Interrupted report"
                 );
             } else {
+                let _ = timed_workspace_teardown(&*self.clock, workspace, CleanupTrigger::Error);
                 cleanup_cargo_target_run_dir(&run_id, &*self.clock).await;
                 return Err(SupervisorError::UpdateTaskRunStatus(e));
             }
@@ -2699,12 +2912,25 @@ impl TaskRunSupervisor {
 
         cleanup_cargo_target_run_dir(&run_id, &*self.clock).await;
 
-        info!(task_run_id = %run_id, ?outcome, "task-run finished");
-        Ok(TaskRunReport {
+        // Explicitly tear down the owned ephemeral workspace, recording exactly
+        // one `workspace_cleanup_seconds` sample with the trigger classified
+        // from the terminal outcome and cancellation state. The Ok report is
+        // available so `complete` / `cancel` are distinguished without string
+        // matching.
+        let report = TaskRunReport {
             task_run_id: run_id,
             outcome,
             stages_completed: completed,
-        })
+        };
+        let trigger = classify_supervisor_cleanup_trigger(
+            &Ok(report.clone()),
+            self.services.cancel(),
+            orderly_shutdown,
+        );
+        let _ = timed_workspace_teardown(&*self.clock, workspace, trigger);
+
+        info!(task_run_id = %report.task_run_id, ?report.outcome, "task-run finished");
+        Ok(report)
     }
 
     /// Best-effort terminal status write for an early-cancelled run.
@@ -2811,6 +3037,7 @@ mod tests {
     use djinn_workspace::Workspace;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
     /// Compile-time assertion: `SupervisorServices` is object-safe.
@@ -4768,6 +4995,20 @@ mod tests {
     const RESUME_TEST_TASK: &str = "task/resume-supervisor";
     const RESUME_TEST_ALT_REF: &str = "refs/djinn/checkpoints/task/resume-supervisor/s1";
 
+    /// Test clock + cancel token pair for resume-helper telemetry tests.
+    /// The system clock is sufficient because these tests assert the resume
+    /// outcome structure (not exact elapsed sums); the dedicated
+    /// clone-telemetry tests below use a fake clock and scrape deltas.
+    fn resume_test_clock_and_cancel() -> (
+        std::sync::Arc<dyn djinn_core::clock::Clock>,
+        tokio_util::sync::CancellationToken,
+    ) {
+        (
+            std::sync::Arc::new(SystemClock::new()),
+            tokio_util::sync::CancellationToken::new(),
+        )
+    }
+
     /// Run `git <args>` in `cwd` and return the trimmed stdout. Panics on
     /// non-zero exit. Used by the resume-helper tests below to capture SHAs.
     fn run_git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
@@ -4838,12 +5079,16 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let outcome = prepare_resume_workspace(
             &mgr,
             RESUME_TEST_PROJECT_ID,
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             None,
+            &*clock,
+            &cancel,
         )
         .await
         .expect("missing metadata must not error");
@@ -4860,6 +5105,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: false,
             ..Default::default()
@@ -4870,6 +5117,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("un-considered metadata must not error");
@@ -4887,6 +5136,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
@@ -4899,6 +5150,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("clean task branch must not error");
@@ -4916,6 +5169,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             submit_or_review_id: Some("review-1".to_string()),
@@ -4929,6 +5184,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("auto-submit selection must not error");
@@ -4948,6 +5205,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             commit_sha: Some(tip.clone()),
@@ -4961,6 +5220,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("safe checkpoint apply must succeed");
@@ -4984,6 +5245,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             // commit_sha intentionally absent
@@ -4997,6 +5260,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("missing-SHA fallback must not error");
@@ -5022,6 +5287,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), true).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             target_ref: Some(RESUME_TEST_ALT_REF.to_string()),
@@ -5035,6 +5302,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("alternate ref apply must succeed");
@@ -5058,6 +5327,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), true).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             target_ref: Some("refs/djinn/checkpoints/does/not/exist".to_string()),
@@ -5071,6 +5342,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("unavailable ref must not error");
@@ -5097,6 +5370,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
         let meta = ResumeLifecycleMetadata {
             considered: true,
             // target_ref intentionally absent
@@ -5110,6 +5385,8 @@ mod tests {
             RESUME_TEST_TASK,
             RESUME_TEST_BASE,
             Some(&meta),
+            &*clock,
+            &cancel,
         )
         .await
         .expect("missing-target fallback must not error");
@@ -5126,6 +5403,709 @@ mod tests {
             reason.contains("missing_target_ref"),
             "fallback reason must identify the missing-target case, got: {reason}"
         );
+    }
+
+    // ── Workspace clone telemetry tests (proposal zp5t) ──────────────────
+
+    use djinn_core::clock::TestClock;
+
+    /// The Prometheus recorder is process-global; serialize telemetry-scrape
+    /// tests behind a mutex so each assertion can use a precise delta.
+    static CLONE_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn clone_telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
+        CLONE_TELEMETRY_MUTEX
+            .lock()
+            .expect("clone telemetry test mutex poisoned")
+    }
+
+    /// Count `workspace_clone_seconds_count` samples for a given outcome.
+    fn clone_count(rendered: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_clone_seconds_count")
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
+    /// Read the `_sum` value for `workspace_clone_seconds` for a given outcome.
+    fn clone_sum(rendered: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_clone_seconds_sum")
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
+    /// Assert that rendered workspace_clone / workspace_seed samples carry no
+    /// high-cardinality identity labels.
+    fn assert_no_identity_labels(rendered: &str, metric_prefix: &str) {
+        for line in rendered.lines() {
+            if !line.starts_with(metric_prefix) {
+                continue;
+            }
+            for forbidden in [
+                "task_id=",
+                "session_id=",
+                "project_id=",
+                "user_id=",
+                "path=",
+                "error=",
+                "branch=",
+                "ref=",
+            ] {
+                assert!(
+                    !line.contains(forbidden),
+                    "metric line must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
+        }
+    }
+
+    /// Successful clone records exactly one `ok` sample, measured by the
+    /// injected monotonic clock.
+    #[tokio::test]
+    async fn timed_clone_attempt_records_one_ok_sample() {
+        let _guard = clone_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let clock = Arc::new(TestClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::Instant::now(),
+        ));
+        let cancel = CancellationToken::new();
+
+        let before = djinn_telemetry::render().expect("render before");
+        let ok_before = clone_count(&before, "ok");
+        let ok_sum_before = clone_sum(&before, "ok");
+        let elapsed = Duration::from_millis(200);
+
+        let clock_clone = clock.clone();
+        timed_clone_attempt(&*clock, &cancel, async move {
+            let result = mgr
+                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                .await;
+            // Advance the TestClock mono time so elapsed is deterministic.
+            clock_clone.advance_mono(elapsed);
+            result
+        })
+        .await
+        .expect("clone must succeed");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            clone_count(&after, "ok"),
+            ok_before + 1.0,
+            "one ok clone sample expected"
+        );
+        assert!(
+            (clone_sum(&after, "ok") - ok_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
+            "ok clone sum delta must equal elapsed"
+        );
+        // Error/cancelled must not increase.
+        assert_eq!(
+            clone_count(&after, "error"),
+            clone_count(&before, "error"),
+            "error count must not change for a successful clone"
+        );
+        assert_eq!(
+            clone_count(&after, "cancelled"),
+            clone_count(&before, "cancelled"),
+            "cancelled count must not change for a successful clone"
+        );
+        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+    }
+
+    /// A failed clone (missing mirror project) records exactly one `error`
+    /// sample when the cancel token is NOT set.
+    #[tokio::test]
+    async fn timed_clone_attempt_records_one_error_sample() {
+        let _guard = clone_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let mgr = MirrorManager::new(tmp.path().to_path_buf());
+        let clock = Arc::new(TestClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::Instant::now(),
+        ));
+        let cancel = CancellationToken::new();
+
+        let before = djinn_telemetry::render().expect("render before");
+        let err_before = clone_count(&before, "error");
+        let err_sum_before = clone_sum(&before, "error");
+        let elapsed = Duration::from_millis(150);
+
+        let clock_clone = clock.clone();
+        let result = timed_clone_attempt(&*clock, &cancel, async move {
+            let result = mgr
+                .clone_ephemeral("nonexistent-project", RESUME_TEST_BASE)
+                .await;
+            clock_clone.advance_mono(elapsed);
+            result
+        })
+        .await;
+        assert!(result.is_err(), "clone of missing project must fail");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            clone_count(&after, "error"),
+            err_before + 1.0,
+            "one error clone sample expected"
+        );
+        assert!(
+            (clone_sum(&after, "error") - err_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
+            "error clone sum delta must equal elapsed"
+        );
+        assert_eq!(
+            clone_count(&after, "ok"),
+            clone_count(&before, "ok"),
+            "ok count must not change for a failed clone"
+        );
+        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+    }
+
+    /// A clone that resolves (Ok or Err) while the cancel token IS set
+    /// records exactly one `cancelled` sample.
+    #[tokio::test]
+    async fn timed_clone_attempt_records_cancelled_when_token_set() {
+        let _guard = clone_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let clock = Arc::new(TestClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::Instant::now(),
+        ));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let before = djinn_telemetry::render().expect("render before");
+        let cancel_before = clone_count(&before, "cancelled");
+        let cancel_sum_before = clone_sum(&before, "cancelled");
+        let elapsed = Duration::from_millis(100);
+
+        // Even though the clone succeeds, the cancel token is set so the
+        // outcome is `cancelled`.
+        let clock_clone = clock.clone();
+        timed_clone_attempt(&*clock, &cancel, async move {
+            let result = mgr
+                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                .await;
+            clock_clone.advance_mono(elapsed);
+            result
+        })
+        .await
+        .expect("clone itself succeeds");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            clone_count(&after, "cancelled"),
+            cancel_before + 1.0,
+            "one cancelled clone sample expected when token is set"
+        );
+        assert!(
+            (clone_sum(&after, "cancelled") - cancel_sum_before - elapsed.as_secs_f64()).abs()
+                < 0.001,
+            "cancelled clone sum delta must equal elapsed"
+        );
+        assert_eq!(
+            clone_count(&after, "ok"),
+            clone_count(&before, "ok"),
+            "ok count must not change when cancel token is set"
+        );
+        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+    }
+
+    /// Multi-attempt fallback: when task_branch clone fails and base_branch
+    /// clone succeeds, two distinct samples are recorded — one `error` and
+    /// one `ok`. The fallback starts a new attempt only when the second
+    /// operation actually begins.
+    #[tokio::test]
+    async fn timed_clone_attempt_multi_attempt_fallback_records_two_samples() {
+        let _guard = clone_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let clock = Arc::new(TestClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::Instant::now(),
+        ));
+        let cancel = CancellationToken::new();
+
+        let before = djinn_telemetry::render().expect("render before");
+        let ok_before = clone_count(&before, "ok");
+        let err_before = clone_count(&before, "error");
+        let ok_sum_before = clone_sum(&before, "ok");
+        let err_sum_before = clone_sum(&before, "error");
+        let err_elapsed = Duration::from_millis(120);
+        let ok_elapsed = Duration::from_millis(250);
+
+        // First attempt: task_branch doesn't exist → error.
+        let clock_clone = clock.clone();
+        let first = timed_clone_attempt(&*clock, &cancel, async move {
+            let result = mgr
+                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_TASK)
+                .await;
+            clock_clone.advance_mono(err_elapsed);
+            result
+        })
+        .await;
+        assert!(first.is_err(), "task_branch clone must fail (first cycle)");
+
+        // Second attempt (fallback): base_branch exists → ok.
+        let clock_clone2 = clock.clone();
+        timed_clone_attempt(&*clock, &cancel, async move {
+            let (mgr2, _tip2) = build_resume_test_mirror(tmp.path(), false).await;
+            let result = mgr2
+                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                .await;
+            clock_clone2.advance_mono(ok_elapsed);
+            result
+        })
+        .await
+        .expect("base_branch clone must succeed");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            clone_count(&after, "error"),
+            err_before + 1.0,
+            "one error sample for the failed task_branch attempt"
+        );
+        assert_eq!(
+            clone_count(&after, "ok"),
+            ok_before + 1.0,
+            "one ok sample for the successful base_branch fallback attempt"
+        );
+        assert!(
+            (clone_sum(&after, "error") - err_sum_before - err_elapsed.as_secs_f64()).abs() < 0.001,
+            "error clone sum delta must equal first attempt elapsed"
+        );
+        assert!(
+            (clone_sum(&after, "ok") - ok_sum_before - ok_elapsed.as_secs_f64()).abs() < 0.001,
+            "ok clone sum delta must equal fallback attempt elapsed"
+        );
+        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+    }
+
+    /// `classify_clone_outcome`: Err + not-cancelled → error. This pure
+    /// function test uses the Err variant which doesn't require constructing
+    /// a `Workspace` (whose `new` is crate-private to `djinn-workspace`).
+    #[test]
+    fn classify_clone_outcome_error_when_not_cancelled() {
+        let cancel = CancellationToken::new();
+        let err: Result<Workspace, MirrorError> = Err(MirrorError::Missing("proj".to_string()));
+        assert_eq!(
+            classify_clone_outcome(&err, &cancel),
+            djinn_telemetry::workspace_clone::OUTCOME_ERROR,
+        );
+    }
+
+    /// `classify_clone_outcome`: Err + cancelled → cancelled.
+    #[test]
+    fn classify_clone_outcome_cancelled_when_token_set() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let err: Result<Workspace, MirrorError> = Err(MirrorError::Missing("proj".to_string()));
+        assert_eq!(
+            classify_clone_outcome(&err, &cancel),
+            djinn_telemetry::workspace_clone::OUTCOME_CANCELLED,
+        );
+    }
+
+    // ── Workspace cleanup telemetry tests (proposal zp5t) ─────────────────
+
+    /// The Prometheus recorder is process-global; serialize telemetry-scrape
+    /// tests behind a mutex so each assertion can use a precise delta.
+    static CLEANUP_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn cleanup_telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
+        CLEANUP_TELEMETRY_MUTEX
+            .lock()
+            .expect("cleanup telemetry test mutex poisoned")
+    }
+
+    /// Count `workspace_cleanup_seconds_count` samples for a given
+    /// trigger/outcome pair.
+    fn cleanup_count(rendered: &str, trigger: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_cleanup_seconds_count")
+                    && line.contains(&format!("trigger=\"{trigger}\""))
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
+    /// Read the `_sum` value for `workspace_cleanup_seconds` for a given
+    /// trigger/outcome pair.
+    fn cleanup_sum(rendered: &str, trigger: &str, outcome: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_workspace_cleanup_seconds_sum")
+                    && line.contains(&format!("trigger=\"{trigger}\""))
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
+    /// Assert that rendered workspace_cleanup samples carry no high-cardinality
+    /// identity labels.
+    fn assert_no_cleanup_identity_labels(rendered: &str) {
+        for line in rendered.lines() {
+            if !line.starts_with("djinn_workspace_cleanup_seconds") {
+                continue;
+            }
+            for forbidden in [
+                "task_id=",
+                "session_id=",
+                "project_id=",
+                "user_id=",
+                "path=",
+                "error=",
+                "reason=",
+                "branch=",
+                "ref=",
+            ] {
+                assert!(
+                    !line.contains(forbidden),
+                    "cleanup metric line must not carry high-cardinality label {forbidden}: {line}",
+                );
+            }
+        }
+    }
+
+    /// `classify_supervisor_cleanup_trigger`: Ok + not-cancelled → complete.
+    #[test]
+    fn classify_cleanup_trigger_complete_on_ok() {
+        let cancel = CancellationToken::new();
+        let report = TaskRunReport {
+            task_run_id: "test".to_string(),
+            outcome: TaskRunOutcome::WorkerSubmitted,
+            stages_completed: vec![],
+        };
+        assert_eq!(
+            classify_supervisor_cleanup_trigger(&Ok(report), &cancel, false),
+            CleanupTrigger::Complete,
+        );
+    }
+
+    /// `classify_supervisor_cleanup_trigger`: Err + not-cancelled → error.
+    #[test]
+    fn classify_cleanup_trigger_error_on_err() {
+        let cancel = CancellationToken::new();
+        let err = SupervisorError::LoadTask("rpc error".to_string());
+        assert_eq!(
+            classify_supervisor_cleanup_trigger(&Err(err), &cancel, false),
+            CleanupTrigger::Error,
+        );
+    }
+
+    /// `classify_supervisor_cleanup_trigger`: Ok + cancelled → cancel.
+    #[test]
+    fn classify_cleanup_trigger_cancel_when_token_set() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let report = TaskRunReport {
+            task_run_id: "test".to_string(),
+            outcome: TaskRunOutcome::Interrupted,
+            stages_completed: vec![],
+        };
+        assert_eq!(
+            classify_supervisor_cleanup_trigger(&Ok(report), &cancel, false),
+            CleanupTrigger::Cancel,
+        );
+    }
+
+    /// `classify_supervisor_cleanup_trigger`: Err + cancelled → cancel (a
+    /// cancelled run can surface a racing RPC error).
+    #[test]
+    fn classify_cleanup_trigger_cancel_on_err_when_token_set() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let err = SupervisorError::LoadTask("rpc error".to_string());
+        assert_eq!(
+            classify_supervisor_cleanup_trigger(&Err(err), &cancel, false),
+            CleanupTrigger::Cancel,
+        );
+    }
+
+    /// A successful owned-workspace teardown records exactly one `ok` sample
+    /// with the classified trigger.
+    #[tokio::test]
+    async fn timed_teardown_records_one_complete_ok_sample() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let ws = mgr
+            .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+            .await
+            .expect("clone");
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+
+        let before = djinn_telemetry::render().expect("render before");
+        let count_before = cleanup_count(&before, "complete", "ok");
+        let sum_before = cleanup_sum(&before, "complete", "ok");
+
+        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete);
+        assert!(result.is_ok(), "teardown must succeed");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            cleanup_count(&after, "complete", "ok"),
+            count_before + 1.0,
+            "one complete/ok cleanup sample expected"
+        );
+        // The TestClock does not advance during the synchronous teardown, so
+        // the recorded duration is ~0. Assert the sum is non-negative (the
+        // teardown completed and recorded a valid sample).
+        let sum_delta = cleanup_sum(&after, "complete", "ok") - sum_before;
+        assert!(
+            sum_delta >= 0.0,
+            "complete/ok sum delta must be non-negative, got {sum_delta}"
+        );
+        assert_no_cleanup_identity_labels(&after);
+    }
+
+    /// An attached workspace teardown is a no-op and does NOT emit a sample —
+    /// attached directories are never deleted or observed.
+    #[test]
+    fn timed_teardown_on_attached_emits_nothing() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = Workspace::attach_existing(tmp.path(), "main").expect("attach");
+        assert!(!ws.is_owned(), "attached workspace must not be owned");
+
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+
+        let before = djinn_telemetry::render().expect("render before");
+        let complete_ok_before = cleanup_count(&before, "complete", "ok");
+
+        // teardown_owned on Attached returns Ok and does NOT delete.
+        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete);
+        assert!(result.is_ok(), "attached teardown must be Ok");
+
+        let after = djinn_telemetry::render().expect("render after");
+        // Attached workspaces are never observed: no telemetry sample emitted.
+        assert!(
+            tmp.path().exists(),
+            "attached directory must NOT be deleted"
+        );
+        assert_eq!(
+            cleanup_count(&after, "complete", "ok"),
+            complete_ok_before,
+            "attached teardown must NOT emit any sample"
+        );
+    }
+
+    /// Each bounded trigger/outcome pair passes through the real timed
+    /// cleanup boundary. The injected operation proves no sample exists until
+    /// it returns, without relying on slow filesystem failures.
+    #[test]
+    fn cleanup_records_all_eight_returned_operation_outcomes() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+        let elapsed = Duration::from_millis(42);
+        for (trigger_str, trigger) in [
+            ("complete", CleanupTrigger::Complete),
+            ("error", CleanupTrigger::Error),
+            ("cancel", CleanupTrigger::Cancel),
+            ("shutdown", CleanupTrigger::Shutdown),
+        ] {
+            for (outcome_str, succeeds) in [("ok", true), ("error", false)] {
+                let before = djinn_telemetry::render().expect("render before");
+                let count_before = cleanup_count(&before, trigger_str, outcome_str);
+                let sum_before = cleanup_sum(&before, trigger_str, outcome_str);
+                let result = timed_cleanup_operation(&clock, trigger, || {
+                    let during = djinn_telemetry::render().expect("render during teardown");
+                    assert_eq!(
+                        cleanup_count(&during, trigger_str, outcome_str),
+                        count_before,
+                        "sample must wait for returned teardown"
+                    );
+                    clock.advance_mono(elapsed);
+                    if succeeds {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::other("injected cleanup failure"))
+                    }
+                });
+                assert_eq!(
+                    result.is_ok(),
+                    succeeds,
+                    "injected {trigger_str}/{outcome_str} result must propagate"
+                );
+                let after = djinn_telemetry::render().expect("render after");
+                assert_eq!(
+                    cleanup_count(&after, trigger_str, outcome_str),
+                    count_before + 1.0
+                );
+                assert!(
+                    (cleanup_sum(&after, trigger_str, outcome_str)
+                        - sum_before
+                        - elapsed.as_secs_f64())
+                    .abs()
+                        < 0.001
+                );
+            }
+        }
+        assert_no_cleanup_identity_labels(&djinn_telemetry::render().expect("render labels"));
+    }
+
+    #[test]
+    fn cleanup_panic_emits_nothing_until_a_later_returned_teardown() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+        let before = djinn_telemetry::render().expect("render before");
+        let count_before = cleanup_count(&before, "complete", "ok");
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            timed_cleanup_operation(
+                &clock,
+                CleanupTrigger::Complete,
+                || -> std::io::Result<()> { panic!("injected teardown panic") },
+            )
+        }));
+        assert!(panic.is_err());
+        assert_eq!(
+            cleanup_count(
+                &djinn_telemetry::render().expect("render after panic"),
+                "complete",
+                "ok"
+            ),
+            count_before
+        );
+        timed_cleanup_operation(&clock, CleanupTrigger::Complete, || Ok(()))
+            .expect("returned teardown");
+        assert_eq!(
+            cleanup_count(
+                &djinn_telemetry::render().expect("render after returned teardown"),
+                "complete",
+                "ok"
+            ),
+            count_before + 1.0
+        );
+    }
+
+    /// Duplicate teardown suppression: calling `teardown_owned` once (which
+    /// calls `TempDir::close()`) prevents the Drop from deleting again. The
+    /// directory is gone after `teardown_owned`, so a second implicit Drop is a
+    /// no-op.
+    #[tokio::test]
+    async fn teardown_owned_prevents_double_drop() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let ws = mgr
+            .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+            .await
+            .expect("clone");
+        let path = ws.path().to_path_buf();
+
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+
+        let before = djinn_telemetry::render().expect("render before");
+        let count_before = cleanup_count(&before, "complete", "ok");
+
+        // First teardown: records exactly one sample and removes the dir.
+        timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete)
+            .expect("first teardown must succeed");
+        assert!(!path.exists(), "directory must be removed after teardown");
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            cleanup_count(&after, "complete", "ok"),
+            count_before + 1.0,
+            "exactly one cleanup sample (no duplicate from Drop)"
+        );
+    }
+
+    /// `CleanupTrigger::Shutdown` maps to the `shutdown` trigger string.
+    #[test]
+    fn cleanup_trigger_shutdown_as_str() {
+        assert_eq!(
+            CleanupTrigger::Shutdown.as_str(),
+            djinn_telemetry::workspace_cleanup::TRIGGER_SHUTDOWN,
+        );
+        assert_eq!(
+            CleanupTrigger::Complete.as_str(),
+            djinn_telemetry::workspace_cleanup::TRIGGER_COMPLETE,
+        );
+        assert_eq!(
+            CleanupTrigger::Error.as_str(),
+            djinn_telemetry::workspace_cleanup::TRIGGER_ERROR,
+        );
+        assert_eq!(
+            CleanupTrigger::Cancel.as_str(),
+            djinn_telemetry::workspace_cleanup::TRIGGER_CANCEL,
+        );
+    }
+
+    /// A teardown that returns Err (e.g. externally-deleted dir) records exactly
+    /// one `error` outcome sample. This proves the error classification path
+    /// works and that recording happens AFTER teardown returns — no metric is
+    /// emitted if teardown never returns (panic/SIGKILL are out of scope).
+    #[tokio::test]
+    async fn timed_teardown_records_error_on_failure() {
+        let _guard = cleanup_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let ws = mgr
+            .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+            .await
+            .expect("clone");
+        let ws_path = ws.path().to_path_buf();
+
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+
+        let before = djinn_telemetry::render().expect("render before");
+        let count_before = cleanup_count(&before, "error", "error");
+        let sum_before = cleanup_sum(&before, "error", "error");
+
+        // Externally delete the directory so TempDir::close() returns Err.
+        std::fs::remove_dir_all(&ws_path).expect("externally delete dir");
+
+        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Error);
+        assert!(
+            result.is_err(),
+            "teardown must fail on externally deleted dir"
+        );
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            cleanup_count(&after, "error", "error"),
+            count_before + 1.0,
+            "one error/error cleanup sample expected"
+        );
+        let sum_delta = cleanup_sum(&after, "error", "error") - sum_before;
+        assert!(
+            sum_delta >= 0.0,
+            "error/error sum delta must be non-negative, got {sum_delta}"
+        );
+        assert_no_cleanup_identity_labels(&after);
     }
 
     /// Regression: a persistent push_to_origin failure after WorkerDone must

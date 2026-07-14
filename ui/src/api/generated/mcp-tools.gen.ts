@@ -985,6 +985,7 @@ export namespace DoctorFixOutputSchema {
   error?: string
   finding_id: string
   ok: boolean
+  result?: any
   [k: string]: any
   }
 
@@ -1321,6 +1322,34 @@ export namespace EpicCloseOutputSchema {
    */
   originating_adr_id?: string
   owner?: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id?: string
   status?: string
   title?: string
@@ -1444,6 +1473,34 @@ export namespace EpicCreateOutputSchema {
    */
   originating_adr_id?: string
   owner?: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id?: string
   status?: string
   title?: string
@@ -1533,6 +1590,34 @@ export namespace EpicListOutputSchema {
    */
   originating_adr_id?: string
   owner: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id: string
   status: string
   title: string
@@ -1641,6 +1726,34 @@ export namespace EpicReopenOutputSchema {
    */
   originating_adr_id?: string
   owner?: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id?: string
   status?: string
   title?: string
@@ -1693,6 +1806,34 @@ export namespace EpicShowOutputSchema {
    */
   originating_adr_id?: string
   owner?: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id?: string
   status?: string
   task_count?: number
@@ -1836,6 +1977,34 @@ export namespace EpicUpdateOutputSchema {
    */
   originating_adr_id?: string
   owner?: string
+  /**
+   * Build owner of the proposal (whose credentials the build consumes),
+   * enriched on `epic_list` responses. The board shows their avatar on the
+   * proposal swimlane.
+   */
+  proposal_build_owner_user_id?: string
+  /**
+   * Originating proposal id (denormalized from `proposal_epics` at
+   * graduation). `None` for hand-created epics. The board groups its
+   * swimlanes by it.
+   */
+  proposal_id?: string
+  /**
+   * Proposal short id, enriched on `epic_list` responses so the board can
+   * label and link proposal swimlanes without loading proposals.
+   */
+  proposal_short_id?: string
+  /**
+   * Proposal status (`building`, `shipped`, …), enriched on `epic_list`
+   * responses. The board only renders proposal swimlanes for `building`
+   * proposals so the kanban stays scoped to active work.
+   */
+  proposal_status?: string
+  /**
+   * Proposal title, enriched on `epic_list` responses (see
+   * `proposal_short_id`).
+   */
+  proposal_title?: string
   short_id?: string
   status?: string
   title?: string
@@ -3718,6 +3887,11 @@ export namespace MemoryGraphOutputSchema {
    * Total resolved edges incident to this node (inbound + outbound).
    */
   connection_count: number
+  /**
+   * Creation time (ISO-8601 UTC string, as stored). Drives the graph
+   * canvas time axis; optional so older serialized responses stay valid.
+   */
+  created_at?: string
   /**
    * Entity type discriminator: `"note"` for note rows, `"proposal"` for
    * proposal rows. Defaults to `"note"` so existing serialized responses
@@ -11000,10 +11174,16 @@ export namespace UserSettingsGetOutputSchema {
    * edit lanes (UI disables the controls; the server rejects lane writes).
    */
   lane_locked: boolean
+  /**
+   * Per-lane concurrency ceilings. `None` means this user has no
+   * lane-specific ceiling (legacy/unbounded behavior).
+   */
+  lane_max_sessions?: (LaneMaxSessionsPayload | null)
   lanes: ModelLanesPayload
   /**
    * This user's per-model concurrency caps (`{ "provider/model": cap }`).
-   * The sole admission control at dispatch; empty ⇒ default 1 per model.
+   * Per-model admission ceilings at dispatch, composed with any per-lane
+   * ceiling; empty ⇒ default 1 per model.
    */
   max_sessions: {
   [k: string]: number
@@ -11013,6 +11193,25 @@ export namespace UserSettingsGetOutputSchema {
    * `users.id` of the signed-in caller (echoed so the UI can sanity-check identity).
    */
   user_id?: string
+  [k: string]: any
+  }
+  /**
+   * Per-user concurrency ceilings for each role lane.
+   */
+  export interface LaneMaxSessionsPayload {
+  /**
+   * Concurrent worker sessions.
+   */
+  implement: number
+  /**
+   * Concurrent autonomous planning and refinement sessions. Interactive
+   * chat is not subject to this ceiling.
+   */
+  plan: number
+  /**
+   * Concurrent reviewer sessions.
+   */
+  review: number
   [k: string]: any
   }
   /**
@@ -11060,6 +11259,11 @@ export namespace UserSettingsSetInputSchema {
    */
   diverse_review?: boolean
   /**
+   * Per-lane concurrency ceilings for THIS user. Every value must be in
+   * 1..=10. Omit to keep the current value.
+   */
+  lane_max_sessions?: (LaneMaxSessionsPayload | null)
+  /**
    * Per-ROLE ordered model lanes for THIS user (each highest priority first),
    * as full `provider/model` ids: `plan` (planner/architect/chat),
    * `implement` (worker), `review` (reviewer). Each id must be a model on a
@@ -11070,8 +11274,9 @@ export namespace UserSettingsSetInputSchema {
   /**
    * Per-model concurrency caps for THIS user (`{ "provider/model": cap }`).
    * How many sessions of each model may run concurrently for this user — the
-   * sole admission control (no global ceiling). Pass `{}` to clear (→ default
-   * 1 per model). Omit to keep the current value.
+   * per-model admission ceiling (there is no global ceiling), composed with
+   * any per-lane ceiling. Pass `{}` to clear (→ default 1 per model). Omit to
+   * keep the current value.
    */
   max_sessions?: {
   [k: string]: number
@@ -11081,6 +11286,25 @@ export namespace UserSettingsSetInputSchema {
    * configure). Non-admins must omit it.
    */
   target_user_id?: string
+  [k: string]: any
+  }
+  /**
+   * Per-user concurrency ceilings for each role lane.
+   */
+  export interface LaneMaxSessionsPayload {
+  /**
+   * Concurrent worker sessions.
+   */
+  implement: number
+  /**
+   * Concurrent autonomous planning and refinement sessions. Interactive
+   * chat is not subject to this ceiling.
+   */
+  plan: number
+  /**
+   * Concurrent reviewer sessions.
+   */
+  review: number
   [k: string]: any
   }
   /**
@@ -11121,6 +11345,11 @@ export namespace UserSettingsSetOutputSchema {
   diverse_review?: boolean
   error?: string
   /**
+   * The resulting per-lane concurrency ceilings after the patch. `None`
+   * means no lane-specific ceiling.
+   */
+  lane_max_sessions?: (LaneMaxSessionsPayload | null)
+  /**
    * The resulting per-role model lanes after the patch.
    */
   lanes?: (ModelLanesPayload | null)
@@ -11131,6 +11360,25 @@ export namespace UserSettingsSetOutputSchema {
   [k: string]: number
   }
   ok: boolean
+  [k: string]: any
+  }
+  /**
+   * Per-user concurrency ceilings for each role lane.
+   */
+  export interface LaneMaxSessionsPayload {
+  /**
+   * Concurrent worker sessions.
+   */
+  implement: number
+  /**
+   * Concurrent autonomous planning and refinement sessions. Interactive
+   * chat is not subject to this ceiling.
+   */
+  plan: number
+  /**
+   * Concurrent reviewer sessions.
+   */
+  review: number
   [k: string]: any
   }
   /**

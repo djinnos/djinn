@@ -1,7 +1,7 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::provider::Pricing;
-use djinn_core::models::{SessionRecord, SessionStatus};
+use djinn_core::models::{ModelLane, SessionRecord, SessionStatus};
 use serde_json::Value;
 
 use crate::Result;
@@ -600,6 +600,53 @@ impl SessionRepository {
         Ok(rows
             .into_iter()
             .map(|r| (r.creator, r.model_id, r.cnt))
+            .collect())
+    }
+
+    /// Count currently-running autonomous sessions grouped by
+    /// `(creator_user_id, model lane)`.
+    ///
+    /// Lane attribution intentionally follows the same role mapping used by
+    /// dispatch admission: `worker` consumes the implement lane, `reviewer`
+    /// consumes the review lane, and every other autonomous role consumes the
+    /// plan lane. Interactive `chat` sessions are excluded even though
+    /// [`ModelLane::for_role`] maps them to plan, because chat never flows
+    /// through coordinator admission and must not starve background work.
+    pub async fn count_active_by_user_and_lane(
+        &self,
+    ) -> Result<Vec<(Option<String>, ModelLane, i64)>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query_as::<_, (Option<String>, String, i64)>(
+            r#"SELECT COALESCE(s.created_by_user_id, t.created_by_user_id) AS creator,
+                      CASE
+                          WHEN s.agent_type = 'worker' THEN 'implement'
+                          WHEN s.agent_type = 'reviewer' THEN 'review'
+                          ELSE 'plan'
+                      END AS lane,
+                      COUNT(*)::bigint AS cnt
+                 FROM sessions s
+                 LEFT JOIN tasks t ON t.id = s.task_id
+                WHERE s.status = 'running'
+                  AND s.agent_type <> 'chat'
+                GROUP BY COALESCE(s.created_by_user_id, t.created_by_user_id),
+                         CASE
+                             WHEN s.agent_type = 'worker' THEN 'implement'
+                             WHEN s.agent_type = 'reviewer' THEN 'review'
+                             ELSE 'plan'
+                         END"#,
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(creator, lane, count)| {
+                let lane = match lane.as_str() {
+                    "implement" => ModelLane::Implement,
+                    "review" => ModelLane::Review,
+                    _ => ModelLane::Plan,
+                };
+                (creator, lane, count)
+            })
             .collect())
     }
 
@@ -1832,6 +1879,22 @@ mod tests {
             .unwrap();
         }
 
+        // Reviewer is its own lane; it still shares the legacy per-model
+        // count with every other autonomous role.
+        let reviewer_task = mk_task(&db, &project_id, &epic.id, &user_a, "task").await;
+        repo.create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: Some(&reviewer_task),
+            model: "openai/gpt",
+            agent_type: "reviewer",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
         let map: std::collections::HashMap<(String, String), i64> = repo
             .count_active_by_user_and_model()
             .await
@@ -1839,14 +1902,41 @@ mod tests {
             .into_iter()
             .filter_map(|(c, m, n)| c.map(|c| ((c, m), n)))
             .collect();
-        // user_a's gpt count is 5 (2 worker + 3 tribunal) — the chat session is excluded.
+        // user_a's gpt count is 6 (2 worker + 3 tribunal + 1 reviewer) — the
+        // chat session is excluded.
         assert_eq!(
             map.get(&(user_a.clone(), "openai/gpt".to_string())),
-            Some(&5)
+            Some(&6)
         );
         assert_eq!(map.get(&(user_a.clone(), "x/kimi".to_string())), Some(&1));
         assert_eq!(
             map.get(&(user_b.clone(), "openai/gpt".to_string())),
+            Some(&1)
+        );
+
+        let lane_counts: std::collections::HashMap<(String, ModelLane), i64> = repo
+            .count_active_by_user_and_lane()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|(creator, lane, count)| creator.map(|c| ((c, lane), count)))
+            .collect();
+        assert_eq!(
+            lane_counts.get(&(user_a.clone(), ModelLane::Implement)),
+            Some(&3),
+            "two gpt workers plus one kimi worker consume implement capacity"
+        );
+        assert_eq!(
+            lane_counts.get(&(user_a.clone(), ModelLane::Plan)),
+            Some(&3),
+            "advocate/adversary/judge consume plan capacity"
+        );
+        assert_eq!(
+            lane_counts.get(&(user_a.clone(), ModelLane::Review)),
+            Some(&1)
+        );
+        assert_eq!(
+            lane_counts.get(&(user_b.clone(), ModelLane::Implement)),
             Some(&1)
         );
     }

@@ -568,14 +568,52 @@ impl DjinnMcpServer {
         };
         let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.list_filtered(query).await {
-            Ok(result) => Json(list_response::success::<EpicListResponse>(
-                result.epics.iter().map(EpicModel::from).collect(),
-                result.total_count,
-                limit,
-                offset,
-            )),
+            Ok(result) => {
+                let mut epics: Vec<EpicModel> = result.epics.iter().map(EpicModel::from).collect();
+                if let Err(e) = self.enrich_epic_proposal_refs(&mut epics).await {
+                    return Json(list_response::error::<EpicListResponse>(e));
+                }
+                Json(list_response::success::<EpicListResponse>(
+                    epics,
+                    result.total_count,
+                    limit,
+                    offset,
+                ))
+            }
             Err(e) => Json(list_response::error::<EpicListResponse>(e.to_string())),
         }
+    }
+
+    /// Fill `proposal_short_id`/`proposal_title`/`proposal_status` on epics
+    /// that carry a `proposal_id`, with one batched proposals lookup. Lets the
+    /// board label proposal swimlanes without hydrating proposals.
+    async fn enrich_epic_proposal_refs(
+        &self,
+        epics: &mut [EpicModel],
+    ) -> std::result::Result<(), String> {
+        let mut ids: Vec<String> = epics.iter().filter_map(|e| e.proposal_id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let proposals =
+            djinn_db::ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let refs = proposals
+            .refs_by_ids(&ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        let by_id: std::collections::HashMap<&str, &djinn_db::ProposalRef> =
+            refs.iter().map(|r| (r.id.as_str(), r)).collect();
+        for epic in epics.iter_mut() {
+            if let Some(r) = epic.proposal_id.as_deref().and_then(|id| by_id.get(id)) {
+                epic.proposal_short_id = Some(r.short_id.clone());
+                epic.proposal_title = Some(r.title.clone());
+                epic.proposal_status = Some(r.status.clone());
+                epic.proposal_build_owner_user_id = r.build_owner_user_id.clone();
+            }
+        }
+        Ok(())
     }
 
     /// Update allowed fields of an epic.

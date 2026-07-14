@@ -23,7 +23,7 @@ impl NoteRepository {
         let node_rows = sqlx::query!(
             r#"SELECT n.id AS "id!", n.permalink AS "permalink!",
                     n.title AS "title!", n.note_type AS "note_type!",
-                    n.folder AS "folder!",
+                    n.folder AS "folder!", n.created_at AS "created_at!",
                     (SELECT COUNT(*) FROM note_links WHERE source_id = n.id
                        AND target_id IS NOT NULL)
                     + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)
@@ -72,13 +72,14 @@ impl NoteRepository {
                 folder: row.folder,
                 connection_count: row.connection_count,
                 entity_type: "note".to_string(),
+                created_at: Some(row.created_at),
             })
             .collect();
 
         // ── Proposal nodes ──────────────────────────────────────────────────────
         // Fetch proposals linked to this project via proposal_targets.
         let proposal_rows = sqlx::query(
-            r#"SELECT p.id, p.short_id, p.title
+            r#"SELECT p.id, p.short_id, p.title, p.created_at
                FROM proposals p
                JOIN proposal_targets pt ON pt.proposal_id = p.id
                WHERE pt.project_id = $1"#,
@@ -91,6 +92,7 @@ impl NoteRepository {
             let id: String = row.get("id");
             let short_id: String = row.get("short_id");
             let title: String = row.get("title");
+            let created_at: String = row.get("created_at");
             // Count heterogeneous typed edges incident to this proposal.
             let connection_count: i64 = sqlx::query_scalar(
                 r#"SELECT COUNT(*) FROM memory_entity_associations
@@ -111,6 +113,7 @@ impl NoteRepository {
                 is_orphan: false,
                 broken_targets: Vec::new(),
                 entity_type: "proposal".to_string(),
+                created_at: Some(created_at),
             });
         }
 

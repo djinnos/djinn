@@ -3825,7 +3825,7 @@ EOF
         let payload = &sink.payloads()[0];
 
         // Reviewer-checkable payload shape: all required stable fields present.
-        assert_pretask_payload_shape(&payload, &cfg.lifecycle.pre_task[0], 0);
+        assert_pretask_payload_shape(payload, &cfg.lifecycle.pre_task[0], 0);
 
         // Command-level assertions on the payload.
         assert_eq!(

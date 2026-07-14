@@ -1,8 +1,7 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
-import { render, screen, userEvent, waitFor, within } from "@/test/test-utils";
+import { render, screen, waitFor, within } from "@/test/test-utils";
 import { KanbanBoard } from "@/components/KanbanBoard";
 import { mergedColumnStore } from "@/stores/mergedColumnStore";
-import { loadMoreClosedTasks } from "@/api/server";
 import type { Epic, Task } from "@/api/types";
 
 vi.mock("@/electron/commands", () => ({
@@ -55,6 +54,39 @@ const epicB: Epic = {
   updated_at: "2026-01-01T00:00:00Z",
 };
 
+// Two epics graduated from the same building proposal — they share a lane.
+const buildingProposal = {
+  proposal_id: "prop-1",
+  proposal_short_id: "pr1s",
+  proposal_title: "Proposal One",
+  proposal_status: "building",
+};
+
+const epicP1: Epic = {
+  ...epicA,
+  id: "epic-p1",
+  title: "Graduated One",
+  ...buildingProposal,
+};
+
+const epicP2: Epic = {
+  ...epicA,
+  id: "epic-p2",
+  title: "Graduated Two",
+  ...buildingProposal,
+};
+
+// An epic whose proposal already shipped — no longer building.
+const shippedEpic: Epic = {
+  ...epicA,
+  id: "epic-shipped",
+  title: "Shipped Epic",
+  proposal_id: "prop-shipped",
+  proposal_short_id: "prsh",
+  proposal_title: "Shipped Proposal",
+  proposal_status: "shipped",
+};
+
 const makeTask = (
   overrides: Partial<Task> & Pick<Task, "id" | "title" | "status">,
 ): Task => ({
@@ -75,8 +107,6 @@ const makeTask = (
 describe("KanbanBoard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // The Merged-column pagination state is a global store; reset it so tests
-    // that don't opt into "Load more" see no affordance.
     mergedColumnStore.getState().reset();
   });
 
@@ -125,17 +155,122 @@ describe("KanbanBoard", () => {
     expect(inFlightCol).toHaveTextContent("1");
     expect(doneCol).toHaveTextContent("1");
 
+    // Tasks land in their status cell inside the epic's swimlane.
     expect(
-      within(openCol!.parentElement as HTMLElement).getByText("Open task"),
+      within(screen.getByTestId("lane-no-proposal-open")).getByText(
+        "Open task",
+      ),
     ).toBeInTheDocument();
     expect(
-      within(inFlightCol!.parentElement as HTMLElement).getByText(
+      within(screen.getByTestId("lane-no-proposal-in_progress")).getByText(
         "Flight task",
       ),
     ).toBeInTheDocument();
     expect(
-      within(doneCol!.parentElement as HTMLElement).getByText("Done task"),
+      within(screen.getByTestId("lane-no-proposal-done")).getByText(
+        "Done task",
+      ),
     ).toBeInTheDocument();
+  });
+
+  it("groups epics graduated from the same building proposal into one proposal lane", () => {
+    const tasks: Task[] = [
+      makeTask({
+        id: "t-p1",
+        title: "Task in graduated one",
+        status: "open",
+        epic_id: epicP1.id,
+      }),
+      makeTask({
+        id: "t-p2",
+        title: "Task in graduated two",
+        status: "in_progress",
+        epic_id: epicP2.id,
+      }),
+    ];
+
+    render(
+      <KanbanBoard
+        tasks={tasks}
+        epics={
+          new Map([
+            [epicP1.id, epicP1],
+            [epicP2.id, epicP2],
+          ])
+        }
+      />,
+    );
+
+    // One lane titled by the proposal, holding both epics' tasks. The epics
+    // do not get their own lanes (their titles only appear as card chips).
+    expect(screen.getByText("Proposal One")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("lane-header-epic:epic-p1"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("lane-header-epic:epic-p2"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("lane-proposal:prop-1-open")).getByText(
+        "Task in graduated one",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(
+        screen.getByTestId("lane-proposal:prop-1-in_progress"),
+      ).getByText("Task in graduated two"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the epic chip on cards inside proposal lanes", () => {
+    const tasks: Task[] = [
+      makeTask({
+        id: "t-p1",
+        title: "Task in graduated one",
+        status: "open",
+        epic_id: epicP1.id,
+      }),
+    ];
+
+    render(
+      <KanbanBoard tasks={tasks} epics={new Map([[epicP1.id, epicP1]])} />,
+    );
+
+    const chip = screen.getByTestId("taskcard-epic-chip");
+    expect(chip).toHaveTextContent("Graduated One");
+  });
+
+  it("hides merged tasks of non-building proposals but keeps their active tasks visible", () => {
+    const tasks: Task[] = [
+      makeTask({
+        id: "t-shipped-open",
+        title: "Straggler open task",
+        status: "open",
+        epic_id: shippedEpic.id,
+      }),
+      makeTask({
+        id: "t-shipped-done",
+        title: "Old merged task",
+        status: "closed",
+        epic_id: shippedEpic.id,
+        merge_commit_sha: "old123",
+      }),
+    ];
+
+    render(
+      <KanbanBoard
+        tasks={tasks}
+        epics={new Map([[shippedEpic.id, shippedEpic]])}
+      />,
+    );
+
+    // No proposal lane for a shipped proposal; the straggler shows under the
+    // epic lane so live work never disappears, but the old merged task ages
+    // off the board.
+    expect(screen.queryByText("Shipped Proposal")).not.toBeInTheDocument();
+    expect(screen.getByText("Shipped Epic")).toBeInTheDocument();
+    expect(screen.getByText("Straggler open task")).toBeInTheDocument();
+    expect(screen.queryByText("Old merged task")).not.toBeInTheDocument();
   });
 
   it("applies the text search from the shared filter URL param", async () => {
@@ -287,12 +422,13 @@ describe("KanbanBoard", () => {
   it("shows empty board state when no tasks", () => {
     render(<KanbanBoard tasks={[]} epics={new Map()} />);
 
-    expect(screen.getAllByText("No tasks")).toHaveLength(4);
+    expect(screen.getByText("No tasks")).toBeInTheDocument();
   });
 
-  it("shows the exact server merged total (not the loaded count) and Load more when more merged pages exist", async () => {
-    // Simulate the first merged page having been loaded with more remaining.
-    // The server reports 1231 merged tasks total even though only one is loaded.
+  it("never shows merged-column pagination — the board stays scoped to active proposals", () => {
+    // Even when the merged store reports more pages server-side, the board
+    // renders no Load more affordance: old merged tasks belong to retired
+    // proposals and age off the board instead.
     mergedColumnStore.getState().setProjectPage({
       slug: "owner/repo",
       projectId: "p1",
@@ -313,46 +449,15 @@ describe("KanbanBoard", () => {
 
     render(<KanbanBoard tasks={tasks} epics={new Map([[epicA.id, epicA]])} />);
 
-    // Header shows the exact server total (1231), never a "+"-suffixed estimate.
-    const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
-    expect(doneCol).toHaveTextContent("1231");
-    expect(doneCol).not.toHaveTextContent("+");
-
-    const loadMore = screen.getByRole("button", { name: "Load more" });
-    await userEvent.click(loadMore);
-    expect(loadMoreClosedTasks).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not show Load more when all merged pages are loaded and shows the exact total", () => {
-    mergedColumnStore.getState().setProjectPage({
-      slug: "owner/repo",
-      projectId: "p1",
-      loaded: 1,
-      hasMore: false,
-      totalMerged: 1,
-    });
-
-    const tasks: Task[] = [
-      makeTask({
-        id: "t-done",
-        title: "Merged task",
-        status: "closed",
-        epic_id: epicA.id,
-        merge_commit_sha: "abc123merged",
-      }),
-    ];
-
-    render(<KanbanBoard tasks={tasks} epics={new Map([[epicA.id, epicA]])} />);
-
-    const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
-    expect(doneCol).toHaveTextContent("1");
-    expect(doneCol).not.toHaveTextContent("+");
     expect(
       screen.queryByRole("button", { name: "Load more" }),
     ).not.toBeInTheDocument();
+    // The Merged header counts what is on the board, not the server total.
+    const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
+    expect(doneCol).not.toHaveTextContent("1231");
   });
 
-  it("shows empty open epics in the Open column when they have no tasks", () => {
+  it("does not create lanes for standalone epics without tasks — lanes are proposals", () => {
     render(
       <KanbanBoard
         tasks={[]}
@@ -365,11 +470,18 @@ describe("KanbanBoard", () => {
       />,
     );
 
-    const openCol = screen.getByText("Open").closest(".flex.flex-col")
-      ?.parentElement as HTMLElement;
+    expect(screen.queryByText("Epic Alpha")).not.toBeInTheDocument();
+    expect(screen.queryByText("Epic Draft")).not.toBeInTheDocument();
+    expect(screen.getByText("No tasks")).toBeInTheDocument();
+  });
 
-    expect(within(openCol).getByText("Epic Alpha")).toBeInTheDocument();
-    expect(within(openCol).getByText("Epic Draft")).toBeInTheDocument();
-    expect(within(openCol).getAllByText("No tasks yet")).toHaveLength(2);
+  it("seeds a proposal lane for an empty epic under a building proposal", () => {
+    render(
+      <KanbanBoard tasks={[]} epics={new Map([[epicP1.id, epicP1]])} />,
+    );
+
+    expect(screen.getByText("Proposal One")).toBeInTheDocument();
+    expect(screen.queryByText("Graduated One")).not.toBeInTheDocument();
+    expect(screen.getByText("No tasks yet")).toBeInTheDocument();
   });
 });

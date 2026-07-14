@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use djinn_core::auth_context::{TrustedRevisionCallerContext, TrustedRevisionPrincipal};
 use serde::{Deserialize, Serialize};
 
 /// The closed set of changes represented by the note revision ledger.
@@ -230,6 +231,31 @@ impl TrustedNoteRevisionProvenance {
     }
 }
 
+/// Convert only the server-owned dispatch context into persisted revision
+/// values. MCP wire parameters cannot construct either trusted value.
+impl TryFrom<&TrustedRevisionCallerContext> for TrustedNoteRevisionAttribution {
+    type Error = NoteRevisionValidationError;
+
+    fn try_from(context: &TrustedRevisionCallerContext) -> Result<Self, Self::Error> {
+        match context.principal() {
+            TrustedRevisionPrincipal::Human { user_id } => Self::human(user_id.clone()),
+            TrustedRevisionPrincipal::Agent { agent_id } => Self::agent(agent_id.clone()),
+        }
+    }
+}
+
+impl TryFrom<&TrustedRevisionCallerContext> for TrustedNoteRevisionProvenance {
+    type Error = NoteRevisionValidationError;
+
+    fn try_from(context: &TrustedRevisionCallerContext) -> Result<Self, Self::Error> {
+        Self::new(
+            context.session_id().map(ToOwned::to_owned),
+            context.task_id().map(ToOwned::to_owned),
+            context.task_run_id().map(ToOwned::to_owned),
+        )
+    }
+}
+
 /// Full before/after state carried by a revision event. Content is intentionally
 /// absent for confidence-only and extraction-skipped events.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -295,5 +321,30 @@ mod tests {
             TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction).subsystem(),
             Some("extraction")
         );
+    }
+
+    #[test]
+    fn server_owned_context_converts_human_and_agent_principals() {
+        let human = TrustedRevisionCallerContext::authenticated_human("user-1").unwrap();
+        let attribution = TrustedNoteRevisionAttribution::try_from(&human).unwrap();
+        let provenance = TrustedNoteRevisionProvenance::try_from(&human).unwrap();
+        assert_eq!(attribution.actor_kind(), NoteRevisionActorKind::Human);
+        assert_eq!(attribution.actor_id(), Some("user-1"));
+        assert!(provenance.is_empty());
+
+        let agent = TrustedRevisionCallerContext::authenticated_agent("worker")
+            .unwrap()
+            .with_execution_provenance(
+                Some("session".into()),
+                Some("task".into()),
+                Some("run".into()),
+            );
+        let attribution = TrustedNoteRevisionAttribution::try_from(&agent).unwrap();
+        let provenance = TrustedNoteRevisionProvenance::try_from(&agent).unwrap();
+        assert_eq!(attribution.actor_kind(), NoteRevisionActorKind::Agent);
+        assert_eq!(attribution.actor_id(), Some("worker"));
+        assert_eq!(provenance.session_id(), Some("session"));
+        assert_eq!(provenance.task_id(), Some("task"));
+        assert_eq!(provenance.task_run_id(), Some("run"));
     }
 }

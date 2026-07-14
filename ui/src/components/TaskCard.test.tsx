@@ -4,7 +4,7 @@ import { render, screen } from "@/test/test-utils";
 import { mockTaskA, mockCiPassing, mockCiPending, mockCiFailing, mockCiUnknown, mockCiAdvisoryFailure } from "@/test/fixtures";
 
 describe("TaskCard", () => {
-  it("renders title, short_id, status badge, priority, labels, and AC count", () => {
+  it("renders title, short_id, status badge, priority, and AC count (labels stay off the card)", () => {
     const task = {
       ...mockTaskA,
       id: "task-card-1",
@@ -34,7 +34,8 @@ describe("TaskCard", () => {
     expect(screen.getByText("starting")).toBeInTheDocument();
     expect(screen.getByLabelText(`Priority P${task.priority}`)).toBeInTheDocument();
     expect(screen.getByText("1/2")).toBeInTheDocument();
-    expect(screen.getByText(/frontend/i)).toBeInTheDocument();
+    // Label chips were dropped from the card to keep rows scannable.
+    expect(screen.queryByText(/frontend/i)).not.toBeInTheDocument();
   });
 
   it("renders the real 'starting' status (not a derived 'setting up') for a dispatched, pre-session run", () => {

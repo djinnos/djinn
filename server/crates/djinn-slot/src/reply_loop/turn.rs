@@ -2,6 +2,7 @@
 // while rrdr budget wind-down hooks land; split-out is a separate refactor.
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
 use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
@@ -41,6 +42,7 @@ use super::persistence::{
     complete_compaction_boundary, flush_in_flight_turn, persist_session_message,
     record_compaction_started, serialize_llm_input, serialize_message,
 };
+use super::phase::SessionPhaseTracker;
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
 use djinn_db::SessionCompactionBoundaryRepository;
@@ -530,6 +532,7 @@ pub async fn run_reply_loop(
         }
     };
     let tool_metadata = tool_runtime_metadata(tools);
+    let phase_tracker = Arc::new(Mutex::new(SessionPhaseTracker::new(slot_ctx, role_name)));
     // Register activity tracker.
     let activity_ts = slot_ctx.register_activity(task_id);
     let last_rpc_touch = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -763,6 +766,7 @@ pub async fn run_reply_loop(
             // provider-agnostic conversation — covers all wire formats without
             // mutating stored history.
             let request_conversation = conversation.with_synthesized_tool_results();
+            phase_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).enter_provider_wait();
             let stream_result = provider
                 .stream(request_conversation.as_ref(), tools, tool_choice)
                 .await;
@@ -780,6 +784,11 @@ pub async fn run_reply_loop(
                     if let Some(llm) = otel_llm {
                         llm.end_error("context_length_exceeded");
                     }
+                    // Compaction is local orchestration, not provider wait.
+                    phase_tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .exit_provider_wait();
                     let compacted = compact_conversation_in_critical_section(
                         provider,
                         conversation,
@@ -824,12 +833,14 @@ pub async fn run_reply_loop(
                 tool_metadata: &tool_metadata,
                 tool_dispatcher,
                 otel_session: otel_session.as_ref(),
+                phase_tracker: Some(&phase_tracker),
             };
             let mut stream_state = consume_provider_stream(StreamLoopContext {
                 provider,
                 stream,
                 tool_metadata: &tool_metadata,
                 dispatch: &dispatch_ctx,
+                phase_tracker: &phase_tracker,
                 task_id,
                 session_id,
                 role_name,
@@ -851,6 +862,7 @@ pub async fn run_reply_loop(
                 total_reasoning_out: &mut total_reasoning_out,
             })
             .await?;
+            phase_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).exit_provider_wait();
             // Flush any observed assistant/tool content before returning on
             // interrupt, cancellation, or early stream end.  This persists the
             // in-flight turn so it survives session release and is visible on
@@ -980,6 +992,11 @@ pub async fn run_reply_loop(
                         backoff_secs = backoff.as_secs(),
                         "ReplyLoop: provider stream ended without events; backing off then retrying"
                     );
+                    // Keep provider ownership through provider-loop backoff.
+                    phase_tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .enter_provider_wait();
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
@@ -1059,6 +1076,11 @@ pub async fn run_reply_loop(
                         backoff_secs = backoff.as_secs(),
                         "ReplyLoop: provider returned empty assistant turn; backing off then retrying"
                     );
+                    // Keep provider ownership through provider-loop backoff.
+                    phase_tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .enter_provider_wait();
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
@@ -1187,30 +1209,31 @@ pub async fn run_reply_loop(
                 )
                 .await
                 {
-                    NoProgressGuardResult::FirstBounceCorrective(corrective_text)
+                    NoProgressGuardResult::FirstBounceCorrective(corrective_text) => {
                         if let Some(tool_use_id) =
-                            find_tool_use_id(&turn_tool_calls, primary_finalize) =>
-                    {
-                        no_progress_guard_triggered = true;
-                        let corrective_result = ContentBlock::ToolResult {
-                            tool_use_id: tool_use_id.to_string(),
-                            content: vec![ContentBlock::Text {
-                                text: corrective_text,
-                            }],
-                            is_error: true,
-                        };
-                        let result_msg = Message {
-                            role: Role::User,
-                            content: vec![corrective_result],
-                            metadata: None,
-                        };
-                        persist_session_message(&msg_repo, session_id, task_id, &result_msg)
-                            .await;
-                        conversation.push(result_msg);
-                        // Skip finalize and tool dispatch for this turn; the
-                        // loop will continue and the worker will see the
-                        // corrective message.
-                        continue;
+                            find_tool_use_id(&turn_tool_calls, primary_finalize)
+                        {
+                            no_progress_guard_triggered = true;
+                            let corrective_result = ContentBlock::ToolResult {
+                                tool_use_id: tool_use_id.to_string(),
+                                content: vec![ContentBlock::Text {
+                                    text: corrective_text,
+                                }],
+                                is_error: true,
+                            };
+                            let result_msg = Message {
+                                role: Role::User,
+                                content: vec![corrective_result],
+                                metadata: None,
+                            };
+                            persist_session_message(&msg_repo, session_id, task_id, &result_msg)
+                                .await;
+                            conversation.push(result_msg);
+                            // Skip finalize and tool dispatch for this turn;
+                            // the loop will continue and the worker will see
+                            // the corrective message.
+                            continue;
+                        }
                     }
                     NoProgressGuardResult::SecondStrikeSettle => {
                         // Second consecutive identical no-progress submit.
@@ -1484,6 +1507,10 @@ pub async fn run_reply_loop(
         Ok(())
     }
     .await;
+    phase_tracker
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .finish();
     if let Some(session) = otel_session {
         session.record_usage(total_tokens_in, total_tokens_out);
         session.record_cache_usage(total_cache_read, total_cache_write, total_reasoning_out);
@@ -2008,6 +2035,9 @@ mod tests {
             .tool_dispatcher
             .as_deref()
             .expect("test SlotContext has a tool dispatcher");
+        let phase_tracker = Arc::new(std::sync::Mutex::new(
+            super::super::phase::SessionPhaseTracker::new(&slot_ctx, "worker"),
+        ));
         let dispatch_ctx = super::super::tool_dispatch::ToolDispatchContext {
             ctx: &slot_ctx,
             task_id: "task",
@@ -2016,6 +2046,7 @@ mod tests {
             tool_metadata: &tool_metadata,
             tool_dispatcher: dispatcher,
             otel_session: None,
+            phase_tracker: None,
         };
 
         let state = consume_provider_stream(StreamLoopContext {
@@ -2023,6 +2054,7 @@ mod tests {
             stream,
             tool_metadata: &tool_metadata,
             dispatch: &dispatch_ctx,
+            phase_tracker: &phase_tracker,
             task_id: "task",
             session_id: "session",
             role_name: "worker",

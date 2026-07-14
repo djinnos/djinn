@@ -2,9 +2,9 @@
 //!
 //! These primitives implement the concurrency-cap check and in-flight ledger
 //! overlay used by **every** dispatch path — normal task dispatch, planner
-//! escalation, and (once wired in a follow-up task) refinement tribunal
-//! dispatch. Centralising them here ensures a single source of truth for cap
-//! semantics rather than a divergent copy in each caller.
+//! escalation, and refinement tribunal dispatch. Centralising them here
+//! ensures a single source of truth for cap semantics rather than a divergent
+//! copy in each caller.
 //!
 //! The high-level `CoordinatorActor` admission methods that compose these
 //! primitives (`check_user_model_admission`, `clear_inflight_dispatch`, etc.)
@@ -12,6 +12,10 @@
 //! machinery they depend on.
 
 use std::collections::HashMap;
+
+use djinn_core::models::ModelLane;
+
+use crate::types::InflightDispatch;
 
 fn record_user_cap_utilization(user: &str, model: &str, used: u32, cap: u32) {
     djinn_telemetry::dispatch::set_user_cap_utilization(user, model, used, cap);
@@ -21,8 +25,8 @@ fn record_user_cap_utilization(user: &str, model: &str, used: u32, cap: u32) {
 ///
 /// `running_by_user_model` must already include the in-flight ledger overlay
 /// (see [`overlay_inflight_ledger`]). Returns `true` when the user has room for
-/// one more session on `model` under `cap` (always `true` when `cap` is 0,
-/// which is clamped to 1 internally).
+/// one more session on `model` under `cap`. A zero cap is defensively treated
+/// as one; API validation prevents new zero values from being persisted.
 ///
 /// This is the single shared cap-check primitive. Normal multi-model dispatch
 /// calls it directly to filter candidate lists; single-model callers (e.g.
@@ -50,34 +54,67 @@ pub(crate) fn model_under_user_cap(
     used < cap
 }
 
-/// Overlay the in-flight dispatch ledger onto the DB-seeded per-user running
-/// counts, taking `max(db, ledger)` per `(creator, model)`.
+/// Check whether a user has room for one more session in `lane`.
 ///
-/// The DB seed counts only sessions that reached `running`, which lags a fresh
-/// dispatch by the worker pod's boot time (20-60s). The ledger holds dispatches
-/// that have not yet produced a `running` row, so overlaying it makes those
-/// count against the per-user cap immediately and prevents re-firing passes from
-/// overshooting it. `max` (not sum) is deliberate: a task present in BOTH the
-/// running rows and the ledger must count once, not twice.
+/// `None` preserves the pre-lane-limit behavior: no lane-specific ceiling is
+/// enforced. A present cap is clamped to at least one as a final defensive
+/// boundary; API and persistence validation reject zero before it reaches the
+/// coordinator.
+pub(crate) fn lane_under_user_cap(
+    running_by_user_lane: &HashMap<(String, ModelLane), u32>,
+    creator: &str,
+    lane: ModelLane,
+    cap: Option<u32>,
+) -> bool {
+    let Some(cap) = cap else {
+        return true;
+    };
+    let used = running_by_user_lane
+        .get(&(creator.to_string(), lane))
+        .copied()
+        .unwrap_or(0);
+    used < cap.max(1)
+}
+
+/// Overlay the in-flight dispatch ledger onto the DB-seeded per-user running
+/// counts by adding reservations that do not yet have a running session row.
+///
+/// Callers capture active task ids before reading aggregate counts, then
+/// reconcile against that earlier snapshot. Usually the retained entries are
+/// disjoint booting work. If a session row lands between the reads, its
+/// reservation is intentionally added too (a conservative one-pass
+/// double-count). Using `max` would undercount the common case of one old
+/// running task plus one distinct booting task and could admit an overshoot.
 pub(crate) fn overlay_inflight_ledger(
     running_by_user_model: &mut HashMap<(String, String), u32>,
-    inflight_dispatches: &HashMap<String, (Option<String>, String)>,
+    inflight_dispatches: &HashMap<String, InflightDispatch>,
 ) {
-    let mut ledger_counts: HashMap<(String, String), u32> = HashMap::new();
-    for (creator, model) in inflight_dispatches.values() {
-        if let Some(c) = creator {
-            *ledger_counts.entry((c.clone(), model.clone())).or_insert(0) += 1;
+    for dispatch in inflight_dispatches.values() {
+        if let Some(creator) = dispatch.creator.as_ref() {
+            *running_by_user_model
+                .entry((creator.clone(), dispatch.model.clone()))
+                .or_insert(0) += 1;
         }
-    }
-    for (key, lcount) in ledger_counts {
-        let entry = running_by_user_model.entry(key).or_insert(0);
-        *entry = (*entry).max(lcount);
     }
     #[cfg(test)]
     observe_dispatch_cap_counts(
         DispatchCapObservationStage::LedgerOverlay,
         running_by_user_model,
     );
+}
+
+/// Overlay the same reconciled in-flight ledger onto DB-seeded lane counts.
+pub(crate) fn overlay_inflight_lane_ledger(
+    running_by_user_lane: &mut HashMap<(String, ModelLane), u32>,
+    inflight_dispatches: &HashMap<String, InflightDispatch>,
+) {
+    for dispatch in inflight_dispatches.values() {
+        if let Some(creator) = dispatch.creator.as_ref() {
+            *running_by_user_lane
+                .entry((creator.clone(), dispatch.lane))
+                .or_insert(0) += 1;
+        }
+    }
 }
 
 // ─── Test-only cap-count instrumentation ──────────────────────────────────
@@ -101,7 +138,7 @@ pub(crate) struct DispatchCapObservation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchCapObservationStage {
     /// Count after DB-seeded running rows have been overlaid with the in-flight
-    /// ledger via `max(db_count, ledger_count)`.
+    /// ledger by adding reconciled, not-yet-running reservations.
     LedgerOverlay,
     /// Count consulted by the per-user cap gate for a candidate model.
     CapConsidered,

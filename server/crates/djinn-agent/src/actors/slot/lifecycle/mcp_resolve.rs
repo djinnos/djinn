@@ -4,8 +4,14 @@
 
 use std::path::Path;
 
+use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
+use djinn_db::ExtensionLoadDiagnosticRepository;
+
 use crate::context::AgentContext;
 use crate::environment::environment_config_for_path;
+use crate::extension_diagnostics::{
+    ExtensionDiagnosticAssociations, ExtensionDiagnosticFact, persist_extension_diagnostic,
+};
 use crate::mcp_client::McpToolRegistry;
 use crate::mcp_settings::{effective_mcp_server_names, effective_skill_names};
 use crate::native_skills;
@@ -25,6 +31,8 @@ pub(crate) struct McpAndSkills {
     /// Per-server MCP instructions from connected servers, in deterministic
     /// server-name order. Failed or no-instruction servers are omitted.
     pub mcp_server_instructions: std::collections::BTreeMap<String, String>,
+    /// Canonical repository rows for this combined MCP + skill load pass.
+    pub extension_diagnostics: Vec<ExtensionLoadDiagnosticV1>,
 }
 
 /// Fetch project environment config, resolve the effective MCP server + skill
@@ -34,6 +42,9 @@ pub(crate) struct McpAndSkills {
 pub(crate) async fn resolve_mcp_and_skills(
     worktree_path: &Path,
     runtime_role: &dyn AgentRole,
+    project_id: &str,
+    task_id: &str,
+    session_id: &str,
     task_short_id: &str,
     role_mcp_servers: Option<&[String]>,
     role_skills: &[String],
@@ -52,7 +63,8 @@ pub(crate) async fn resolve_mcp_and_skills(
         role_name,
         &effective_mcp_servers,
     );
-    let mcp_registry = connect_mcp_registry(
+    let load_attempt_id = uuid::Uuid::now_v7().to_string();
+    let mcp_result = connect_mcp_registry(
         task_short_id,
         role_name,
         &resolved_mcp_servers,
@@ -61,14 +73,15 @@ pub(crate) async fn resolve_mcp_and_skills(
         app_state,
     )
     .await;
-    let mcp_server_instructions = mcp_registry
+    let mcp_server_instructions = mcp_result
+        .registry
         .as_ref()
         .map(|r| r.server_instructions().clone())
         .unwrap_or_default();
     let project_skills =
         load_project_skills(worktree_path, task_short_id, role_name, &effective_skills).await;
     let (resolved_skills, native_skill_names) =
-        merge_native_skills(role_name, project_skills, authoring_trigger);
+        merge_native_skills(role_name, project_skills.skills, authoring_trigger);
     if !native_skill_names.is_empty() {
         tracing::info!(
             task_id = %task_short_id,
@@ -79,13 +92,25 @@ pub(crate) async fn resolve_mcp_and_skills(
             "Lifecycle: merged native skills for role"
         );
     }
+    let mut facts = mcp_result.diagnostics;
+    facts.extend(project_skills.diagnostics);
+    let extension_diagnostics = persist_load_diagnostics(
+        project_id,
+        task_id,
+        session_id,
+        &load_attempt_id,
+        facts,
+        app_state,
+    )
+    .await;
     McpAndSkills {
         effective_mcp_servers,
         effective_skills,
-        mcp_registry,
+        mcp_registry: mcp_result.registry,
         resolved_skills,
         native_skill_names,
         mcp_server_instructions,
+        extension_diagnostics,
     }
 }
 
@@ -123,16 +148,19 @@ async fn connect_mcp_registry(
     resolved_mcp_servers: &[(String, crate::mcp_settings::McpServerConfig)],
     #[cfg(test)] mcp_registry_override: Option<McpToolRegistry>,
     app_state: &AgentContext,
-) -> Option<McpToolRegistry> {
+) -> crate::mcp_client::McpDiscoveryResult {
     #[cfg(test)]
     {
         if let Some(registry) = mcp_registry_override {
-            return Some(registry);
+            return crate::mcp_client::McpDiscoveryResult {
+                registry: Some(registry),
+                diagnostics: Vec::new(),
+            };
         }
     }
     let _ = (task_short_id, role_name); // used in cfg(test) and tracing
     if !resolved_mcp_servers.is_empty() {
-        crate::mcp_client::connect_and_discover(
+        crate::mcp_client::connect_and_discover_with_diagnostics(
             task_short_id,
             role_name,
             resolved_mcp_servers,
@@ -140,7 +168,10 @@ async fn connect_mcp_registry(
         )
         .await
     } else {
-        None
+        crate::mcp_client::McpDiscoveryResult {
+            registry: None,
+            diagnostics: Vec::new(),
+        }
     }
 }
 
@@ -150,22 +181,28 @@ async fn load_project_skills(
     task_short_id: &str,
     role_name: &str,
     effective_skills: &[String],
-) -> Vec<ResolvedSkill> {
+) -> crate::skills_manifest::DetailedVerifiedSkillsLoad {
     if effective_skills.is_empty() {
-        return Vec::new();
+        return crate::skills_manifest::DetailedVerifiedSkillsLoad {
+            skills: Vec::new(),
+            diagnostics: Vec::new(),
+            error: None,
+        };
     }
-    match crate::skills_manifest::load_verified_skills(worktree_path, effective_skills) {
-        Ok(loaded) => {
+    let loaded =
+        crate::skills_manifest::load_verified_skills_detailed(worktree_path, effective_skills);
+    match &loaded.error {
+        None => {
             tracing::info!(
                 task_id = %task_short_id,
                 role = %role_name,
                 requested_count = effective_skills.len(),
-                resolved_count = loaded.len(),
+                resolved_count = loaded.skills.len(),
                 "Lifecycle: resolved role skills"
             );
             loaded
         }
-        Err(error) => {
+        Some(error) => {
             tracing::error!(
                 task_id = %task_short_id,
                 role = %role_name,
@@ -173,6 +210,48 @@ async fn load_project_skills(
                 error = %error,
                 "Lifecycle: skills manifest verification failed"
             );
+            loaded
+        }
+    }
+}
+
+/// Persist a lifecycle load pass and return its canonical scoped rows.
+///
+/// This is crate-visible for the post-discovery integration regression, which
+/// drives the same session-associated persistence/read boundary as stage.
+pub(crate) async fn persist_load_diagnostics(
+    project_id: &str,
+    task_id: &str,
+    session_id: &str,
+    load_attempt_id: &str,
+    facts: Vec<ExtensionDiagnosticFact>,
+    app_state: &AgentContext,
+) -> Vec<ExtensionLoadDiagnosticV1> {
+    let repository = ExtensionLoadDiagnosticRepository::new(app_state.db.clone());
+    let associations = ExtensionDiagnosticAssociations {
+        project_id: project_id.to_owned(),
+        task_id: Some(task_id.to_owned()),
+        session_id: Some(session_id.to_owned()),
+        load_attempt_id: load_attempt_id.to_owned(),
+    };
+    for fact in facts {
+        match persist_extension_diagnostic(&repository, associations.clone(), fact).await {
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(project_id, task_id, session_id, load_attempt_id, error = %error, "Lifecycle: failed to persist extension diagnostics")
+            }
+        }
+    }
+    match repository
+        .list_for_load_attempt(project_id, load_attempt_id)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::error!(project_id, task_id, session_id, load_attempt_id, error = %error, "Lifecycle: failed to read persisted extension diagnostics");
+            // Prompt rendering only consumes the repository's scoped, canonically
+            // ordered read. Do not substitute write-return values when that read
+            // fails: they are neither the complete attempt nor its canonical order.
             Vec::new()
         }
     }

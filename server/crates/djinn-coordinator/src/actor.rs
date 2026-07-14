@@ -80,10 +80,12 @@ pub(super) struct CoordinatorActor {
     /// registers (20-60s after dispatch). Without this ledger, dispatch passes
     /// that re-fire during that window re-seed from a stale-low count and
     /// overshoot the cap (e.g. 8 workers for a cap of 4). This ledger makes a
-    /// dispatched-but-not-yet-running task count against the cap immediately;
-    /// `max(db_count, ledger_count)` keeps the seed correct across restarts too.
+    /// dispatched-but-not-yet-running task count against the cap immediately.
+    /// Admission snapshots capture active task ids before reading aggregate
+    /// counts, then add retained reservations; a session-row handoff can be
+    /// conservatively double-counted for one pass but can never be missed.
     // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
-    pub(super) inflight_dispatches: HashMap<String, (Option<String>, String)>,
+    pub(super) inflight_dispatches: HashMap<String, InflightDispatch>,
     /// Provisional admission reservations for refinement dispatch.
     ///
     /// Before a refinement task row exists, the dispatch path reserves an
@@ -93,7 +95,7 @@ pub(super) struct CoordinatorActor {
     /// re-keyed to the real task id via `inflight_dispatches` and removed from
     /// here. This map is ephemeral (restart-safe-to-lose); reconciliation
     /// against the live pool handles orphaned entries.
-    pub(super) provisional_admissions: HashMap<String, (Option<String>, String)>,
+    pub(super) provisional_admissions: HashMap<String, InflightDispatch>,
     /// Durable dispatch-state: task UUID → cooldown EXPIRY instant. Persisted as
     /// a wall-clock timestamp and converted to a process-local `StdInstant` on
     /// startup; expired persisted cooldowns are intentionally not reloaded.
@@ -580,6 +582,11 @@ impl CoordinatorActor {
         };
 
         for record in records {
+            let inflight_lane = record
+                .last_dispatched_role
+                .as_deref()
+                .map(djinn_core::models::ModelLane::for_role)
+                .unwrap_or(djinn_core::models::ModelLane::Plan);
             if record.failure_streak > 0 {
                 self.dispatch_failure_streak.insert(
                     record.task_id.clone(),
@@ -622,8 +629,14 @@ impl CoordinatorActor {
             }
 
             if let Some(model_id) = record.inflight_model_id {
-                self.inflight_dispatches
-                    .insert(record.task_id, (record.inflight_creator_user_id, model_id));
+                self.inflight_dispatches.insert(
+                    record.task_id,
+                    InflightDispatch {
+                        creator: record.inflight_creator_user_id,
+                        model: model_id,
+                        lane: inflight_lane,
+                    },
+                );
                 summary.inflight += 1;
             }
         }
@@ -665,11 +678,11 @@ impl CoordinatorActor {
         let mut inflight_ledger: Vec<_> = self
             .inflight_dispatches
             .iter()
-            .map(|(task_id, (creator, model))| DebugInflightEntry {
+            .map(|(task_id, dispatch)| DebugInflightEntry {
                 task_id: task_id.clone(),
                 short_id: debug_short_id(task_id),
-                creator: creator.clone(),
-                model: model.clone(),
+                creator: dispatch.creator.clone(),
+                model: dispatch.model.clone(),
                 started_at: self
                     .last_dispatched
                     .get(task_id)
@@ -872,6 +885,12 @@ impl CoordinatorActor {
                 "audit scheduler: tick complete"
             );
         }
+
+        // Publish Linux PSI (CPU/memory/IO pressure) through the bounded
+        // telemetry helpers. Each resource is published independently, so a
+        // partially supported kernel still reports the resources it exposes, and
+        // read/parse failures never stop repeated monitor sampling.
+        crate::resource_monitor::sample_and_publish_psi();
 
         // Check memory pressure before dispatching.
         let memory_throttled = if let Some(mem) = crate::resource_monitor::MemoryStatus::read() {
@@ -2063,15 +2082,28 @@ mod tests {
         );
         actor.inflight_dispatches.insert(
             "inflight-a".to_owned(),
-            (Some("user-a".to_owned()), DEFAULT_MODEL_ID.to_owned()),
+            InflightDispatch {
+                creator: Some("user-a".to_owned()),
+                model: DEFAULT_MODEL_ID.to_owned(),
+                lane: djinn_core::models::ModelLane::Plan,
+            },
         );
         actor.inflight_dispatches.insert(
             "inflight-b".to_owned(),
-            (Some("user-b".to_owned()), DEFAULT_MODEL_ID.to_owned()),
+            InflightDispatch {
+                creator: Some("user-b".to_owned()),
+                model: DEFAULT_MODEL_ID.to_owned(),
+                lane: djinn_core::models::ModelLane::Review,
+            },
         );
-        actor
-            .inflight_dispatches
-            .insert("inflight-c".to_owned(), (None, DEFAULT_MODEL_ID.to_owned()));
+        actor.inflight_dispatches.insert(
+            "inflight-c".to_owned(),
+            InflightDispatch {
+                creator: None,
+                model: DEFAULT_MODEL_ID.to_owned(),
+                lane: djinn_core::models::ModelLane::Implement,
+            },
+        );
         {
             let mut tracker = actor.auto_merge_tracker.lock().unwrap();
             tracker.insert("pr-a".to_owned(), AutoMergeFastPathState::InFlight);

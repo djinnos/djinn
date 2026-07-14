@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use djinn_db::{
     CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric, Database, DbNoteGroup,
-    NoteConsolidationRepository,
+    NoteConsolidationRepository, NoteRevisionReason,
 };
 use djinn_memory::ConsolidationCluster;
 use time::OffsetDateTime;
@@ -108,6 +108,8 @@ async fn consolidate_clusters(
             .map(String::as_str)
             .collect::<Vec<_>>();
         let synthesized = synthesize_cluster(cluster);
+        let reason = NoteRevisionReason::new("consolidation:create canonical cluster note")
+            .map_err(|e| djinn_db::error::DbError::InvalidData(e.to_string()))?;
 
         let created = repo
             .create_canonical_consolidated_note(CreateCanonicalConsolidatedNote {
@@ -119,6 +121,7 @@ async fn consolidate_clusters(
                 abstract_: synthesized.abstract_.as_deref(),
                 overview: synthesized.overview.as_deref(),
                 confidence: synthesized.confidence,
+                reason,
                 source_session_ids: &source_session_refs,
                 scope_paths: &synthesized.scope_paths,
                 source_note_ids: &cluster.note_ids,

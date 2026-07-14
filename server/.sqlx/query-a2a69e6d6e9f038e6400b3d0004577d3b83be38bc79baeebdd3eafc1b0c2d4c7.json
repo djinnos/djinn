@@ -1,0 +1,118 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT e.id, e.project_id, e.short_id, e.title, e.description, e.emoji, e.color,\n                    e.status AS \"status!\", e.owner, e.created_at, e.updated_at, e.closed_at,\n                    e.memory_refs::text AS \"memory_refs!\", e.auto_breakdown AS \"auto_breakdown!: bool\",\n                    e.originating_adr_id, e.created_by_user_id, e.proposal_id\n             FROM epic_blockers b\n             JOIN epics e ON e.id = b.epic_id\n             WHERE b.blocking_epic_id = $1\n               AND e.status = 'open'\n               AND NOT EXISTS (\n                   SELECT 1 FROM epic_blockers b2\n                   JOIN epics be ON be.id = b2.blocking_epic_id\n                   WHERE b2.epic_id = e.id AND be.status != 'closed'\n               )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "short_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "emoji",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "color",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "status!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "owner",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "closed_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "memory_refs!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "auto_breakdown!: bool",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 14,
+        "name": "originating_adr_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 15,
+        "name": "created_by_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 16,
+        "name": "proposal_id",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "a2a69e6d6e9f038e6400b3d0004577d3b83be38bc79baeebdd3eafc1b0c2d4c7"
+}

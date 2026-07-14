@@ -73,8 +73,8 @@ use djinn_workspace::Workspace;
 use crate::AgentType;
 use crate::actors::slot::helpers::conflict_context_for_dispatch;
 use crate::actors::slot::helpers::{
-    build_provider_from_resolved, build_restamp_target, build_telemetry_meta_with_attribution,
-    default_base_url, resolved_needs_base_url,
+    ProviderCredential, build_provider_from_resolved, build_restamp_target,
+    build_telemetry_meta_with_attribution, default_base_url, resolved_needs_base_url,
 };
 use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use crate::actors::slot::lifecycle::model_resolution::{
@@ -103,6 +103,25 @@ use djinn_provider::provider::error::ProviderError;
 use djinn_runtime::{LoopGuardKind as RuntimeLoopGuardKind, LoopGuardTrip, ProviderFailureClass};
 
 use super::SupervisorCallbackContext;
+
+/// A session is created before extension loading so diagnostic rows can carry
+/// its foreign key. Every later setup failure must therefore settle that row.
+async fn mark_session_failed(services: &dyn SupervisorServices, session_id: &str) {
+    if let Err(error) = services
+        .update_session_status(
+            session_id.to_owned(),
+            SessionStatus::Failed,
+            0,
+            0,
+            0,
+            0,
+            None,
+        )
+        .await
+    {
+        tracing::warn!(session_id, error = %error, "Supervisor stage: failed to mark setup session failed");
+    }
+}
 
 /// Conservative quota-reset window synthesized for an exhausted Codex/OpenAI
 /// empty-200 throttle (idea A6/idea 3).
@@ -835,6 +854,41 @@ pub(crate) async fn execute_stage(
         }
     };
 
+    // The session is intentionally created before extension loading so every
+    // diagnostic has a session foreign key. Preserve its billing attribution
+    // from the credential already resolved above rather than dropping it while
+    // moving creation earlier in the stage.
+    let billing_signal = resolved.as_ref().map(|resolved| {
+        derive_billing_signal(
+            &resolved.catalog_provider_id,
+            &resolved.model_name,
+            matches!(
+                resolved.provider_credential.as_ref(),
+                Some(ProviderCredential::OAuthConfig(_))
+            ),
+        )
+    });
+
+    let _ = services
+        .report_stage_step(djinn_runtime::stage_step::SESSION_CREATE)
+        .await;
+    let session_record = services
+        .create_session(
+            djinn_supervisor::services::SerializableCreateSessionParams {
+                project_id: task.project_id.clone(),
+                task_id: Some(task.id.clone()),
+                model: model_id.clone(),
+                agent_type: runtime_role_name.to_string(),
+                metadata_json: None,
+                task_run_id: Some(task_run_id.to_string()),
+                cost_basis_hint: billing_signal.map(|(hint, _)| hint),
+                billing_source: billing_signal.map(|(_, source)| source),
+            },
+        )
+        .await
+        .map_err(StageError::SessionCreate)?;
+    let session_id = session_record.id.clone();
+
     // ── MCP + skills ─────────────────────────────────────────────────────────
     // `runtime_role` drives resolution so specialists can override the base
     // role's MCP/skill defaults.  `role_mcp_servers` carries the DB row's
@@ -853,9 +907,13 @@ pub(crate) async fn execute_stage(
         resolved_skills,
         native_skill_names: _native_skill_names,
         mcp_server_instructions,
+        extension_diagnostics,
     } = resolve_mcp_and_skills(
         worktree_path,
         runtime_role.as_ref(),
+        &task.project_id,
+        &task.id,
+        &session_id,
         &task.short_id,
         role_mcp_servers.as_deref(),
         &role_skills,
@@ -870,10 +928,16 @@ pub(crate) async fn execute_stage(
     // Pre-verification hooks come from `lifecycle.pre_verification` (via the
     // SupervisorServices RPC). Missing / malformed configs degrade to empty
     // lists (see `environment`).
-    let env_config = services
+    let env_config = match services
         .get_environment_config(task.project_id.clone())
         .await
-        .map_err(|e| StageError::Setup(format!("env_config: {e}")))?;
+    {
+        Ok(config) => config,
+        Err(error) => {
+            mark_session_failed(services, &session_id).await;
+            return Err(StageError::Setup(format!("env_config: {error}")));
+        }
+    };
     let SetupContext {
         prompt_setup_commands,
     } = match resolve_setup_context(
@@ -887,6 +951,7 @@ pub(crate) async fn execute_stage(
     {
         Ok(ctx) => ctx,
         Err(SetupError { reason }) => {
+            mark_session_failed(services, &session_id).await;
             return Err(StageError::Setup(reason));
         }
     };
@@ -967,50 +1032,10 @@ pub(crate) async fn execute_stage(
         worker_resume_note: worker_resume_note.as_deref(),
         arbiter_directive: arbiter_directive.as_deref(),
         mcp_server_instructions: &mcp_server_instructions,
+        extension_diagnostics: &extension_diagnostics,
     })
     .await;
 
-    // ── Create the session record linked to the task-run ─────────────────────
-    // Phase 6c routes session creation through `SupervisorServices` so the
-    // in-Pod worker never opens its own DB connection.  Host-side
-    // `DirectServices` delegates to `SessionRepository::create` verbatim.
-    //
-    // Derive the billing classification from the RESOLVED CREDENTIAL (not just
-    // model-id substrings) so `DirectServices::create_session` books
-    // `sessions.cost_basis` on explicit signal: a session on `openai/gpt-5.5`
-    // backed by a ChatGPT/Codex PLAN OAuth credential is a $0-spend plan even
-    // though its model id has no `codex` marker. OAuth transport ALONE does not
-    // imply a subscription — see `oauth_is_subscription_plan`. The catalog
-    // string rules stay as an additional signal (a `zai-coding-plan/...` model
-    // remains projected); the legacy fallback covers `hint = None`.
-    let billing_signal = resolved.as_ref().map(|r| {
-        let credential_is_oauth = matches!(
-            r.provider_credential,
-            Some(crate::actors::slot::helpers::ProviderCredential::OAuthConfig(_))
-        );
-        derive_billing_signal(&r.catalog_provider_id, &r.model_name, credential_is_oauth)
-    });
-    let cost_basis_hint = billing_signal.map(|(hint, _)| hint);
-    let billing_source = billing_signal.map(|(_, source)| source);
-    let _ = services
-        .report_stage_step(djinn_runtime::stage_step::SESSION_CREATE)
-        .await;
-    let session_record = services
-        .create_session(
-            djinn_supervisor::services::SerializableCreateSessionParams {
-                project_id: task.project_id.clone(),
-                task_id: Some(task.id.clone()),
-                model: model_id.clone(),
-                agent_type: runtime_role_name.to_string(),
-                metadata_json: None,
-                task_run_id: Some(task_run_id.to_string()),
-                cost_basis_hint,
-                billing_source,
-            },
-        )
-        .await
-        .map_err(StageError::SessionCreate)?;
-    let session_id = session_record.id.clone();
     // 7ry9: Emit session-start structured telemetry with the provider-facing
     // prompt hash. The hash is already computed from the final truncated
     // system prompt; no prompt contents are emitted.
@@ -1078,17 +1103,7 @@ pub(crate) async fn execute_stage(
         ) {
             Some(provider) => provider,
             None => {
-                let _ = services
-                    .update_session_status(
-                        session_id.clone(),
-                        SessionStatus::Failed,
-                        0,
-                        0,
-                        0,
-                        0,
-                        None,
-                    )
-                    .await;
+                mark_session_failed(services, &session_id).await;
                 return Err(StageError::ModelResolution(
                     "no provider credential resolved for model".into(),
                 ));
@@ -1232,9 +1247,24 @@ pub(crate) async fn execute_stage(
         &mut conversation,
         false,
     );
+    let revision_caller =
+        djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent(
+            runtime_role_name,
+        )
+        .map(|context| {
+            context.with_execution_provenance(
+                Some(session_id.clone()),
+                Some(task.id.clone()),
+                Some(task_run_id.to_owned()),
+            )
+        });
     let (reply_result, final_output, tokens_in, tokens_out, cache_read, cache_write) =
         djinn_core::auth_context::SESSION_USER_ID
-            .scope(task.created_by_user_id.clone(), reply_loop_fut)
+            .scope(
+                task.created_by_user_id.clone(),
+                djinn_core::auth_context::REVISION_CALLER_CONTEXT
+                    .scope(revision_caller, reply_loop_fut),
+            )
             .await;
 
     // ── Map the reply-loop outcome to StageOutcome ───────────────────────────

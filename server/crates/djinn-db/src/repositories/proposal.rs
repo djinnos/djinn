@@ -8,6 +8,7 @@ use djinn_core::models::{
 };
 
 use crate::database::Database;
+use crate::repositories::epic::EpicRepository;
 use crate::repositories::note::NoteRepository;
 use crate::repositories::note::{LexicalSearchBackend, sanitize_postgres_tsquery};
 use crate::{Error, Result};
@@ -576,6 +577,18 @@ pub struct AwaitingReviewPark {
     /// `round_cap`, `repeated_objection`). `None` for a clean judge-ready
     /// convergence.
     pub stop_reason: Option<String>,
+}
+
+/// Minimal proposal reference for labelling (board swimlanes, links).
+#[derive(Debug, sqlx::FromRow)]
+pub struct ProposalRef {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub status: String,
+    /// Participant accountable for the build (whose credentials the epics'
+    /// tasks burn). The board shows their avatar on the proposal swimlane.
+    pub build_owner_user_id: Option<String>,
 }
 
 pub struct ProposalRepository {
@@ -2046,6 +2059,8 @@ impl ProposalRepository {
         )
         .execute(self.db.pool())
         .await?;
+        self.set_epic_proposal_link(epic_id, Some(proposal_id))
+            .await?;
         if let Some(proposal) = self.get(proposal_id).await?
             && proposal.status == "building"
         {
@@ -2198,18 +2213,56 @@ impl ProposalRepository {
             .collect())
     }
 
+    /// Lightweight `(id, short_id, title)` lookup for a set of proposal ids.
+    /// Used by `epic_list` to label proposal swimlanes on the board without
+    /// hydrating full proposals.
+    pub async fn refs_by_ids(&self, ids: &[String]) -> Result<Vec<ProposalRef>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ProposalRef>(
+            "SELECT id, short_id, title, status, build_owner_user_id FROM proposals WHERE id = ANY($1)",
+        )
+        .bind(ids)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Mirror a `proposal_epics` link change onto the denormalized
+    /// `epics.proposal_id` column and re-emit the epic so live boards regroup
+    /// the swimlane immediately.
+    async fn set_epic_proposal_link(&self, epic_id: &str, proposal_id: Option<&str>) -> Result<()> {
+        sqlx::query!(
+            "UPDATE epics SET proposal_id = $1 WHERE id = $2",
+            proposal_id,
+            epic_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let epics = EpicRepository::new(self.db.clone(), self.events.clone());
+        if let Some(epic) = epics.get(epic_id).await? {
+            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        }
+        Ok(())
+    }
+
     /// Drop every graduated-epic link for a proposal. The missing counterpart
     /// to [`Self::link_epic`] (which only ever inserts): an aborted build must
     /// unlink its epics so a later re-graduation starts from a clean set
     /// instead of accumulating closed epics from prior generations.
     pub async fn unlink_epics(&self, proposal_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
+        let linked = self.graduated_epics(proposal_id).await?;
         sqlx::query!(
             "DELETE FROM proposal_epics WHERE proposal_id = $1",
             proposal_id
         )
         .execute(self.db.pool())
         .await?;
+        for (epic_id, _) in linked {
+            self.set_epic_proposal_link(&epic_id, None).await?;
+        }
         Ok(())
     }
 
@@ -2218,6 +2271,10 @@ impl ProposalRepository {
         proposal_id: &str,
     ) -> Result<()> {
         sqlx::query("DELETE FROM proposal_epics WHERE proposal_id = $1")
+            .bind(proposal_id)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("UPDATE epics SET proposal_id = NULL WHERE proposal_id = $1")
             .bind(proposal_id)
             .execute(&mut **tx)
             .await?;
@@ -2236,6 +2293,7 @@ impl ProposalRepository {
             .bind(epic_id)
             .execute(self.db.pool())
             .await?;
+        self.set_epic_proposal_link(epic_id, None).await?;
         Ok(())
     }
 
@@ -2246,6 +2304,10 @@ impl ProposalRepository {
     ) -> Result<()> {
         sqlx::query("DELETE FROM proposal_epics WHERE proposal_id = $1 AND epic_id = $2")
             .bind(proposal_id)
+            .bind(epic_id)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("UPDATE epics SET proposal_id = NULL WHERE id = $1")
             .bind(epic_id)
             .execute(&mut **tx)
             .await?;
