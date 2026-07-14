@@ -8,14 +8,14 @@
 #![cfg(unix)]
 
 use djinn_core::cargo_target_runs::{
-    CargoTargetRunsCaps, CargoTargetRunsInventoryError, Filesystem, inventory_cargo_target_runs,
-    resolve_cargo_target_runs_caps, trim_cargo_target_runs, trim_cargo_target_runs_with_fs,
+    inventory_cargo_target_runs, resolve_cargo_target_runs_caps, trim_cargo_target_runs,
+    trim_cargo_target_runs_with_fs, CargoTargetRunsCaps, CargoTargetRunsInventoryError, Filesystem,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::Path;
 
 const FIXTURES: &str = concat!(
@@ -190,7 +190,12 @@ fn run_fixture(case: &Path, fixture: &Fixture, expected: &Expected) {
             "committed initial allocated bytes {}",
             case.display()
         );
-        assert_eq!(inventory.total_allocated_bytes, allocated_bytes_independently(root));
+        if inventory_expected.errors == 0 {
+            assert_eq!(
+                inventory.total_allocated_bytes,
+                allocated_bytes_independently(root)
+            );
+        }
     }
 
     let caps = CargoTargetRunsCaps {
@@ -204,7 +209,9 @@ fn run_fixture(case: &Path, fixture: &Fixture, expected: &Expected) {
     }
     .expect("Linux trim capability is required");
     if fixture.scenario == "unmeasurable" {
-        let mut permissions = fs::metadata(root.join("unmeasurable")).unwrap().permissions();
+        let mut permissions = fs::metadata(root.join("unmeasurable"))
+            .unwrap()
+            .permissions();
         permissions.set_mode(0o700);
         fs::set_permissions(root.join("unmeasurable"), permissions).unwrap();
     }
@@ -254,7 +261,10 @@ fn assert_result(
         case.display()
     );
     if result.errors == 0 {
-        assert_eq!(result.final_allocated_bytes, allocated_bytes_independently(root));
+        assert_eq!(
+            result.final_allocated_bytes,
+            allocated_bytes_independently(root)
+        );
     }
     for name in &expected.survivors {
         assert!(
@@ -273,6 +283,9 @@ fn materialize(root: &Path, scenario: &str) {
             run(root, "a");
             run(root, "b");
         }
+        // The root-failure assertion inventories a deliberately missing child
+        // root, so this fixture needs no on-disk entries.
+        "root_failure" => {}
         "allocated" => {
             run(root, "run");
             fs::File::create(root.join("run/sparse"))
