@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::Task;
 
 use crate::actors::slot::MergeConflictMetadata;
@@ -18,8 +19,16 @@ use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 use tracing::Instrument;
 
+mod diagnostics;
 mod types;
 pub(crate) use types::{PromptContext, PromptContextInputs, ReadSourceInfo};
+// Re-export for `use super::*` in test modules.
+#[allow(unused_imports)]
+pub(super) use diagnostics::{
+    EXTENSION_DIAGNOSTICS_HEADING, MAX_EXTENSION_DIAGNOSTIC_RECORDS,
+    MAX_EXTENSION_DIAGNOSTIC_SECTION_BYTES, insert_diagnostics_before_task,
+    render_extension_diagnostics,
+};
 
 /// Append read-only sibling repo section to prompt. No-op when no read sources.
 fn append_read_sources_prompt(prompt: &str, read_sources: &[ReadSourceInfo]) -> String {
@@ -118,7 +127,7 @@ fn format_mcp_instructions(
     ))
 }
 
-/// Apply extensions, skills, read sources, and MCP instructions to base prompt
+/// Apply extensions, diagnostics, skills, read sources, and MCP instructions
 /// in canonical order.
 fn apply_prompt_sections(
     base_system_prompt: &str,
@@ -126,8 +135,18 @@ fn apply_prompt_sections(
     resolved_skills: &[ResolvedSkill],
     read_sources: &[ReadSourceInfo],
     mcp_server_instructions: &std::collections::BTreeMap<String, String>,
+    extension_diagnostics: &[ExtensionLoadDiagnosticV1],
 ) -> String {
-    let with_extensions = apply_role_extensions(base_system_prompt, system_prompt_extensions);
+    // Always split at the task boundary so platform and task bytes are
+    // byte-identical with and without diagnostics.
+    let with_extensions = match render_extension_diagnostics(extension_diagnostics) {
+        Some(diagnostics) => insert_diagnostics_before_task(
+            base_system_prompt,
+            system_prompt_extensions,
+            &diagnostics,
+        ),
+        None => insert_diagnostics_before_task(base_system_prompt, system_prompt_extensions, ""),
+    };
     let with_skills = apply_skills(&with_extensions, resolved_skills);
     let with_read_sources = append_read_sources_prompt(&with_skills, read_sources);
     match format_mcp_instructions(mcp_server_instructions) {
@@ -940,6 +959,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         resolved_skills,
         read_sources,
         mcp_server_instructions,
+        extension_diagnostics,
     );
     // 7ry9: Hash the final provider-facing system prompt *after* all
     // extensions, skills, read sources, MCP instructions, and truncation.
@@ -1206,7 +1226,7 @@ fn source_kind_label(kind: djinn_runtime::ResumeSourceKind) -> &'static str {
 
 #[cfg(test)]
 #[path = "test_support.rs"]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 #[path = "prompt_context_tests.rs"]
