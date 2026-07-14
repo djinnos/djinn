@@ -1,0 +1,18 @@
+{
+  "metric": "djinn_cache_pressure_units_total",
+  "labels": ["mode", "rung", "outcome"],
+  "rungs": ["incremental", "profile", "base"],
+  "outcomes": ["planned", "post_lock_eligible", "retained", "attempted", "deleted", "failed"],
+  "byte_metrics": {
+    "projected": "djinn_cache_pressure_projected_allocated_bytes_total",
+    "reclaimed": "djinn_cache_pressure_reclaimed_allocated_bytes_total"
+  },
+  "terminations": ["completed", "reached_high", "remeasure_failed"],
+  "cases": {
+    "dry_run": "planned and projected only",
+    "pre_attempt_measurement_failure": "failed, remeasure_failed, zero attempted/deleted/reclaimed",
+    "post_success_remeasurement_failure": "attempted/deleted/reclaimed then remeasure_failed",
+    "removal_failure": "attempted then failed",
+    "successful_deletion": "attempted, deleted, reclaimed"
+  }
+}
