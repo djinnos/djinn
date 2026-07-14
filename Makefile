@@ -91,7 +91,10 @@ sqlx-verify: ## Verify server/.sqlx/ freshness; assumes schema already applied +
 	@# (Test) job. Mirroring the generator here closes it.
 	@rm -rf /tmp/sqlx-check && mkdir -p /tmp/sqlx-check
 	@grep -rl --include='*.rs' 'sqlx::query' $(SERVER_DIR)/crates/ 2>/dev/null | xargs -r touch
-	@cd $(SERVER_DIR) && SQLX_OFFLINE_DIR=/tmp/sqlx-check cargo check --workspace --all-targets --all-features
+	@# Integration tests link djinn-db as a normal library, so `cfg(test)` alone
+	@# does not expose its fixture-only constructors. Enable the explicit fixture
+	@# feature while checking every target; production builds still omit it.
+	@cd $(SERVER_DIR) && SQLX_OFFLINE_DIR=/tmp/sqlx-check cargo check --workspace --all-targets --all-features --features djinn-db/test-support
 	@if [ -z "$$(ls -A /tmp/sqlx-check 2>/dev/null)" ]; then \
 		echo "ERROR: regeneration produced no query files — cannot validate .sqlx/."; \
 		echo "       Try 'cargo clean -p djinn-db' and rerun."; \
