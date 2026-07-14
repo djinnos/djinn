@@ -42,7 +42,7 @@ pub const MAX_ZERO_RESULT_THRESHOLD: f64 = 1.0;
 pub const MIN_QUERY_FLOOR: u64 = 1;
 
 /// Maximum supported query floor (inclusive).
-pub const MAX_QUERY_FLOOR: u64 = 10_000_000;
+pub const MAX_QUERY_FLOOR: u64 = 100_000;
 
 /// Default retrieval-health window: 24 hours.
 pub const DEFAULT_WINDOW_HOURS: u64 = 24;
@@ -140,18 +140,31 @@ impl RetrievalHealthConfig {
     ///
     /// Variables:
     /// * `DJINN_RETRIEVAL_HEALTH_WINDOW_HOURS` — defaults to 24.
-    /// * `DJINN_RETRIEVAL_HEALTH_ZERO_RESULT_THRESHOLD` — defaults to 0.50.
-    /// * `DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR` — defaults to 20.
+    /// * `DJINN_RETRIEVAL_ZERO_RESULT_THRESHOLD` — defaults to 0.50.
+    /// * `DJINN_RETRIEVAL_MINIMUM_QUERIES` — defaults to 20.
     ///
-    /// Any explicitly set value outside the documented bounds returns an error.
+    /// `DJINN_RETRIEVAL_HEALTH_ZERO_RESULT_THRESHOLD` and
+    /// `DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR` remain supported as deprecated
+    /// fallback aliases. When both a canonical variable and its alias are set,
+    /// the canonical value is selected and the alias is ignored.
+    ///
+    /// Any selected value outside the documented bounds returns an error.
     pub fn from_env() -> Result<Self, RetrievalHealthConfigError> {
-        let window_hours =
-            parse_env_u64("DJINN_RETRIEVAL_HEALTH_WINDOW_HOURS", DEFAULT_WINDOW_HOURS)?;
+        let window_hours = parse_env_u64(
+            "DJINN_RETRIEVAL_HEALTH_WINDOW_HOURS",
+            None,
+            DEFAULT_WINDOW_HOURS,
+        )?;
         let zero_result_threshold = parse_env_f64(
-            "DJINN_RETRIEVAL_HEALTH_ZERO_RESULT_THRESHOLD",
+            "DJINN_RETRIEVAL_ZERO_RESULT_THRESHOLD",
+            Some("DJINN_RETRIEVAL_HEALTH_ZERO_RESULT_THRESHOLD"),
             DEFAULT_ZERO_RESULT_THRESHOLD,
         )?;
-        let query_floor = parse_env_u64("DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR", DEFAULT_QUERY_FLOOR)?;
+        let query_floor = parse_env_u64(
+            "DJINN_RETRIEVAL_MINIMUM_QUERIES",
+            Some("DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR"),
+            DEFAULT_QUERY_FLOOR,
+        )?;
         Self::new(window_hours, zero_result_threshold, query_floor)
     }
 }
@@ -167,32 +180,56 @@ impl Default for RetrievalHealthConfig {
     }
 }
 
-fn parse_env_u64(var: &str, default: u64) -> Result<u64, RetrievalHealthConfigError> {
-    match std::env::var(var) {
-        Ok(value) => {
+fn parse_env_u64(
+    canonical_var: &str,
+    alias_var: Option<&str>,
+    default: u64,
+) -> Result<u64, RetrievalHealthConfigError> {
+    match selected_env_value(canonical_var, alias_var) {
+        Some((var, value)) => {
             value
                 .parse::<u64>()
                 .map_err(|_| RetrievalHealthConfigError::InvalidEnvValue {
-                    var: var.to_string(),
+                    var,
                     value,
                 })
         }
-        Err(_) => Ok(default),
+        None => Ok(default),
     }
 }
 
-fn parse_env_f64(var: &str, default: f64) -> Result<f64, RetrievalHealthConfigError> {
-    match std::env::var(var) {
-        Ok(value) => {
+fn parse_env_f64(
+    canonical_var: &str,
+    alias_var: Option<&str>,
+    default: f64,
+) -> Result<f64, RetrievalHealthConfigError> {
+    match selected_env_value(canonical_var, alias_var) {
+        Some((var, value)) => {
             value
                 .parse::<f64>()
                 .map_err(|_| RetrievalHealthConfigError::InvalidEnvValue {
-                    var: var.to_string(),
+                    var,
                     value,
                 })
         }
-        Err(_) => Ok(default),
+        None => Ok(default),
     }
+}
+
+/// Select the canonical environment variable when present, otherwise its
+/// deprecated fallback alias. This deliberately avoids parsing an alias when a
+/// canonical value was selected.
+fn selected_env_value(canonical_var: &str, alias_var: Option<&str>) -> Option<(String, String)> {
+    std::env::var(canonical_var)
+        .ok()
+        .map(|value| (canonical_var.to_string(), value))
+        .or_else(|| {
+            alias_var.and_then(|alias_var| {
+                std::env::var(alias_var)
+                    .ok()
+                    .map(|value| (alias_var.to_string(), value))
+            })
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -504,7 +541,7 @@ mod tests {
     #[test]
     fn valid_config_endpoints() {
         assert!(RetrievalHealthConfig::new(1, 0.0, 1).is_ok());
-        assert!(RetrievalHealthConfig::new(168, 1.0, 10_000_000).is_ok());
+        assert!(RetrievalHealthConfig::new(168, 1.0, 100_000).is_ok());
     }
 
     #[test]
@@ -541,9 +578,9 @@ mod tests {
             RetrievalHealthConfig::new(
                 DEFAULT_WINDOW_HOURS,
                 DEFAULT_ZERO_RESULT_THRESHOLD,
-                10_000_001
+                100_001
             ),
-            Err(RetrievalHealthConfigError::QueryFloor(10_000_001))
+            Err(RetrievalHealthConfigError::QueryFloor(100_001))
         );
     }
 
@@ -554,6 +591,8 @@ mod tests {
     fn clear_env_vars() {
         for var in [
             "DJINN_RETRIEVAL_HEALTH_WINDOW_HOURS",
+            "DJINN_RETRIEVAL_ZERO_RESULT_THRESHOLD",
+            "DJINN_RETRIEVAL_MINIMUM_QUERIES",
             "DJINN_RETRIEVAL_HEALTH_ZERO_RESULT_THRESHOLD",
             "DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR",
         ] {
@@ -564,8 +603,17 @@ mod tests {
     }
 
     fn set_env_vars(window: &str, threshold: &str, floor: &str) {
+        clear_env_vars();
         unsafe {
             std::env::set_var("DJINN_RETRIEVAL_HEALTH_WINDOW_HOURS", window);
+            std::env::set_var("DJINN_RETRIEVAL_ZERO_RESULT_THRESHOLD", threshold);
+            std::env::set_var("DJINN_RETRIEVAL_MINIMUM_QUERIES", floor);
+        }
+    }
+
+    fn set_alias_env_vars(threshold: &str, floor: &str) {
+        clear_env_vars();
+        unsafe {
             std::env::set_var("DJINN_RETRIEVAL_HEALTH_ZERO_RESULT_THRESHOLD", threshold);
             std::env::set_var("DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR", floor);
         }
@@ -588,6 +636,30 @@ mod tests {
     fn from_env_parses_custom_values() {
         let _guard = env_lock();
         set_env_vars("48", "0.75", "50");
+        let config = RetrievalHealthConfig::from_env().unwrap();
+        assert_eq!(config.window_hours(), 48);
+        assert_eq!(config.zero_result_threshold(), 0.75);
+        assert_eq!(config.query_floor(), 50);
+    }
+
+    #[test]
+    fn from_env_uses_deprecated_aliases_as_fallback() {
+        let _guard = env_lock();
+        set_alias_env_vars("0.75", "50");
+        let config = RetrievalHealthConfig::from_env().unwrap();
+        assert_eq!(config.window_hours(), DEFAULT_WINDOW_HOURS);
+        assert_eq!(config.zero_result_threshold(), 0.75);
+        assert_eq!(config.query_floor(), 50);
+    }
+
+    #[test]
+    fn from_env_canonical_values_win_over_invalid_aliases() {
+        let _guard = env_lock();
+        set_env_vars("48", "0.75", "50");
+        unsafe {
+            std::env::set_var("DJINN_RETRIEVAL_HEALTH_ZERO_RESULT_THRESHOLD", "invalid");
+            std::env::set_var("DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR", "0");
+        }
         let config = RetrievalHealthConfig::from_env().unwrap();
         assert_eq!(config.window_hours(), 48);
         assert_eq!(config.zero_result_threshold(), 0.75);
@@ -625,9 +697,19 @@ mod tests {
     }
 
     #[test]
+    fn from_env_rejects_query_floor_above_signed_off_limit() {
+        let _guard = env_lock();
+        set_env_vars("24", "0.5", "100001");
+        assert_eq!(
+            RetrievalHealthConfig::from_env(),
+            Err(RetrievalHealthConfigError::QueryFloor(100_001))
+        );
+    }
+
+    #[test]
     fn from_env_rejects_non_numeric() {
         let _guard = env_lock();
-        set_env_vars("not-a-number", "0.5", "20");
+        set_env_vars("24", "not-a-number", "20");
         assert!(
             matches!(
                 RetrievalHealthConfig::from_env(),
