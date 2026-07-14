@@ -7,7 +7,9 @@ use djinn_db::{Database, EpicCreateInput, EpicRepository, TaskRepository};
 use tokio_util::sync::CancellationToken;
 
 use crate::roles::AgentRole;
-use crate::test_helpers::{agent_context_from_db, create_test_project, test_tempdir};
+use crate::test_helpers::{
+    agent_context_from_db, create_test_project, create_test_user, test_tempdir,
+};
 
 pub(crate) async fn create_epic(
     db: &Database,
@@ -44,19 +46,24 @@ pub(crate) async fn create_task(
     title: &str,
     status: Option<&str>,
 ) -> Task {
-    TaskRepository::new(db.clone(), events.clone())
-        .create(
-            epic_id,
-            title,
-            "description",
-            "design",
-            "task",
-            1,
-            "test-owner",
-            status,
-        )
+    let creator_id = create_test_user(db).await;
+    djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(creator_id), async {
+            TaskRepository::new(db.clone(), events.clone())
+                .create(
+                    epic_id,
+                    title,
+                    "description",
+                    "design",
+                    "task",
+                    1,
+                    "test-owner",
+                    status,
+                )
+                .await
+                .expect("create task")
+        })
         .await
-        .expect("create task")
 }
 
 pub(crate) async fn create_project_epic_task(
