@@ -346,3 +346,117 @@ fn sa4x_directive_absent_for_advisory_statuses_or_missing_baseline() {
         .is_none()
     );
 }
+
+// ── Merge-queue (`merge_group`) lane directive ────────────────────────────────
+
+/// Attach a merge-queue failure lane to a CI test task.
+fn with_mq_lane(
+    mut task: djinn_core::models::Task,
+    state: &str,
+    run_id: Option<i64>,
+    failed_checks_json: &str,
+    fingerprint: Option<&str>,
+    same_signature_count: i64,
+) -> djinn_core::models::Task {
+    task.ci_mq_state = Some(state.into());
+    task.ci_mq_run_id = run_id;
+    task.ci_mq_head_sha = Some("mq-head-sha".into());
+    task.ci_mq_failed_check_names = Some(failed_checks_json.into());
+    task.ci_mq_failure_fingerprint = fingerprint.map(Into::into);
+    task.ci_mq_same_signature_count = Some(same_signature_count);
+    task
+}
+
+#[test]
+fn build_ci_blocking_directive_renders_merge_queue_lane_on_green_head() {
+    // Green PR head, but the merge queue rejected it at dequeue time → the
+    // directive is still Some and renders the merge-queue section.
+    let task = with_mq_lane(
+        task_with_ci(
+            "passing",
+            Some("head-green"),
+            Some(77),
+            "[]",
+            None,
+            Some("base"),
+        ),
+        "dequeued_failure",
+        Some(9988),
+        r#"["Integration Tests", "Server Tests"]"#,
+        Some("mq-fp-xyz"),
+        3,
+    );
+    let directive = build_ci_blocking_directive(&task)
+        .expect("merge-queue lane must produce a directive even on a green PR head");
+    assert_contains_all(
+        &directive,
+        &[
+            "**Merge-queue state:** dequeued_failure",
+            "**Merge-group run:** `9988`",
+            "Integration Tests",
+            "Server Tests",
+            "**Merge-queue failure fingerprint:** `mq-fp-xyz`",
+            "3rd consecutive same-signature",
+            "merge queue",
+        ],
+    );
+    assert!(
+        !directive.contains("REQUIRED CI is failing"),
+        "green PR head must not render the PR-head failing section: {directive}"
+    );
+}
+
+#[test]
+fn build_ci_blocking_directive_combines_head_and_merge_queue_sections() {
+    let task = with_mq_lane(
+        task_with_ci(
+            "failing",
+            Some("head-red"),
+            Some(77),
+            r#"["Quality Gate"]"#,
+            Some("fp-head"),
+            Some("base"),
+        ),
+        "dequeued_failure",
+        Some(1234),
+        r#"["Integration Tests"]"#,
+        Some("mq-fp"),
+        1,
+    );
+    let directive = build_ci_blocking_directive(&task).expect("both sections present");
+    assert_contains_all(
+        &directive,
+        &[
+            "REQUIRED CI is failing",
+            "**Remediation baseline SHA:** `base`",
+            "**Merge-queue state:** dequeued_failure",
+            "1st consecutive same-signature",
+            "Integration Tests",
+        ],
+    );
+}
+
+#[test]
+fn build_ci_blocking_directive_merge_queue_optional_fields_degrade_gracefully() {
+    // Missing run id and fingerprint → "unknown"/omitted, no panic.
+    let task = with_mq_lane(
+        task_with_ci("passing", Some("h"), Some(1), "[]", None, Some("b")),
+        "dequeued_failure",
+        None,
+        "[]",
+        None,
+        1,
+    );
+    let directive = build_ci_blocking_directive(&task).expect("mq lane present");
+    assert_contains_all(
+        &directive,
+        &[
+            "**Merge-group run:** unknown",
+            "**Merge-group failing checks:** unknown",
+        ],
+    );
+    assert!(
+        !directive.contains("Merge-queue failure fingerprint"),
+        "missing merge-queue fingerprint line must be omitted: {directive}"
+    );
+}

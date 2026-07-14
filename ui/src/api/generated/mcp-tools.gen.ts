@@ -3976,6 +3976,7 @@ export namespace MemoryHealthOutputSchema {
   machine_connected_orphan_count?: number
   orphan_note_count?: number
   recent_sweep?: (RecentSweepMetrics | null)
+  retrieval: RetrievalHealthResponse
   stale_note_count?: number
   stale_notes_by_folder?: StaleFolder[]
   total_notes?: number
@@ -3999,6 +4000,48 @@ export namespace MemoryHealthOutputSchema {
   last_decayed_count: number
   last_superseded_source_count: number
   last_sweep_at?: string
+  [k: string]: any
+  }
+  /**
+   * Required even when the top-level note-health operation returns an error.
+   */
+  export interface RetrievalHealthResponse {
+  config_window_hours: number
+  persisted: RetrievalHealthScope
+  process: RetrievalHealthScope
+  [k: string]: any
+  }
+  /**
+   * A retrieval source remains present when it is unavailable. Stable error
+   * codes are `project_required`, `project_unresolved`, `rollup_unavailable`,
+   * and `process_snapshot_unavailable`.
+   */
+  export interface RetrievalHealthScope {
+  error_code?: string
+  /**
+   * Process construction time; only applicable to the process scope.
+   */
+  started_at?: string
+  status: string
+  /**
+   * Fixed, bounded entry-point evidence (four workload entry points).
+   */
+  summaries: RetrievalEntryPointHealthSummary[]
+  window_end?: string
+  /**
+   * Inclusive start and exclusive end of the persisted half-open window.
+   */
+  window_start?: string
+  [k: string]: any
+  }
+  export interface RetrievalEntryPointHealthSummary {
+  candidate_count: number
+  entry_point: string
+  error_queries: number
+  injected_count: number
+  skipped_count: number
+  total_queries: number
+  zero_result_queries: number
   [k: string]: any
   }
   /**
@@ -10172,6 +10215,8 @@ export namespace SessionShowInputSchema {
 }
 export type SessionShowInput = SessionShowInputSchema.SessionShowInput;
 export namespace SessionShowOutputSchema {
+  export type AnyJson = any
+
   export interface SessionShowOutput {
   agent_type?: string
   /**
@@ -10181,6 +10226,11 @@ export namespace SessionShowOutputSchema {
   cache_write_tokens?: number
   ended_at?: string
   error?: string
+  /**
+   * Canonical extension-load failures associated with this session. Present
+   * on successful lookups, including as an empty array.
+   */
+  extension_load_diagnostics?: AnyJson[]
   id?: string
   model_id?: string
   /**
@@ -10794,6 +10844,16 @@ export namespace TaskListOutputSchema {
    */
   merge_blocked_reason?: string
   /**
+   * Merge-queue (`merge_group`) failure lane for the current PR head.
+   * 
+   * Present only when GitHub's merge queue rejected the PR at dequeue time
+   * (a PR head whose own required checks are green can still be dequeued if
+   * the heavy `merge_group` stages fail). Populated from the `mq_*` columns
+   * of `task_pr_ci_snapshots`; omitted entirely when no merge-queue failure
+   * has been recorded for the current head.
+   */
+  merge_queue?: (CiMergeQueueLane | null)
+  /**
    * Head SHA of the internal mirror branch, when known.
    */
   mirror_head_sha?: string
@@ -10828,6 +10888,53 @@ export namespace TaskListOutputSchema {
    * - `"CI state unknown"` (unknown)
    */
   summary_reason: string
+  [k: string]: any
+  }
+  /**
+   * The merge-queue (`merge_group`) failure lane surfaced in a
+   * [`CiGateSnapshot`].
+   * 
+   * Mirrors `djinn_core::models::MergeQueueLane` in serialized form. GitHub's
+   * merge queue runs the heavy CI stages on the ephemeral `merge_group` ref, so
+   * a PR whose own head checks pass can still be rejected by the queue. This
+   * lane records that queue verdict with its own failure fingerprint and
+   * same-signature counting, independent of the PR-head lane.
+   */
+  export interface CiMergeQueueLane {
+  /**
+   * Names of the merge-group check runs that failed.
+   */
+  failed_check_names: string[]
+  /**
+   * Stable fingerprint of the merge-group failure signature.
+   */
+  failure_fingerprint?: string
+  /**
+   * ISO-8601 timestamp when this merge-queue lane state was first observed.
+   */
+  first_seen_at?: string
+  /**
+   * The `head_sha` of the failed merge-group run (the ephemeral queue ref
+   * head), when known.
+   */
+  head_sha?: string
+  /**
+   * ISO-8601 timestamp when this merge-queue lane state was last observed.
+   */
+  last_seen_at?: string
+  /**
+   * The `merge_group` Actions run id that failed, when known.
+   */
+  run_id?: number
+  /**
+   * How many consecutive dequeue observations carried the same
+   * `failure_fingerprint` in this lane.
+   */
+  same_signature_count: number
+  /**
+   * Lane state, e.g. `"dequeued_failure"`.
+   */
+  state: string
   [k: string]: any
   }
 

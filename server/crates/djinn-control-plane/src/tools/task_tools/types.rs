@@ -388,6 +388,50 @@ pub struct CiGateSnapshot {
     /// failure, when one is recorded.  Absent when no error is known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head_observation_error: Option<String>,
+    /// Merge-queue (`merge_group`) failure lane for the current PR head.
+    ///
+    /// Present only when GitHub's merge queue rejected the PR at dequeue time
+    /// (a PR head whose own required checks are green can still be dequeued if
+    /// the heavy `merge_group` stages fail). Populated from the `mq_*` columns
+    /// of `task_pr_ci_snapshots`; omitted entirely when no merge-queue failure
+    /// has been recorded for the current head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_queue: Option<CiMergeQueueLane>,
+}
+
+/// The merge-queue (`merge_group`) failure lane surfaced in a
+/// [`CiGateSnapshot`].
+///
+/// Mirrors `djinn_core::models::MergeQueueLane` in serialized form. GitHub's
+/// merge queue runs the heavy CI stages on the ephemeral `merge_group` ref, so
+/// a PR whose own head checks pass can still be rejected by the queue. This
+/// lane records that queue verdict with its own failure fingerprint and
+/// same-signature counting, independent of the PR-head lane.
+#[derive(Clone, Serialize, schemars::JsonSchema)]
+pub struct CiMergeQueueLane {
+    /// Lane state, e.g. `"dequeued_failure"`.
+    pub state: String,
+    /// The `merge_group` Actions run id that failed, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<i64>,
+    /// The `head_sha` of the failed merge-group run (the ephemeral queue ref
+    /// head), when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    /// Names of the merge-group check runs that failed.
+    pub failed_check_names: Vec<String>,
+    /// Stable fingerprint of the merge-group failure signature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_fingerprint: Option<String>,
+    /// How many consecutive dequeue observations carried the same
+    /// `failure_fingerprint` in this lane.
+    pub same_signature_count: i64,
+    /// ISO-8601 timestamp when this merge-queue lane state was first observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_seen_at: Option<String>,
+    /// ISO-8601 timestamp when this merge-queue lane state was last observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<String>,
 }
 
 /// Derived CI gate state combining raw CI status with task lifecycle.
@@ -514,6 +558,20 @@ pub fn task_ci_gate_snapshot(t: &Task) -> Option<CiGateSnapshot> {
         github_head_sha: t.ci_github_head_sha.clone(),
         heads_diverged: t.ci_heads_diverged,
         head_observation_error: t.ci_head_observation_error.clone(),
+        merge_queue: t.ci_mq_state.as_ref().map(|state| CiMergeQueueLane {
+            state: state.clone(),
+            run_id: t.ci_mq_run_id,
+            head_sha: t.ci_mq_head_sha.clone(),
+            failed_check_names: t
+                .ci_mq_failed_check_names
+                .as_deref()
+                .map(parse_string_array)
+                .unwrap_or_default(),
+            failure_fingerprint: t.ci_mq_failure_fingerprint.clone(),
+            same_signature_count: t.ci_mq_same_signature_count.unwrap_or(0),
+            first_seen_at: t.ci_mq_first_seen_at.clone(),
+            last_seen_at: t.ci_mq_last_seen_at.clone(),
+        }),
     })
 }
 
