@@ -22,12 +22,13 @@
   },
   {
     "name": "task_list",
-    "description": "List tasks with optional filters and pagination.",
+    "description": "List tasks with optional filters for status, priority, label, and text search. Supports pagination.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "status": {
-          "type": "string"
+          "type": "string",
+          "description": "Positive (\"open\") or negative (\"!closed\") status filter. A leading \"!\" matches every task whose status differs from the given value. The pseudo-status \"merged\" matches closed tasks that actually merged (have a merge-commit SHA, or opened a PR and closed as completed) — this is what backs the Kanban Merged column."
         },
         "issue_type": {
           "type": "string"
@@ -47,7 +48,8 @@
           "description": "Epic ID to filter by"
         },
         "sort": {
-          "type": "string"
+          "type": "string",
+          "description": "priority (default), created, created_desc, updated, updated_desc, closed (closed_at DESC then created_at DESC)."
         },
         "limit": {
           "type": "integer"
@@ -98,7 +100,7 @@
   },
   {
     "name": "memory_read",
-    "description": "Read a note by permalink or title.",
+    "description": "Read a memory note by permalink or title from the database-backed memory store. Returns full content and metadata.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -119,7 +121,7 @@
   },
   {
     "name": "memory_search",
-    "description": "Search notes and proposals in project memory. Returns a unified result set interleaved by relevance.",
+    "description": "Search notes and proposals in project memory. Query formulation rules: (1) write a declarative statement, not an interrogative question; (2) express one information need per query; (3) make each query self-contained; (4) omit retrieval-meta wording such as `find`, `information about`, and `search for`; (5) preserve discriminative symbol names, exact error strings, and config keys verbatim. Good query: `Authentication timeout handling for E_CONNRESET`. Bad query: `Can you find information about authentication timeout errors?` Worker-issued searches remain lexical/BM25-only until proposal 72iu supplies worker embeddings. Returns a unified result set interleaved by relevance.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -253,7 +255,7 @@
   },
   {
     "name": "code_search",
-    "description": "Search code across registered repos with `git grep` (basic regex). Pass `project` (UUID or owner/repo slug) to search one repo, or omit it (or pass \"*\") to search ALL registered projects at once — e.g. find every caller of a gRPC service org-wide. Served from each repo's default branch (no checkout). For your own task repo's working tree (your uncommitted changes), use shell grep instead.",
+    "description": "Search code across registered repos with `git grep` (basic regex). Pass `project` to search one repo, or omit it to search ALL projects at once. Served from each repo's default branch (no checkout); use shell grep for local changes.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -370,16 +372,17 @@
   },
   {
     "name": "ci_job_log",
-    "description": "Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.",
+    "description": "Fetch the failing GitHub Actions CI log for this task's PR. Call with NO arguments to auto-discover the currently-failing jobs from the task's recorded CI state — it checks the PR-head lane first, then falls back to the merge-queue (merge_group) lane, so it stays accurate even after a new push makes old job ids stale. When several jobs fail it returns the first job's log with a header listing the others (name + job_id); pass `job_id` to fetch a specific one, and `step` to narrow to a single failed step. `pr_number` targets another PR in the same project's repo (e.g. planner escalation tasks whose description names the source PR). If the output is large, use output_view or output_grep to navigate it.",
     "inputSchema": {
       "type": "object",
-      "required": [
-        "job_id"
-      ],
       "properties": {
         "job_id": {
           "type": "integer",
-          "description": "The GitHub Actions job ID from the CI failure activity"
+          "description": "Optional. A specific GitHub Actions job ID to fetch directly. Omit to auto-discover the failing jobs."
+        },
+        "pr_number": {
+          "type": "integer",
+          "description": "Optional. Target this PR number in the same project's repo instead of the task's own PR (for escalation tasks that reference a source PR)."
         },
         "step": {
           "type": "string",
@@ -527,7 +530,7 @@
   },
   {
     "name": "request_planner",
-    "description": "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs to be split or merged, or has failed multiple Lead interventions. The Planner owns the board and decides whether to reshape the work, dedupe it, or — if the issue requires deeper code-structural reasoning — dispatch an Architect spike. Adds a comment and dispatches the Planner. Your session should end after this call.",
+    "description": "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs splitting/merging, or has failed multiple Lead interventions. Adds a comment and dispatches the Planner; your session should end after this call.",
     "inputSchema": {
       "type": "object",
       "required": [

@@ -1140,6 +1140,11 @@ pub(crate) fn build_ci_failure_sections(
             })
             .collect();
         sections.push(format!("\n{}", hints.join("\n")));
+        sections.push(
+            "If these job ids are stale (new push since), call `ci_job_log()` with no arguments \
+             to auto-discover the current failing jobs."
+                .to_string(),
+        );
     }
 
     (sections, ci_jobs)
