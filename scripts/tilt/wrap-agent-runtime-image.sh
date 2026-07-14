@@ -13,6 +13,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 IMAGE_TAG="${IMAGE_TAG:-localhost:5001/djinn-agent-runtime:dev}"
 BASE_IMAGE="${BASE_IMAGE:-djinn-agent-runtime-base:dev}"
+BASE_BUILD_SCRIPT="${BASE_BUILD_SCRIPT:-$REPO_ROOT/scripts/tilt/build-agent-runtime-base.sh}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$REPO_ROOT/.tilt/artifacts}"
 BINARY="$ARTIFACTS_DIR/djinn-agent-worker"
 DOCKERFILE="$REPO_ROOT/server/docker/djinn-agent-runtime.Dockerfile"
@@ -23,8 +24,13 @@ if [[ ! -x "$BINARY" ]]; then
 fi
 
 if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
-    echo "error: base image $BASE_IMAGE not present — run build-agent-runtime-base.sh first" >&2
-    exit 1
+    # Tilt tracks the base-image local resource by its Dockerfile inputs, not
+    # by whether Docker still retains the resulting tag. Docker Desktop can
+    # evict an unused local image while Tilt still reports that resource as
+    # Ready, which otherwise leaves every later worker rebuild permanently
+    # broken until someone manually retriggers the heavy base resource.
+    echo "==> base image $BASE_IMAGE is missing; rebuilding it"
+    BASE_TAG="$BASE_IMAGE" "$BASE_BUILD_SCRIPT"
 fi
 
 BUILD_CTX="$(mktemp -d)"
