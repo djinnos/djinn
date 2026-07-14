@@ -691,6 +691,9 @@ async fn three_rung_executor_removal_failure_blocks_same_base_escalation() {
     let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000036");
     let target = base.join("debug").join("incremental");
     std::fs::create_dir_all(&target).unwrap();
+    let already_removed = target.join("already-removed");
+    std::fs::write(&already_removed, b"partial").unwrap();
+    std::fs::write(target.join("must-remain"), b"preserve").unwrap();
     let unit = eligible_three_rung_unit(&base, &target, PressureRung::Incremental);
     let broader = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
     let capacity = SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Ok(
@@ -700,6 +703,19 @@ async fn three_rung_executor_removal_failure_blocks_same_base_escalation() {
         },
     )])));
 
+    // The production executor still calls its removal path; this deterministic
+    // filesystem seam removes one child then reports the error that a real
+    // `remove_dir_all` can return after it has already made progress.
+    set_remove_dir_all_hook(Some(Box::new({
+        let already_removed = already_removed.clone();
+        move |_| {
+            std::fs::remove_file(&already_removed)?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "simulated remove_dir_all failure after partial deletion",
+            ))
+        }
+    })));
     let result = execute_three_rung_pressure_plan(
         &ThreeRungPressurePlan {
             units: vec![unit.clone(), broader.clone()],
@@ -710,12 +726,16 @@ async fn three_rung_executor_removal_failure_blocks_same_base_escalation() {
         &capacity,
         &executable_pressure_config(),
         &three_rung_clock(),
-        Path::new("/outside-root"),
+        temp.path(),
     )
     .await;
+    set_remove_dir_all_hook(None);
     assert_eq!(result.attempted, vec![unit.clone()]);
     assert_eq!(result.retained, vec![unit, broader]);
     assert!(base.exists());
+    assert!(target.exists());
+    assert!(!already_removed.exists());
+    assert!(target.join("must-remain").exists());
 }
 
 #[cfg(unix)]

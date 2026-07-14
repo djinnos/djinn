@@ -332,6 +332,33 @@ enum Removal {
     Removed,
     Absent,
 }
+
+// Keep the destructive syscall behind this small seam so the executor's
+// fail-closed behavior can be exercised for a real, mid-removal filesystem
+// error. Production always uses `remove_dir_all`; the hook only exists in
+// unit-test builds and is thread-local so parallel tests cannot affect one
+// another.
+#[cfg(test)]
+thread_local! {
+    static REMOVE_DIR_ALL_HOOK: std::cell::RefCell<Option<Box<dyn Fn(&Path) -> std::io::Result<()>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_remove_dir_all_hook(hook: Option<Box<dyn Fn(&Path) -> std::io::Result<()>>>) {
+    REMOVE_DIR_ALL_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+
+fn remove_dir_all_for_three_rung_target(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(result) =
+        REMOVE_DIR_ALL_HOOK.with(|slot| slot.borrow().as_ref().map(|hook| hook(path)))
+    {
+        return result;
+    }
+    std::fs::remove_dir_all(path)
+}
+
 fn remove_three_rung_target(unit: &PressurePlanUnit, root: &Path) -> Result<Removal, ()> {
     let root = std::fs::canonicalize(root).map_err(|_| ())?;
     if !unit.canonical_base.starts_with(&root)
@@ -339,7 +366,7 @@ fn remove_three_rung_target(unit: &PressurePlanUnit, root: &Path) -> Result<Remo
     {
         return Err(());
     }
-    match std::fs::remove_dir_all(&unit.canonical_target) {
+    match remove_dir_all_for_three_rung_target(&unit.canonical_target) {
         Ok(()) => Ok(Removal::Removed),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Removal::Absent),
         Err(_) => Err(()),
