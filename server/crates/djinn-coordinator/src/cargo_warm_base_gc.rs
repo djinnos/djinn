@@ -23,10 +23,51 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod fingerprint_inventory;
+mod three_rung_plan;
 
 pub use fingerprint_inventory::{
     FINGERPRINT_DIR, FingerprintUnitEntry, FingerprintUnitInventory, inventory_fingerprint_units,
 };
+pub use three_rung_plan::{
+    PressureBaseSnapshot, PressurePlanDisposition, PressurePlanRetainReason, PressurePlanUnit,
+    PressureRung, ThreeRungPressurePlan, build_three_rung_pressure_plan,
+};
+
+/// Capture the DB-derived activity facts needed by the immutable three-rung
+/// planner. Profile staleness is project activity only: this intentionally
+/// never consults artifact or directory mtimes.
+///
+/// This adapter does not open locks, probe capacity, or mutate the filesystem.
+pub async fn snapshot_three_rung_pressure_bases(
+    inventory: WarmBaseInventory,
+    activity: &dyn ActivityGuard,
+) -> Vec<PressureBaseSnapshot> {
+    let mut snapshots = Vec::with_capacity(inventory.entries.len());
+    for entry in inventory.entries {
+        let effective_latest_activity = activity
+            .activity(&entry.project_id)
+            .await
+            .ok()
+            .and_then(|snapshot| snapshot.latest_activity)
+            .and_then(|value| parse_iso8601(&value).ok())
+            .map(system_time_from_offset);
+        snapshots.push(PressureBaseSnapshot {
+            project_id: entry.project_id,
+            canonical_base: std::fs::canonicalize(&entry.path).unwrap_or(entry.path),
+            effective_latest_activity,
+        });
+    }
+    snapshots
+}
+
+/// Consume an immutable plan in dry-run mode. Returning cloned units preserves
+/// the captured plan for diagnostics while guaranteeing no lock, guard,
+/// capacity, or filesystem operation occurs during consumption.
+pub fn consume_three_rung_pressure_plan_dry_run(
+    plan: &ThreeRungPressurePlan,
+) -> Vec<PressurePlanUnit> {
+    plan.units.clone()
+}
 
 pub const CARGO_WARM_BASE_ROOT: &str = "/cache/cargo-target";
 pub const WARM_BASE_GC_LOCK_FILE: &str = ".djinn-gc.lock";
