@@ -312,9 +312,9 @@ mod tests {
     async fn seed_task(db: &Database, task_id: &str, project_id: &str) {
         db.ensure_initialized().await.unwrap();
         sqlx::query(
-            "INSERT INTO tasks (id, project_id, short_id, title, description, \
+            "INSERT INTO tasks (id, project_id, short_id, title, description, design, \
              issue_type, status, priority, acceptance_criteria, created_at, updated_at) \
-             VALUES ($1, $2, $3, 'test', 'test', 'task', 'open', 0, '[]', \
+             VALUES ($1, $2, $3, 'test', 'test', '', 'task', 'open', 0, '[]', \
              '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z') \
              ON CONFLICT (id) DO NOTHING",
         )
