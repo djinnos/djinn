@@ -690,9 +690,7 @@ impl CoordinatorActor {
             .resolve_dispatch_models_for_role("planner", attributed_user_id)
             .await;
 
-        // Credential-backed eligibility is a hard dispatch boundary. Never
-        // substitute a globally configured or synthetic model when the durable
-        // owner has no eligible credentials.
+        // An empty owner-scoped model set is a hard dispatch boundary.
         let primary_model = self.resolve_refinement_primary_model(&user_models)?;
         let candidates = self.resolve_refinement_model_candidates(&user_models);
 

@@ -1,3 +1,4 @@
+// djinn:allow-oversize — refinement cap and persisted-owner dispatch regressions share DB-backed fixtures.
 use super::*;
 use crate::SharedCoordinatorState;
 use crate::consolidation::DbConsolidationRunner;
