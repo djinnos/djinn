@@ -1,6 +1,12 @@
 //! Checked-in, synthetic compatibility contract. Production never reads this fixture.
 
+use std::path::{Path, PathBuf};
+
+use djinn_control_plane::McpState;
+use djinn_core::events::EventBus;
 use djinn_core::tool_call::{ToolCallFailure, TrustedRemedyCode};
+use djinn_db::Database;
+use djinn_mcp_extension::ExtensionContext;
 use djinn_mcp_extension::compatibility::{
     AtomicDeletionBundle, CompatibilityTrap, CurrentToolSurface, ParameterMappingSafety,
     ReleaseCalendar, ReleaseKind, ReleaseNoteOwner, ReleaseNoteRef, RemovedParameterBehavior,
@@ -8,6 +14,8 @@ use djinn_mcp_extension::compatibility::{
     ServerReleaseVersion, ToolForwardingSafety, TrapLifecycle, normalize_call, trap_applies,
     validate_registry,
 };
+use djinn_mcp_extension::dispatch::{DispatchResult, dispatch_tool_call_with_compatibility};
+use djinn_supervisor::UnimplementedRpcServices;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -310,9 +318,41 @@ fn remedy_mut(trap: &mut CompatibilityTrap) -> &mut TrustedRemedyCode {
     }
 }
 
+/// Every capability panics so the precedence contract also proves dispatch did
+/// not attempt project resolution or handler invocation after normalization
+/// rejected the unsafe alias.
+struct PanicOnAccessContext;
+
+#[async_trait::async_trait]
+impl ExtensionContext for PanicOnAccessContext {
+    fn db(&self) -> Database {
+        panic!("normalization failure must precede project database access")
+    }
+
+    fn event_bus(&self) -> EventBus {
+        panic!("normalization failure must precede project event-bus access")
+    }
+
+    fn mcp_state(&self) -> McpState {
+        panic!("normalization failure must precede handler state access")
+    }
+
+    fn lsp(&self) -> djinn_lsp::LspManager {
+        panic!("normalization failure must precede LSP handler access")
+    }
+
+    fn working_root_for(&self, _fallback: &Path) -> PathBuf {
+        panic!("normalization failure must precede worktree resolution")
+    }
+
+    fn default_project_id(&self) -> Option<&str> {
+        panic!("normalization failure must precede default-project resolution")
+    }
+}
+
 /// The requested selector intentionally resolves this single root contract test.
-#[test]
-fn compatibility_traps() {
+#[tokio::test]
+async fn compatibility_traps() {
     assert!(djinn_mcp_extension::compatibility::PRODUCTION_REGISTRY.is_empty());
     let fixture: Fixture = serde_json::from_str(FIXTURE).expect("strict checked-in fixture");
     validate_fixture(&fixture).expect("all deletion fixture cases resolve");
@@ -505,16 +545,30 @@ fn compatibility_traps() {
         },
         remedy: TrustedRemedyCode::CallReplacementTool,
     });
-    let unsafe_result = normalize_call(
+    // Exercise the public dispatch seam, not merely the normalizer. Every
+    // subsequent layer is deliberately hostile: the allowlist excludes the
+    // replacement, the path cannot identify a project, task_show cannot decode
+    // these arguments, and both context and supervisor doubles panic on access.
+    let rejecting_allowlist = [json!({"name":"task_list"})];
+    let unsafe_result = dispatch_tool_call_with_compatibility(
+        &PanicOnAccessContext,
+        &UnimplementedRpcServices::new(),
+        &json!({
+            "name": "unsafe_cached_tool",
+            "arguments": {"unexpected": true}
+        }),
+        Path::new("/unresolvable/compatibility-trap-worktree"),
+        Some(&rejecting_allowlist),
+        None,
+        None,
         &[unsafe_tool],
         current,
-        "unsafe_cached_tool",
-        args(json!({"unexpected":true})),
-    );
-    let djinn_mcp_extension::compatibility::NormalizationResult::Failure(unsafe_result) =
+    )
+    .await;
+    let DispatchResult::Handled(djinn_core::tool_call::ToolCallOutcome::Failure(unsafe_result)) =
         unsafe_result
     else {
-        panic!("unsafe forwarding precedes allowlist/schema/handler");
+        panic!("unsafe forwarding must fail before allowlist, project, schema, and handler access");
     };
     assert_eq!(
         metadata(unsafe_result),
