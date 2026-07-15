@@ -691,9 +691,7 @@ impl DjinnMcpServer {
         let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         for epic_id in epic_ids {
             if let Ok(Some(epic)) = epic_repo.get(epic_id).await {
-                self.state
-                    .event_bus()
-                    .send(DjinnEventEnvelope::epic_updated(&epic));
+                epic_repo.emit_updated(&epic).await;
             }
         }
     }
