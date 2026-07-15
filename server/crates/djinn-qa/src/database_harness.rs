@@ -95,15 +95,12 @@ pub struct DjinnDatabaseLeaseFactory;
 #[async_trait]
 impl DatabaseLeaseFactory for DjinnDatabaseLeaseFactory {
     async fn acquire(&self) -> Result<DatabaseLease, DatabaseAcquisitionError> {
-        // `ephemeral` is djinn-db's async entry point for its UUID template
-        // clone lifecycle. It is deliberately the only database mechanism used
-        // by this harness.
+        // `open_in_memory` is djinn-db's UUID template-clone test lifecycle.
+        // It is deliberately the only database mechanism used by this harness.
         let database =
-            Database::ephemeral()
-                .await
-                .map_err(|source| DatabaseAcquisitionError::Open {
-                    detail: source.to_string(),
-                })?;
+            Database::open_in_memory().map_err(|source| DatabaseAcquisitionError::Open {
+                detail: source.to_string(),
+            })?;
         database.ensure_initialized().await.map_err(|source| {
             DatabaseAcquisitionError::Initialize {
                 detail: source.to_string(),
