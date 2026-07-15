@@ -73,6 +73,8 @@ function judgeSummaryText(summary: string | null | undefined): string {
 export function ProposalRefinement({
   proposalId,
   status,
+  authorUserId,
+  signoffUserIds = [],
   gateStatus,
   debateTrail = [],
   revisions = [],
@@ -81,6 +83,9 @@ export function ProposalRefinement({
 }: {
   proposalId: string;
   status: ProposalRefinementStatus | null;
+  /** The proposal author plus sign-off users are the only valid run owners. */
+  authorUserId?: string | null;
+  signoffUserIds?: string[];
   gateStatus?: ProposalGateStatus | null;
   debateTrail?: ProposalDebateTrailRow[];
   revisions?: ProposalHistoryEntry[];
@@ -98,13 +103,25 @@ export function ProposalRefinement({
     const u = userFor(id);
     return u ? userDisplayName(u) : id;
   };
-  // User the tribunal runs are attributed to (task owner + model scope),
-  // mirroring the kick-off owner picker. Defaults to the current user; the
-  // backend falls back to the proposal author when left blank.
-  const [owner, setOwner] = useState<string>("");
+  // User the tribunal runs are attributed to (task owner + model scope).
+  // Like build kickoff, only the proposal author and sign-off participants
+  // are eligible; never manufacture an admin or system fallback.
+  const participants = useMemo(() => {
+    const ids = new Set<string>();
+    if (authorUserId) ids.add(authorUserId);
+    signoffUserIds.forEach((id) => ids.add(id));
+    return Array.from(ids);
+  }, [authorUserId, signoffUserIds]);
+  const defaultOwner =
+    me?.id && participants.includes(me.id) ? me.id : (participants[0] ?? "");
+  const [owner, setOwner] = useState<string>(defaultOwner);
   useEffect(() => {
-    if (!owner && me?.id) setOwner(me.id);
-  }, [owner, me?.id]);
+    setOwner((current) => {
+      // User and participant data can resolve after the initial render.
+      if (me?.id && participants.includes(me.id)) return me.id;
+      return participants.includes(current) ? current : defaultOwner;
+    });
+  }, [defaultOwner, me?.id, participants]);
 
   // Optional feedback the human attaches when accepting/rejecting the result.
   // Required to demand another tribunal round (sent as the request reason).
@@ -273,6 +290,13 @@ export function ProposalRefinement({
         <p className="text-sm font-medium text-foreground">{ribbon}</p>
 
         <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+          {status.owner_user_id && (
+            <span className="flex items-center gap-1.5">
+              owned by
+              <UserAvatar user={userFor(status.owner_user_id)} className="size-4" />
+              {nameFor(status.owner_user_id)}
+            </span>
+          )}
           <span>
             Entries{" "}
             <span className="font-mono font-medium text-foreground">
@@ -291,10 +315,35 @@ export function ProposalRefinement({
 
         {/* Stopped — let the user run a fresh tribunal from here. */}
         {!status.active && (
-          <div className="space-y-1 border-t pt-2">
-            <Button size="sm" disabled={busy} onClick={handleStart}>
-              {busy ? "Starting…" : "Restart refinement"}
-            </Button>
+          <div className="space-y-2 border-t pt-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm">Owner</span>
+              <Select value={owner} onValueChange={setOwner}>
+                <SelectTrigger className="h-8 w-[200px] text-sm">
+                  <SelectValue placeholder="Pick a participant">
+                    {owner ? (
+                      <span className="flex items-center gap-2">
+                        <UserAvatar user={userFor(owner)} className="size-4" />
+                        {nameFor(owner)}
+                      </span>
+                    ) : undefined}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {participants.map((id) => (
+                    <SelectItem key={id} value={id}>
+                      <span className="flex items-center gap-2">
+                        <UserAvatar user={userFor(id)} className="size-4" />
+                        {nameFor(id)}
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button size="sm" disabled={busy || !owner} onClick={handleStart}>
+                {busy ? "Starting…" : "Restart refinement"}
+              </Button>
+            </div>
             <p className="text-xs text-muted-foreground">
               Runs a fresh Adversary → Advocate → Judge tribunal from the current
               spec.
@@ -566,7 +615,7 @@ export function ProposalRefinement({
         consecutive dry adversary rounds.
       </p>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm">Attribute to</span>
+        <span className="text-sm">Owner</span>
         <Select
           value={owner}
           onValueChange={(v) => typeof v === "string" && setOwner(v)}
@@ -575,7 +624,7 @@ export function ProposalRefinement({
             {/* Render the resolved name explicitly: `owner` is set
                 programmatically, so Radix never captures the selected item's
                 text and SelectValue would otherwise fall back to the raw id. */}
-            <SelectValue placeholder="Pick a user">
+            <SelectValue placeholder="Pick a participant">
               {owner ? (
                 <span className="flex items-center gap-2">
                   <UserAvatar user={userFor(owner)} className="size-4" />
@@ -585,17 +634,17 @@ export function ProposalRefinement({
             </SelectValue>
           </SelectTrigger>
           <SelectContent>
-            {users.map((u) => (
-              <SelectItem key={u.id} value={u.id}>
+            {participants.map((id) => (
+              <SelectItem key={id} value={id}>
                 <span className="flex items-center gap-2">
-                  <UserAvatar user={u} className="size-4" />
-                  {userDisplayName(u)}
+                  <UserAvatar user={userFor(id)} className="size-4" />
+                  {nameFor(id)}
                 </span>
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
-        <Button size="sm" disabled={busy} onClick={handleStart}>
+        <Button size="sm" disabled={busy || !owner} onClick={handleStart}>
           {busy ? "Starting…" : "Start refinement"}
         </Button>
       </div>
