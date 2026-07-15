@@ -27,6 +27,7 @@ async fn code_graph_tool(
         &crate::extension::ToolCancellation::never(),
     )
     .await
+    .into_test_result()
 }
 
 #[derive(Clone)]

@@ -100,12 +100,51 @@ pub(crate) async fn call_tool(
     allowed_schemas: Option<&[serde_json::Value]>,
     cancel: &ToolCancellation,
 ) -> djinn_core::tool_call::ToolCallOutcome {
+    let current_release = djinn_mcp_extension::compatibility::ServerReleaseVersion {
+        major: 0,
+        minor: 1,
+        patch: 0,
+    };
+    call_tool_with_compatibility(
+        state,
+        services,
+        name,
+        arguments,
+        worktree_path,
+        session_task_id,
+        session_role,
+        mcp_registry,
+        allowed_schemas,
+        cancel,
+        djinn_mcp_extension::compatibility::PRODUCTION_REGISTRY,
+        &current_release,
+    )
+    .await
+}
+
+/// Internal dispatch seam used by regression tests to inject a checked-in
+/// compatibility trap without exposing obsolete surfaces in production.
+#[allow(clippy::too_many_arguments)]
+async fn call_tool_with_compatibility(
+    state: &AgentContext,
+    services: &dyn djinn_supervisor::SupervisorServices,
+    name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    worktree_path: &Path,
+    session_task_id: Option<&str>,
+    session_role: Option<&str>,
+    mcp_registry: Option<&McpToolRegistry>,
+    allowed_schemas: Option<&[serde_json::Value]>,
+    cancel: &ToolCancellation,
+    registry: &[djinn_mcp_extension::compatibility::CompatibilityTrap],
+    current_release: &djinn_mcp_extension::compatibility::ServerReleaseVersion,
+) -> djinn_core::tool_call::ToolCallOutcome {
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
 
     // Try the extension dispatch first. It handles most tools through
     // ExtensionContext and returns Unhandled for tools that need djinn-agent
     // internals (workspace, task_merge, coordinator, code_graph, skill_read).
-    let ext_result = djinn_mcp_extension::dispatch::dispatch_tool_call(
+    let ext_result = djinn_mcp_extension::dispatch::dispatch_tool_call_with_compatibility(
         state as &dyn djinn_mcp_extension::ExtensionContext,
         services,
         &synthetic,
@@ -113,6 +152,8 @@ pub(crate) async fn call_tool(
         allowed_schemas,
         session_task_id,
         session_role,
+        registry,
+        current_release,
     )
     .await;
 

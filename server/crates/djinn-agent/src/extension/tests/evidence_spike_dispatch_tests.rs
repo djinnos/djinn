@@ -13,7 +13,6 @@
 //!    evidence-spike allowlist is provided.
 
 use super::*;
-use crate::extension::handlers::dispatch_tool_call;
 use crate::mcp_client::McpToolRegistry;
 
 /// The evidence-spike schemas used as `allowed_schemas` in dispatch.
@@ -29,6 +28,38 @@ fn make_tool_call(
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> serde_json::Value {
     serde_json::json!({ "name": name, "arguments": arguments })
+}
+
+/// Invoke the public two-phase boundary while retaining this legacy test
+/// module's `Result` assertions.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_tool_call(
+    state: &crate::context::AgentContext,
+    services: &dyn djinn_supervisor::SupervisorServices,
+    tool_call: &serde_json::Value,
+    worktree_path: &std::path::Path,
+    allowed_schemas: Option<&[serde_json::Value]>,
+    session_task_id: Option<&str>,
+    session_role: Option<&str>,
+    mcp_registry: Option<&McpToolRegistry>,
+    cancel: &crate::extension::ToolCancellation,
+) -> Result<serde_json::Value, String> {
+    let name = tool_call["name"].as_str().expect("tool name");
+    let arguments = tool_call["arguments"].as_object().cloned();
+    call_tool(
+        state,
+        services,
+        name,
+        arguments,
+        worktree_path,
+        session_task_id,
+        session_role,
+        mcp_registry,
+        allowed_schemas,
+        cancel,
+    )
+    .await
+    .into_test_result()
 }
 
 // ── Blocked tools: evidence-spike allowlist must reject mutation/destructive

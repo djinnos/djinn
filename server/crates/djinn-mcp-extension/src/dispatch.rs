@@ -14,8 +14,8 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::compatibility::{
-    NormalizationResult, PRODUCTION_REGISTRY, PreparedToolCall, ServerReleaseVersion,
-    normalize_call,
+    CompatibilityTrap, NormalizationResult, PRODUCTION_REGISTRY, PreparedToolCall,
+    ServerReleaseVersion, normalize_call,
 };
 use crate::context::ExtensionContext;
 use crate::handlers::{code_intel, memory_agent, task_admin, task_epic};
@@ -64,6 +64,46 @@ pub async fn dispatch_tool_call<T>(
 where
     T: Serialize,
 {
+    let current_release = ServerReleaseVersion {
+        major: 0,
+        minor: 1,
+        patch: 0,
+    };
+    dispatch_tool_call_with_compatibility(
+        ctx,
+        services,
+        tool_call,
+        worktree_path,
+        allowed_schemas,
+        session_task_id,
+        session_role,
+        PRODUCTION_REGISTRY,
+        &current_release,
+    )
+    .await
+}
+
+/// Dispatch a call using an explicitly supplied compatibility registry.
+///
+/// Production callers use [`dispatch_tool_call`], which supplies the
+/// server-owned production registry. This seam lets integration tests verify
+/// normalization through agent-local fallback without advertising stale
+/// surfaces in the production tool inventory.
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_tool_call_with_compatibility<T>(
+    ctx: &dyn ExtensionContext,
+    services: &dyn djinn_supervisor::SupervisorServices,
+    tool_call: &T,
+    worktree_path: &Path,
+    allowed_schemas: Option<&[serde_json::Value]>,
+    session_task_id: Option<&str>,
+    session_role: Option<&str>,
+    registry: &[CompatibilityTrap],
+    current_release: &ServerReleaseVersion,
+) -> DispatchResult
+where
+    T: Serialize,
+{
     let call: IncomingToolCall = match serde_json::to_value(tool_call)
         .map_err(|e| e.to_string())
         .and_then(|v| from_value(v).map_err(|e| format!("invalid frontend tool payload: {e}")))
@@ -72,17 +112,7 @@ where
         Err(e) => return handled(Err(e), Vec::new()),
     };
 
-    let current_release = ServerReleaseVersion {
-        major: 0,
-        minor: 1,
-        patch: 0,
-    };
-    let prepared = match normalize_call(
-        PRODUCTION_REGISTRY,
-        &current_release,
-        &call.name,
-        call.arguments,
-    ) {
+    let prepared = match normalize_call(registry, current_release, &call.name, call.arguments) {
         NormalizationResult::Prepared(prepared) => prepared,
         NormalizationResult::Failure(failure) => {
             return DispatchResult::Handled(djinn_core::tool_call::ToolCallOutcome::Failure(
