@@ -3,7 +3,7 @@ use crate::models::Credential;
 use crate::models::CustomProvider;
 use crate::models::DispatchPause;
 use crate::models::DispatchPauseScope;
-use crate::models::Epic;
+use crate::models::EpicEventPayload;
 use crate::models::GitSettings;
 use crate::models::Project;
 use crate::models::Proposal;
@@ -124,21 +124,21 @@ impl DjinnEventEnvelope {
         }
     }
 
-    pub fn epic_created(epic: &Epic) -> Self {
+    pub fn epic_created(payload: &EpicEventPayload<'_>) -> Self {
         Self {
             entity_type: "epic",
             action: "created",
-            payload: serde_json::to_value(epic).unwrap(),
+            payload: serde_json::to_value(payload).unwrap(),
             id: None,
             project_id: None,
             from_sync: false,
         }
     }
-    pub fn epic_updated(epic: &Epic) -> Self {
+    pub fn epic_updated(payload: &EpicEventPayload<'_>) -> Self {
         Self {
             entity_type: "epic",
             action: "updated",
-            payload: serde_json::to_value(epic).unwrap(),
+            payload: serde_json::to_value(payload).unwrap(),
             id: None,
             project_id: None,
             from_sync: false,
