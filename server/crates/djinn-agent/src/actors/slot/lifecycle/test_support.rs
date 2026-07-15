@@ -124,6 +124,7 @@ pub(crate) async fn assemble_for_role_with_extension_diagnostics(
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
         extension_diagnostics,
+        memory_intent_planner: None,
     })
     .await
 }
@@ -156,6 +157,7 @@ pub(crate) async fn assemble_for_role_with_mcp_instructions(
         arbiter_directive: None,
         mcp_server_instructions,
         extension_diagnostics: &[],
+        memory_intent_planner: None,
     })
     .await
 }
@@ -187,6 +189,7 @@ pub(crate) async fn assemble_for_role_with_resume(
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
         extension_diagnostics: &[],
+        memory_intent_planner: None,
     })
     .await
 }

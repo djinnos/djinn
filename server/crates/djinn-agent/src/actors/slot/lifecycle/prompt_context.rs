@@ -21,9 +21,15 @@ use tracing::Instrument;
 
 mod ci_directive;
 mod diagnostics;
+mod planner_enrichment;
 mod types;
 use ci_directive::build_ci_blocking_directive;
-pub(crate) use types::{PromptContext, PromptContextInputs, ReadSourceInfo};
+use planner_enrichment::merge_planned_knowledge;
+#[allow(unused_imports)] // Lifecycle seams are consumed by stage wiring and test modules.
+pub(crate) use types::{
+    MemoryIntentPlannerHost, MemoryIntentPlannerInvocation, PlannedNoteSearch, PromptContext,
+    PromptContextInputs, ReadSourceInfo, SupervisorPlannerHost,
+};
 // Re-export for `use super::*` in test modules.
 #[allow(unused_imports)]
 pub(super) use diagnostics::{
@@ -354,10 +360,20 @@ const KNOWLEDGE_NOTE_TYPES: &[&str] = &["pattern", "pitfall", "case"];
 ///   `exceeded`=`len>=cap`.
 /// - **Fail-open:** trace errors are logged and swallowed; the rendered context
 ///   is produced from the production query alone.
+#[allow(dead_code)] // Scope-only entry point remains available to focused lifecycle tests.
 pub(crate) async fn load_knowledge_context(
     task: &Task,
     epic_context: Option<&str>,
     app_state: &AgentContext,
+) -> Option<String> {
+    load_knowledge_context_with_planner(task, epic_context, app_state, None).await
+}
+
+async fn load_knowledge_context_with_planner(
+    task: &Task,
+    epic_context: Option<&str>,
+    app_state: &AgentContext,
+    planner: Option<&MemoryIntentPlannerInvocation<'_>>,
 ) -> Option<String> {
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_paths = derive_task_scope_paths(task, epic_context);
@@ -412,6 +428,7 @@ pub(crate) async fn load_knowledge_context(
                     },
                     cap_exceeded,
                     &app_state.db,
+                    planner.map(|p| (p.session_id, p.task_run_id)),
                 )
                 .await;
             }
@@ -447,6 +464,7 @@ pub(crate) async fn load_knowledge_context(
     } else {
         Some(packed.rendered)
     };
+    let rendered = merge_planned_knowledge(rendered, &notes, &note_repo, task, planner).await;
 
     // Persist the trace (fail-open). Measure the persist phase separately.
     let persist_start = tokio::time::Instant::now();
@@ -463,6 +481,7 @@ pub(crate) async fn load_knowledge_context(
         },
         candidate_cap_exceeded,
         &app_state.db,
+        planner.map(|p| (p.session_id, p.task_run_id)),
     )
     .await;
 
@@ -618,6 +637,7 @@ struct KnowledgeTraceDurations {
 
 /// Persist a `LoadKnowledgeContext` retrieval trace row. Fail-open: logs and
 /// swallows all errors, never propagating them to the caller.
+#[allow(clippy::too_many_arguments)] // Trace fields stay explicit at this boundary.
 async fn persist_knowledge_trace(
     task: &Task,
     task_paths: &[String],
@@ -626,6 +646,7 @@ async fn persist_knowledge_trace(
     durations: KnowledgeTraceDurations,
     candidate_cap_exceeded: bool,
     db: &djinn_db::Database,
+    attribution: Option<(&str, &str)>,
 ) {
     use djinn_db::repositories::retrieval_trace::{
         CreateRetrievalTraceParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
@@ -674,8 +695,8 @@ async fn persist_knowledge_trace(
     let repo = RetrievalTraceRepository::new(db.clone());
     let params = CreateRetrievalTraceParams {
         project_id: &task.project_id,
-        session_id: None,
-        task_run_id: None,
+        session_id: attribution.map(|(session_id, _)| session_id),
+        task_run_id: attribution.map(|(_, task_run_id)| task_run_id),
         task_id: Some(&task.id),
         entry_point: RetrievalTraceEntryPoint::LoadKnowledgeContext,
         trigger: Some(&trigger),
@@ -725,6 +746,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         arbiter_directive,
         mcp_server_instructions,
         extension_diagnostics,
+        memory_intent_planner,
     } = inputs;
 
     // ── Phase 0: synchronous work with no data dependencies ──
@@ -804,7 +826,13 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             );
             async move {
                 let child_start = tokio::time::Instant::now();
-                let result = load_knowledge_context(task, epic_context_ref, app_state).await;
+                let result = load_knowledge_context_with_planner(
+                    task,
+                    epic_context_ref,
+                    app_state,
+                    memory_intent_planner.as_ref(),
+                )
+                .await;
                 (result, child_start.elapsed())
             }
             .instrument(span)
