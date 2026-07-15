@@ -31,6 +31,7 @@ async fn lead_prompt_context(db: Database, task: &Task) -> PromptContext {
 struct RecordingPlannedNoteSearch {
     requests: std::sync::Mutex<Vec<(String, String)>>,
     rows: Vec<djinn_memory::MemorySearchEntityRow>,
+    rows_by_query: std::collections::BTreeMap<String, Vec<djinn_memory::MemorySearchEntityRow>>,
 }
 
 #[async_trait::async_trait]
@@ -46,7 +47,11 @@ impl PlannedNoteSearch for RecordingPlannedNoteSearch {
             .lock()
             .expect("record planned search")
             .push((query.into(), note_type.into()));
-        Ok(self.rows.clone())
+        Ok(self
+            .rows_by_query
+            .get(query)
+            .cloned()
+            .unwrap_or_else(|| self.rows.clone()))
     }
 }
 
@@ -55,14 +60,28 @@ fn valid_planner_payload() -> &'static str {
 }
 
 fn planned_note() -> djinn_memory::MemorySearchEntityRow {
+    planned_note_row(
+        "planned-note-real",
+        "Planned Note",
+        "patterns/planned-note",
+        "planned note body",
+    )
+}
+
+fn planned_note_row(
+    id: &str,
+    title: &str,
+    permalink: &str,
+    snippet: &str,
+) -> djinn_memory::MemorySearchEntityRow {
     djinn_memory::MemorySearchEntityRow {
         entity: "note".into(),
-        id: "planned-note-real".into(),
-        title: "Planned Note".into(),
+        id: id.into(),
+        title: title.into(),
         folder: "patterns".into(),
         note_type: "pattern".into(),
-        permalink: "patterns/planned-note".into(),
-        snippet: "planned note body".into(),
+        permalink: permalink.into(),
+        snippet: snippet.into(),
         score: 1.0,
     }
 }
@@ -2195,4 +2214,223 @@ async fn planner_production_boundary_empty_host_payload_is_scope_only_without_se
     assert_eq!(result.system_prompt, baseline.system_prompt);
     assert_eq!(host.requests.lock().expect("requests").len(), 1);
     assert!(search.requests.lock().expect("searches").is_empty());
+}
+
+#[tokio::test]
+async fn planner_production_boundary_scope_budget_runs_planner_without_injection() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
+    task.created_by_user_id = Some("creator-real".into());
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    for index in 0..10 {
+        let note = note_repo
+            .create(
+                &task.project_id,
+                &format!("Scope budget note {index:02}"),
+                &"scope ".repeat(40),
+                "pattern",
+                "[]",
+            )
+            .await
+            .expect("seed scope note");
+        note_repo
+            .set_confidence(&note.id, 0.95)
+            .await
+            .expect("raise scope confidence");
+    }
+
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let host = RecordingPlannerHost::with_content(valid_planner_payload());
+    let search = RecordingPlannedNoteSearch {
+        rows: vec![planned_note_row(
+            "oversized-planned",
+            "Oversized planned note",
+            "patterns/oversized-planned",
+            &"planned ".repeat(80),
+        )],
+        ..Default::default()
+    };
+    let config = crate::context::MemoryIntentPlannerConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let role = LeadRole;
+    let worktree = test_tempdir("planner-production-boundary-budget-");
+    let context = assemble_prompt_context(planner_assembly_inputs!(
+        &task,
+        &role,
+        worktree,
+        &app_state,
+        Some(MemoryIntentPlannerInvocation {
+            config: &config,
+            host: &host,
+            session_id: "session-budget",
+            task_run_id: "task-run-budget",
+            creator_id: task.created_by_user_id.as_deref(),
+            acceptance_criteria: vec![],
+            resume_compaction_summary: None,
+            planned_note_search: Some(&search),
+        })
+    ))
+    .await;
+
+    let knowledge = context.knowledge_context.expect("scope context");
+    assert!(knowledge.contains("Scope budget note"));
+    assert!(
+        knowledge.len() > 1_500,
+        "scope content must consume the shared budget"
+    );
+    assert!(!knowledge.contains("Oversized planned note"));
+    assert!(knowledge.len() <= KNOWLEDGE_BUDGET_CHARS);
+    assert_eq!(host.requests.lock().expect("host work").len(), 1);
+    assert_eq!(search.requests.lock().expect("search work").len(), 2);
+}
+
+#[tokio::test]
+async fn planner_production_boundary_scope_first_dedup_caps_and_order_are_deterministic() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
+    task.created_by_user_id = Some("creator-real".into());
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let scope_note = note_repo
+        .create(
+            &task.project_id,
+            "Scope first",
+            "scope body",
+            "pattern",
+            "[]",
+        )
+        .await
+        .expect("seed scope note");
+    let first = "Database migration timeout E_CONNRESET";
+    let second = "Memory planner configuration injection";
+    let third = "Stable repository rank handling";
+    let payload = format!(
+        r#"{{"queries":[{{"type":"pitfall","query":"{first}"}},{{"type":"pattern","query":"{second}"}},{{"type":"case","query":"{third}"}}]}}"#
+    );
+    let host = RecordingPlannerHost::with_content(&payload);
+    let search = RecordingPlannedNoteSearch {
+        rows_by_query: std::collections::BTreeMap::from([
+            (
+                first.into(),
+                vec![
+                    planned_note_row(
+                        &scope_note.id,
+                        "Duplicate ID",
+                        "patterns/different-link",
+                        "skip",
+                    ),
+                    planned_note_row(
+                        "different-id",
+                        "Duplicate permalink",
+                        &scope_note.permalink,
+                        "skip",
+                    ),
+                    planned_note_row(
+                        "first-a",
+                        "First ranked unique",
+                        "pitfalls/first-a",
+                        "first",
+                    ),
+                    planned_note_row(
+                        "first-b",
+                        "Second ranked unique",
+                        "pitfalls/first-b",
+                        "second",
+                    ),
+                    planned_note_row(
+                        "first-extra",
+                        "First query overflow",
+                        "pitfalls/first-extra",
+                        "skip",
+                    ),
+                ],
+            ),
+            (
+                second.into(),
+                vec![
+                    planned_note_row("second-a", "Third planned", "patterns/second-a", "third"),
+                    planned_note_row("second-b", "Fourth planned", "patterns/second-b", "fourth"),
+                    planned_note_row(
+                        "second-extra",
+                        "Second query overflow",
+                        "patterns/second-extra",
+                        "skip",
+                    ),
+                ],
+            ),
+            (
+                third.into(),
+                vec![
+                    planned_note_row("third-a", "Fifth planned", "cases/third-a", "fifth"),
+                    planned_note_row("third-b", "Sixth planned", "cases/third-b", "sixth"),
+                    planned_note_row(
+                        "third-extra",
+                        "Global overflow",
+                        "cases/third-extra",
+                        "skip",
+                    ),
+                ],
+            ),
+        ]),
+        ..Default::default()
+    };
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let config = crate::context::MemoryIntentPlannerConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let role = LeadRole;
+    let worktree = test_tempdir("planner-production-boundary-order-");
+    let assemble = || async {
+        assemble_prompt_context(planner_assembly_inputs!(
+            &task,
+            &role,
+            worktree,
+            &app_state,
+            Some(MemoryIntentPlannerInvocation {
+                config: &config,
+                host: &host,
+                session_id: "session-order",
+                task_run_id: "task-run-order",
+                creator_id: task.created_by_user_id.as_deref(),
+                acceptance_criteria: vec![],
+                resume_compaction_summary: None,
+                planned_note_search: Some(&search),
+            })
+        ))
+        .await
+    };
+    let first_run = assemble().await;
+    let second_run = assemble().await;
+    let knowledge = first_run.knowledge_context.as_deref().expect("knowledge");
+    assert_eq!(first_run.knowledge_context, second_run.knowledge_context);
+    assert_eq!(first_run.system_prompt, second_run.system_prompt);
+    assert!(knowledge.len() <= KNOWLEDGE_BUDGET_CHARS);
+    assert_eq!(knowledge.matches("**[Note]").count(), 6);
+    assert_ordered(
+        knowledge,
+        &[
+            "Scope first",
+            "First ranked unique",
+            "Second ranked unique",
+            "Third planned",
+            "Fourth planned",
+            "Fifth planned",
+            "Sixth planned",
+        ],
+    );
+    for skipped in [
+        "Duplicate ID",
+        "Duplicate permalink",
+        "First query overflow",
+        "Second query overflow",
+        "Global overflow",
+    ] {
+        assert!(!knowledge.contains(skipped));
+    }
+    assert_eq!(host.requests.lock().expect("host work").len(), 2);
+    assert_eq!(search.requests.lock().expect("search work").len(), 6);
 }

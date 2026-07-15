@@ -92,7 +92,7 @@ pub(super) async fn merge_planned_knowledge(
             if rendered_for_query == 2 {
                 break;
             }
-            if count == 6 || !ids.insert(row.id.clone()) || !links.insert(row.permalink.clone()) {
+            if count == 6 || ids.contains(&row.id) || links.contains(&row.permalink) {
                 continue;
             }
             let line = format!(
@@ -106,6 +106,8 @@ pub(super) async fn merge_planned_knowledge(
             if !output.is_empty() {
                 output.push('\n')
             }
+            ids.insert(row.id);
+            links.insert(row.permalink);
             output.push_str(&line);
             count += 1;
             rendered_for_query += 1;
