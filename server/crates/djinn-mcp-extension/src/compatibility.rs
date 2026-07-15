@@ -95,12 +95,23 @@ impl fmt::Display for CivilDate {
 impl FromStr for CivilDate {
     type Err = String;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 10 || &value[4..5] != "-" || &value[7..8] != "-" {
+        // Check bytes rather than slicing the input string: a ten-byte UTF-8
+        // value need not have character boundaries at offsets 4 or 7.
+        let bytes = value.as_bytes();
+        if bytes.len() != 10 || !value.is_ascii() || bytes[4] != b'-' || bytes[7] != b'-' {
             return Err("date must be YYYY-MM-DD".into());
         }
-        let year = value[..4].parse().map_err(|_| "invalid date year")?;
-        let month = value[5..7].parse().map_err(|_| "invalid date month")?;
-        let day = value[8..10].parse().map_err(|_| "invalid date day")?;
+        let parse_decimal = |part: &[u8], error: &str| -> Result<u16, String> {
+            if !part.iter().all(u8::is_ascii_digit) {
+                return Err(error.into());
+            }
+            Ok(part
+                .iter()
+                .fold(0_u16, |number, digit| number * 10 + u16::from(digit - b'0')))
+        };
+        let year = i32::from(parse_decimal(&bytes[..4], "invalid date year")?);
+        let month = parse_decimal(&bytes[5..7], "invalid date month")? as u8;
+        let day = parse_decimal(&bytes[8..10], "invalid date day")? as u8;
         if !(1..=12).contains(&month) || day == 0 || day > month_days(year, month) {
             return Err("invalid calendar date".into());
         }
@@ -173,8 +184,21 @@ pub struct ServerRelease {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReleaseKind {
+    /// A major server release is also a compatibility-minor boundary.
+    Major,
     Minor,
     Patch,
+}
+
+impl ReleaseKind {
+    /// Releases which advance the server's compatibility minor sequence.
+    ///
+    /// A major rollover (for example, `1.99.0` to `2.0.0`) is represented
+    /// explicitly in the checked-in calendar and counts as that sequence's
+    /// next boundary. This avoids guessing a minor number across majors.
+    fn is_compatibility_minor(self) -> bool {
+        matches!(self, Self::Major | Self::Minor)
+    }
 }
 
 /// Injected server identity and checked-in release calendar.
@@ -581,19 +605,23 @@ fn validate_retirement(l: &TrapLifecycle, releases: &[ServerRelease]) -> Result<
         .iter()
         .find(|r| r.version == l.introduced_in)
         .ok_or("unknown introduction release")?;
-    let threshold_minor = releases
+    // The calendar, ordered by semantic server versions, is authoritative.
+    // Counting compatibility-minor boundaries instead of calculating
+    // `introduced.minor + 2` lets 1.99.0 -> 2.0.0 be represented correctly.
+    let mut following_minors: Vec<_> = releases
         .iter()
-        .find(|r| {
-            r.kind == ReleaseKind::Minor
-                && r.version.major == l.introduced_in.major
-                && r.version.minor >= l.introduced_in.minor + 2
-        })
+        .filter(|r| r.version > l.introduced_in && r.kind.is_compatibility_minor())
+        .collect();
+    following_minors.sort_by_key(|r| &r.version);
+    let threshold_minor = following_minors
+        .get(1)
+        .copied()
         .ok_or("calendar lacks two-minor threshold")?;
     let date = introduced.released_on.days_after(90);
     let expected = releases
         .iter()
         .filter(|r| {
-            r.kind == ReleaseKind::Minor
+            r.kind.is_compatibility_minor()
                 && r.version > threshold_minor.version
                 && r.released_on >= date
         })
@@ -653,5 +681,41 @@ mod tests {
             normalize_call(&[trap], &v("1.1.0"), "new", Some(both)),
             NormalizationResult::Failure(_)
         ));
+    }
+
+    #[test]
+    fn retirement_uses_calendar_boundaries_across_a_major_rollover() {
+        fn release(version: &str, released_on: &str, kind: ReleaseKind) -> ServerRelease {
+            ServerRelease {
+                version: v(version),
+                released_on: released_on.parse().unwrap(),
+                kind,
+            }
+        }
+
+        let mut lifecycle = lifecycle();
+        lifecycle.introduced_in = v("1.99.0");
+        lifecycle.remove_after = v("2.2.0");
+        // Deliberately unordered: semantic server-version ordering, not fixture
+        // order or minor arithmetic, determines the two release threshold.
+        let releases = vec![
+            release("2.2.0", "2030-04-15", ReleaseKind::Minor),
+            release("1.99.0", "2030-01-01", ReleaseKind::Minor),
+            release("2.1.0", "2030-04-01", ReleaseKind::Minor),
+            release("2.0.0", "2030-02-01", ReleaseKind::Major),
+        ];
+
+        assert_eq!(validate_retirement(&lifecycle, &releases), Ok(()));
+    }
+
+    #[test]
+    fn civil_date_rejects_multibyte_input_without_panicking() {
+        // This is ten bytes, but byte four is inside `é`; old string slicing
+        // panicked before it could return the documented strict parse error.
+        assert_eq!(
+            "abcé12345".parse::<CivilDate>(),
+            Err("date must be YYYY-MM-DD".into())
+        );
+        assert!(serde_json::from_str::<CivilDate>("\"abcé12345\"").is_err());
     }
 }
