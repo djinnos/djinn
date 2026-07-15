@@ -203,12 +203,13 @@ pub(crate) async fn call_memory_write(
     project_path: &str,
     _worktree_root: &Path,
 ) -> Result<serde_json::Value, String> {
-    let p: MemoryWriteParams = parse_args(arguments)?;
+    let p: MemoryWriteParams = parse_args_stripping(arguments, &["project"])?;
     let project_path = project_path.to_owned();
     let server = djinn_control_plane::server::DjinnMcpServer::new(ctx.mcp_state());
     let result = server
         .memory_write(rmcp::handler::server::wrapper::Parameters(
             SharedMemoryWriteParams {
+                reason: p.reason,
                 project: project_path,
                 title: p.title,
                 content: p.content,
@@ -231,12 +232,13 @@ pub(crate) async fn call_memory_edit(
     project_path: &str,
     _worktree_root: &Path,
 ) -> Result<serde_json::Value, String> {
-    let p: MemoryEditParams = parse_args(arguments)?;
+    let p: MemoryEditParams = parse_args_stripping(arguments, &["project"])?;
     let project_path = project_path.to_owned();
     let server = djinn_control_plane::server::DjinnMcpServer::new(ctx.mcp_state());
     let result = server
         .memory_edit(rmcp::handler::server::wrapper::Parameters(
             SharedMemoryEditParams {
+                reason: p.reason,
                 project: project_path,
                 identifier: p.identifier,
                 operation: p.operation,
