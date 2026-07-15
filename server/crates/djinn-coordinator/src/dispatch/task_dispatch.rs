@@ -3291,6 +3291,10 @@ mod inflight_ledger_tests {
         observations.extend(take_dispatch_cap_observations());
         let max_observed = observations
             .iter()
+            // LedgerOverlay and CapConsidered may conservatively count both a
+            // newly visible session row and its reservation for one pass. The
+            // admission invariant is the count after a successful increment.
+            .filter(|obs| obs.stage == DispatchCapObservationStage::InflightIncremented)
             .map(|obs| obs.effective_count)
             .max()
             .unwrap_or(0);
@@ -3576,7 +3580,9 @@ mod inflight_ledger_tests {
                 "cap {cap}: stress run must observe the lag-window ledger overlay"
             );
             for obs in observations.iter().filter(|obs| {
-                obs.creator_user_id == fixture.created_by_user_id && obs.model == fixture.model_id
+                obs.stage == DispatchCapObservationStage::InflightIncremented
+                    && obs.creator_user_id == fixture.created_by_user_id
+                    && obs.model == fixture.model_id
             }) {
                 assert!(
                     obs.effective_count <= cap,
@@ -3588,7 +3594,8 @@ mod inflight_ledger_tests {
             let max_instantaneous_count = observations
                 .iter()
                 .filter(|obs| {
-                    obs.creator_user_id == fixture.created_by_user_id
+                    obs.stage == DispatchCapObservationStage::InflightIncremented
+                        && obs.creator_user_id == fixture.created_by_user_id
                         && obs.model == fixture.model_id
                 })
                 .map(|obs| obs.effective_count)
