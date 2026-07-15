@@ -882,27 +882,9 @@ impl RepoGraphBridge {
             pagerank_for.insert(ranked.node_index, ranked.page_rank);
         }
 
-        // Proposal qoxm: per-file cross-module co-change pressure from the
-        // co-change sidecar. Sum each file's coupling score to partners in a
-        // *different* crate/module; that summed score becomes the fourth
-        // refactor-ranking axis, so a config file that changes lockstep with a
-        // source file in another crate scores higher.
-        let mut cross_module_cc: HashMap<PathBuf, f64> = HashMap::new();
-        for cc in graph.cochange_edges() {
-            let (Some(fa), Some(fb)) = (
-                graph.node(cc.source).file_path.clone(),
-                graph.node(cc.target).file_path.clone(),
-            ) else {
-                continue;
-            };
-            if super::refactor::module_key(&fa.to_string_lossy())
-                == super::refactor::module_key(&fb.to_string_lossy())
-            {
-                continue;
-            }
-            *cross_module_cc.entry(fa).or_insert(0.0) += cc.confidence;
-            *cross_module_cc.entry(fb).or_insert(0.0) += cc.confidence;
-        }
+        // Proposal qoxm: per-file cross-module co-change pressure — the
+        // fourth refactor-ranking axis (see refactor.rs for the derivation).
+        let cross_module_cc = super::refactor::cross_module_cochange_pressure(&graph);
 
         // Walk every function-like node carrying complexity. Skip the
         // same node-classes the iter-28 `complexity` op skips, plus

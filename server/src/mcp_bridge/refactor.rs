@@ -1,4 +1,31 @@
 use djinn_control_plane::bridge::ComplexityMetrics as WireComplexityMetrics;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+/// Proposal qoxm: per-file cross-module co-change pressure from the
+/// co-change sidecar. Sum each file's coupling score to partners in a
+/// *different* crate/module; that summed score becomes the fourth
+/// refactor-ranking axis, so a config file that changes lockstep with a
+/// source file in another crate scores higher.
+pub(crate) fn cross_module_cochange_pressure(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+) -> HashMap<PathBuf, f64> {
+    let mut cross_module_cc: HashMap<PathBuf, f64> = HashMap::new();
+    for cc in graph.cochange_edges() {
+        let (Some(fa), Some(fb)) = (
+            graph.node(cc.source).file_path.clone(),
+            graph.node(cc.target).file_path.clone(),
+        ) else {
+            continue;
+        };
+        if module_key(&fa.to_string_lossy()) == module_key(&fb.to_string_lossy()) {
+            continue;
+        }
+        *cross_module_cc.entry(fa).or_insert(0.0) += cc.confidence;
+        *cross_module_cc.entry(fb).or_insert(0.0) += cc.confidence;
+    }
+    cross_module_cc
+}
 
 pub(crate) fn complexity_metrics_to_wire(
     m: djinn_graph::complexity::ComplexityMetrics,
