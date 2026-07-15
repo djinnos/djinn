@@ -192,6 +192,12 @@ impl DjinnMcpServer {
                 attach_graph_staleness(self.state.repo_graph().as_ref(), ctx, head, &mut response)
                     .await;
             }
+            // glqk: attach the coverage advisory (best-effort, cheap DB read;
+            // no graph blob). Only the six designated ops carry a coverage
+            // field — the helper skips every other variant. Independent of
+            // `caller_head`: coverage is about workspace index status, not the
+            // caller's commit.
+            attach_coverage_advisory(self.state.db(), &project_id, &mut response).await;
             Ok(response)
         } else {
             result
@@ -269,6 +275,7 @@ impl DjinnMcpServer {
             "snapshot" => self.code_graph_snapshot(ctx, params).await,
             "crate_graph" => self.code_graph_crate_graph(ctx, params).await,
             "impact_check" => self.code_graph_impact_check(ctx, params).await,
+            "coverage" => self.code_graph_coverage(ctx, params).await,
             // Every registry entry is handled above.  This arm is
             // unreachable because `lookup_by_name` already rejected
             // unknown ops, but the compiler needs a wildcard.

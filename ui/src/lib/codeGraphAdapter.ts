@@ -76,6 +76,21 @@ export interface SnapshotNode {
    */
   x?: number;
   y?: number;
+  /**
+   * Proposal lmkv: server-precomputed 3D "galaxy" layout coordinates, computed
+   * once at warm time alongside `x`/`y`. When every rendered node carries
+   * finite `gx`/`gy`/`gz`, the galaxy view uses them directly and skips its Web
+   * Worker force layout entirely. `undefined` (legacy blobs, the gitignored
+   * Storybook fixture) means the client falls back to the worker path.
+   */
+  gx?: number;
+  gy?: number;
+  gz?: number;
+  /**
+   * Proposal lmkv: server-precomputed node degree from the collapsed galaxy
+   * edge view. Used in place of the client's recomputation when present.
+   */
+  degree?: number;
 }
 
 export interface SnapshotEdge {
@@ -218,6 +233,15 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
           is_test: n.is_test === true,
           x: typeof n.x === "number" && Number.isFinite(n.x) ? n.x : undefined,
           y: typeof n.y === "number" && Number.isFinite(n.y) ? n.y : undefined,
+          gx: typeof n.gx === "number" && Number.isFinite(n.gx) ? n.gx : undefined,
+          gy: typeof n.gy === "number" && Number.isFinite(n.gy) ? n.gy : undefined,
+          gz: typeof n.gz === "number" && Number.isFinite(n.gz) ? n.gz : undefined,
+          degree:
+            typeof n.degree === "number" &&
+            Number.isFinite(n.degree) &&
+            n.degree >= 0
+              ? Math.floor(n.degree)
+              : undefined,
         };
       })
       .filter((n) => n.id.length > 0),

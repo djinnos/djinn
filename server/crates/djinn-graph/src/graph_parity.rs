@@ -437,6 +437,8 @@ mod tests {
             processes: Vec::new(),
             route_exclusion_config: Default::default(),
             layout_positions: BTreeMap::new(),
+            galaxy_positions: BTreeMap::new(),
+            galaxy_degrees: BTreeMap::new(),
         }
     }
 

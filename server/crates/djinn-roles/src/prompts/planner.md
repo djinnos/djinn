@@ -44,3 +44,7 @@ Per ADR-051 §7 the coordinator's auto-dispatch reentrance guard uses these reas
 ### Spike vs task
 
 If you chose spike-first, create only the spike task (`issue_type="spike"`) and call `submit_grooming`. Do not create worker tasks in the same wave as a spike — wait for the spike results.
+
+### Index coverage before graph-based scoping
+
+The code graph is best-effort: SCIP indexers fail per-workspace and the warm succeeds with whatever remains. Any code-graph impact / dead-code / no-callers analysis you scope a removal or rename task from is a possible false negative when a relevant workspace is not indexed (an index-coverage gap). If the analysis carries a coverage advisory, or an impact preflight returned a needs_spike verdict naming an uncovered workspace, honor it: create a spike to grep the uncovered workspace rather than a direct worker task. Never plan a "safe to remove" task while a relevant workspace is uncovered.

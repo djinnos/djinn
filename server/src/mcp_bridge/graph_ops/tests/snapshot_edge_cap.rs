@@ -79,6 +79,8 @@ fn snapshot_caps_drawable_edges_but_keeps_containment() {
         processes: vec![],
         route_exclusion_config: Default::default(),
         layout_positions: std::collections::BTreeMap::new(),
+        galaxy_positions: std::collections::BTreeMap::new(),
+        galaxy_degrees: std::collections::BTreeMap::new(),
     });
     let ranking = RepoGraphRanking {
         nodes: graph

@@ -1188,6 +1188,7 @@ fn tally_indexer_results(
                     indexer: plan.indexer,
                     status: summary.status,
                     detail: Some(summary.detail),
+                    workspace_rel_root: plan.workspace_rel_root.to_string_lossy().into_owned(),
                 });
                 if !has_success && summary.failure_count == 0 {
                     failure_count += summary.total_count;
@@ -1210,6 +1211,7 @@ fn tally_indexer_results(
                     indexer: plan.indexer,
                     status: "artifact_pending".to_string(),
                     detail: Some(detail),
+                    workspace_rel_root: plan.workspace_rel_root.to_string_lossy().into_owned(),
                 });
                 commands.push(ExecutedIndexerCommand {
                     plan,
@@ -1228,6 +1230,7 @@ fn tally_indexer_results(
                     indexer: plan.indexer,
                     status: "timed_out".to_string(),
                     detail: Some(detail),
+                    workspace_rel_root: plan.workspace_rel_root.to_string_lossy().into_owned(),
                 });
                 tracing::warn!(
                     indexer = plan.indexer.binary_name(),
@@ -1242,6 +1245,7 @@ fn tally_indexer_results(
                         indexer: plan.indexer,
                         status: "artifact_pending".to_string(),
                         detail: Some(format!("expected artifact {}", plan.output_path.display())),
+                        workspace_rel_root: plan.workspace_rel_root.to_string_lossy().into_owned(),
                     });
                     commands.push(ExecutedIndexerCommand {
                         plan,
@@ -1262,6 +1266,7 @@ fn tally_indexer_results(
                         } else {
                             stderr.clone()
                         }),
+                        workspace_rel_root: plan.workspace_rel_root.to_string_lossy().into_owned(),
                     });
                     tracing::warn!(
                         indexer = plan.indexer.binary_name(),
@@ -1283,6 +1288,7 @@ fn tally_indexer_results(
                         indexer: plan.indexer,
                         status: status.to_string(),
                         detail: Some(err.to_string()),
+                        workspace_rel_root: plan.workspace_rel_root.to_string_lossy().into_owned(),
                     });
                     tracing::warn!(
                         indexer = plan.indexer.binary_name(),
@@ -1370,6 +1376,7 @@ pub(crate) fn append_graph_cache_shrink_warning(
         indexer: SupportedIndexer::RustAnalyzer,
         status: "warning".to_string(),
         detail: Some(detail),
+        workspace_rel_root: String::new(),
     });
     write_workspace_warm_statuses(project_root, &statuses)
 }
@@ -1766,18 +1773,21 @@ mod tests {
                 indexer: SupportedIndexer::TypeScript,
                 status: "failed".to_string(),
                 detail: Some("crashed".to_string()),
+                workspace_rel_root: String::new(),
             },
             WorkspaceWarmStatus {
                 workspace_slug: "web".to_string(),
                 indexer: SupportedIndexer::TypeScript,
                 status: "artifact_pending".to_string(),
                 detail: Some("expected artifact".to_string()),
+                workspace_rel_root: String::new(),
             },
             WorkspaceWarmStatus {
                 workspace_slug: "worker".to_string(),
                 indexer: SupportedIndexer::TypeScript,
                 status: "artifact_pending".to_string(),
                 detail: Some("expected artifact".to_string()),
+                workspace_rel_root: String::new(),
             },
         ];
 
@@ -2740,12 +2750,14 @@ mod tests {
                 indexer: SupportedIndexer::TypeScript,
                 status: "artifact_pending".to_string(),
                 detail: Some(r#"{"kind":"cache_hit"}"#.to_string()),
+                workspace_rel_root: String::new(),
             },
             WorkspaceWarmStatus {
                 workspace_slug: "api".to_string(),
                 indexer: SupportedIndexer::TypeScript,
                 status: "artifact_pending".to_string(),
                 detail: Some("expected artifact /out/api.scip".to_string()),
+                workspace_rel_root: String::new(),
             },
         ];
         let artifacts = vec![ScipArtifact {

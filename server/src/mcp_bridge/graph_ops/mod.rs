@@ -27,6 +27,7 @@ use super::graph_neighbors::{
 use super::{build_snapshot_payload, refactor, shared};
 use crate::server::AppState;
 
+mod edges_op;
 mod flow;
 mod insights;
 mod query;

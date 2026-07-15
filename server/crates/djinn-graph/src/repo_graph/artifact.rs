@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::complexity::ComplexityMetrics;
+use crate::galaxy_layout::GalaxyLayoutPosition;
 use crate::layout::GraphLayoutPosition;
 use crate::scip_parser::{ScipSymbolKind, ScipVisibility};
 
@@ -107,6 +108,38 @@ pub struct RepoGraphArtifact {
     /// Deterministic warm-time layout positions keyed by stable node UID.
     #[serde(default)]
     pub layout_positions: BTreeMap<String, GraphLayoutPosition>,
+    /// Proposal lmkv: deterministic warm-time 3D "galaxy" layout positions
+    /// keyed by stable node UID. Additive trailing field — bincode is
+    /// positional, so blobs written before this field fall back through
+    /// [`RepoGraphArtifactV10WithoutGalaxyLayout`] and hydrate this as empty.
+    /// A `code_graph snapshot` then omits the per-node galaxy coordinates and
+    /// the UI transparently falls back to its worker layout.
+    #[serde(default)]
+    pub galaxy_positions: BTreeMap<String, GalaxyLayoutPosition>,
+    /// Proposal lmkv: per-node degree from the *collapsed* galaxy edge view
+    /// (external symbols dropped, usage edges folded to one file→file edge per
+    /// pair), keyed by stable node UID. Shipped so the UI reuses the server
+    /// degree instead of recomputing it. Additive trailing field; see
+    /// [`Self::galaxy_positions`].
+    #[serde(default)]
+    pub galaxy_degrees: BTreeMap<String, u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoGraphArtifactV10WithoutGalaxyLayout {
+    version: u32,
+    nodes: Vec<RepoGraphNode>,
+    edges: Vec<RepoGraphArtifactEdge>,
+    #[serde(default)]
+    symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+    #[serde(default)]
+    communities: Vec<crate::communities::Community>,
+    #[serde(default)]
+    processes: Vec<RepoGraphArtifactProcess>,
+    #[serde(default)]
+    route_exclusion_config: RouteExclusionConfig,
+    #[serde(default)]
+    layout_positions: BTreeMap<String, GraphLayoutPosition>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +246,23 @@ struct RepoGraphNodeV10WithoutWorkspace {
     complexity: Option<ComplexityMetrics>,
 }
 
+impl From<RepoGraphArtifactV10WithoutGalaxyLayout> for RepoGraphArtifact {
+    fn from(old: RepoGraphArtifactV10WithoutGalaxyLayout) -> Self {
+        Self {
+            version: old.version,
+            nodes: old.nodes,
+            edges: old.edges,
+            symbol_ranges: old.symbol_ranges,
+            communities: old.communities,
+            processes: old.processes,
+            route_exclusion_config: old.route_exclusion_config,
+            layout_positions: old.layout_positions,
+            galaxy_positions: BTreeMap::new(),
+            galaxy_degrees: BTreeMap::new(),
+        }
+    }
+}
+
 impl From<RepoGraphArtifactV10WithoutLayoutPositions> for RepoGraphArtifact {
     fn from(old: RepoGraphArtifactV10WithoutLayoutPositions) -> Self {
         Self {
@@ -224,6 +274,8 @@ impl From<RepoGraphArtifactV10WithoutLayoutPositions> for RepoGraphArtifact {
             processes: old.processes,
             route_exclusion_config: old.route_exclusion_config,
             layout_positions: BTreeMap::new(),
+            galaxy_positions: BTreeMap::new(),
+            galaxy_degrees: BTreeMap::new(),
         }
     }
 }
@@ -239,6 +291,8 @@ impl From<RepoGraphArtifactV10WithoutWorkspace> for RepoGraphArtifact {
             processes: old.processes,
             route_exclusion_config: RouteExclusionConfig::default(),
             layout_positions: BTreeMap::new(),
+            galaxy_positions: BTreeMap::new(),
+            galaxy_degrees: BTreeMap::new(),
         }
     }
 }
@@ -254,6 +308,8 @@ impl From<RepoGraphArtifactV10WithoutRouteExclusionConfig> for RepoGraphArtifact
             processes: old.processes,
             route_exclusion_config: RouteExclusionConfig::default(),
             layout_positions: BTreeMap::new(),
+            galaxy_positions: BTreeMap::new(),
+            galaxy_degrees: BTreeMap::new(),
         }
     }
 }
@@ -269,6 +325,8 @@ impl From<RepoGraphArtifactV10WithoutRouteMetadata> for RepoGraphArtifact {
             processes: old.processes,
             route_exclusion_config: RouteExclusionConfig::default(),
             layout_positions: BTreeMap::new(),
+            galaxy_positions: BTreeMap::new(),
+            galaxy_degrees: BTreeMap::new(),
         }
     }
 }
@@ -339,6 +397,14 @@ pub fn deserialize_repo_graph_artifact_bincode(blob: &[u8]) -> Result<RepoGraphA
     match bincode::deserialize::<RepoGraphArtifact>(blob) {
         Ok(artifact) => Ok(artifact),
         Err(current_err) => {
+            // Proposal lmkv: blobs written before the galaxy sidecar end at
+            // `layout_positions`. Try that shape first so already-persisted
+            // v10 blobs still load (galaxy fields hydrate empty).
+            if let Ok(artifact) =
+                bincode::deserialize::<RepoGraphArtifactV10WithoutGalaxyLayout>(blob)
+            {
+                return Ok(RepoGraphArtifact::from(artifact));
+            }
             match bincode::deserialize::<RepoGraphArtifactV10WithoutLayoutPositions>(blob) {
                 Ok(artifact) => Ok(RepoGraphArtifact::from(artifact)),
                 Err(layout_compat_err) => {
