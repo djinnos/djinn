@@ -226,7 +226,39 @@ describe("CodeGraphPage (galaxy)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("offers the crate/complexity color modes", async () => {
+  it("opens the hotspot panel from the HUD toggle and selects a row", async () => {
+    fetchSnapshotMock.mockResolvedValueOnce(POPULATED);
+    selectProjectA();
+
+    render(<CodeGraphPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("galaxy-canvas")).toBeInTheDocument();
+    });
+    // The color-mode select is gone — communities is the only star coloring;
+    // complexity moved into the hotspot leaderboard.
+    expect(
+      screen.queryByRole("combobox", { name: /color mode/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("hotspot-panel")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^hotspots$/i }));
+
+    const panel = await screen.findByTestId("hotspot-panel");
+    // One scored file: lib.rs, worst function `resolve` at cognitive 12.
+    expect(panel).toHaveTextContent("lib.rs");
+    expect(panel).toHaveTextContent("12");
+    expect(panel).toHaveTextContent("resolve");
+
+    const row = screen.getByRole("button", { name: /lib\.rs/i });
+    fireEvent.click(row);
+    expect(row).toHaveAttribute("aria-pressed", "true");
+    // Toggle the row off again.
+    fireEvent.click(row);
+    expect(row).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("renders the project picker inside the galaxy HUD (chrome selector is suppressed on /code-graph)", async () => {
     fetchSnapshotMock.mockResolvedValueOnce(POPULATED);
     selectProjectA();
 
@@ -234,16 +266,8 @@ describe("CodeGraphPage (galaxy)", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("combobox", { name: /color mode/i }),
+        screen.getByRole("combobox", { name: /^project$/i }),
       ).toBeInTheDocument();
     });
-  });
-
-  it("does NOT render a local project picker in the page body (shared chrome handles it)", () => {
-    selectProjectA();
-
-    render(<CodeGraphPage />);
-
-    expect(screen.queryByLabelText(/^project$/i)).not.toBeInTheDocument();
   });
 });

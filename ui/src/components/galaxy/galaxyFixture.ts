@@ -4,8 +4,7 @@
  * Produces graphs shaped like real repositories so the galaxy can be judged
  * at realistic scale without a live server: packages containing files
  * containing symbols, preferential-attachment call edges (power-law degree
- * distribution → a few blazing hubs, many dim leaves), a long-tailed
- * cognitive-complexity distribution for the heat mode, and cross-package
+ * distribution → a few blazing hubs, many dim leaves), and cross-package
  * edges that render as the long strands between clusters.
  */
 
@@ -70,7 +69,6 @@ export function makeGalaxyFixture(options: GalaxyFixtureOptions): GalaxyData {
         degree: 0,
         size: 8,
         group: pkg,
-        heatEligible: false,
       });
 
       // Power-law-ish symbol count: most files small, a few big.
@@ -80,8 +78,6 @@ export function makeGalaxyFixture(options: GalaxyFixtureOptions): GalaxyData {
         const stem2 = SYMBOL_STEMS[Math.floor(rng() * SYMBOL_STEMS.length)];
         const isType = rng() < 0.16;
         const symId = `${fileId}#${stem2}${s}`;
-        // Long-tailed complexity: mostly tame, occasional monsters.
-        const cognitive = Math.pow(rng(), 3.2) * 42;
         nodes.push({
           id: symId,
           label: isType ? `${capitalize(stem2)}${s}` : `${stem2}_${s}`,
@@ -90,8 +86,6 @@ export function makeGalaxyFixture(options: GalaxyFixtureOptions): GalaxyData {
           size: isType ? 6 : 4,
           group: pkg,
           parent: fileId,
-          heat: cognitive / 42,
-          heatEligible: !isType,
         });
         symbols.push(symId);
         edges.push({ source: fileId, target: symId, kind: "Defines" });
@@ -115,7 +109,6 @@ export function makeGalaxyFixture(options: GalaxyFixtureOptions): GalaxyData {
           size: 4,
           group: pkg,
           parent: fileId,
-          heatEligible: false,
         });
         edges.push({ source: fileId, target: fieldId, kind: "Defines" });
       }

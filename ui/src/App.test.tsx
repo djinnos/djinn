@@ -94,10 +94,10 @@ describe("MainLayout — project selector chrome", () => {
     expect(selector).toBeInTheDocument();
   });
 
-  it("renders the shared project selector on /code-graph (global-project-context)", () => {
+  it("does NOT render the project selector on /code-graph (galaxy HUD has its own chip)", () => {
     render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/code-graph"] } } });
-    const selector = screen.getByLabelText("Select project");
-    expect(selector).toBeInTheDocument();
+    const selector = screen.queryByLabelText("Select project");
+    expect(selector).not.toBeInTheDocument();
   });
 
   it("does NOT render the project selector on /tasks (url-filtered board route)", () => {

@@ -12,10 +12,12 @@
  *
  * Degree is computed from the collapsed edge list. Group is the
  * crate/top-level directory, parent is the containing file (from
- * ContainsDefinition), and heat maps cognitive complexity onto an
- * absolute Sonar-style scale (0 tame → HEAT_CEILING red). Positions come
- * from `layoutGalaxy` until the server ships 3D coordinates in the
- * snapshot (proposal lmkv).
+ * ContainsDefinition). Positions come from `layoutGalaxy` until the
+ * server ships 3D coordinates in the snapshot (proposal lmkv).
+ *
+ * `snapshotHotspots` derives the complexity/co-change leaderboard the
+ * HotspotPanel renders: per-file worst cognitive complexity joined with
+ * qoxm co-change coupling (partners, max score, recency).
  */
 
 import { layoutGalaxy } from "@/components/galaxy/galaxyLayout";
@@ -31,9 +33,11 @@ const TYPE_LIKE_SYMBOL_KINDS = new Set([
   "type",
 ]);
 
-/** Cognitive complexity that maps to full-red heat. 25 is Sonar's "very
- * complex" band for a function; the scale is linear below it. */
-const HEAT_CEILING = 25;
+/** Sonar cognitive-complexity bands: below WARN reads green ("fine"),
+ * WARN..SEVERE yellow ("needs attention" — Sonar's default per-function
+ * threshold is 15), at or above SEVERE red ("very complex"). */
+export const COMPLEXITY_WARN = 15;
+export const COMPLEXITY_SEVERE = 25;
 
 /** Usage kinds collapsed to one file→file edge per file pair. Everything
  * else (containment, Implements/Extends, process steps) renders raw. */
@@ -174,13 +178,6 @@ export function snapshotToGalaxy(
     }
   }
 
-  // Cognitive complexity → heat on an ABSOLUTE Sonar-style scale, not a
-  // percentile: ~70% of real functions score 0, so a rank-based heat put
-  // the entire tied-at-zero mass at percentile ~0.7 (yellow) and nothing
-  // could ever read tame. 0 = green, ~12 = yellow, ≥HEAT_CEILING = red.
-  const heatOf = (value: number): number =>
-    Math.min(1, Math.max(0, value) / HEAT_CEILING);
-
   const nodes: GalaxyNode[] = kept.map((n) => {
     const degree = serverDegreeById.get(n.id) ?? degreeById.get(n.id) ?? 0;
     const server = serverById.get(n.id);
@@ -192,7 +189,6 @@ export function snapshotToGalaxy(
     const baseSize =
       n.kind === "folder" ? 12 : n.kind === "file" ? 8 : typeLike ? 6 : 4;
     const degreeBoost = degree > 5 ? Math.min(degree * 0.3, 10) : 0;
-    const hasCognitive = typeof n.cognitive === "number";
     return {
       id: n.id,
       label: displayLabel(n.label, n.kind),
@@ -203,8 +199,6 @@ export function snapshotToGalaxy(
       size: baseSize + degreeBoost,
       group: deriveGalaxyGroup(n.file_path, n.workspace),
       parent: parentById.get(n.id),
-      heat: hasCognitive ? heatOf(n.cognitive as number) : undefined,
-      heatEligible: hasCognitive,
       isTest: n.is_test === true,
       workspace: n.workspace,
     };
@@ -231,6 +225,124 @@ export function snapshotToGalaxy(
     totalEdges: serverTruncated ? snapshot.total_edges : undefined,
     serverPositioned,
   };
+}
+
+// ── Hotspots (complexity × co-change) ───────────────────────────────────────
+
+/** One leaderboard row: a file's worst cognitive complexity joined with its
+ * qoxm co-change coupling. `partnerIds` feeds the fly-to/highlight set. */
+export interface GalaxyHotspot {
+  fileId: string;
+  /** Full repo path (rows show the basename, tooltip the full path). */
+  path: string;
+  workspace?: string;
+  isTest: boolean;
+  /** Max cognitive complexity among the file's scored functions. */
+  complexity: number;
+  /** Label of the worst-scoring function. */
+  worstSymbol: string;
+  /** Number of scored (function-like) symbols in the file. */
+  functionCount: number;
+  /** Co-change partner file ids (empty when uncoupled). */
+  partnerIds: string[];
+  /** Max co-change coupling score across partners (0..1; 0 = uncoupled). */
+  coupling: number;
+  /** Most recent co-change, as an epoch day (from the qoxm edge reason). */
+  lastCoChangeDay?: number;
+  /** Hotspot rank basis: complexity × (1 + Σ partner coupling scores) —
+   * uncoupled files rank by complexity alone. */
+  score: number;
+}
+
+/** Shape of the qoxm co-change edge reason: `cochange;last_day=<i64>`. */
+const COCHANGE_REASON = /^cochange;last_day=(-?\d+)$/;
+
+/**
+ * Derive the hotspot leaderboard from a snapshot. Only files with at least
+ * one scored function appear — co-change coupling without any complexity is
+ * churn on simple code, not a hotspot. Sorted by `score`, descending.
+ */
+export function snapshotHotspots(snapshot: SnapshotPayload): GalaxyHotspot[] {
+  const nodeById = new Map(snapshot.nodes.map((n) => [n.id, n]));
+
+  // Same containment pass as snapshotToGalaxy — symbols → containing file.
+  const parentById = new Map<string, string>();
+  for (const e of snapshot.edges) {
+    if (e.kind === "ContainsDefinition") parentById.set(e.to, e.from);
+    else if (e.kind === "DeclaredInFile") parentById.set(e.from, e.to);
+  }
+
+  const complexityByFile = new Map<
+    string,
+    { complexity: number; worstSymbol: string; functionCount: number }
+  >();
+  for (const n of snapshot.nodes) {
+    if (n.kind !== "symbol" || typeof n.cognitive !== "number") continue;
+    const fileId = parentById.get(n.id);
+    if (!fileId) continue;
+    const entry = complexityByFile.get(fileId);
+    if (!entry) {
+      complexityByFile.set(fileId, {
+        complexity: n.cognitive,
+        worstSymbol: n.label,
+        functionCount: 1,
+      });
+    } else {
+      entry.functionCount += 1;
+      if (n.cognitive > entry.complexity) {
+        entry.complexity = n.cognitive;
+        entry.worstSymbol = n.label;
+      }
+    }
+  }
+
+  const couplingByFile = new Map<
+    string,
+    { partnerIds: string[]; max: number; sum: number; lastDay?: number }
+  >();
+  for (const e of snapshot.edges) {
+    if (e.kind !== "CoChangedWith") continue;
+    const day = e.reason
+      ? Number(COCHANGE_REASON.exec(e.reason)?.[1])
+      : Number.NaN;
+    for (const [self, partner] of [
+      [e.from, e.to],
+      [e.to, e.from],
+    ]) {
+      let entry = couplingByFile.get(self);
+      if (!entry) couplingByFile.set(self, (entry = { partnerIds: [], max: 0, sum: 0 }));
+      entry.partnerIds.push(partner);
+      entry.max = Math.max(entry.max, e.confidence);
+      entry.sum += e.confidence;
+      if (Number.isFinite(day)) {
+        entry.lastDay = entry.lastDay === undefined ? day : Math.max(entry.lastDay, day);
+      }
+    }
+  }
+
+  const hotspots: GalaxyHotspot[] = [];
+  for (const [fileId, cx] of complexityByFile) {
+    if (cx.complexity <= 0) continue;
+    const node = nodeById.get(fileId);
+    if (!node) continue;
+    const coupling = couplingByFile.get(fileId);
+    hotspots.push({
+      fileId,
+      path: node.file_path ?? node.label,
+      workspace: node.workspace,
+      isTest: node.is_test === true,
+      complexity: cx.complexity,
+      worstSymbol: cx.worstSymbol,
+      functionCount: cx.functionCount,
+      partnerIds: coupling?.partnerIds ?? [],
+      coupling: coupling?.max ?? 0,
+      lastCoChangeDay: coupling?.lastDay,
+      score: cx.complexity * (1 + (coupling?.sum ?? 0)),
+    });
+  }
+  return hotspots.sort(
+    (a, b) => b.score - a.score || a.path.localeCompare(b.path),
+  );
 }
 
 function hashSeed(input: string): number {
