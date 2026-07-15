@@ -309,6 +309,17 @@ langfuse:
 
 `deploy/langfuse-local/` has a self-hosted Langfuse for dev clusters.
 
+### Retrieval-health environment overrides
+
+The control plane parses retrieval-health configuration at startup from three
+canonical environment variables
+(`DJINN_RETRIEVAL_HEALTH_WINDOW_HOURS`,
+`DJINN_RETRIEVAL_ZERO_RESULT_THRESHOLD`,
+`DJINN_RETRIEVAL_MINIMUM_QUERIES`), with defaults, inclusive bounds, deprecated
+fallback aliases, deterministic precedence, and startup-failure behaviour for
+malformed or out-of-range values. See the full operator reference:
+[`server/docs/operational/retrieval-health-configuration.md`](../../server/docs/operational/retrieval-health-configuration.md).
+
 ## Extra env
 
 ```yaml
