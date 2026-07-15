@@ -47,6 +47,12 @@ export interface RouteScopeEntry {
   /** react-router-compatible path pattern (may include :params and * wildcards) */
   pattern: string;
   scope: RouteScope;
+  /**
+   * global-project-context pages that render their OWN writer of the global
+   * project store (e.g. the galaxy HUD project chip) — the shared chrome
+   * ProjectSelector is suppressed for them so the control isn't duplicated.
+   */
+  inPageSelector?: boolean;
   /** Human-readable note — purely documentary */
   note?: string;
 }
@@ -79,7 +85,8 @@ export const ROUTE_SCOPES: readonly RouteScopeEntry[] = [
   {
     pattern: "/code-graph",
     scope: "global-project-context",
-    note: "CodeGraphPage reads useSelectedProject() for snapshot/workspace data; local picker removed",
+    inPageSelector: true,
+    note: "CodeGraphPage reads useSelectedProject(); the galaxy HUD project chip writes the store, so the chrome selector is suppressed",
   },
   {
     pattern: "/memory",
@@ -145,9 +152,19 @@ export function getRouteScopeEntry(
   return ROUTE_SCOPES.find((entry) => matchPath(entry.pattern, pathname));
 }
 
-/** Convenience: does this pathname need the global project selector? */
+/** Convenience: does this pathname read the global project store? */
 export function isGlobalProjectContextRoute(pathname: string): boolean {
   return getRouteScopeEntry(pathname)?.scope === "global-project-context";
+}
+
+/**
+ * Should the shared chrome ProjectSelector render for this pathname?
+ * True for global-project-context routes that do NOT carry their own
+ * in-page writer of the project store.
+ */
+export function needsChromeProjectSelector(pathname: string): boolean {
+  const entry = getRouteScopeEntry(pathname);
+  return entry?.scope === "global-project-context" && !entry.inPageSelector;
 }
 
 /**

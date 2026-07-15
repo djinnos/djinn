@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   getRouteScopeEntry,
   isGlobalProjectContextRoute,
+  needsChromeProjectSelector,
   ROUTE_SCOPES,
 } from "./routeScopes";
 
@@ -20,7 +21,7 @@ describe("routeScopes", () => {
       expect(isGlobalProjectContextRoute("/memory")).toBe(true);
     });
 
-    it("returns true for /code-graph (local picker removed)", () => {
+    it("returns true for /code-graph (reads the global store)", () => {
       expect(isGlobalProjectContextRoute("/code-graph")).toBe(true);
     });
 
@@ -64,6 +65,23 @@ describe("routeScopes", () => {
       expect(isGlobalProjectContextRoute("/projects/proj-1/environment")).toBe(
         false,
       );
+    });
+  });
+
+  describe("needsChromeProjectSelector", () => {
+    it("returns true for global-project-context routes without an in-page selector", () => {
+      expect(needsChromeProjectSelector("/agents")).toBe(true);
+      expect(needsChromeProjectSelector("/task/abc-123")).toBe(true);
+      expect(needsChromeProjectSelector("/memory")).toBe(true);
+    });
+
+    it("returns false for /code-graph (galaxy HUD project chip writes the store)", () => {
+      expect(needsChromeProjectSelector("/code-graph")).toBe(false);
+    });
+
+    it("returns false for non-global-project-context routes", () => {
+      expect(needsChromeProjectSelector("/tasks")).toBe(false);
+      expect(needsChromeProjectSelector("/proposals")).toBe(false);
     });
   });
 

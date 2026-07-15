@@ -2,7 +2,7 @@ import { useServerHealth } from "@/hooks/useServerHealth";
 import { useEventSource } from "@/hooks/useEventSource";
 import { Sidebar } from "@/components/Sidebar";
 import { ProjectSelector } from "@/components/ProjectSelector";
-import { isGlobalProjectContextRoute } from "@/lib/routeScopes";
+import { needsChromeProjectSelector } from "@/lib/routeScopes";
 import { KanbanPage } from "@/pages/KanbanPage";
 import { DependenciesPage } from "@/pages/DependenciesPage";
 import { BoardLayout } from "@/components/board/BoardLayout";
@@ -38,7 +38,7 @@ import { useDispatchPauseHydration } from "@/hooks/useDispatchPauseHydration";
 export function MainLayout() {
   const isAdmin = useAuthUser()?.isAdmin ?? false;
   const location = useLocation();
-  const showProjectSelector = isGlobalProjectContextRoute(location.pathname);
+  const showProjectSelector = needsChromeProjectSelector(location.pathname);
 
   return (
     <main className="flex h-screen overflow-hidden bg-background">

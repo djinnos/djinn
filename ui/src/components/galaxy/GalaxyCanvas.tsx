@@ -30,14 +30,12 @@ import { boundsOf } from "./galaxyLayout";
 import { GalaxyScene, type FlyTarget } from "./GalaxyScene";
 import {
   DEFAULT_GALAXY_DISPLAY,
-  type GalaxyColorMode,
   type GalaxyData,
   type GalaxyDisplay,
 } from "./galaxyTypes";
 
 export interface GalaxyCanvasProps {
   data: GalaxyData;
-  colorMode?: GalaxyColorMode;
   showLabels?: boolean;
   display?: GalaxyDisplay;
   /** Optional headline shown in the HUD chip (e.g. project name). */
@@ -54,6 +52,11 @@ export interface GalaxyCanvasProps {
    */
   banner?: ReactNode;
   /**
+   * Optional right-side overlay panel (e.g. the hotspot leaderboard) —
+   * rendered below the top-right HUD controls, scrolling internally.
+   */
+  sidePanel?: ReactNode;
+  /**
    * External focus (Cmd-K search hits, AI citations): when non-empty the
    * camera flies to these nodes and they become the highlight set,
    * replacing any click selection. Cleared by passing null/empty.
@@ -66,12 +69,6 @@ export interface GalaxyCanvasProps {
 // Focus ids round-trip through a joined string (effect dep); ids can
 // contain spaces, so the separator must be a char no id can contain.
 const FOCUS_KEY_SEP = "\u0000";
-
-const HEAT_LEGEND: Array<{ color: string; label: string }> = [
-  { color: "#34d399", label: "tame" },
-  { color: "#eab308", label: "warm" },
-  { color: "#ef4444", label: "hot" },
-];
 
 /** `server:djinn-graph` → `djinn-graph` — the workspace prefix is noise in
  * a dropdown that already groups by crate. Full key stays in the tooltip. */
@@ -121,13 +118,13 @@ class SceneErrorBoundary extends Component<
 
 export function GalaxyCanvas({
   data,
-  colorMode = "group",
   showLabels = false,
   display = DEFAULT_GALAXY_DISPLAY,
   title,
   headerPrimary,
   headerExtra,
   banner,
+  sidePanel,
   focusIds,
   className,
   onSelect,
@@ -300,9 +297,6 @@ export function GalaxyCanvas({
     : null;
   const truncated =
     data.totalNodes !== undefined && data.totalNodes > data.nodes.length;
-  // Group mode carries its color key inside the Fly-to dropdown (a dot per
-  // crate), so the corner legend would be redundant there.
-  const legend = colorMode === "heat" ? HEAT_LEGEND : null;
 
   return (
     <div
@@ -314,7 +308,6 @@ export function GalaxyCanvas({
         <GalaxyScene
           key={sceneGeneration}
           data={data}
-          colorMode={colorMode}
           highlight={highlight}
           display={display}
           showLabels={showLabels}
@@ -462,18 +455,10 @@ export function GalaxyCanvas({
         )}
       </div>
 
-      {/* ── HUD: legend (bottom-right; group mode keys colors in Fly-to) ── */}
-      {legend && (
-        <div className="pointer-events-none absolute bottom-4 right-4 flex items-center gap-3 rounded-md border border-slate-800/60 bg-slate-950/60 px-3 py-1.5 font-mono text-[10px] text-slate-400 backdrop-blur-sm">
-          {legend.map(({ color, label }) => (
-            <span key={label} className="flex items-center gap-1.5">
-              <span
-                className="inline-block h-2 w-2 rounded-full"
-                style={{ background: color, boxShadow: `0 0 6px ${color}` }}
-              />
-              {label}
-            </span>
-          ))}
+      {/* ── HUD: side panel (right, below the controls row) ── */}
+      {sidePanel && (
+        <div className="absolute bottom-4 right-4 top-14 flex items-start">
+          {sidePanel}
         </div>
       )}
 
@@ -487,9 +472,6 @@ export function GalaxyCanvas({
           <div className="text-slate-400">
             {hoveredNode.group && <span>{hoveredNode.group} · </span>}
             {hoveredNode.degree} connections
-            {hoveredNode.heatEligible && hoveredNode.heat !== undefined && (
-              <span> · heat {(hoveredNode.heat * 100).toFixed(0)}%</span>
-            )}
           </div>
         </div>
       )}
