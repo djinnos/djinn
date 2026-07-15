@@ -1518,6 +1518,25 @@ async fn frozen_cold_rebuild_cases_execute_and_preserve_required_siblings() {
 async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
     use std::process::Command;
 
+    if std::env::var_os("DJINN_TWO_ACTOR_WARM_CHILD").is_some() {
+        let root = PathBuf::from(std::env::var("DJINN_TWO_ACTOR_ROOT").unwrap());
+        let workspace = PathBuf::from(std::env::var("DJINN_TWO_ACTOR_WORKSPACE").unwrap());
+        let id = std::env::var("DJINN_TWO_ACTOR_PROJECT").unwrap();
+        let events = root.join("warm-events");
+        std::fs::create_dir_all(&events).unwrap();
+        let _guard = djinn_agent_worker::cargo_incremental_prune::run_warm_work_at_root(
+            &id,
+            &root,
+            &workspace,
+            |phase| std::fs::write(events.join(format!("{phase:?}")), b"observed").unwrap(),
+        )
+        .unwrap();
+        std::fs::write(events.join("warm-lock-held"), b"held").unwrap();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
     let fixture = frozen_coordinator_fixture();
     let temp = tempfile::tempdir().unwrap();
     let id = "018f8b9a-0d70-7f0a-8000-000000000299";
@@ -1532,25 +1551,27 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
     std::fs::write(workspace.join("src/lib.rs"), "pub fn compiled() {}\n").unwrap();
     let lock_path = temp.path().join(".warm-locks").join(format!("{id}.lock"));
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
-    let mut warm = Command::new("flock")
-        .args(["-n", "-F"])
-        .arg(&lock_path)
-        .arg("sh")
-        .arg("-c")
-        .arg("cargo check --quiet && exec sleep 30")
-        .current_dir(&workspace)
-        .env("CARGO_TARGET_DIR", &base)
+    let mut warm = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "cargo_warm_base_gc::tests::pressure_execution::frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("DJINN_TWO_ACTOR_WARM_CHILD", "1")
+        .env("DJINN_TWO_ACTOR_ROOT", temp.path())
+        .env("DJINN_TWO_ACTOR_WORKSPACE", &workspace)
+        .env("DJINN_TWO_ACTOR_PROJECT", id)
         .spawn()
         .expect("start deterministic warm actor");
     for _ in 0..100 {
-        if base.join("debug").exists() {
+        if temp.path().join("warm-events/warm-lock-held").exists() {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        base.join("debug").exists(),
-        "warm actor reached real Cargo compilation"
+        temp.path().join("warm-events/CompilationExit").exists(),
+        "warm actor reached worker-owned Cargo compilation"
     );
 
     let lock = SharedWarmBaseLock;
