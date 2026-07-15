@@ -391,6 +391,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
         "memory_write",
         Some(
             serde_json::json!({
+                "project": project.slug(),
                 "title": "Project Roadmap",
                 "content": "tracks [[ADR-043 Repo Graph]]",
                 "type": "roadmap",
@@ -421,6 +422,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
         "memory_edit",
         Some(
             serde_json::json!({
+                "project": project.slug(),
                 "identifier": "roadmap",
                 "operation": "append",
                 "content": "next wave",
@@ -492,6 +494,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
         "memory_write",
         Some(
             serde_json::json!({
+                "project": project.slug(),
                 "title": "Project Brief",
                 "content": "tracks [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]]",
                 "type": "brief",
@@ -522,6 +525,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
         "memory_edit",
         Some(
             serde_json::json!({
+                "project": project.slug(),
                 "identifier": "brief",
                 "operation": "append",
                 "content": "next wave",
@@ -659,6 +663,7 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
         "memory_edit",
         Some(
             serde_json::json!({
+                "project": project.slug(),
                 "identifier": "requirements/v1-requirements",
                 "operation": "find_replace",
                 "find_text": "[[Cognitive Memory Scope]]",
