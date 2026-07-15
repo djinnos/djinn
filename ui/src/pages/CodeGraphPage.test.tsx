@@ -7,48 +7,14 @@ import { useCodeGraphStore } from "@/stores/codeGraphStore";
 import type { Project } from "@/api/types";
 import type { CodeGraphWorkspace } from "@/api/codeGraph";
 
-// Sigma + WebGL aren't worth wiring up in jsdom; we stub the constructor so
-// the smoke test only validates the React surface (workspace selector,
-// canvas container, fetch / loading / empty copy).
-vi.mock("sigma", () => ({
-  default: class MockSigma {
-    getCamera() {
-      return { animatedReset: () => {} };
-    }
-    kill() {}
-  },
-}));
+// lmkv cutover: the galaxy (react-three-fiber) IS the code graph. WebGL
+// isn't worth wiring up in jsdom — the scene falls back to the
+// SceneErrorBoundary while the HUD (stats, pickers, toggles) renders
+// normally, so these tests validate the React surface: fetch → adapt →
+// layout (synchronous fallback; no Worker in jsdom) → HUD.
 
-// sigma 3.x ships a separate rendering CJS module that references
-// WebGL contexts at import time. Mock it so jsdom doesn't need WebGL.
-vi.mock("sigma/rendering", () => ({
-  EdgeRectangleProgram: class MockEdgeRectangleProgram {},
-}));
-
-// `@sigma/edge-curve` ships an ES module that does some immediate
-// WebGL probing on import; mock it out so jsdom doesn't blow up.
-vi.mock("@sigma/edge-curve", () => ({
-  default: class MockEdgeCurveProgram {},
-}));
-
-// FA2 worker uses Web Workers / shared array buffers under the hood.
-// In jsdom the supervisor still constructs but `start()` would emit
-// DOMException; mock to a no-op so the lifecycle test doesn't depend
-// on a worker runtime.
-vi.mock("graphology-layout-forceatlas2/worker", () => ({
-  default: class MockSupervisor {
-    isRunning() {
-      return false;
-    }
-    start() {}
-    stop() {}
-    kill() {}
-  },
-}));
-
-// Default to "no warmed graph" — individual tests can override via
-// `mockImplementation` / `mockResolvedValueOnce` to inject populated
-// snapshots (iter 30: with cognitive complexity for the heatmap tests).
+// Default to "no warmed graph" — individual tests override via
+// `mockResolvedValueOnce` to inject populated snapshots.
 type SnapshotResponse = { snapshot: Record<string, unknown> };
 const fetchSnapshotMock = vi.fn<
   (project: string, nodeCap?: number, level?: string) => Promise<SnapshotResponse>
@@ -83,28 +49,81 @@ const projectsFixture: Project[] = [
   },
 ];
 
-describe("CodeGraphPage", () => {
+function snapshotFixture(
+  nodes: Array<Record<string, unknown>>,
+  edges: Array<Record<string, unknown>> = [],
+): SnapshotResponse {
+  return {
+    snapshot: {
+      project_id: "project-a",
+      git_head: "deadbeef",
+      generated_at: "2026-07-14T00:00:00Z",
+      truncated: false,
+      total_nodes: nodes.length,
+      total_edges: edges.length,
+      node_cap: 1_000_000,
+      nodes,
+      edges,
+    },
+  };
+}
+
+const POPULATED = snapshotFixture(
+  [
+    {
+      id: "file:core/src/lib.rs",
+      kind: "file",
+      label: "server/crates/djinn-core/src/lib.rs",
+      file_path: "server/crates/djinn-core/src/lib.rs",
+      pagerank: 0.4,
+      workspace: "server",
+    },
+    {
+      id: "sym:core::resolve",
+      kind: "symbol",
+      label: "resolve",
+      symbol_kind: "function",
+      file_path: "server/crates/djinn-core/src/lib.rs",
+      pagerank: 0.3,
+      cognitive: 12,
+      workspace: "server",
+    },
+    {
+      id: "file:core/src/lib_test.rs",
+      kind: "file",
+      label: "server/crates/djinn-core/src/lib_test.rs",
+      file_path: "server/crates/djinn-core/src/lib_test.rs",
+      pagerank: 0.1,
+      is_test: true,
+      workspace: "server",
+    },
+  ],
+  [
+    {
+      from: "file:core/src/lib.rs",
+      to: "sym:core::resolve",
+      kind: "ContainsDefinition",
+      confidence: 1,
+    },
+  ],
+);
+
+function selectProjectA() {
+  projectStore.setState({
+    projects: projectsFixture,
+    selectedProjectId: "project-a",
+    lastViewPerProject: {},
+  });
+}
+
+describe("CodeGraphPage (galaxy)", () => {
   beforeEach(() => {
     localStorage?.clear?.();
     fetchSnapshotMock.mockReset();
     fetchWorkspacesMock.mockReset();
     useCodeGraphStore.getState().reset();
-    useCodeGraphStore.getState().setSelectedWorkspaceSlug(null);
     fetchWorkspacesMock.mockResolvedValue([]);
-    // Default snapshot fixture: empty graph, no complexity data.
-    fetchSnapshotMock.mockImplementation(async () => ({
-      snapshot: {
-        project_id: "project-a",
-        git_head: "deadbeef",
-        generated_at: "2026-04-28T00:00:00Z",
-        truncated: false,
-        total_nodes: 0,
-        total_edges: 0,
-        node_cap: 2_000,
-        nodes: [],
-        edges: [],
-      },
-    }));
+    fetchSnapshotMock.mockImplementation(async () => snapshotFixture([]));
   });
 
   it("renders the empty-state hint when no project is selected", () => {
@@ -119,378 +138,112 @@ describe("CodeGraphPage", () => {
     expect(
       screen.getByText(/select a project to view its code graph/i),
     ).toBeInTheDocument();
-    expect(screen.queryByTestId("code-graph-canvas")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("galaxy-canvas")).not.toBeInTheDocument();
   });
 
-  it("mounts the Sigma canvas and fetches a snapshot once a project is selected", async () => {
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
+  it("fetches the snapshot and renders the galaxy HUD once a project is selected", async () => {
+    fetchSnapshotMock.mockResolvedValueOnce(POPULATED);
+    selectProjectA();
 
     render(<CodeGraphPage />);
 
-    expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
-    // No local project picker — the shared chrome selector drives project context.
     await waitFor(() => {
-      expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000, "symbol");
+      expect(screen.getByTestId("galaxy-canvas")).toBeInTheDocument();
+    });
+    // Stats line: 3 nodes / 1 edges.
+    expect(screen.getByText(/3 nodes/)).toBeInTheDocument();
+    expect(screen.getByText(/1 edges/)).toBeInTheDocument();
+    // Project chip replaces the old page-local pickers.
+    expect(screen.getByText("Project Alpha")).toBeInTheDocument();
+    // Whole-graph budget is requested — the server clamps as it sees fit.
+    expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 1_000_000);
+  });
+
+  it("surfaces the snapshot-unavailable message when the fetch fails", async () => {
+    fetchSnapshotMock.mockRejectedValueOnce(new Error("graph not warmed"));
+    selectProjectA();
+
+    render(<CodeGraphPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/graph not warmed/i)).toBeInTheDocument();
     });
   });
 
-  // Note: "No projects yet" empty state is now handled by the shared chrome
-  // ProjectSelector, not by CodeGraphPage itself.
+  it("hides tests via the hide-tests toggle without refetching", async () => {
+    fetchSnapshotMock.mockResolvedValueOnce(POPULATED);
+    selectProjectA();
 
-  it("surfaces a friendly empty hint when the snapshot has no nodes", async () => {
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
+    render(<CodeGraphPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/3 nodes/)).toBeInTheDocument();
     });
+
+    fireEvent.click(screen.getByRole("button", { name: /hide tests/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/2 nodes/)).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: /tests hidden/i })).toBeInTheDocument();
+    expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the workspace picker only when multiple workspaces exist", async () => {
+    fetchSnapshotMock.mockResolvedValueOnce(POPULATED);
+    fetchWorkspacesMock.mockResolvedValue([
+      { slug: "server", display: "server" },
+      { slug: "ui", display: "ui" },
+    ] as CodeGraphWorkspace[]);
+    selectProjectA();
+
+    render(<CodeGraphPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("galaxy-canvas")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("combobox", { name: /workspace/i }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("omits the workspace picker for single-workspace projects", async () => {
+    fetchSnapshotMock.mockResolvedValueOnce(POPULATED);
+    fetchWorkspacesMock.mockResolvedValue([
+      { slug: "server", display: "server" },
+    ] as CodeGraphWorkspace[]);
+    selectProjectA();
+
+    render(<CodeGraphPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("galaxy-canvas")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("combobox", { name: /workspace/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers the crate/complexity color modes", async () => {
+    fetchSnapshotMock.mockResolvedValueOnce(POPULATED);
+    selectProjectA();
 
     render(<CodeGraphPage />);
 
     await waitFor(() => {
       expect(
-        screen.getByText(/no graph data yet/i),
+        screen.getByRole("combobox", { name: /color mode/i }),
       ).toBeInTheDocument();
     });
   });
 
-  it("fetches workspaces without blocking snapshot rendering and hides the selector for empty, single, or failed lists", async () => {
-    fetchWorkspacesMock.mockResolvedValueOnce([]);
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
-
-    const emptyView = render(<CodeGraphPage />);
-
-    expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
-    await waitFor(() => {
-      expect(fetchWorkspacesMock).toHaveBeenCalledWith("project-a");
-    });
-    await waitFor(() => {
-      expect(screen.queryByLabelText(/select workspace/i)).not.toBeInTheDocument();
-    });
-
-    emptyView.unmount();
-    fetchWorkspacesMock.mockResolvedValueOnce([{ slug: "api" }]);
-    const singleView = render(<CodeGraphPage />);
-    await waitFor(() => {
-      expect(fetchWorkspacesMock).toHaveBeenCalledTimes(2);
-    });
-    await waitFor(() => {
-      expect(screen.queryByLabelText(/select workspace/i)).not.toBeInTheDocument();
-    });
-
-    singleView.unmount();
-    fetchWorkspacesMock.mockRejectedValueOnce(new Error("workspace API down"));
-    render(<CodeGraphPage />);
-    await waitFor(() => {
-      expect(screen.getByText(/workspace api down/i)).toBeInTheDocument();
-    });
-    expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
-  });
-
-  it("shows All plus workspace options and stores selected workspace or All", async () => {
-    fetchWorkspacesMock.mockResolvedValue([
-      { slug: "api", display: "API" },
-      { slug: "web", display: "Web" },
-    ]);
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
-
-    render(<CodeGraphPage />);
-
-    const selector = await screen.findByLabelText(/select workspace/i);
-    expect(screen.getByRole("option", { name: "All" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "API" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Web" })).toBeInTheDocument();
-
-    fireEvent.change(selector, { target: { value: "api" } });
-    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("api");
-    expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
-    expect(fetchSnapshotMock).toHaveBeenLastCalledWith("project-a", 10_000, "symbol");
-
-    fireEvent.change(selector, { target: { value: "" } });
-    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
-    expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("persists workspace selection across canvas remounts for the same project", async () => {
-    fetchWorkspacesMock.mockResolvedValue([
-      { slug: "api", display: "API" },
-      { slug: "web", display: "Web" },
-    ]);
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
-
-    const { rerender } = render(<CodeGraphPage />);
-
-    fireEvent.change(await screen.findByLabelText(/select workspace/i), {
-      target: { value: "web" },
-    });
-    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("web");
-
-    rerender(<CodeGraphPage />);
-
-    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("web");
-    expect(screen.getByLabelText(/select workspace/i)).toHaveValue("web");
-    expect(fetchWorkspacesMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("resets workspace selection when the project changes (via shared chrome selector)", async () => {
-    fetchWorkspacesMock.mockImplementation(async (project) =>
-      project === "project-a"
-        ? [
-            { slug: "api", display: "API" },
-            { slug: "web", display: "Web" },
-          ]
-        : [
-            { slug: "worker", display: "Worker" },
-            { slug: "cli", display: "CLI" },
-          ],
-    );
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
-
-    render(<CodeGraphPage />);
-
-    fireEvent.change(await screen.findByLabelText(/select workspace/i), {
-      target: { value: "api" },
-    });
-    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("api");
-
-    // Simulate the shared chrome selector changing the project.
-    projectStore.setState({ selectedProjectId: "project-b" });
-
-    await waitFor(() => {
-      expect(fetchWorkspacesMock).toHaveBeenCalledWith("project-b");
-    });
-    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
-
-    fireEvent.change(await screen.findByLabelText(/select workspace/i), {
-      target: { value: "worker" },
-    });
-    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("worker");
-
-    // Simulate switching back to project-a via shared chrome selector.
-    fetchWorkspacesMock.mockResolvedValueOnce([
-      { slug: "api", display: "API" },
-      { slug: "web", display: "Web" },
-    ]);
-    projectStore.setState({ selectedProjectId: "project-a" });
-
-    await waitFor(() => {
-      expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
-    });
-  });
-
-  // ── Iter 30: complexity heatmap toggle ─────────────────────────────────
-
-  it("renders the color-mode toggle in the toolbar (iter 30)", async () => {
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
-
-    render(<CodeGraphPage />);
-
-    expect(await screen.findByTestId("color-mode-toggle")).toBeInTheDocument();
-    expect(screen.getByTestId("color-mode-topology")).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
-    expect(screen.getByTestId("color-mode-complexity")).toHaveAttribute(
-      "aria-checked",
-      "false",
-    );
-  });
-
-  it("disables the heatmap option when no nodes carry cognitive (iter 30)", async () => {
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
-
-    render(<CodeGraphPage />);
-
-    await waitFor(() => {
-      expect(fetchSnapshotMock).toHaveBeenCalled();
-    });
-    // The empty fixture has no function nodes, so complexity data is
-    // unavailable and the heatmap option must be disabled.
-    const complexityBtn = await screen.findByTestId("color-mode-complexity");
-    expect(complexityBtn).toBeDisabled();
-    expect(complexityBtn).toHaveAttribute(
-      "title",
-      expect.stringMatching(/no complexity data/i),
-    );
-  });
-
-  it("enables the heatmap option once a snapshot carries cognitive (iter 30)", async () => {
-    fetchSnapshotMock.mockImplementation(async () => ({
-      snapshot: {
-        project_id: "project-a",
-        git_head: "deadbeef",
-        generated_at: "2026-04-28T00:00:00Z",
-        truncated: false,
-        total_nodes: 3,
-        total_edges: 0,
-        node_cap: 2_000,
-        nodes: [
-          {
-            id: "symbol:fn_a",
-            kind: "symbol",
-            label: "fn_a",
-            symbol_kind: "function",
-            file_path: "src/a.rs",
-            pagerank: 0.5,
-            cognitive: 3,
-          },
-          {
-            id: "symbol:fn_b",
-            kind: "symbol",
-            label: "fn_b",
-            symbol_kind: "function",
-            file_path: "src/b.rs",
-            pagerank: 0.5,
-            cognitive: 5,
-          },
-          {
-            id: "symbol:fn_c",
-            kind: "symbol",
-            label: "fn_c",
-            symbol_kind: "function",
-            file_path: "src/c.rs",
-            pagerank: 0.5,
-            cognitive: 7,
-          },
-        ],
-        edges: [],
-      },
-    }));
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
-
-    render(<CodeGraphPage />);
-
-    const complexityBtn = await screen.findByTestId("color-mode-complexity");
-    await waitFor(() => {
-      expect(complexityBtn).not.toBeDisabled();
-    });
-    expect(useCodeGraphStore.getState().complexityAvailable).toBe(true);
-  });
-
-  it("flips the store mode when the toggle is clicked (iter 30)", async () => {
-    fetchSnapshotMock.mockImplementation(async () => ({
-      snapshot: {
-        project_id: "project-a",
-        git_head: "deadbeef",
-        generated_at: "2026-04-28T00:00:00Z",
-        truncated: false,
-        total_nodes: 1,
-        total_edges: 0,
-        node_cap: 2_000,
-        nodes: [
-          {
-            id: "symbol:fn_a",
-            kind: "symbol",
-            label: "fn_a",
-            symbol_kind: "function",
-            file_path: "src/a.rs",
-            pagerank: 0.5,
-            cognitive: 3,
-          },
-        ],
-        edges: [],
-      },
-    }));
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
-
-    render(<CodeGraphPage />);
-
-    const complexityBtn = await screen.findByTestId("color-mode-complexity");
-    await waitFor(() => {
-      expect(complexityBtn).not.toBeDisabled();
-    });
-    fireEvent.click(complexityBtn);
-    expect(useCodeGraphStore.getState().colorMode).toBe("complexity");
-
-    // Toggling back to topology works too.
-    fireEvent.click(screen.getByTestId("color-mode-topology"));
-    expect(useCodeGraphStore.getState().colorMode).toBe("topology");
-  });
-
-  // ── Regression: exactly one toolbar on the page ───────────────────────────
-
-  it("renders exactly one graph-toolbar on the assembled Code Graph page (regression)", async () => {
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
-
-    render(<CodeGraphPage />);
-
-    expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
-    await waitFor(() => {
-      expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000, "symbol");
-    });
-    expect(screen.getAllByTestId("graph-toolbar")).toHaveLength(1);
-  });
-
-  // ── Duplicate project picker regression ──────────────────────────────────
-
   it("does NOT render a local project picker in the page body (shared chrome handles it)", () => {
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
+    selectProjectA();
 
     render(<CodeGraphPage />);
 
-    // The shared chrome ProjectSelector is rendered outside this component;
-    // the page itself should have no "Select project" control.
-    expect(screen.queryByLabelText(/select project/i)).not.toBeInTheDocument();
-  });
-
-  it("renders the workspace selector only when multiple workspaces exist", async () => {
-    fetchWorkspacesMock.mockResolvedValue([
-      { slug: "api", display: "API" },
-      { slug: "web", display: "Web" },
-    ]);
-    projectStore.setState({
-      projects: projectsFixture,
-      selectedProjectId: "project-a",
-      lastViewPerProject: {},
-    });
-
-    render(<CodeGraphPage />);
-
-    const selector = await screen.findByLabelText(/select workspace/i);
-    expect(selector).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "All" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^project$/i)).not.toBeInTheDocument();
   });
 });

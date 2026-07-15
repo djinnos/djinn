@@ -342,6 +342,14 @@ pub(crate) fn build_snapshot_payload(
                 // nodes that never had a position computed.
                 x: graph.layout_position(idx).map(|p| p.x).unwrap_or_default(),
                 y: graph.layout_position(idx).map(|p| p.y).unwrap_or_default(),
+                // lmkv: warm-time 3D galaxy coordinates + collapsed-edge
+                // degree from the djinn-graph galaxy sidecar. `None` (skipped
+                // on the wire) for legacy artifacts / synthetic nodes without
+                // a galaxy position, so the galaxy UI falls back to its worker.
+                gx: graph.galaxy_position(idx).map(|p| p.x),
+                gy: graph.galaxy_position(idx).map(|p| p.y),
+                gz: graph.galaxy_position(idx).map(|p| p.z),
+                degree: graph.galaxy_degree(idx),
                 keywords: Vec::new(),
             }
         })
@@ -403,8 +411,13 @@ pub(crate) fn build_snapshot_payload(
     }
 
     // Cap the cappable remainder to the budget left after the always-kept
-    // cross-workspace edges, keeping the highest-salience edges.
-    let intra_budget = SNAPSHOT_DRAWABLE_EDGE_CAP.saturating_sub(cross_workspace_edges.len());
+    // cross-workspace edges, keeping the highest-salience edges. The edge
+    // budget scales with the requested node budget: a caller that asked
+    // for a whole-graph snapshot (galaxy renderer, lmkv) gets the whole
+    // edge set too, while default-budget UI snapshots keep the small
+    // cold-load payload.
+    let drawable_edge_cap = SNAPSHOT_DRAWABLE_EDGE_CAP.max(node_cap);
+    let intra_budget = drawable_edge_cap.saturating_sub(cross_workspace_edges.len());
     if drawable_edges.len() > intra_budget {
         drawable_edges.select_nth_unstable_by(intra_budget, |a, b| {
             b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
@@ -418,6 +431,28 @@ pub(crate) fn build_snapshot_payload(
     snapshot_edges.append(&mut containment_edges);
     snapshot_edges.append(&mut cross_workspace_edges);
     snapshot_edges.extend(drawable_edges.into_iter().map(|(_, edge)| edge));
+
+    // Proposal qoxm: surface commit co-change coupling as its own edge
+    // channel. These live in a sidecar outside the petgraph (so they never
+    // inflated the pagerank/degree used above); emit one `CoChangedWith` edge
+    // per file pair whose BOTH endpoints survived the node cap. Not counted in
+    // `total_edges` (a structural-graph measure) and not subject to the
+    // drawable salience cap — the per-file top-K cap was already applied at
+    // warm time. The galaxy renderer draws them at lower intensity.
+    for cc in graph.cochange_edges() {
+        if !surviving.contains(&cc.source) || !surviving.contains(&cc.target) {
+            continue;
+        }
+        let from_node = graph.node(cc.source);
+        let to_node = graph.node(cc.target);
+        snapshot_edges.push(SnapshotEdge {
+            from: format_node_key(&from_node.id),
+            to: format_node_key(&to_node.id),
+            kind: format!("{:?}", RepoGraphEdgeKind::CoChangedWith),
+            confidence: cc.confidence,
+            reason: Some(djinn_graph::cochange::encode_reason(cc.last_co_change)),
+        });
+    }
 
     // Sort edges deterministically (kind > from > to) so test snapshots
     // stay stable across runs.
@@ -592,6 +627,12 @@ fn build_community_snapshot_payload(
                 is_test: false,
                 x,
                 y,
+                // Community super-nodes are not part of the galaxy view; the
+                // galaxy renderer consumes the symbol-level snapshot.
+                gx: None,
+                gy: None,
+                gz: None,
+                degree: None,
                 keywords: agg.keywords,
             }
         })

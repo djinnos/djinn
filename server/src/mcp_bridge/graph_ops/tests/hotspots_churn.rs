@@ -127,6 +127,8 @@ fn hotspots_test_graph() -> RepoDependencyGraph {
         processes: vec![],
         route_exclusion_config: RouteExclusionConfig::default(),
         layout_positions: BTreeMap::new(),
+        galaxy_positions: BTreeMap::new(),
+        galaxy_degrees: BTreeMap::new(),
     })
 }
 

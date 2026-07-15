@@ -453,6 +453,7 @@ mod tests {
         "coupling_hubs",
         "crate_graph",
         "impact_check",
+        "coverage",
     ];
 
     #[test]
