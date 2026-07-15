@@ -20,8 +20,8 @@ expression: section
 - `write(content, path)`
 - `edit(new_text, old_text, path)`
 - `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)`
-- `memory_write(content, title, type, status?, tags?)`
-- `memory_edit(content, identifier, operation, find_text?, section?, type?)`
+- `memory_write(content, reason, title, type, status?, tags?)`
+- `memory_edit(content, identifier, operation, reason, find_text?, section?, type?)`
 - `proposal_show(id, fields?, revision_bodies?)`
 - `proposal_debate_list(proposal_id)`
 - `proposal_update(id, acceptance_criteria?, body?, body_format?, status?, superseded_by?, title?)`

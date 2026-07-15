@@ -21,7 +21,7 @@ expression: section
 - `edit(new_text, old_text, path)`
 - `apply_patch(patch)`
 - `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)`
-- `memory_write(content, title, type, status?, tags?)`
-- `memory_edit(content, identifier, operation, find_text?, section?, type?)`
+- `memory_write(content, reason, title, type, status?, tags?)`
+- `memory_edit(content, identifier, operation, reason, find_text?, section?, type?)`
 - `request_planner(id, reason)`
 - `submit_work(commit_title, summary, task_id, files_changed?, remaining_concerns?)`

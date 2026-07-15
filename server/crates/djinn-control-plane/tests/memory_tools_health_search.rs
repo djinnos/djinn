@@ -14,7 +14,7 @@ async fn mcp_memory_health_orphans_and_broken_links_shapes() {
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "type": "reference"}),
+            json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "reason": "seed health and search fixture", "type": "reference"}),
         )
         .await
         .expect("memory_write should dispatch");
@@ -59,14 +59,14 @@ async fn no_regression_memory_search_ranking_notes_only() {
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Rust Note One", "content": "rust memory test", "type": "reference"}),
+            json!({"project": project, "title": "Rust Note One", "content": "rust memory test", "reason": "seed health and search fixture", "type": "reference"}),
         )
         .await
         .expect("memory_write one should dispatch");
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Rust Note Two", "content": "another rust note", "type": "adr"}),
+            json!({"project": project, "title": "Rust Note Two", "content": "another rust note", "reason": "seed health and search fixture", "type": "adr"}),
         )
         .await
         .expect("memory_write two should dispatch");

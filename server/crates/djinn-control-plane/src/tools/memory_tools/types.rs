@@ -1,12 +1,29 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::*;
 use crate::tools::json_object::AnyJson;
 
 // ── Param structs ─────────────────────────────────────────────────────────────
 
+/// Deserialize required mutation reasons before tool dispatch or transaction setup.
+pub fn deserialize_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let reason = String::deserialize(deserializer)?;
+    let reason = reason.trim().to_owned();
+    if reason.is_empty() {
+        return Err(serde::de::Error::custom("reason must be non-blank"));
+    }
+    Ok(reason)
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WriteParams {
+    /// Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.
+    #[serde(deserialize_with = "deserialize_reason")]
+    pub reason: String,
     /// Absolute path to the project directory.
     pub project: String,
     pub title: String,
@@ -110,7 +127,11 @@ pub struct MemoryConfirmParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EditParams {
+    /// Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.
+    #[serde(deserialize_with = "deserialize_reason")]
+    pub reason: String,
     pub project: String,
     /// Note permalink or title.
     pub identifier: String,
@@ -168,7 +189,11 @@ pub struct ListParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteParams {
+    /// Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.
+    #[serde(deserialize_with = "deserialize_reason")]
+    pub reason: String,
     pub project: String,
     pub identifier: String,
 }
