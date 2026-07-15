@@ -328,6 +328,15 @@ const HISTORICAL_FIXTURES: &[(&str, &str, i32, &str)] = &[
         0,
         "empty",
     ),
+    // The pre-outcome TraceCandidate shape remains reliable skipped evidence:
+    // serde defaults an absent outcome key to Skipped, while the non-null known
+    // skipped_reason satisfies the existing candidate invariant.
+    (
+        "rt-empty-default-skipped-outcome",
+        r#"[{"note_id":"n1","rank":1,"confidence":0.5,"skipped_reason":"not_top_k","source":null,"scope":null}]"#,
+        0,
+        "empty",
+    ),
     // ── legacy_unknown: absent evidence (candidates default is '[]' but we
     //    also exercise the default path by relying on column default when no
     //    explicit payload proves injection). Here tokens > 0 but no injected

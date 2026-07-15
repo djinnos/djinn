@@ -173,13 +173,15 @@ FROM (
             -- tokens. The array must be non-empty because migration 103's
             -- default empty array may mean a legacy writer omitted candidate
             -- evidence. Every element must be a well-formed skipped-candidate
-            -- object: note_id is a string,
-            -- outcome is 'skipped', and skipped_reason is a known non-null
-            -- drop reason. This rejects strings, scalars, partial objects,
-            -- injected candidates, and unknown candidate vocabulary rather
-            -- than treating insufficient evidence as empty. A non-array value
-            -- is also NOT reliable (it may be a truncated/malformed payload)
-            -- and falls through to legacy_unknown below.
+            -- object: note_id is a string, outcome is either absent (the DTO's
+            -- backward-compatible default is 'skipped') or explicitly
+            -- 'skipped', and skipped_reason is a known non-null drop reason.
+            -- JSON null, non-string, injected, and unknown outcome values are
+            -- rejected. This also rejects strings, scalars, partial objects,
+            -- and unknown candidate vocabulary rather than treating
+            -- insufficient evidence as empty. A non-array value is also NOT
+            -- reliable (it may be a truncated/malformed payload) and falls
+            -- through to legacy_unknown below.
             WHEN rt.estimated_injected_tokens = 0
                  AND jsonb_typeof(rt.candidates) = 'array'
                  AND jsonb_array_length(rt.candidates) > 0
@@ -222,7 +224,15 @@ FROM (
                               OR cand -> 'source' = 'null'::jsonb THEN TRUE
                             ELSE jsonb_typeof(cand -> 'source') = 'string'
                         END
-                        OR (cand ->> 'outcome') IS DISTINCT FROM 'skipped'
+                        -- TraceCandidate defaults an absent outcome key to
+                        -- Skipped. Explicit JSON null is not absent and must be
+                        -- rejected along with non-string/unknown values.
+                        OR NOT CASE
+                            WHEN cand -> 'outcome' IS NULL THEN TRUE
+                            WHEN jsonb_typeof(cand -> 'outcome') = 'string' THEN
+                                (cand ->> 'outcome') = 'skipped'
+                            ELSE FALSE
+                        END
                         OR jsonb_typeof(cand -> 'skipped_reason') IS DISTINCT FROM 'string'
                         OR (cand ->> 'skipped_reason') NOT IN (
                             'not_top_k',
