@@ -674,7 +674,7 @@ impl CoordinatorActor {
         phase: RefinementPhase,
         diverse_refinement: bool,
         attributed_user_id: Option<&str>,
-    ) -> (String, String) {
+    ) -> Option<(String, String)> {
         let agent_type = match phase {
             RefinementPhase::AdvocateRevision => "advocate",
             RefinementPhase::AdversaryAttack => "adversary",
@@ -682,7 +682,7 @@ impl CoordinatorActor {
             RefinementPhase::AwaitingHumanReview
             | RefinementPhase::AwaitingEvidence
             | RefinementPhase::Complete => {
-                return ("advocate".into(), String::new());
+                return Some(("advocate".into(), String::new()));
             }
         };
 
@@ -690,25 +690,24 @@ impl CoordinatorActor {
             .resolve_dispatch_models_for_role("planner", attributed_user_id)
             .await;
 
-        let primary_model = self.resolve_refinement_primary_model(&user_models);
+        // Credential-backed eligibility is a hard dispatch boundary. Never
+        // substitute a globally configured or synthetic model when the durable
+        // owner has no eligible credentials.
+        let primary_model = self.resolve_refinement_primary_model(&user_models)?;
         let candidates = self.resolve_refinement_model_candidates(&user_models);
 
         let (model_id, _same_fallback) =
             select_refinement_model(diverse_refinement, &primary_model, &candidates);
 
-        (agent_type.to_string(), model_id)
+        Some((agent_type.to_string(), model_id))
     }
 
     /// Resolve the primary model for a refinement session.
-    pub(super) fn resolve_refinement_primary_model(&self, user_models: &[String]) -> String {
-        if let Some(first) = user_models.first() {
-            return first.clone();
-        }
-        self.model_priorities
-            .values()
-            .next()
-            .and_then(|models| models.first().cloned())
-            .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".to_string())
+    pub(super) fn resolve_refinement_primary_model(
+        &self,
+        user_models: &[String],
+    ) -> Option<String> {
+        user_models.first().cloned()
     }
 
     /// Resolve candidate models for diverse-refinement selection.
@@ -716,13 +715,7 @@ impl CoordinatorActor {
         &self,
         user_models: &[String],
     ) -> Vec<String> {
-        if !user_models.is_empty() {
-            return user_models.to_vec();
-        }
-        self.model_priorities
-            .values()
-            .flat_map(|models| models.iter().cloned())
-            .collect()
+        user_models.to_vec()
     }
 
     /// Resolve the user a refinement run is attributed to. Durable refinement

@@ -90,6 +90,10 @@ pub(crate) async fn seed_refinement_fixture(db: &djinn_db::Database) -> Refineme
         .add_target(&proposal.id, &project.id, "primary")
         .await
         .expect("add proposal target");
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .start_refinement_with_owner(&proposal.id, Some(&user_id))
+        .await
+        .expect("persist refinement owner and start boundary");
 
     RefinementFixture {
         db: db.clone(),
@@ -1373,10 +1377,11 @@ fn test_model(id: &str, provider_id: &str) -> Model {
     }
 }
 
-/// Refinement model selection must use the durable owner supplied by the
-/// persisted loop state, rather than the proposal author or another participant.
-/// The two private credentials deliberately expose different providers, so the
-/// historical fixed `test/mock` shortcut cannot satisfy this assertion.
+/// Refinement model selection must use the owner written by the repository and
+/// reloaded from the proposal, rather than the proposal author or another
+/// participant. The two private credentials deliberately expose different
+/// providers, so the historical fixed `test/mock` shortcut cannot satisfy this
+/// assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refinement_model_resolution_scopes_private_credentials_to_durable_owner() {
     let db = crate::test_helpers::create_test_db();
@@ -1405,6 +1410,42 @@ async fn refinement_model_resolution_scopes_private_credentials_to_durable_owner
         .await
         .expect("seed unrelated private credential");
 
+    let proposal = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(misleading_user.id.clone()), async {
+            ProposalRepository::new(db.clone(), EventBus::noop())
+                .create(ProposalCreateInput {
+                    title: "Persisted owner credential boundary",
+                    body: "The proposal author and refinement owner are distinct.",
+                    acceptance_criteria: Some("[]"),
+                    status: Some("building"),
+                    body_format: None,
+                })
+                .await
+                .expect("create misleading-user-authored proposal")
+        })
+        .await;
+    let proposal_repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    proposal_repo
+        .add_target(&proposal.id, &fixture.project_id, "primary")
+        .await
+        .expect("add persisted-owner proposal target");
+    proposal_repo
+        .start_refinement_with_owner(&proposal.id, Some(&fixture.user_id))
+        .await
+        .expect("persist durable refinement owner");
+    let reloaded = proposal_repo
+        .get(&proposal.id)
+        .await
+        .expect("reload persisted-owner proposal")
+        .expect("persisted-owner proposal exists");
+    assert_eq!(
+        reloaded.author_user_id.as_deref(),
+        Some(misleading_user.id.as_str())
+    );
+    let reloaded_owner = reloaded
+        .refinement_owner_user_id
+        .expect("repository persisted refinement owner");
+
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel(16);
     let pool = spawn_test_pool(&db, 1);
     let mut actor = build_refinement_actor(&db, &events_tx, pool);
@@ -1427,34 +1468,133 @@ async fn refinement_model_resolution_scopes_private_credentials_to_durable_owner
             "misleading-provider/misleading-model".to_owned(),
         ],
     );
-    seed_refinement_state(
-        &mut actor,
-        &fixture.proposal_id,
-        Some(fixture.user_id.clone()),
-    );
-    let durable_owner = actor
-        .active_refinements
-        .get(&fixture.proposal_id)
-        .and_then(|state| state.attributed_user_id.as_deref())
-        .expect("refinement state retains the durable owner")
-        .to_owned();
 
+    let durable_owner = actor
+        .resolve_refinement_attributed_user(&proposal.id, Some(reloaded_owner.clone()))
+        .await
+        .expect("reloaded durable owner passes dispatch validation");
     let (_, owner_model) = actor
         .resolve_refinement_dispatch_params(
             super::super::refinement::RefinementPhase::AdversaryAttack,
             false,
             Some(&durable_owner),
         )
-        .await;
-    let (_, misattributed_model) = actor
+        .await
+        .expect("durable owner has an eligible model");
+
+    assert_eq!(owner_model, "owner-provider/owner-model");
+    assert_ne!(owner_model, "misleading-provider/misleading-model");
+
+    // A different persisted owner with no credentials must not inherit either
+    // private model or the configured global priority.
+    let credentialless_owner = UserRepository::new(db.clone())
+        .upsert_from_github(777_103, "credentialless-refinement-owner", None, None)
+        .await
+        .expect("create credentialless refinement owner");
+    proposal_repo
+        .start_refinement_with_owner(&proposal.id, Some(&credentialless_owner.id))
+        .await
+        .expect("persist credentialless refinement owner");
+    let reloaded_credentialless_owner = proposal_repo
+        .get(&proposal.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .refinement_owner_user_id
+        .expect("reload credentialless refinement owner");
+    let credentialless_owner = actor
+        .resolve_refinement_attributed_user(
+            &proposal.id,
+            Some(reloaded_credentialless_owner.clone()),
+        )
+        .await
+        .expect("credentialless persisted owner passes ownership validation");
+    let dispatch_params = actor
         .resolve_refinement_dispatch_params(
             super::super::refinement::RefinementPhase::AdversaryAttack,
             false,
-            Some(&misleading_user.id),
+            Some(&credentialless_owner),
         )
         .await;
+    assert!(
+        dispatch_params.is_none(),
+        "credentialless owner must not fall back to another user's private model or a global model"
+    );
+}
 
-    assert_eq!(owner_model, "owner-provider/owner-model");
-    assert_eq!(misattributed_model, "misleading-provider/misleading-model");
-    assert_ne!(owner_model, misattributed_model);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authored_proposal_without_persisted_owner_fails_closed() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let proposal = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(fixture.user_id.clone()), async {
+            ProposalRepository::new(db.clone(), EventBus::noop())
+                .create(ProposalCreateInput {
+                    title: "Authored but unowned refinement",
+                    body: "Proposal author must not become the refinement owner.",
+                    acceptance_criteria: Some("[]"),
+                    status: Some("building"),
+                    body_format: None,
+                })
+                .await
+                .expect("create authored proposal without refinement owner")
+        })
+        .await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    repo.add_target(&proposal.id, &fixture.project_id, "primary")
+        .await
+        .expect("add unowned proposal target");
+    let reloaded = repo.get(&proposal.id).await.unwrap().unwrap();
+    assert_eq!(
+        reloaded.author_user_id.as_deref(),
+        Some(fixture.user_id.as_str())
+    );
+    assert!(reloaded.refinement_owner_user_id.is_none());
+
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel(16);
+    let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+    seed_refinement_state(&mut actor, &proposal.id, Some(fixture.user_id.clone()));
+    actor.drive_active_refinements().await;
+
+    assert!(actor.refinement_sessions.is_empty());
+    assert!(actor.provisional_admissions.is_empty());
+    let tasks = TaskRepository::new(db.clone(), EventBus::noop())
+        .list_by_project(&fixture.project_id)
+        .await
+        .expect("list tasks after absent-owner dispatch attempt");
+    assert!(tasks.iter().all(|task| task.issue_type != "refinement"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persisted_and_in_memory_refinement_owner_mismatch_fails_closed() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let misleading_user = UserRepository::new(db.clone())
+        .upsert_from_github(777_102, "misleading-runtime-owner", None, None)
+        .await
+        .expect("create misleading runtime owner");
+    let persisted = ProposalRepository::new(db.clone(), EventBus::noop())
+        .get(&fixture.proposal_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .refinement_owner_user_id;
+    assert_eq!(persisted.as_deref(), Some(fixture.user_id.as_str()));
+
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel(16);
+    let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+    seed_refinement_state(
+        &mut actor,
+        &fixture.proposal_id,
+        Some(misleading_user.id.clone()),
+    );
+    actor.drive_active_refinements().await;
+
+    assert!(actor.refinement_sessions.is_empty());
+    assert!(actor.provisional_admissions.is_empty());
+    let tasks = TaskRepository::new(db.clone(), EventBus::noop())
+        .list_by_project(&fixture.project_id)
+        .await
+        .expect("list tasks after owner-mismatch dispatch attempt");
+    assert!(tasks.iter().all(|task| task.issue_type != "refinement"));
 }
