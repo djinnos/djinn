@@ -25,6 +25,9 @@ import {
   snapshotToGalaxy,
 } from "@/lib/codeGraphGalaxyAdapter";
 import type { SnapshotPayload } from "@/lib/codeGraphAdapter";
+import { CodeGraphPage } from "@/pages/CodeGraphPage";
+import { projectStore } from "@/stores/projectStore";
+import { setMcpToolResponder } from "@/storybook-mocks/mcpClient";
 
 // Optional import: eager glob resolves to {} when the fixture is deleted.
 const fixtureModules = import.meta.glob<{ default: SnapshotPayload }>(
@@ -140,4 +143,61 @@ export const Djinn: Story = {};
 /** Cognitive-complexity heat over the real graph. */
 export const DjinnComplexityHeat: Story = {
   args: { colorMode: "heat" },
+};
+
+// ── Full page: the real /code-graph experience ──────────────────────────────
+//
+// Mounts the actual `CodeGraphPage` (GalaxyView + Cmd-K palette + FAB)
+// against the full local dump via the aliased mcpClient mock, with the
+// project store seeded — project chip, workspace picker, hide-tests,
+// color modes, and search all live exactly as on the real page.
+
+function FullPageHarness() {
+  useEffect(() => {
+    projectStore.setState({
+      projects: [
+        {
+          id: "project-djinn",
+          name: "djinn",
+          github_owner: "djinnos",
+          github_repo: "djinn",
+        },
+      ],
+      selectedProjectId: "project-djinn",
+      lastViewPerProject: {},
+    });
+  }, []);
+
+  if (!snapshot) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-[#06090f] font-mono text-sm text-slate-400">
+        No local snapshot fixture — see the note on the Djinn story.
+      </div>
+    );
+  }
+  return (
+    <div className="h-screen w-full">
+      <CodeGraphPage />
+    </div>
+  );
+}
+
+export const FullPage: StoryObj = {
+  render: () => <FullPageHarness />,
+  beforeEach: () => {
+    setMcpToolResponder((name, args) => {
+      if (name !== "code_graph" || !snapshot) return {};
+      if (args?.operation === "snapshot") return { snapshot };
+      if (args?.operation === "workspaces") {
+        const slugs = new Set<string>();
+        for (const node of snapshot.nodes) {
+          if (node.workspace) slugs.add(node.workspace);
+        }
+        return {
+          workspaces: [...slugs].map((slug) => ({ slug, display: slug })),
+        };
+      }
+      return {};
+    });
+  },
 };

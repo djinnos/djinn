@@ -286,7 +286,7 @@ export function layoutGalaxy(
 
   // Bigger graphs get a bigger shell: constant volume-per-node keeps the
   // globe readable instead of compressing 60k stars into a 20k-node shell.
-  const shellScale = Math.max(1, Math.cbrt(n / 20_000));
+  const shellScale = Math.max(1, Math.cbrt(n / 15_000));
 
   for (let i = 0; i < n; i++) {
     const node = nodes[i];

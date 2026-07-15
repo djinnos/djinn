@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useMemo, useRef, type ComponentRef } from "react";
-import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import { Bloom, EffectComposer } from "@react-three/postprocessing";
 import * as THREE from "three";
@@ -28,10 +28,11 @@ import {
 } from "./galaxyColors";
 import type { GalaxyColorMode, GalaxyData, GalaxyDisplay } from "./galaxyTypes";
 
-/** Above this node count, hover/click raycasting is disabled (too costly). */
-export const GALAXY_INTERACTION_LIMIT = 30_000;
 /** At most this many labels render, picked by visual weight. */
 const MAX_LABELS = 70;
+/** Hover raycasts are throttled to this interval — a full-graph ray-sphere
+ * sweep (~65k instances) costs a few ms, fine at ~14Hz, jank at 120Hz. */
+const HOVER_THROTTLE_MS = 70;
 const IDLE_ROTATE_DELAY_MS = 20_000;
 const BASE_BLOOM_INTENSITY = 1.45;
 /** Dim factor for non-highlighted nodes while a selection is active. */
@@ -52,7 +53,7 @@ interface SceneProps {
   display: GalaxyDisplay;
   showLabels: boolean;
   flyTarget: FlyTarget;
-  onNodePointer: (index: number | null, event?: ThreeEvent<PointerEvent>) => void;
+  onNodePointer: (index: number | null, clientX?: number, clientY?: number) => void;
   onNodeClick: (index: number | null) => void;
 }
 
@@ -77,7 +78,6 @@ function GalaxyNodes({
   colorMode,
   highlight,
   boost,
-  interactive,
   onNodePointer,
   onNodeClick,
 }: {
@@ -86,13 +86,16 @@ function GalaxyNodes({
   highlight: Set<string> | null;
   /** nodeBoostScale(count) × user nodeGlow — 1 = full glow, 0 = flat. */
   boost: number;
-  interactive: boolean;
   onNodePointer: SceneProps["onNodePointer"];
   onNodeClick: SceneProps["onNodeClick"];
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
+  const { camera, gl } = useThree();
   const count = data.nodes.length;
   const detail = useMemo(() => sphereDetail(count), [count]);
+  // Whole-repo clouds: shrink stars as density grows (gated: 1.0 at ≤20k)
+  // so clumps read as star fields instead of merged white patches.
+  const sizeDamp = 1 / Math.pow(Math.max(1, count / 20_000), 1 / 6);
 
   useEffect(() => {
     const mesh = meshRef.current;
@@ -105,7 +108,7 @@ function GalaxyNodes({
       const node = data.nodes[i];
       const isLit = !hasHighlight || highlight.has(node.id);
 
-      const s = node.size * (isLit ? 0.5 : 0.2);
+      const s = node.size * sizeDamp * (isLit ? 0.5 : 0.2);
       tempObj.position.set(node.x, node.y, node.z);
       tempObj.scale.set(s, s, s);
       tempObj.updateMatrix();
@@ -125,21 +128,64 @@ function GalaxyNodes({
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
-  }, [data, colorMode, highlight, boost, count]);
+  }, [data, colorMode, highlight, boost, count, sizeDamp]);
 
-  const handleMove = interactive
-    ? (e: ThreeEvent<PointerEvent>) => {
-        e.stopPropagation();
-        onNodePointer(e.instanceId ?? null, e);
-      }
-    : undefined;
-  const handleOut = interactive ? () => onNodePointer(null) : undefined;
-  const handleClick = interactive
-    ? (e: ThreeEvent<MouseEvent>) => {
-        e.stopPropagation();
-        onNodeClick(e.instanceId ?? null);
-      }
-    : undefined;
+  // Manual picking instead of R3F event raycasting: R3F would ray-sweep
+  // every instance on EVERY pointer event; throttling the sweep ourselves
+  // keeps hover live at any graph size. Click picks on pointerup with a
+  // small drag guard so OrbitControls orbits don't count as clicks.
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    let lastHover = 0;
+    let downX = 0;
+    let downY = 0;
+
+    const pick = (event: PointerEvent): number | null => {
+      const mesh = meshRef.current;
+      if (!mesh) return null;
+      const rect = canvas.getBoundingClientRect();
+      pointer.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObject(mesh, false);
+      return hits.length > 0 ? (hits[0].instanceId ?? null) : null;
+    };
+
+    const onMove = (event: PointerEvent) => {
+      const now = performance.now();
+      if (now - lastHover < HOVER_THROTTLE_MS) return;
+      lastHover = now;
+      const index = pick(event);
+      if (index === null) onNodePointer(null);
+      else onNodePointer(index, event.clientX, event.clientY);
+    };
+    const onLeave = () => onNodePointer(null);
+    const onDown = (event: PointerEvent) => {
+      downX = event.clientX;
+      downY = event.clientY;
+    };
+    const onUp = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      const drag = Math.hypot(event.clientX - downX, event.clientY - downY);
+      if (drag > 5) return; // orbit, not a click
+      onNodeClick(pick(event));
+    };
+
+    canvas.addEventListener("pointermove", onMove);
+    canvas.addEventListener("pointerleave", onLeave);
+    canvas.addEventListener("pointerdown", onDown);
+    canvas.addEventListener("pointerup", onUp);
+    return () => {
+      canvas.removeEventListener("pointermove", onMove);
+      canvas.removeEventListener("pointerleave", onLeave);
+      canvas.removeEventListener("pointerdown", onDown);
+      canvas.removeEventListener("pointerup", onUp);
+    };
+  }, [camera, gl, onNodePointer, onNodeClick]);
 
   return (
     <instancedMesh
@@ -147,9 +193,6 @@ function GalaxyNodes({
       ref={meshRef}
       args={[undefined, undefined, count]}
       frustumCulled={false}
-      onPointerMove={handleMove}
-      onPointerOut={handleOut}
-      onClick={handleClick}
     >
       <sphereGeometry args={detail} />
       <meshBasicMaterial toneMapped={false} />
@@ -173,6 +216,9 @@ function GalaxyEdges({
     data.nodes.forEach((node, i) => indexById.set(node.id, i));
 
     const densityScale = edgeIntensityScale(data.edges.length) * brightness;
+    // 0 at ≤50k edges (approved look untouched), full strength at ≥250k.
+    const hubCoefficient =
+      0.06 * Math.min(1, Math.max(0, (data.edges.length - 50_000) / 200_000));
     const hasHighlight = highlight !== null && highlight.size > 0;
     const positions = new Float32Array(data.edges.length * 6);
     const colors = new Float32Array(data.edges.length * 6);
@@ -199,6 +245,14 @@ function GalaxyEdges({
         intensity = sLit && tLit ? 0.5 : 0.04 * densityScale;
       } else {
         intensity *= densityScale;
+        // Whole-repo regime only (ramps in past 50k edges): thousands of
+        // near-parallel edges into mega-hub files stack into white beams;
+        // dim each edge by its larger endpoint degree so trunks read as
+        // faint cones instead of searchlights.
+        if (hubCoefficient > 0) {
+          const maxDegree = Math.max(s.degree, t.degree);
+          intensity /= 1 + hubCoefficient * Math.sqrt(maxDegree);
+        }
       }
 
       const [r, g, b] = edgeKindColor(edge.kind);
@@ -429,7 +483,6 @@ export function GalaxyScene({
   onNodeClick,
 }: SceneProps) {
   const nodeCount = data.nodes.length;
-  const interactive = nodeCount <= GALAXY_INTERACTION_LIMIT;
   const boost = nodeBoostScale(nodeCount) * display.nodeGlow;
   const bloom = BASE_BLOOM_INTENSITY * bloomIntensityScale(nodeCount) * display.bloom;
 
@@ -438,7 +491,6 @@ export function GalaxyScene({
       dpr={[1, 1.5]}
       gl={{ antialias: false, alpha: false, powerPreference: "high-performance" }}
       camera={{ fov: 50, near: 0.1, far: 100_000, position: [0, 0, flyTarget.distance] }}
-      onPointerMissed={() => onNodeClick(null)}
     >
       <color attach="background" args={["#06090f"]} />
       <ContextJanitor />
@@ -448,7 +500,6 @@ export function GalaxyScene({
         colorMode={colorMode}
         highlight={highlight}
         boost={boost}
-        interactive={interactive}
         onNodePointer={onNodePointer}
         onNodeClick={onNodeClick}
       />

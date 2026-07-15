@@ -133,9 +133,13 @@ export function edgeIntensityScale(edgeCount: number): number {
 }
 
 export const NODE_REFERENCE_COUNT = 25_000;
-const NODE_FADE_END = 250_000;
-const BLOOM_FLOOR = 0.7;
-const NODE_BOOST_FLOOR = 0.8;
+// Whole-repo tuning: dense sphere clouds (60k+ instanced spheres, not
+// point sprites) merge into white long before 250k, so the fade completes
+// by 120k and drops much lower. Graphs at or below the reference count —
+// where the look is already approved — are untouched.
+const NODE_FADE_END = 120_000;
+const BLOOM_FLOOR = 0.45;
+const NODE_BOOST_FLOOR = 0.35;
 
 function fadeFactor(nodeCount: number): number {
   if (nodeCount <= NODE_REFERENCE_COUNT) return 0;
