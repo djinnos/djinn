@@ -29,6 +29,7 @@ use sqlx::{Connection, Executor};
 
 const MIGRATION_VERSION: u64 = 119;
 const MIGRATION_FILE: &str = "119_retrieval_traces_rollout_outcome.sql";
+const ABSENT_CANDIDATES_FIXTURE_ID: &str = "rt-absent-candidates-default";
 
 fn base_database_url() -> String {
     std::env::var("DJINN_TEST_DATABASE_URL")
@@ -315,11 +316,12 @@ const HISTORICAL_FIXTURES: &[(&str, &str, i32, &str)] = &[
         120,
         "injected",
     ),
-    // ── empty: zero tokens + well-formed array with NO injected candidate
-    //    (no candidate whose skipped_reason is JSON-null). The empty array is
-    //    reliable zero-injection evidence. ──────────────────────────────────
-    ("rt-empty-array", r#"[]"#, 0, "empty"),
-    // empty with skipped candidates only (no JSON-null skipped_reason).
+    // ── legacy_unknown: an empty array cannot prove whether a legacy writer
+    //    observed no candidates or omitted candidates and received migration
+    //    103's default. ──────────────────────────────────────────────────────
+    ("rt-empty-array", r#"[]"#, 0, "legacy_unknown"),
+    // ── empty positive control: zero tokens plus a non-empty array containing
+    //    only well-formed skipped candidates. ────────────────────────────────
     (
         "rt-empty-skipped-only",
         r#"[{"note_id":"n1","outcome":"skipped","skipped_reason":"not_top_k","rank":1,"confidence":0.1}]"#,
@@ -437,6 +439,25 @@ async fn assert_historical_backfill(pool: &sqlx::PgPool) {
             "historical row {id} outcome should be {expected_outcome}, got {outcome:?}"
         );
     }
+
+    let (stored_candidates, rollout_label, outcome): (serde_json::Value, String, String) =
+        sqlx::query_as(
+            "SELECT candidates, rollout_label, outcome FROM retrieval_traces WHERE id = $1",
+        )
+        .bind(ABSENT_CANDIDATES_FIXTURE_ID)
+        .fetch_one(pool)
+        .await
+        .expect("load historical row whose candidates were omitted");
+    assert_eq!(
+        stored_candidates,
+        serde_json::json!([]),
+        "omitted candidates should use migration 103's empty-array default"
+    );
+    assert_eq!(rollout_label, "legacy");
+    assert_eq!(
+        outcome, "legacy_unknown",
+        "migration-103's default empty array is absent evidence, not proof of an empty retrieval"
+    );
 }
 
 /// Assert that a future legacy insert (one that does NOT set rollout_label or
@@ -558,6 +579,18 @@ async fn seed_historical_fixtures(pool: &sqlx::PgPool) {
     for (id, candidates_json, tokens, _expected) in HISTORICAL_FIXTURES {
         seed_trace(pool, id, *tokens, candidates_json).await;
     }
+
+    // Deliberately bypass seed_trace: this pre-119 insert omits `candidates`
+    // entirely so migration 103's `[]` default represents absent evidence.
+    sqlx::query(
+        "INSERT INTO retrieval_traces \
+             (id, schema_version, project_id, entry_point, estimated_injected_tokens) \
+         VALUES ($1, 1, 'project-rt', 'dispatch', 0)",
+    )
+    .bind(ABSENT_CANDIDATES_FIXTURE_ID)
+    .execute(pool)
+    .await
+    .expect("seed historical row with omitted candidates");
 }
 
 #[tokio::test]

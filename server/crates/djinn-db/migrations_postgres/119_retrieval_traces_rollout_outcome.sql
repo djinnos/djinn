@@ -136,9 +136,10 @@ FROM (
 
             -- empty: reliable, well-formed zero-injection evidence. The row
             -- must prove zero injected candidates AND zero estimated injected
-            -- tokens. A well-formed empty array is reliable zero-injection
-            -- evidence. For a non-empty array, every element must be a
-            -- well-formed skipped-candidate object: note_id is a string,
+            -- tokens. The array must be non-empty because migration 103's
+            -- default empty array may mean a legacy writer omitted candidate
+            -- evidence. Every element must be a well-formed skipped-candidate
+            -- object: note_id is a string,
             -- outcome is 'skipped', and skipped_reason is a known non-null
             -- drop reason. This rejects strings, scalars, partial objects,
             -- injected candidates, and unknown candidate vocabulary rather
@@ -147,6 +148,7 @@ FROM (
             -- and falls through to legacy_unknown below.
             WHEN rt.estimated_injected_tokens = 0
                  AND jsonb_typeof(rt.candidates) = 'array'
+                 AND jsonb_array_length(rt.candidates) > 0
                  AND NOT EXISTS (
                      SELECT 1
                      FROM jsonb_array_elements(
