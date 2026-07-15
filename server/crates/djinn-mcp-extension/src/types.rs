@@ -261,6 +261,7 @@ pub struct MemoryBuildContextParams {
 
 #[derive(Deserialize)]
 pub struct MemoryWriteParams {
+    pub reason: String,
     pub title: String,
     pub content: String,
     #[serde(rename = "type")]
@@ -282,6 +283,7 @@ pub struct MemoryMoveParams {
 
 #[derive(Deserialize)]
 pub struct MemoryEditParams {
+    pub reason: String,
     pub identifier: String,
     pub operation: String,
     pub content: String,

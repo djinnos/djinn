@@ -100,6 +100,7 @@ mod tests {
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Summary Note".to_string(),
                 content: "Sentence one. Sentence two.\n\nMore context follows here.".to_string(),
@@ -144,6 +145,7 @@ mod tests {
 
         let Json(edited) = server
             .memory_edit(Parameters(EditParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 identifier: note_id.clone(),
                 operation: "append".to_string(),

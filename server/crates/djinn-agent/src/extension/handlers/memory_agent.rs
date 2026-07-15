@@ -162,6 +162,7 @@ pub(super) async fn call_memory_write(
     let result = server
         .memory_write(rmcp::handler::server::wrapper::Parameters(
             SharedMemoryWriteParams {
+                reason: p.reason,
                 project: project_path,
                 title: p.title,
                 content: p.content,
@@ -190,6 +191,7 @@ pub(super) async fn call_memory_edit(
     let result = server
         .memory_edit(rmcp::handler::server::wrapper::Parameters(
             SharedMemoryEditParams {
+                reason: p.reason,
                 project: project_path,
                 identifier: p.identifier,
                 operation: p.operation,
