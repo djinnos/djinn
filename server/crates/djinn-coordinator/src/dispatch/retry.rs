@@ -8,12 +8,12 @@ use djinn_core::models::task_attempt::{TaskAttemptLedgerRow, TaskAttemptOutcome}
 use djinn_core::models::{ReopenClass, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
+use djinn_db::EffectiveCreatorProvenance;
 use djinn_db::repositories::task_arbitration::{
     CreateArbitrationParams, TaskArbitrationRecord, TaskArbitrationRepository, TryCreateResult,
     UpdateDispatchLedgerParams,
 };
 use djinn_db::repositories::task_attempt::TaskAttemptRepository;
-use djinn_db::EffectiveCreatorProvenance;
 
 /// uv3p Part B: what the fleet actually did after the current intervention (or
 /// after a human released a prior hold), derived from `task_attempts` rows.

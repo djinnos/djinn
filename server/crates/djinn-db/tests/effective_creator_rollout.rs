@@ -74,7 +74,7 @@ fn production_task_writers_match_the_callsite_inventory_and_provenance_boundary(
                     call.symbol
                 );
                 assert!(
-                    !call.text.contains("set_created_by_user_id"),
+                    !call.enclosing_function.contains("set_created_by_user_id"),
                     "post-insert attribution at {}:{} ({})",
                     relative,
                     call.line,
@@ -110,6 +110,9 @@ struct Invocation {
     symbol: String,
     line: usize,
     text: String,
+    /// The complete enclosing function, not merely the create invocation.
+    /// A creator patch follows the invocation and must be checked here.
+    enclosing_function: String,
 }
 
 fn calls(source: &str) -> Vec<Invocation> {
@@ -129,11 +132,13 @@ fn calls(source: &str) -> Vec<Invocation> {
             }
             let open = offset + needle.len() - 1;
             let end = matching(&code, open, b'(', b')').expect("balanced task creation invocation");
+            let (symbol, enclosing_function) = enclosing_function(&code, offset);
             result.push(Invocation {
                 method: (*method).to_owned(),
-                symbol: enclosing_symbol(&code, offset),
+                symbol,
                 line: code[..offset].bytes().filter(|byte| *byte == b'\n').count() + 1,
                 text: code[offset..=end].to_owned(),
+                enclosing_function,
             });
         }
     }
@@ -212,9 +217,10 @@ fn inline_test_ranges(code: &str) -> Vec<std::ops::Range<usize>> {
     ranges
 }
 
-fn enclosing_symbol(code: &str, offset: usize) -> String {
-    let mut symbol = None;
-    for line in code[..offset].lines() {
+fn enclosing_function(code: &str, offset: usize) -> (String, String) {
+    let mut declaration = None;
+    let mut line_start = 0;
+    for line in code[..offset].split_inclusive('\n') {
         let trimmed = line.trim_start();
         let candidate = trimmed
             .strip_prefix("pub(crate) async fn ")
@@ -222,16 +228,28 @@ fn enclosing_symbol(code: &str, offset: usize) -> String {
             .or_else(|| trimmed.strip_prefix("pub async fn "))
             .or_else(|| trimmed.strip_prefix("async fn "))
             .or_else(|| trimmed.strip_prefix("pub(super) fn "))
+            .or_else(|| trimmed.strip_prefix("pub(crate) fn "))
             .or_else(|| trimmed.strip_prefix("pub fn "))
             .or_else(|| trimmed.strip_prefix("fn "));
         if let Some(candidate) = candidate {
-            symbol = candidate
+            let symbol = candidate
                 .split(|character: char| character == '(' || character.is_whitespace())
                 .next()
-                .map(str::to_owned);
+                .unwrap_or("<module>")
+                .to_owned();
+            declaration = Some((line_start + line.len() - trimmed.len(), symbol));
         }
+        line_start += line.len();
     }
-    symbol.unwrap_or_else(|| "<module>".to_owned())
+    let Some((start, symbol)) = declaration else {
+        return ("<module>".to_owned(), code.to_owned());
+    };
+    let open = code[start..]
+        .find('{')
+        .map(|relative| start + relative)
+        .expect("function containing task creation has a body");
+    let end = matching(code, open, b'{', b'}').expect("balanced function containing task creation");
+    (symbol, code[start..=end].to_owned())
 }
 
 fn matching(code: &str, open: usize, left: u8, right: u8) -> Option<usize> {
@@ -297,4 +315,44 @@ fn strip_comments_and_strings(source: &str) -> String {
         }
     }
     String::from_utf8(result).expect("Rust source remains UTF-8")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::calls;
+
+    #[test]
+    fn post_insert_attribution_is_detected_per_enclosing_function() {
+        let source = r#"
+async fn valid_writer() {
+    repo.create_in_project_with_provenance(
+        EffectiveCreatorProvenance { explicit_user_id: Some(user_id) },
+    ).await?;
+}
+
+async fn patched_writer() {
+    let task = repo.create_in_project_with_provenance(
+        EffectiveCreatorProvenance { explicit_user_id: Some(user_id) },
+    ).await?;
+    repo.set_created_by_user_id(&task.id, user_id).await?;
+}
+"#;
+
+        let calls = calls(source);
+        let valid = calls
+            .iter()
+            .find(|call| call.symbol == "valid_writer")
+            .expect("valid call discovered");
+        let patched = calls
+            .iter()
+            .find(|call| call.symbol == "patched_writer")
+            .expect("patched call discovered");
+
+        assert!(!valid.enclosing_function.contains("set_created_by_user_id"));
+        assert!(
+            patched
+                .enclosing_function
+                .contains("set_created_by_user_id")
+        );
+    }
 }

@@ -461,7 +461,11 @@ impl CoordinatorActor {
             .create_in_project_with_provenance(
                 &home_project_id,
                 None,
-                EffectiveCreatorProvenance { explicit_user_id: proposal.build_owner_user_id.as_deref(), source_task_id: None, proposal_id: Some(&proposal.id) },
+                EffectiveCreatorProvenance {
+                    explicit_user_id: proposal.build_owner_user_id.as_deref(),
+                    source_task_id: None,
+                    proposal_id: Some(&proposal.id),
+                },
                 &title,
                 &design,
                 &design,
@@ -678,7 +682,11 @@ impl CoordinatorActor {
             .create_in_project_with_provenance(
                 &home_project_id,
                 None,
-                EffectiveCreatorProvenance { explicit_user_id: proposal.build_owner_user_id.as_deref(), source_task_id: None, proposal_id: Some(&proposal.id) },
+                EffectiveCreatorProvenance {
+                    explicit_user_id: proposal.build_owner_user_id.as_deref(),
+                    source_task_id: None,
+                    proposal_id: Some(&proposal.id),
+                },
                 &title,
                 &design,
                 &design,
