@@ -344,7 +344,9 @@ mod tests {
         let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
         assert_eq!(decomp_tasks.len(), 1);
 
-        let _ = tx.send(DjinnEventEnvelope::epic_created(&epic));
+        let _ = tx.send(DjinnEventEnvelope::epic_created(
+            &djinn_core::models::EpicEventPayload::bare(&epic),
+        ));
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
@@ -431,7 +433,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let promoted = epic_repo.set_status_raw(&epic.id, "open").await.unwrap();
-        let _ = tx.send(DjinnEventEnvelope::epic_updated(&promoted));
+        let _ = tx.send(DjinnEventEnvelope::epic_updated(
+            &djinn_core::models::EpicEventPayload::bare(&promoted),
+        ));
 
         let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
         assert_eq!(decomp_tasks.len(), 1);
@@ -468,12 +472,16 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let promoted = epic_repo.set_status_raw(&epic.id, "open").await.unwrap();
-        let _ = tx.send(DjinnEventEnvelope::epic_updated(&promoted));
+        let _ = tx.send(DjinnEventEnvelope::epic_updated(
+            &djinn_core::models::EpicEventPayload::bare(&promoted),
+        ));
 
         let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
         assert_eq!(decomp_tasks.len(), 1);
 
-        let _ = tx.send(DjinnEventEnvelope::epic_updated(&promoted));
+        let _ = tx.send(DjinnEventEnvelope::epic_updated(
+            &djinn_core::models::EpicEventPayload::bare(&promoted),
+        ));
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
@@ -553,7 +561,9 @@ mod tests {
             .update_memory_refs(&epic.id, r#"["design/roadmap"]"#)
             .await
             .unwrap();
-        let _ = tx.send(DjinnEventEnvelope::epic_updated(&touched));
+        let _ = tx.send(DjinnEventEnvelope::epic_updated(
+            &djinn_core::models::EpicEventPayload::bare(&touched),
+        ));
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
         // No NEW planning task must have been created — the worker task is still

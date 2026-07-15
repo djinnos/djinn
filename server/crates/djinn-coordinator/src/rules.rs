@@ -1800,7 +1800,9 @@ mod tests {
         // While that review is still open, neither a re-emitted close nor the
         // second epic closing stacks a duplicate (dedup: one open review).
         let closed_e1 = epic_repo.get(&e1.id).await.unwrap().unwrap();
-        let _ = tx.send(DjinnEventEnvelope::epic_updated(&closed_e1));
+        let _ = tx.send(DjinnEventEnvelope::epic_updated(
+            &djinn_core::models::EpicEventPayload::bare(&closed_e1),
+        ));
         epic_repo.close(&e2.id).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         assert_eq!(

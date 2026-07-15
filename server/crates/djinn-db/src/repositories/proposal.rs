@@ -2242,7 +2242,7 @@ impl ProposalRepository {
         .await?;
         let epics = EpicRepository::new(self.db.clone(), self.events.clone());
         if let Some(epic) = epics.get(epic_id).await? {
-            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+            epics.emit_updated(&epic).await;
         }
         Ok(())
     }
