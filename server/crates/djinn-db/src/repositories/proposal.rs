@@ -3745,6 +3745,7 @@ mod tests {
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
 
     use super::*;
+    use crate::repositories::user::UserRepository;
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -5396,6 +5397,52 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// The owner update and lifecycle record are one all-or-nothing write. A
+    /// deleted user exercises the real Postgres FK failure after the transaction
+    /// has begun, so neither half of a refinement start may escape the rollback.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_refinement_with_deleted_owner_rolls_back_owner_and_lifecycle() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Refinement owner rollback"))
+            .await
+            .unwrap();
+        let owner = UserRepository::new(db.clone())
+            .upsert_from_github(9_001, "deleted-refinement-owner", None, None)
+            .await
+            .unwrap();
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&owner.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let err = repo
+            .start_refinement_with_owner(&proposal.id, &owner.id, None)
+            .await
+            .expect_err("a deleted owner must violate the refinement-owner FK");
+        assert!(
+            matches!(&err, Error::Sqlx(sqlx::Error::Database(_))),
+            "deleted owner must return the database FK error, got {err:?}"
+        );
+
+        let reloaded = repo.get(&proposal.id).await.unwrap().expect("proposal row");
+        assert_eq!(
+            reloaded.refinement_owner_user_id, None,
+            "the failed owner update must roll back"
+        );
+        assert!(
+            repo.revisions(&proposal.id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|revision| revision.event_kind != "refinement_start"),
+            "the failed transaction must not commit a refinement_start lifecycle row"
         );
     }
 
