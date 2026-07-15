@@ -16,7 +16,8 @@ use djinn_core::events::EventBus;
 use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::paths::project_dir;
 use djinn_db::{
-    ExtensionLoadDiagnosticRepository, ProjectRepository, SessionRepository, TaskRepository,
+    ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic, ProjectRepository,
+    SessionRepository, TaskRepository,
     repositories::session::CreateSessionParams,
 };
 use serde_json::json;
@@ -27,6 +28,16 @@ static DJINN_HOME_LOCK: Mutex<()> = Mutex::new(());
 
 struct ProductionProbe {
     context: AgentContext,
+    returned_attempts: Mutex<Vec<Vec<ExtensionLoadDiagnosticV1>>>,
+}
+
+impl ProductionProbe {
+    fn returned_attempts(&self) -> Vec<Vec<ExtensionLoadDiagnosticV1>> {
+        self.returned_attempts
+            .lock()
+            .expect("probe result lock")
+            .clone()
+    }
 }
 
 #[async_trait]
@@ -36,12 +47,17 @@ impl ExtensionDiagnosticsProbeOps for ProductionProbe {
         project_id: &str,
         canonical_workspace: &Path,
     ) -> Result<Vec<ExtensionLoadDiagnosticV1>, String> {
-        djinn_agent::extension_diagnostics_probe::probe_project_extensions(
+        let rows = djinn_agent::extension_diagnostics_probe::probe_project_extensions(
             project_id,
             canonical_workspace,
             &self.context,
         )
-        .await
+        .await?;
+        self.returned_attempts
+            .lock()
+            .expect("probe result lock")
+            .push(rows.clone());
+        Ok(rows)
     }
 }
 
@@ -137,11 +153,15 @@ async fn extension_diagnostics_doctor_auth_retention() {
         harness.db().clone(),
         CancellationToken::new(),
     );
+    let probe = Arc::new(ProductionProbe {
+        context,
+        returned_attempts: Mutex::new(Vec::new()),
+    });
     let harness = McpTestHarness::from_state(
         harness
             .state()
             .clone()
-            .with_extension_diagnostics_probe(Arc::new(ProductionProbe { context })),
+            .with_extension_diagnostics_probe(probe.clone()),
     );
     let admin = create_admin(harness.db()).await;
 
@@ -175,12 +195,14 @@ async fn extension_diagnostics_doctor_auth_retention() {
             .any(|row| row["source_kind"] == "project_skill")
     );
 
-    // Seed an equivalent historical session row by copying one real normalized doctor
-    // record. The second invocation must not reconstruct or return this prior row.
+    // Seed an equivalent historical session row through the repository. The second
+    // invocation must not reconstruct or return this prior row.
     let repository = ExtensionLoadDiagnosticRepository::new(harness.db().clone());
-    let first_id = first_findings[0]["diagnostic_id"]
-        .as_str()
-        .expect("first diagnostic id");
+    let first_probe_rows = probe.returned_attempts();
+    let first_row = first_probe_rows
+        .first()
+        .and_then(|attempt| attempt.first())
+        .expect("first persisted doctor diagnostic");
     let task = TaskRepository::new(harness.db().clone(), EventBus::noop())
         .create_in_project(
             &project_a.id,
@@ -209,35 +231,44 @@ async fn extension_diagnostics_doctor_auth_retention() {
         })
         .await
         .expect("historical session");
-    let historical_id = uuid::Uuid::now_v7().to_string();
     let historical_attempt = uuid::Uuid::now_v7().to_string();
-    sqlx::query(
-        "INSERT INTO extension_load_diagnostics (id, project_id, task_id, session_id, load_attempt_id, schema_version, source_kind, source_key, phase, severity, summary, summary_fingerprint, remedy_code, remedy, occurrence_count, first_seen_at, last_seen_at, created_at) SELECT $1, $2, $3, $4, $5, schema_version, source_kind, source_key, phase, severity, summary, summary_fingerprint, remedy_code, remedy, occurrence_count, first_seen_at, last_seen_at, created_at FROM extension_load_diagnostics WHERE id = $6",
-    )
-    .bind(&historical_id).bind(&project_a.id).bind(&task.id).bind(&session.id).bind(&historical_attempt).bind(first_id)
-    .execute(harness.db().pool()).await.expect("seed equivalent session diagnostic");
     let historical = repository
-        .list_for_load_attempt(&project_a.id, &historical_attempt)
+        .insert_or_increment(InsertExtensionLoadDiagnostic {
+            project_id: project_a.id.clone(),
+            task_id: Some(task.id.clone()),
+            session_id: Some(session.id.clone()),
+            load_attempt_id: historical_attempt.clone(),
+            source_kind: first_row.source_kind,
+            source_key: first_row.source_key.clone(),
+            phase: first_row.phase,
+            severity: first_row.severity,
+            summary: first_row.summary.clone(),
+            summary_fingerprint: uuid::Uuid::now_v7().simple().to_string(),
+            remedy_code: first_row.remedy_code,
+            remedy: first_row.remedy.clone(),
+            first_seen_at: first_row.first_seen_at.clone(),
+            last_seen_at: first_row.last_seen_at.clone(),
+            created_at: first_row.created_at.clone(),
+        })
         .await
-        .expect("historical session diagnostic");
-    assert_eq!(historical.len(), 1);
-    assert_eq!(historical[0].task_id.as_deref(), Some(task.id.as_str()));
+        .expect("seed equivalent session diagnostic");
+    assert_eq!(historical.task_id.as_deref(), Some(task.id.as_str()));
     assert_eq!(
-        historical[0].session_id.as_deref(),
+        historical.session_id.as_deref(),
         Some(session.id.as_str())
     );
     assert_eq!(
-        historical[0].source_kind.as_str(),
+        historical.source_kind.as_str(),
         first_findings[0]["source_kind"]
             .as_str()
             .expect("first source kind")
     );
     assert_eq!(
-        historical[0].phase.as_str(),
+        historical.phase.as_str(),
         first_findings[0]["phase"].as_str().expect("first phase")
     );
     assert_eq!(
-        historical[0].summary,
+        historical.summary,
         first_findings[0]["summary"]
             .as_str()
             .expect("first summary")
@@ -262,7 +293,7 @@ async fn extension_diagnostics_doctor_auth_retention() {
     assert!(
         findings
             .iter()
-            .all(|row| row["diagnostic_id"] != historical_id)
+            .all(|row| row["diagnostic_id"] != historical.diagnostic_id.as_str())
     );
     assert!(
         findings.iter().all(|row| !first_ids
@@ -270,16 +301,12 @@ async fn extension_diagnostics_doctor_auth_retention() {
         "a new probe cannot project any prior doctor attempt"
     );
 
-    let fresh_id = findings[0]["diagnostic_id"]
-        .as_str()
-        .expect("fresh diagnostic id");
-    let fresh = sqlx::query_scalar::<_, String>(
-        "SELECT load_attempt_id FROM extension_load_diagnostics WHERE id = $1",
-    )
-    .bind(fresh_id)
-    .fetch_one(harness.db().pool())
-    .await
-    .expect("fresh attempt");
+    let fresh_rows = probe
+        .returned_attempts()
+        .get(1)
+        .expect("fresh probe returned persisted rows")
+        .clone();
+    let fresh = fresh_rows[0].load_attempt_id.clone();
     assert_ne!(
         fresh, historical_attempt,
         "doctor invocation creates a fresh attempt"
@@ -295,6 +322,7 @@ async fn extension_diagnostics_doctor_auth_retention() {
         .list_for_load_attempt(&project_a.id, &fresh)
         .await
         .expect("attempt rows");
+    assert_eq!(canonical, fresh_rows, "probe returns canonical persisted rows");
     assert!(
         canonical
             .iter()
@@ -350,20 +378,20 @@ async fn extension_diagnostics_doctor_auth_retention() {
         )),
         "project B invocation cannot project project A attempt diagnostics"
     );
-    let project_b_attempt_id = project_b_findings[0]["diagnostic_id"]
-        .as_str()
-        .expect("project B diagnostic id");
-    let project_b_attempt = sqlx::query_scalar::<_, String>(
-        "SELECT load_attempt_id FROM extension_load_diagnostics WHERE id = $1",
-    )
-    .bind(project_b_attempt_id)
-    .fetch_one(harness.db().pool())
-    .await
-    .expect("project B attempt");
+    let project_b_rows = probe
+        .returned_attempts()
+        .get(2)
+        .expect("project B probe returned persisted rows")
+        .clone();
+    let project_b_attempt = &project_b_rows[0].load_attempt_id;
     let project_b_canonical = repository
         .list_for_load_attempt(&project_b.id, &project_b_attempt)
         .await
         .expect("project B attempt rows");
+    assert_eq!(
+        project_b_canonical, project_b_rows,
+        "project B probe returns its own canonical persisted rows"
+    );
     assert_eq!(
         project_b_findings.iter().cloned().collect::<Vec<_>>(),
         project_b_canonical
