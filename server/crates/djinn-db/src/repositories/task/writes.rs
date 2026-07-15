@@ -283,6 +283,51 @@ impl TaskRepository {
         .await
     }
 
+    /// Create a task attributed to a concrete, already-resolved user. This is
+    /// for background producers (such as proposal refinement) which do not run
+    /// inside an authenticated request task-local. The creator is installed for
+    /// the duration of the insert, so it is written by the same transaction as
+    /// the task row rather than repaired by a later UPDATE.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_in_project_as_user(
+        &self,
+        creator_user_id: &str,
+        project_id: &str,
+        epic_id: Option<&str>,
+        title: &str,
+        description: &str,
+        design: &str,
+        issue_type: &str,
+        priority: i64,
+        owner: &str,
+        status: Option<&str>,
+        acceptance_criteria: Option<&str>,
+    ) -> Result<Task> {
+        let creator_user_id = creator_user_id.trim();
+        if creator_user_id.is_empty() {
+            return Err(Error::InvalidData(
+                "effective_creator_unavailable: task creator is empty".into(),
+            ));
+        }
+        djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                Some(creator_user_id.to_owned()),
+                self.create_in_project(
+                    project_id,
+                    epic_id,
+                    title,
+                    description,
+                    design,
+                    issue_type,
+                    priority,
+                    owner,
+                    status,
+                    acceptance_criteria,
+                ),
+            )
+            .await
+    }
+
     /// Test helper: create a task with a specific short_id.
     /// This bypasses the normal short_id generation for testing collision scenarios.
     #[cfg(test)]

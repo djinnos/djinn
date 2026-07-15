@@ -865,6 +865,11 @@ async fn reviewer_feedback_injected_into_all_three_tribunal_task_descriptions() 
             .expect("read task")
             .expect("task exists");
 
+        assert_eq!(
+            task.created_by_user_id.as_deref(),
+            Some(fixture.user_id.as_str()),
+            "{agent_type} task must be atomically attributed to the durable refinement owner"
+        );
         assert!(
             task.description.contains(REVIEWER_FEEDBACK_LABEL),
             "{agent_type} task description must contain the exact feedback label:\n{}",

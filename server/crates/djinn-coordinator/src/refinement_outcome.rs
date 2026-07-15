@@ -911,23 +911,34 @@ impl CoordinatorActor {
             }
         };
 
-        // Resolve the attributed user's display identity (their GitHub login)
-        // for the legacy `owner` column so the Kanban board and owner-based
-        // filters (`task_ready owner=…`) render refinement tasks under the real
-        // user instead of "system". `created_by_user_id` (set below) remains the
-        // authoritative ownership field; `tasks.owner` is legacy display/filter
-        // only. Falls back to "system" when the user row can't be resolved so
-        // task creation never fails on the lookup.
-        let owner = match attributed_user_id {
-            Some(uid) => self
-                .resolve_owner_identity(uid)
-                .await
-                .unwrap_or_else(|| "system".to_string()),
-            None => "system".to_string(),
+        // Background refinement has no authenticated request scope. Require its
+        // durable proposal owner before inserting anything: the task insert must
+        // carry `created_by_user_id` atomically, never receive it as a best-effort
+        // follow-up update after becoming visible to dispatch.
+        let Some(attributed_user_id) = attributed_user_id.filter(|id| !id.trim().is_empty()) else {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                agent_type,
+                "Cannot create refinement task: durable refinement owner is unavailable"
+            );
+            return None;
+        };
+        // The legacy owner column remains a display/filter field. Unlike the
+        // outcome display fallback, a missing user row here is an attribution
+        // failure and must prevent a creator-less task from being created.
+        let Some(owner) = self.resolve_owner_identity(attributed_user_id).await else {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                agent_type,
+                user_id = %attributed_user_id,
+                "Cannot create refinement task: durable refinement owner no longer resolves"
+            );
+            return None;
         };
 
         match task_repo
-            .create_in_project(
+            .create_in_project_as_user(
+                attributed_user_id,
                 &project_id,
                 None,
                 &title,
@@ -953,15 +964,6 @@ impl CoordinatorActor {
                         agent_type,
                         error = %e,
                         "Failed to set agent_type on refinement task"
-                    );
-                }
-                if let Some(uid) = attributed_user_id
-                    && let Err(e) = task_repo2.set_created_by_user_id(&task.id, uid).await
-                {
-                    tracing::warn!(
-                        task_id = %task.id,
-                        error = %e,
-                        "Failed to attribute refinement task to user"
                     );
                 }
                 Some(task.id)

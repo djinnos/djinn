@@ -1201,9 +1201,11 @@ impl CoordinatorActor {
             ));
         }
 
-        let owner_user_id = owner_user_id.filter(|id| !id.trim().is_empty()).ok_or_else(|| {
-            "effective_creator_unavailable: refinement owner could not be resolved".to_string()
-        })?;
+        let owner_user_id = owner_user_id
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                "effective_creator_unavailable: refinement owner could not be resolved".to_string()
+            })?;
         let state = RefinementLoopState::new(proposal_id, current_revision_seq)
             .with_attributed_user(Some(owner_user_id.clone()));
         self.active_refinements
@@ -1240,9 +1242,11 @@ impl CoordinatorActor {
             ));
         }
 
-        let owner_user_id = owner_user_id.filter(|id| !id.trim().is_empty()).ok_or_else(|| {
-            "effective_creator_unavailable: refinement owner could not be resolved".to_string()
-        })?;
+        let owner_user_id = owner_user_id
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                "effective_creator_unavailable: refinement owner could not be resolved".to_string()
+            })?;
         let state = RefinementLoopState::new(proposal_id, current_revision_seq)
             .with_attributed_user(Some(owner_user_id.clone()));
         self.active_refinements

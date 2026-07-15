@@ -15,11 +15,7 @@ use djinn_db::{ProposalDebateTrailCreateInput, ProposalRepository, TaskRepositor
 /// Record a `refinement_start` boundary, then sleep so subsequent debate/task
 /// `created_at` timestamps strictly advance past it (current-run scoping uses a
 /// strict `>` comparison).
-async fn seed_refinement_start(
-    db: &djinn_db::Database,
-    proposal_id: &str,
-    owner_user_id: &str,
-) {
+async fn seed_refinement_start(db: &djinn_db::Database, proposal_id: &str, owner_user_id: &str) {
     ProposalRepository::new(db.clone(), EventBus::noop())
         .start_refinement_with_owner(proposal_id, owner_user_id, None)
         .await
@@ -163,7 +159,15 @@ async fn recover_restores_awaiting_review_park_and_does_not_stamp_interrupted() 
         .unwrap()
         .latest_revision_seq;
     // Parked on the current head — nobody edited the spec since convergence.
-    seed_awaiting_review_park(&db, &fixture.proposal_id, &fixture.user_id, head, head, Some("round_cap")).await;
+    seed_awaiting_review_park(
+        &db,
+        &fixture.proposal_id,
+        &fixture.user_id,
+        head,
+        head,
+        Some("round_cap"),
+    )
+    .await;
 
     actor.recover_interrupted_refinements().await;
 
@@ -455,7 +459,15 @@ async fn recover_stamps_interrupted_when_parked_spec_moved_on() {
 
     // Park on the original head, then edit the spec so the head advances past
     // the parked revision — simulating a human/agent change after convergence.
-    seed_awaiting_review_park(&db, &fixture.proposal_id, &fixture.user_id, parked_seq, parked_seq, None).await;
+    seed_awaiting_review_park(
+        &db,
+        &fixture.proposal_id,
+        &fixture.user_id,
+        parked_seq,
+        parked_seq,
+        None,
+    )
+    .await;
     repo.update(
         &fixture.proposal_id,
         djinn_db::ProposalUpdateInput {
