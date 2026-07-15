@@ -430,21 +430,27 @@ async fn task_list_status_merged() {
     };
 
     let mk = async |title: &str| {
-        repo.create_in_project_with_provenance(
-            &project.id,
-            Some(&epic.id),
-            provenance,
-            title,
-            "desc",
-            "design",
-            "task",
-            1,
-            "owner",
-            None,
-            None,
-        )
-        .await
-        .unwrap()
+        let task = repo
+            .create_in_project_with_provenance(
+                &project.id,
+                Some(&epic.id),
+                provenance,
+                title,
+                "desc",
+                "design",
+                "task",
+                1,
+                "owner",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            task.created_by_user_id.as_deref(),
+            Some(creator_id.as_str())
+        );
+        task
     };
 
     // Included: closed with a landed merge-commit SHA.
