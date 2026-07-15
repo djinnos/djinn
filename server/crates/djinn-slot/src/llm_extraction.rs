@@ -1100,6 +1100,65 @@ pub async fn run_llm_extraction_with_provider_and_candidate_lookup(
     .await;
 }
 
+/// Capture replay decisions without creating or mutating notes.
+///
+/// The offline runner supplies the extraction completion it received from its
+/// injected provider and the same bounded candidates the production lookup
+/// returned. This deliberately reuses the production parser, intra-batch
+/// deduplication, ADR-054 gate, and novelty request/response contract while
+/// stopping before any persistence path.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn capture_llm_extraction_replay(
+    fixture_id: String,
+    extraction_response: &str,
+    provider: &dyn LlmProvider,
+    candidates: &[djinn_db::NoteDedupCandidate],
+) -> Result<Vec<crate::extraction_replay_eval::ExtractionObservation>, String> {
+    let extracted = parse_extraction_response(extraction_response)?;
+    let (notes, _) = dedup_extracted_notes(&extracted);
+    let mut observations = Vec::with_capacity(notes.len());
+    for (note_type, note) in notes {
+        let quality_passed = !assess_note_quality(note_type, &note.content).is_underspecified;
+        let duplicate_of = if quality_passed && !candidates.is_empty() {
+            let candidate_abstract = summarize_candidate_note(&note);
+            let response = complete(
+                provider,
+                CompletionRequest {
+                    system: NOVELTY_SYSTEM_PROMPT.to_string(),
+                    prompt: build_novelty_prompt(note_type, &note, &candidate_abstract, candidates),
+                    max_tokens: 300,
+                },
+            )
+            .await
+            .map_err(|error| format!("semantic compare failed: {error}"))?;
+            let decision: NoveltyDecision = serde_json::from_str(response.text.trim())
+                .map_err(|error| format!("invalid novelty decision json: {error}"))?;
+            match decision.decision {
+                NoveltyDecisionKind::Novel => None,
+                NoveltyDecisionKind::AlreadyKnown => Some(
+                    decision
+                        .existing_note_id
+                        .filter(|id| candidates.iter().any(|candidate| candidate.id == *id))
+                        .ok_or_else(|| {
+                            "already_known decision missing valid existing_note_id".to_string()
+                        })?,
+                ),
+            }
+        } else {
+            None
+        };
+        observations.push(crate::extraction_replay_eval::ExtractionObservation {
+            fixture_id: fixture_id.clone(),
+            note_type: note_type.to_string(),
+            title: note.title.clone(),
+            content: note.content.clone(),
+            adr_054_quality_passed: quality_passed,
+            duplicate_of,
+        });
+    }
+    Ok(observations)
+}
+
 /// Inner implementation that accepts an optional provider override for test injection.
 ///
 /// When `provider_override` is `Some`, the given provider is used directly
