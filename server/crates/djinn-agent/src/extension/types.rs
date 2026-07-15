@@ -732,7 +732,16 @@ pub(super) struct BoundaryRule {
 
 #[derive(Deserialize)]
 pub(super) struct CiJobLogParams {
-    pub job_id: u64,
+    /// Explicit Actions job id to fetch directly (escape hatch). When omitted,
+    /// the failing jobs are auto-discovered from the task's recorded CI state.
+    #[serde(default)]
+    pub job_id: Option<u64>,
+    /// Target a specific PR in the same project's repo (escalation tasks whose
+    /// description names a source PR). Defaults to the task's own recorded PR.
+    #[serde(default)]
+    pub pr_number: Option<u64>,
+    /// Optional step name to narrow the returned log to a single failed step.
+    #[serde(default)]
     pub step: Option<String>,
 }
 
