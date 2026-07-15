@@ -170,10 +170,8 @@ async fn injected_retrieval_config_drives_memory_health_and_doctor_prefetch() {
     let inside_72_outside_24 = inside_72_outside_24
         .format(&Iso8601::DEFAULT)
         .expect("format backdated trace timestamp");
-    sqlx::query("UPDATE retrieval_traces SET created_at = $1 WHERE id = $2")
-        .bind(inside_72_outside_24)
-        .bind(&project_trace_ids[7])
-        .execute(harness.db().pool())
+    traces
+        .update_created_at(&project_trace_ids[7], &inside_72_outside_24)
         .await
         .expect("backdate window-sensitive retrieval trace");
 
