@@ -1,4 +1,5 @@
 use super::*;
+use djinn_core::auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext};
 
 #[tokio::test]
 async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
@@ -374,6 +375,15 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
 
 #[tokio::test]
 async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree() {
+    REVISION_CALLER_CONTEXT
+        .scope(
+            TrustedRevisionCallerContext::authenticated_agent("planner"),
+            call_tool_memory_singletons_target_canonical_project_root_from_worktree_inner(),
+        )
+        .await;
+}
+
+async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree_inner() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
     let project_path = crate::extension::tests::project_fs_path(&project)
@@ -477,6 +487,15 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 
 #[tokio::test]
 async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_worktree() {
+    REVISION_CALLER_CONTEXT
+        .scope(
+            TrustedRevisionCallerContext::authenticated_agent("planner"),
+            call_tool_memory_brief_singleton_targets_canonical_project_root_from_worktree_inner(),
+        )
+        .await;
+}
+
+async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_worktree_inner() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
     let project_path = crate::extension::tests::project_fs_path(&project)
@@ -633,6 +652,16 @@ async fn call_tool_dispatches_registered_mcp_tool_success() {
 
 #[tokio::test]
 async fn call_tool_memory_current_requirement_targets_canonical_project_root_from_worktree() {
+    REVISION_CALLER_CONTEXT
+        .scope(
+            TrustedRevisionCallerContext::authenticated_agent("planner"),
+            call_tool_memory_current_requirement_targets_canonical_project_root_from_worktree_inner(
+            ),
+        )
+        .await;
+}
+
+async fn call_tool_memory_current_requirement_targets_canonical_project_root_from_worktree_inner() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
     let project_path = crate::extension::tests::project_fs_path(&project)
