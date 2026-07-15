@@ -128,7 +128,10 @@ pub(super) async fn dispatch_tool_call(
     mcp_registry: Option<&McpToolRegistry>,
     cancel: &super::ToolCancellation,
 ) -> djinn_core::tool_call::ToolCallOutcome {
-    let call = IncomingToolCall { name: prepared.name, arguments: prepared.arguments };
+    let call = IncomingToolCall {
+        name: prepared.name,
+        arguments: prepared.arguments,
+    };
     let warnings = prepared.compatibility_warnings;
 
     let project = {
@@ -192,10 +195,10 @@ pub(super) async fn dispatch_tool_call(
         && let Some(registry) = mcp_registry
         && registry.has_tool(&call.name)
     {
-        return Err(format!(
+        return djinn_core::tool_call::ToolCallOutcome::from_result(Err(format!(
             "tool `{}` is a dynamic MCP registry tool and is not permitted under the active restricted profile",
             call.name
-        ));
+        )));
     }
 
     let result = match call.name.as_str() {
@@ -284,7 +287,9 @@ pub(super) async fn dispatch_tool_call(
         }
     };
     match djinn_core::tool_call::ToolCallOutcome::from_result(result) {
-        djinn_core::tool_call::ToolCallOutcome::Success { value, .. } => djinn_core::tool_call::ToolCallOutcome::Success { value, warnings },
+        djinn_core::tool_call::ToolCallOutcome::Success { value, .. } => {
+            djinn_core::tool_call::ToolCallOutcome::Success { value, warnings }
+        }
         failure => failure,
     }
 }

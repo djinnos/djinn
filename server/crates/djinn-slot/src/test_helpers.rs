@@ -58,10 +58,11 @@ impl SlotToolDispatcher for MockToolDispatcher {
         _worktree_path: &'a std::path::Path,
         _task_id: &'a str,
         _role_name: &'a str,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<dyn std::future::Future<Output = djinn_core::tool_call::ToolCallOutcome> + Send + 'a>,
+    > {
         Box::pin(async move {
-            match tool_name {
+            djinn_core::tool_call::ToolCallOutcome::from_result(match tool_name {
                 // Return a successful stub for common test tools.
                 "shell" => Ok(serde_json::json!({
                     "ok": true,
@@ -76,7 +77,7 @@ impl SlotToolDispatcher for MockToolDispatcher {
                 _ => Err(format!(
                     "MockToolDispatcher: extension tool '{tool_name}' not implemented in test"
                 )),
-            }
+            })
         })
     }
     fn is_mcp_tool(&self, _tool_name: &str) -> bool {
@@ -186,8 +187,9 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
         _worktree_path: &'a std::path::Path,
         _task_id: &'a str,
         _role_name: &'a str,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<dyn std::future::Future<Output = djinn_core::tool_call::ToolCallOutcome> + Send + 'a>,
+    > {
         let result = if let Some(handler) = self.handlers.get(tool_name) {
             handler(arguments.as_ref())
         } else {
@@ -195,7 +197,7 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
                 "ConfigurableToolDispatcher: tool '{tool_name}' not configured"
             ))
         };
-        Box::pin(async move { result })
+        Box::pin(async move { djinn_core::tool_call::ToolCallOutcome::from_result(result) })
     }
     fn is_mcp_tool(&self, tool_name: &str) -> bool {
         self.mcp_tools.iter().any(|t| t == tool_name)

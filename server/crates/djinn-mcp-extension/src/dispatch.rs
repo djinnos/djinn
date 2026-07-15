@@ -13,7 +13,10 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::compatibility::{NormalizationResult, PRODUCTION_REGISTRY, PreparedToolCall, ServerReleaseVersion, normalize_call};
+use crate::compatibility::{
+    NormalizationResult, PRODUCTION_REGISTRY, PreparedToolCall, ServerReleaseVersion,
+    normalize_call,
+};
 use crate::context::ExtensionContext;
 use crate::handlers::{code_intel, memory_agent, task_admin, task_epic};
 use crate::helpers::*;
@@ -28,9 +31,17 @@ pub enum DispatchResult {
     Unhandled(PreparedToolCall),
 }
 
-fn handled(result: Result<serde_json::Value, String>, warnings: Vec<djinn_core::tool_call::CompatibilityMetadata>) -> DispatchResult {
+fn handled(
+    result: Result<serde_json::Value, String>,
+    warnings: Vec<djinn_core::tool_call::CompatibilityMetadata>,
+) -> DispatchResult {
     match djinn_core::tool_call::ToolCallOutcome::from_result(result) {
-        djinn_core::tool_call::ToolCallOutcome::Success { value, .. } => DispatchResult::Handled(djinn_core::tool_call::ToolCallOutcome::Success { value, warnings }),
+        djinn_core::tool_call::ToolCallOutcome::Success { value, .. } => {
+            DispatchResult::Handled(djinn_core::tool_call::ToolCallOutcome::Success {
+                value,
+                warnings,
+            })
+        }
         failure => DispatchResult::Handled(failure),
     }
 }
@@ -61,19 +72,43 @@ where
         Err(e) => return handled(Err(e), Vec::new()),
     };
 
-    let current_release = ServerReleaseVersion { major: 0, minor: 1, patch: 0 };
-    let prepared = match normalize_call(PRODUCTION_REGISTRY, &current_release, &call.name, call.arguments) {
+    let current_release = ServerReleaseVersion {
+        major: 0,
+        minor: 1,
+        patch: 0,
+    };
+    let prepared = match normalize_call(
+        PRODUCTION_REGISTRY,
+        &current_release,
+        &call.name,
+        call.arguments,
+    ) {
         NormalizationResult::Prepared(prepared) => prepared,
-        NormalizationResult::Failure(failure) => return DispatchResult::Handled(djinn_core::tool_call::ToolCallOutcome::Failure(failure)),
+        NormalizationResult::Failure(failure) => {
+            return DispatchResult::Handled(djinn_core::tool_call::ToolCallOutcome::Failure(
+                failure,
+            ));
+        }
     };
 
     // Allowed schemas gate.
-    if let Some(schemas) = allowed_schemas && !is_tool_allowed_for_schemas(schemas, &prepared.name) {
-        return handled(Err(format!("tool `{}` is not in the allowed schema list", prepared.name)), prepared.compatibility_warnings);
+    if let Some(schemas) = allowed_schemas
+        && !is_tool_allowed_for_schemas(schemas, &prepared.name)
+    {
+        return handled(
+            Err(format!(
+                "tool `{}` is not in the allowed schema list",
+                prepared.name
+            )),
+            prepared.compatibility_warnings,
+        );
     }
 
     // Resolve project context.
-    let normalized_call = IncomingToolCall { name: prepared.name.clone(), arguments: prepared.arguments.clone() };
+    let normalized_call = IncomingToolCall {
+        name: prepared.name.clone(),
+        arguments: prepared.arguments.clone(),
+    };
     let project = resolve_project(ctx, worktree_path, &normalized_call).await;
     let project_id = project.as_ref().map(|p| p.id.clone());
     let project_ref = project
