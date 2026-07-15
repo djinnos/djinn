@@ -13,6 +13,10 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::compatibility::{
+    CompatibilityTrap, NormalizationResult, PRODUCTION_REGISTRY, PreparedToolCall,
+    ServerReleaseVersion, normalize_call,
+};
 use crate::context::ExtensionContext;
 use crate::handlers::{code_intel, memory_agent, task_admin, task_epic};
 use crate::helpers::*;
@@ -21,10 +25,25 @@ use crate::types::*;
 /// Result of attempting to dispatch a tool call through the extension.
 pub enum DispatchResult {
     /// The extension handled the tool call.
-    Handled(Result<serde_json::Value, String>),
+    Handled(djinn_core::tool_call::ToolCallOutcome),
     /// The extension does not handle this tool. The caller (djinn-agent façade)
     /// should handle it with its concrete context.
-    Unhandled,
+    Unhandled(PreparedToolCall),
+}
+
+fn handled(
+    result: Result<serde_json::Value, String>,
+    warnings: Vec<djinn_core::tool_call::CompatibilityMetadata>,
+) -> DispatchResult {
+    match djinn_core::tool_call::ToolCallOutcome::from_result(result) {
+        djinn_core::tool_call::ToolCallOutcome::Success { value, .. } => {
+            DispatchResult::Handled(djinn_core::tool_call::ToolCallOutcome::Success {
+                value,
+                warnings,
+            })
+        }
+        failure => DispatchResult::Handled(failure),
+    }
 }
 
 /// Main dispatch entry point.
@@ -45,26 +64,82 @@ pub async fn dispatch_tool_call<T>(
 where
     T: Serialize,
 {
+    let current_release = ServerReleaseVersion {
+        major: 0,
+        minor: 1,
+        patch: 0,
+    };
+    dispatch_tool_call_with_compatibility(
+        ctx,
+        services,
+        tool_call,
+        worktree_path,
+        allowed_schemas,
+        session_task_id,
+        session_role,
+        PRODUCTION_REGISTRY,
+        &current_release,
+    )
+    .await
+}
+
+/// Dispatch a call using an explicitly supplied compatibility registry.
+///
+/// Production callers use [`dispatch_tool_call`], which supplies the
+/// server-owned production registry. This seam lets integration tests verify
+/// normalization through agent-local fallback without advertising stale
+/// surfaces in the production tool inventory.
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_tool_call_with_compatibility<T>(
+    ctx: &dyn ExtensionContext,
+    services: &dyn djinn_supervisor::SupervisorServices,
+    tool_call: &T,
+    worktree_path: &Path,
+    allowed_schemas: Option<&[serde_json::Value]>,
+    session_task_id: Option<&str>,
+    session_role: Option<&str>,
+    registry: &[CompatibilityTrap],
+    current_release: &ServerReleaseVersion,
+) -> DispatchResult
+where
+    T: Serialize,
+{
     let call: IncomingToolCall = match serde_json::to_value(tool_call)
         .map_err(|e| e.to_string())
         .and_then(|v| from_value(v).map_err(|e| format!("invalid frontend tool payload: {e}")))
     {
         Ok(c) => c,
-        Err(e) => return DispatchResult::Handled(Err(e)),
+        Err(e) => return handled(Err(e), Vec::new()),
+    };
+
+    let prepared = match normalize_call(registry, current_release, &call.name, call.arguments) {
+        NormalizationResult::Prepared(prepared) => prepared,
+        NormalizationResult::Failure(failure) => {
+            return DispatchResult::Handled(djinn_core::tool_call::ToolCallOutcome::Failure(
+                failure,
+            ));
+        }
     };
 
     // Allowed schemas gate.
     if let Some(schemas) = allowed_schemas
-        && !is_tool_allowed_for_schemas(schemas, &call.name)
+        && !is_tool_allowed_for_schemas(schemas, &prepared.name)
     {
-        return DispatchResult::Handled(Err(format!(
-            "tool `{}` is not in the allowed schema list",
-            call.name
-        )));
+        return handled(
+            Err(format!(
+                "tool `{}` is not in the allowed schema list",
+                prepared.name
+            )),
+            prepared.compatibility_warnings,
+        );
     }
 
     // Resolve project context.
-    let project = resolve_project(ctx, worktree_path, &call).await;
+    let normalized_call = IncomingToolCall {
+        name: prepared.name.clone(),
+        arguments: prepared.arguments.clone(),
+    };
+    let project = resolve_project(ctx, worktree_path, &normalized_call).await;
     let project_id = project.as_ref().map(|p| p.id.clone());
     let project_ref = project
         .as_ref()
@@ -73,8 +148,8 @@ where
     let worktree_project_path = worktree_path.display().to_string();
 
     // Route to tool-group helpers.
-    let name = call.name.as_str();
-    let args = &call.arguments;
+    let name = prepared.name.as_str();
+    let args = &prepared.arguments;
 
     // ── Task query/mutation tools ──────────────────────────────────────
     if let Some(result) = dispatch_task_query_tools(
@@ -87,17 +162,17 @@ where
     )
     .await
     {
-        return DispatchResult::Handled(result);
+        return handled(result, prepared.compatibility_warnings);
     }
 
     // ── Epic tools ─────────────────────────────────────────────────────
     if let Some(result) = dispatch_epic_tools(ctx, name, args, project_id.as_deref()).await {
-        return DispatchResult::Handled(result);
+        return handled(result, prepared.compatibility_warnings);
     }
 
     // ── Proposal tools ─────────────────────────────────────────────────
     if let Some(result) = dispatch_proposal_tools(ctx, name, args).await {
-        return DispatchResult::Handled(result);
+        return handled(result, prepared.compatibility_warnings);
     }
 
     // ── Memory tools ───────────────────────────────────────────────────
@@ -111,26 +186,26 @@ where
     )
     .await
     {
-        return DispatchResult::Handled(result);
+        return handled(result, prepared.compatibility_warnings);
     }
 
     // ── Agent tools ────────────────────────────────────────────────────
     if let Some(result) =
         dispatch_agent_tools(ctx, name, args, &project_ref, &worktree_project_path).await
     {
-        return DispatchResult::Handled(result);
+        return handled(result, prepared.compatibility_warnings);
     }
 
     // ── Task admin tools (that don't need djinn-agent internals) ───────
     if let Some(result) = dispatch_task_admin_tools(ctx, name, args).await {
-        return DispatchResult::Handled(result);
+        return handled(result, prepared.compatibility_warnings);
     }
 
     // ── Code intelligence tools ────────────────────────────────────────
     if let Some(result) =
         dispatch_code_intel_tools(ctx, name, args, worktree_path, project_id.as_deref()).await
     {
-        return DispatchResult::Handled(result);
+        return handled(result, prepared.compatibility_warnings);
     }
 
     // ── Supervisor-routed tools ────────────────────────────────────────
@@ -138,11 +213,11 @@ where
         dispatch_supervisor_tools(services, name, args, session_task_id, project_id.as_deref())
             .await
     {
-        return DispatchResult::Handled(result);
+        return handled(result, prepared.compatibility_warnings);
     }
 
     // Not handled by extension — caller should handle.
-    DispatchResult::Unhandled
+    DispatchResult::Unhandled(prepared)
 }
 
 // ── Project resolution ──────────────────────────────────────────────────────
