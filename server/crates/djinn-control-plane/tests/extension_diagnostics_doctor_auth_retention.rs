@@ -112,6 +112,10 @@ async fn extension_diagnostics_doctor_auth_retention() {
         .set_environment_config(&project_a.id, &fixture["environment_config"].to_string())
         .await
         .expect("project A environment config");
+    projects
+        .set_environment_config(&project_b.id, &fixture["environment_config"].to_string())
+        .await
+        .expect("project B environment config");
 
     let workspace_a = project_dir(&project_a.github_owner, &project_a.github_repo);
     std::fs::create_dir_all(&workspace_a).expect("canonical project A workspace");
@@ -121,6 +125,13 @@ async fn extension_diagnostics_doctor_auth_retention() {
     )
     .expect("materialize read-only MCP fixture");
     let fixture_before = std::fs::read_to_string(workspace_a.join("mcp.json")).expect("fixture");
+    let workspace_b = project_dir(&project_b.github_owner, &project_b.github_repo);
+    std::fs::create_dir_all(&workspace_b).expect("canonical project B workspace");
+    std::fs::write(
+        workspace_b.join("mcp.json"),
+        fixture["mcp_json"].as_str().expect("fixture MCP JSON"),
+    )
+    .expect("materialize project B read-only MCP fixture");
 
     let context = djinn_agent::test_helpers::agent_context_from_db(
         harness.db().clone(),
@@ -233,7 +244,7 @@ async fn extension_diagnostics_doctor_auth_retention() {
     );
 
     let response = SESSION_USER_ID
-        .scope(Some(admin), async {
+        .scope(Some(admin.clone()), async {
             harness
                 .call_tool(
                     "doctor_run",
@@ -295,12 +306,71 @@ async fn extension_diagnostics_doctor_auth_retention() {
         response_fields, canonical_fields,
         "response is the exact canonical attempt projection"
     );
+    let fresh_ids: Vec<_> = findings
+        .iter()
+        .map(|row| {
+            row["diagnostic_id"]
+                .as_str()
+                .expect("fresh diagnostic id")
+                .to_owned()
+        })
+        .collect();
     assert!(
         repository
             .list_for_load_attempt(&project_b.id, &fresh)
             .await
             .expect("project B scoped read")
             .is_empty()
+    );
+    let project_b_response = SESSION_USER_ID
+        .scope(Some(admin.clone()), async {
+            harness
+                .call_tool(
+                    "doctor_run",
+                    json!({ "check_names": [PROBE_NAME], "project": project_b.id }),
+                )
+                .await
+        })
+        .await
+        .expect("authorized project B probe dispatch");
+    assert_eq!(project_b_response["ok"], true);
+    let project_b_findings = project_b_response["results"][0]["extension_diagnostics"]
+        .as_array()
+        .expect("project B doctor findings");
+    assert!(
+        !project_b_findings.is_empty(),
+        "project B fixture generates diagnostics"
+    );
+    assert!(
+        project_b_findings.iter().all(|row| !fresh_ids.contains(
+            &row["diagnostic_id"]
+                .as_str()
+                .expect("project B diagnostic id")
+                .to_owned(),
+        )),
+        "project B invocation cannot project project A attempt diagnostics"
+    );
+    let project_b_attempt_id = project_b_findings[0]["diagnostic_id"]
+        .as_str()
+        .expect("project B diagnostic id");
+    let project_b_attempt = sqlx::query_scalar::<_, String>(
+        "SELECT load_attempt_id FROM extension_load_diagnostics WHERE id = $1",
+    )
+    .bind(project_b_attempt_id)
+    .fetch_one(harness.db().pool())
+    .await
+    .expect("project B attempt");
+    let project_b_canonical = repository
+        .list_for_load_attempt(&project_b.id, &project_b_attempt)
+        .await
+        .expect("project B attempt rows");
+    assert_eq!(
+        project_b_findings.iter().cloned().collect::<Vec<_>>(),
+        project_b_canonical
+            .iter()
+            .map(finding_fields)
+            .collect::<Vec<_>>(),
+        "project B response projects only project B's new persisted attempt"
     );
     assert_eq!(
         std::fs::read_to_string(workspace_a.join("mcp.json")).expect("fixture after probe"),
