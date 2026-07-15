@@ -2,6 +2,7 @@
 // to canonical djinn-slot extraction.
 
 use crate::context::AgentContext;
+use djinn_slot::TerminalExtractionContext;
 
 use super::adapter::agent_to_slot_context;
 
@@ -16,10 +17,11 @@ pub async fn run_extraction_backfill(app_state: AgentContext) {
 pub(crate) async fn run_post_session_extraction(
     task_id: String,
     task_run_id: String,
+    terminal_context: TerminalExtractionContext,
     app_state: AgentContext,
 ) {
     let slot_ctx = agent_to_slot_context(&app_state);
-    djinn_slot::run_post_session_extraction(task_id, task_run_id, slot_ctx).await;
+    djinn_slot::run_post_session_extraction(task_id, task_run_id, terminal_context, slot_ctx).await;
 }
 
 #[cfg(test)]
@@ -114,7 +116,13 @@ mod tests {
         agent.event_bus = capturing_bus;
         match action {
             "post_session" => {
-                run_post_session_extraction(task.id.clone(), task_run_id.clone(), agent).await;
+                run_post_session_extraction(
+                    task.id.clone(),
+                    task_run_id.clone(),
+                    TerminalExtractionContext::unknown_historical(),
+                    agent,
+                )
+                .await;
             }
             "backfill" => run_extraction_backfill(agent).await,
             _ => panic!("unknown action: {action}"),

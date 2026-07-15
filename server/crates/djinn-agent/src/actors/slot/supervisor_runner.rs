@@ -15,6 +15,7 @@ use djinn_runtime::{
     ResumeLifecycleMetadata, SessionRuntime, StreamEvent, TaskRunOutcome, TaskRunReport,
     TestRuntime,
 };
+use djinn_slot::{TerminalExtractionContext, TerminalExtractionOutcome};
 
 use crate::actors::slot::lifecycle::model_resolution::resolve_role_model_preference;
 use crate::context::AgentContext;
@@ -544,10 +545,12 @@ pub(super) async fn dispatch_task_runtime(
                 let app_state_ext = app_state.clone();
                 let task_id_ext = task.id.clone();
                 let task_run_id_ext = report.task_run_id.clone();
+                let terminal_context_ext = terminal_extraction_context(&report);
                 tokio::spawn(async move {
                     crate::actors::slot::session_extraction::run_post_session_extraction(
                         task_id_ext,
                         task_run_id_ext,
+                        terminal_context_ext,
                         app_state_ext,
                     )
                     .await;
@@ -1131,6 +1134,48 @@ fn provider_failure_class_for_report(report: &TaskRunReport) -> Option<ProviderF
     }
 }
 
+/// Translate the authoritative runtime report for extraction without inferring
+/// a review verdict that the report does not contain.
+fn terminal_extraction_context(report: &TaskRunReport) -> TerminalExtractionContext {
+    let outcome = match &report.outcome {
+        TaskRunOutcome::PrOpened { .. }
+        | TaskRunOutcome::Closed { .. }
+        | TaskRunOutcome::WorkerSubmitted => TerminalExtractionOutcome::Completed,
+        TaskRunOutcome::Parked { reason, .. } => TerminalExtractionOutcome::Parked {
+            classification: reason.clone(),
+            reason: Some(reason.clone()),
+        },
+        TaskRunOutcome::Escalated { reason } => TerminalExtractionOutcome::Parked {
+            classification: "escalated".to_string(),
+            reason: Some(reason.clone()),
+        },
+        TaskRunOutcome::Failed { stage, reason, .. } => TerminalExtractionOutcome::Failed {
+            classification: stage.clone(),
+            reason: Some(reason.clone()),
+        },
+        TaskRunOutcome::LoopGuardTripped {
+            kind,
+            offending_signature,
+            ..
+        } => TerminalExtractionOutcome::Failed {
+            classification: format!("loop_guard_{}", loop_guard_kind_label(*kind)),
+            reason: Some(offending_signature.clone()),
+        },
+        TaskRunOutcome::Interrupted => TerminalExtractionOutcome::Failed {
+            classification: "interrupted".to_string(),
+            reason: None,
+        },
+        TaskRunOutcome::EnvironmentalNonAttempt { reason } => TerminalExtractionOutcome::Failed {
+            classification: "environmental_non_attempt".to_string(),
+            reason: Some(reason.clone()),
+        },
+    };
+    TerminalExtractionContext {
+        outcome,
+        review_decision: None,
+    }
+}
+
 fn is_budget_park_report(report: &TaskRunReport) -> bool {
     matches!(
         &report.outcome,
@@ -1547,6 +1592,32 @@ mod tests {
             stages_completed: stages,
         }
     }
+    #[test]
+    fn terminal_extraction_context_preserves_park_reason_without_review_inference() {
+        let report = report(
+            "parked-run",
+            vec![RoleKind::Worker],
+            TaskRunOutcome::Parked {
+                reason: "acceptance_criteria".into(),
+                wind_down_ignored: false,
+                session_id: "session-parked".into(),
+                tokens_in: 100,
+                tokens_out: 10,
+            },
+        );
+        assert_eq!(
+            terminal_extraction_context(&report),
+            TerminalExtractionContext {
+                outcome: TerminalExtractionOutcome::Parked {
+                    classification: "acceptance_criteria".to_string(),
+                    reason: Some("acceptance_criteria".to_string()),
+                },
+                review_decision: None,
+            },
+            "a runtime report must preserve its park reason and never invent a review verdict"
+        );
+    }
+
     #[test]
     fn planned_terminal_outcomes_have_no_provider_breaker_signal() {
         let guard_report = report(
