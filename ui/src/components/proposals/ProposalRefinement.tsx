@@ -318,7 +318,12 @@ export function ProposalRefinement({
           <div className="space-y-2 border-t pt-2">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm">Owner</span>
-              <Select value={owner} onValueChange={setOwner}>
+              <Select
+                value={owner}
+                onValueChange={(value) =>
+                  typeof value === "string" && setOwner(value)
+                }
+              >
                 <SelectTrigger className="h-8 w-[200px] text-sm">
                   <SelectValue placeholder="Pick a participant">
                     {owner ? (
