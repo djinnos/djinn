@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use sqlx::postgres::{PgTypeInfo, PgValueRef};
+use sqlx::{Decode, Postgres, Type};
 
 use crate::Result;
 use crate::database::Database;
@@ -41,6 +43,109 @@ pub enum RetrievalTraceEntryPoint {
     FormatKnowledgeNotes,
     /// The `memory_recall_trace` MCP tool.
     MemoryRecallTrace,
+}
+
+/// Conservatively classify evidence written through the legacy insertion API.
+/// This mirrors migration 119's invariant: an injected trace needs positive
+/// token evidence and an injected candidate; reliable empty evidence needs a
+/// non-empty, valid all-skipped candidate set and zero tokens. Everything else
+/// is intentionally `legacy_unknown`.
+pub fn classify_legacy_trace_outcome(
+    candidates: &serde_json::Value,
+    estimated_injected_tokens: i32,
+) -> RetrievalTraceOutcome {
+    let Ok(candidates) = serde_json::from_value::<Vec<TraceCandidate>>(candidates.clone()) else {
+        return RetrievalTraceOutcome::LegacyUnknown;
+    };
+    if validate_candidates(&candidates).is_err() {
+        return RetrievalTraceOutcome::LegacyUnknown;
+    }
+
+    if estimated_injected_tokens > 0
+        && candidates
+            .iter()
+            .any(|candidate| candidate.outcome == CandidateOutcome::Injected)
+    {
+        RetrievalTraceOutcome::Injected
+    } else if estimated_injected_tokens == 0
+        && !candidates.is_empty()
+        && candidates
+            .iter()
+            .all(|candidate| candidate.outcome == CandidateOutcome::Skipped)
+    {
+        RetrievalTraceOutcome::Empty
+    } else {
+        RetrievalTraceOutcome::LegacyUnknown
+    }
+}
+
+fn validate_explicit_trace_semantics(
+    candidates_json: &serde_json::Value,
+    estimated_injected_tokens: i32,
+    outcome: RetrievalTraceOutcome,
+) -> Result<()> {
+    let candidates: Vec<TraceCandidate> =
+        serde_json::from_value(candidates_json.clone()).map_err(|err| {
+            DbError::InvalidData(format!(
+                "explicit retrieval trace candidates must be a valid array: {err}"
+            ))
+        })?;
+    validate_candidates(&candidates)?;
+    let has_injected_candidate = candidates
+        .iter()
+        .any(|candidate| candidate.outcome == CandidateOutcome::Injected);
+
+    if outcome == RetrievalTraceOutcome::Injected
+        && (estimated_injected_tokens <= 0 || !has_injected_candidate)
+    {
+        return Err(DbError::InvalidData(
+            "trace outcome 'injected' requires positive estimated_injected_tokens and at least one injected candidate".to_owned(),
+        ));
+    }
+    if matches!(
+        outcome,
+        RetrievalTraceOutcome::DisabledOff
+            | RetrievalTraceOutcome::DisabledKillSwitch
+            | RetrievalTraceOutcome::DisabledLegacy
+    ) && (estimated_injected_tokens != 0 || has_injected_candidate)
+    {
+        return Err(DbError::InvalidData(
+            "disabled trace outcomes require zero estimated_injected_tokens and no injected candidate"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+impl Type<Postgres> for RetrievalTraceOutcome {
+    fn type_info() -> PgTypeInfo {
+        <String as Type<Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &PgTypeInfo) -> bool {
+        <String as Type<Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> Decode<'r, Postgres> for RetrievalTraceOutcome {
+    fn decode(value: PgValueRef<'r>) -> std::result::Result<Self, sqlx::error::BoxDynError> {
+        let value = <String as Decode<Postgres>>::decode(value)?;
+        Self::parse(&value).ok_or_else(|| {
+            Box::new(DbError::InvalidData(format!(
+                "unknown persisted retrieval trace outcome: {value}"
+            ))) as sqlx::error::BoxDynError
+        })
+    }
+}
+
+/// Additive write input for callers that know rollout and trace outcome
+/// semantics. The nested legacy parameters preserve every existing
+/// `CreateRetrievalTraceParams` struct literal unchanged.
+pub struct CreateRetrievalTraceWithSemanticsParams<'a> {
+    pub trace: CreateRetrievalTraceParams<'a>,
+    /// Persisted verbatim (for example `cohort:canary`).
+    pub rollout_label: &'a str,
+    pub outcome: RetrievalTraceOutcome,
 }
 
 impl RetrievalTraceEntryPoint {
@@ -117,6 +222,75 @@ impl CandidateOutcome {
 
 /// All valid outcome string constants.
 pub const CANDIDATE_OUTCOME_VALUES: &[&str] = &["injected", "skipped"];
+
+// ── Trace outcome ────────────────────────────────────────────────────────────
+
+/// The persisted outcome of a retrieval trace as a whole.
+///
+/// This deliberately has a different name from [`CandidateOutcome`]: candidate
+/// outcomes describe individual JSONB candidates, while this enum records the
+/// result of the trace/injection attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalTraceOutcome {
+    Injected,
+    Empty,
+    Error,
+    LegacyUnknown,
+    DisabledOff,
+    DisabledKillSwitch,
+    DisabledLegacy,
+}
+
+impl RetrievalTraceOutcome {
+    pub const ALL_VARIANTS: [Self; 7] = [
+        Self::Injected,
+        Self::Empty,
+        Self::Error,
+        Self::LegacyUnknown,
+        Self::DisabledOff,
+        Self::DisabledKillSwitch,
+        Self::DisabledLegacy,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Injected => "injected",
+            Self::Empty => "empty",
+            Self::Error => "error",
+            Self::LegacyUnknown => "legacy_unknown",
+            Self::DisabledOff => "disabled_off",
+            Self::DisabledKillSwitch => "disabled_kill_switch",
+            Self::DisabledLegacy => "disabled_legacy",
+        }
+    }
+
+    /// Parse a persisted outcome. Unknown values are intentionally rejected
+    /// rather than silently converted to `LegacyUnknown`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "injected" => Some(Self::Injected),
+            "empty" => Some(Self::Empty),
+            "error" => Some(Self::Error),
+            "legacy_unknown" => Some(Self::LegacyUnknown),
+            "disabled_off" => Some(Self::DisabledOff),
+            "disabled_kill_switch" => Some(Self::DisabledKillSwitch),
+            "disabled_legacy" => Some(Self::DisabledLegacy),
+            _ => None,
+        }
+    }
+}
+
+/// All valid trace-level outcome string constants, matching migration 119.
+pub const RETRIEVAL_TRACE_OUTCOME_VALUES: &[&str] = &[
+    "injected",
+    "empty",
+    "error",
+    "legacy_unknown",
+    "disabled_off",
+    "disabled_kill_switch",
+    "disabled_legacy",
+];
 
 // ── Skipped-reason vocabulary ─────────────────────────────────────────────────
 
@@ -342,6 +516,11 @@ pub struct RetrievalTraceRow {
     pub task_run_id: Option<String>,
     pub task_id: Option<String>,
     pub entry_point: String,
+    /// Verbatim rollout cohort/flag label; unlike outcome this is intentionally
+    /// not constrained to a closed vocabulary.
+    pub rollout_label: String,
+    /// Typed trace-level result, distinct from per-candidate outcomes.
+    pub outcome: RetrievalTraceOutcome,
     /// Opaque trigger context.
     pub trigger: Option<serde_json::Value>,
     /// JSONB array of [`TraceCandidate`] DTOs.
@@ -403,6 +582,11 @@ pub struct RetrievalTraceListFilter<'a> {
     pub task_id: Option<&'a str>,
     /// Filter by entry point.
     pub entry_point: Option<RetrievalTraceEntryPoint>,
+    /// Filter by the verbatim rollout label.
+    pub rollout_label: Option<&'a str>,
+    /// Filter by the trace-level outcome. This is independent from the
+    /// candidate-level `outcome` filter below.
+    pub trace_outcome: Option<RetrievalTraceOutcome>,
     /// Filter by candidate outcome (matches any candidate in the row's JSONB
     /// array with this `outcome` value).
     pub outcome: Option<CandidateOutcome>,
@@ -523,6 +707,33 @@ impl RetrievalTraceRepository {
         &self,
         params: CreateRetrievalTraceParams<'_>,
     ) -> Result<RetrievalTraceRow> {
+        let outcome =
+            classify_legacy_trace_outcome(params.candidates, params.estimated_injected_tokens);
+        self.insert_with_values(params, "enabled", outcome).await
+    }
+
+    /// Insert a trace with rollout/outcome semantics supplied by an informed
+    /// caller. Validation occurs before SQL so fail-open callers receive an
+    /// ordinary `Result` instead of a durable contradictory trace.
+    pub async fn insert_with_semantics(
+        &self,
+        params: CreateRetrievalTraceWithSemanticsParams<'_>,
+    ) -> Result<RetrievalTraceRow> {
+        validate_explicit_trace_semantics(
+            params.trace.candidates,
+            params.trace.estimated_injected_tokens,
+            params.outcome,
+        )?;
+        self.insert_with_values(params.trace, params.rollout_label, params.outcome)
+            .await
+    }
+
+    async fn insert_with_values(
+        &self,
+        params: CreateRetrievalTraceParams<'_>,
+        rollout_label: &str,
+        outcome: RetrievalTraceOutcome,
+    ) -> Result<RetrievalTraceRow> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
@@ -530,8 +741,8 @@ impl RetrievalTraceRepository {
                     id, schema_version, project_id, session_id, task_run_id, task_id,
                     entry_point, trigger, candidates,
                     candidate_cap, candidate_cap_exceeded, sampling_metadata,
-                    durations_ms, estimated_injected_tokens
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
+                    durations_ms, estimated_injected_tokens, rollout_label, outcome
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
         )
         .bind(&id)
         .bind(RETRIEVAL_TRACE_SCHEMA_VERSION)
@@ -547,6 +758,8 @@ impl RetrievalTraceRepository {
         .bind(params.sampling_metadata)
         .bind(params.durations_ms)
         .bind(params.estimated_injected_tokens)
+        .bind(rollout_label)
+        .bind(outcome.as_str())
         .execute(self.db.pool())
         .await?;
 
@@ -590,6 +803,14 @@ impl RetrievalTraceRepository {
             conditions.push(format!("entry_point = ${bind_pos}"));
             bind_pos += 1;
         }
+        if filter.rollout_label.is_some() {
+            conditions.push(format!("rollout_label = ${bind_pos}"));
+            bind_pos += 1;
+        }
+        if filter.trace_outcome.is_some() {
+            conditions.push(format!("outcome = ${bind_pos}"));
+            bind_pos += 1;
+        }
         // JSONB candidate predicates: because there is no GIN index on the
         // `candidates` array, these predicates are applied only inside the
         // mandatory project-scoped, bounded list query. The query remains a
@@ -622,7 +843,7 @@ impl RetrievalTraceRepository {
         let sql = format!(
             r#"SELECT
                 id, schema_version, project_id, session_id, task_run_id, task_id,
-                entry_point, trigger, candidates,
+                entry_point, rollout_label, outcome, trigger, candidates,
                 candidate_cap, candidate_cap_exceeded, sampling_metadata,
                 durations_ms, estimated_injected_tokens, created_at
             FROM retrieval_traces
@@ -645,6 +866,12 @@ impl RetrievalTraceRepository {
         }
         if let Some(ep) = filter.entry_point {
             query = query.bind(ep.as_str());
+        }
+        if let Some(rollout_label) = filter.rollout_label {
+            query = query.bind(rollout_label);
+        }
+        if let Some(outcome) = filter.trace_outcome {
+            query = query.bind(outcome.as_str());
         }
         if let Some(outcome) = filter.outcome {
             query = query.bind(outcome.as_str());
@@ -813,7 +1040,7 @@ impl RetrievalTraceRepository {
 const RETRIEVAL_TRACE_SELECT_BY_ID: &str = r#"
     SELECT
         id, schema_version, project_id, session_id, task_run_id, task_id,
-        entry_point, trigger, candidates,
+        entry_point, rollout_label, outcome, trigger, candidates,
         candidate_cap, candidate_cap_exceeded, sampling_metadata,
         durations_ms, estimated_injected_tokens, created_at
     FROM retrieval_traces
