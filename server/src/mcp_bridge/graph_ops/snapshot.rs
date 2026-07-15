@@ -935,10 +935,7 @@ impl RepoGraphBridge {
                 cognitive: metrics.cognitive,
                 cyclomatic: metrics.cyclomatic,
                 page_rank,
-                cross_module_cochange: cross_module_cc
-                    .get(file_path)
-                    .copied()
-                    .unwrap_or(0.0),
+                cross_module_cochange: cross_module_cc.get(file_path).copied().unwrap_or(0.0),
             });
         }
 

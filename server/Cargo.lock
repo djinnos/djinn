@@ -1594,6 +1594,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-qa"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "workspace-hack",
+]
+
+[[package]]
 name = "djinn-roles"
 version = "0.1.0"
 dependencies = [
