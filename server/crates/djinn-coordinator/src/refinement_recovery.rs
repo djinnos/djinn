@@ -357,15 +357,18 @@ impl CoordinatorActor {
             }
         };
 
-        // Reconstruct attribution, spawn budget, and orphaned open tasks from
-        // this run's refinement task rows.
-        let (task_attributed_user, run_task_count, orphaned_open_task_ids) = self
+        // Reconstruct only spawn budget and orphaned tasks from this run's rows.
+        // Attribution is always recovered from the durable proposal owner.
+        let (run_task_count, orphaned_open_task_ids) = self
             .reconstruct_run_refinement_tasks(proposal_id, run_start.as_deref())
             .await;
-        let attributed_user_id = task_attributed_user.or_else(|| proposal.author_user_id.clone());
+        let Some(attributed_user_id) = proposal.refinement_owner_user_id.clone() else {
+            tracing::warn!(proposal_id = %proposal_id, "Refinement recovery has no durable owner; refusing to resume");
+            return false;
+        };
 
         let mut state = RefinementLoopState::with_config(proposal_id, head_revision_seq, config)
-            .with_attributed_user(attributed_user_id);
+            .with_attributed_user(Some(attributed_user_id));
         state.phase = phase;
         state.current_round = round.max(1);
         state.snapshot_revision_seq = snapshot_revision_seq;
@@ -399,9 +402,8 @@ impl CoordinatorActor {
         true
     }
 
-    /// Scan this run's refinement task rows to reconstruct: the attributed user
-    /// (most recent task's `created_by_user_id`), the spawn count (all this-run
-    /// refinement tasks), and the ids of any still-OPEN (orphaned) tasks.
+    /// Scan this run's refinement task rows only for spawn count and ids of
+    /// still-open orphaned tasks. Attribution comes from `proposals`.
     ///
     /// Refinement tasks carry no structured proposal-id column; they are matched
     /// by the durable `for proposal {id},` marker their description always
@@ -411,7 +413,7 @@ impl CoordinatorActor {
         &self,
         proposal_id: &str,
         run_start: Option<&str>,
-    ) -> (Option<String>, i32, Vec<String>) {
+    ) -> (i32, Vec<String>) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
         let targets = proposal_repo.targets(proposal_id).await.unwrap_or_default();
@@ -422,8 +424,6 @@ impl CoordinatorActor {
         let marker = format!("for proposal {proposal_id},");
         let mut count = 0i32;
         let mut open_ids: Vec<String> = Vec::new();
-        // (created_at, user_id) of the most recent this-run task with a user.
-        let mut latest_user: Option<(String, String)> = None;
 
         for target in &targets {
             let tasks = match task_repo.list_by_project(&target.project_id).await {
@@ -451,19 +451,10 @@ impl CoordinatorActor {
                 if task.status != "closed" {
                     open_ids.push(task.id.clone());
                 }
-                if let Some(uid) = task.created_by_user_id.clone() {
-                    let is_newer = latest_user
-                        .as_ref()
-                        .map(|(at, _)| task.created_at > *at)
-                        .unwrap_or(true);
-                    if is_newer {
-                        latest_user = Some((task.created_at.clone(), uid));
-                    }
-                }
             }
         }
 
-        (latest_user.map(|(_, uid)| uid), count, open_ids)
+        (count, open_ids)
     }
 
     /// Attempt to restore a dangling refinement that was parked awaiting the
@@ -564,7 +555,7 @@ impl CoordinatorActor {
             refined_revision_seq,
             snapshot_revision_seq,
             current_round,
-            proposal.author_user_id.clone(),
+            proposal.refinement_owner_user_id.clone(),
             stop_reason,
         );
         self.active_refinements

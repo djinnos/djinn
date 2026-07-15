@@ -604,6 +604,9 @@ pub struct ProposalDebateTrailListResponse {
 pub struct ProposalRefinementStatusModel {
     /// Whether refinement has been started for this proposal.
     pub active: bool,
+    /// Durable user attribution for this refinement run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
     /// Current debate round (1-based). `None` when refinement has not started.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_round: Option<i32>,

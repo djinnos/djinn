@@ -85,6 +85,8 @@ pub struct Proposal {
     /// generation). Set on graduate, cleared on stop. Lets a stop find and
     /// force-close the breakdown task even before it has produced epics.
     pub build_breakdown_task_id: Option<String>,
+    /// Durable owner of the current/most recent refinement run.
+    pub refinement_owner_user_id: Option<String>,
     /// When the Judge issues a `needs-evidence` verdict, this is the FK to the
     /// spike task that must close before refinement can resume. `None` when not
     /// parked. ON DELETE SET NULL keeps the proposal safe if the task is

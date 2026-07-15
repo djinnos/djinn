@@ -741,7 +741,7 @@ impl CoordinatorActor {
             .await
             .ok()
             .flatten()
-            .and_then(|p| p.author_user_id)
+            .and_then(|p| p.refinement_owner_user_id)
     }
 
     /// Resolve a user id to the display identity used for the legacy `owner`

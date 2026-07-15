@@ -322,6 +322,11 @@ pub async fn build_refinement_status(
     repo: &ProposalRepository,
     proposal_id: &str,
 ) -> Result<ProposalRefinementStatusModel, String> {
+    let owner_user_id = repo
+        .get(proposal_id)
+        .await
+        .map_err(|e| format!("failed to read proposal owner: {e}"))?
+        .and_then(|p| p.refinement_owner_user_id);
     // Find the latest refinement_start entry.
     let revisions = repo
         .revisions(proposal_id)
@@ -337,6 +342,7 @@ pub async fn build_refinement_status(
         // No refinement started.
         return Ok(ProposalRefinementStatusModel {
             active: false,
+            owner_user_id: owner_user_id.clone(),
             current_round: None,
             dry_rounds: 0,
             total_entries: 0,
@@ -618,6 +624,7 @@ pub async fn build_refinement_status(
 
     Ok(ProposalRefinementStatusModel {
         active: is_active,
+        owner_user_id,
         current_round: Some(current_round),
         dry_rounds,
         total_entries,

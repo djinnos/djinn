@@ -617,7 +617,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, refinement_owner_user_id, linked_spike_task_id, needs_evidence_claim
              FROM proposals WHERE id = $1"#,
             id
         )
@@ -631,7 +631,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, refinement_owner_user_id, linked_spike_task_id, needs_evidence_claim
              FROM proposals WHERE short_id = $1"#,
             short_id
         )
@@ -646,7 +646,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, refinement_owner_user_id, linked_spike_task_id, needs_evidence_claim
              FROM proposals WHERE id = $1 OR short_id = $2"#,
             id_or_short,
             id_or_short
@@ -1402,7 +1402,7 @@ impl ProposalRepository {
         // the `proposal_feedback_unresolved` partial index) for the list badge.
         let sql = format!(
             r#"SELECT id, short_id, title, body, body_format, acceptance_criteria::text AS acceptance_criteria,
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim,
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, refinement_owner_user_id, linked_spike_task_id, needs_evidence_claim,
                     (SELECT COUNT(*) FROM proposal_feedback pf
                        WHERE pf.proposal_id = proposals.id AND pf.resolved_at IS NULL) AS unresolved_feedback_count
              FROM proposals WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
@@ -1547,6 +1547,30 @@ impl ProposalRepository {
         .bind(event_metadata)
         .execute(self.db.pool())
         .await?;
+        Ok(())
+    }
+
+    /// Persist a concrete refinement owner and lifecycle start atomically.
+    pub async fn start_refinement_with_owner(
+        &self,
+        proposal_id: &str,
+        owner_user_id: &str,
+        event_metadata: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        if owner_user_id.trim().is_empty() {
+            return Err(Error::InvalidData(
+                "effective_creator_unavailable: refinement owner is empty".into(),
+            ));
+        }
+        let mut tx = self.db.pool().begin().await?;
+        let row = sqlx::query("UPDATE proposals SET refinement_owner_user_id = $1 WHERE id = $2 RETURNING latest_revision_seq")
+            .bind(owner_user_id).bind(proposal_id).fetch_optional(&mut *tx).await?
+            .ok_or_else(|| Error::InvalidData(format!("proposal not found: {proposal_id}")))?;
+        let seq: i32 = row.try_get("latest_revision_seq")?;
+        sqlx::query(r#"INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata) VALUES ($1, $2, $3, ', ', 'markdown', '[]', NULL, 'refinement_start', $4)"#)
+            .bind(uuid::Uuid::now_v7().to_string()).bind(proposal_id).bind(seq).bind(event_metadata).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2452,7 +2476,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, refinement_owner_user_id, linked_spike_task_id, needs_evidence_claim
              FROM proposals WHERE linked_spike_task_id = $1"#,
             spike_task_id
         )
@@ -3126,7 +3150,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, refinement_owner_user_id, linked_spike_task_id, needs_evidence_claim
              FROM proposals p
              WHERE p.status = 'building'
                AND EXISTS (SELECT 1 FROM proposal_epics pe WHERE pe.proposal_id = p.id)
@@ -3150,7 +3174,7 @@ impl ProposalRepository {
         Ok(sqlx::query_as::<_, Proposal>(
             r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS acceptance_criteria,
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, refinement_owner_user_id, linked_spike_task_id, needs_evidence_claim
              FROM proposals p
              WHERE p.status = 'building'
                AND (

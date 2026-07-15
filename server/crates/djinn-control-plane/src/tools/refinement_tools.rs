@@ -176,9 +176,35 @@ impl DjinnMcpServer {
             ));
         }
 
-        // Record refinement_start lifecycle entry.
+        let owner_user_id = p
+            .owner_user_id
+            .clone()
+            .or_else(|| proposal.author_user_id.clone())
+            .filter(|id| !id.trim().is_empty());
+        let Some(owner_user_id) = owner_user_id else {
+            return Json(err_refinement_start(
+                "effective_creator_unavailable: refinement owner could not be resolved",
+            ));
+        };
+        match djinn_db::UserRepository::new(self.state.db().clone())
+            .get_by_id(&owner_user_id)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Json(err_refinement_start(
+                    "effective_creator_unavailable: refinement owner does not exist",
+                ));
+            }
+            Err(e) => {
+                return Json(err_refinement_start(format!(
+                    "effective_creator_unavailable: failed to resolve refinement owner: {e}"
+                )));
+            }
+        }
+        // Owner update and lifecycle start share a transaction; FK races roll back both.
         match repo
-            .record_refinement_lifecycle(&proposal.id, "refinement_start", None)
+            .start_refinement_with_owner(&proposal.id, &owner_user_id, None)
             .await
         {
             Ok(_) => {}
@@ -204,10 +230,7 @@ impl DjinnMcpServer {
                     // author. This owns the tribunal tasks and scopes per-user
                     // model resolution (so refinement uses the attributed user's
                     // Plan-role models instead of a hardcoded fallback).
-                    owner_user_id: p
-                        .owner_user_id
-                        .clone()
-                        .or_else(|| proposal.author_user_id.clone()),
+                    owner_user_id: Some(owner_user_id.clone()),
                 };
                 if let Err(e) = coordinator_handle.start_proposal_refinement(request).await {
                     let stop_metadata = json!({
@@ -249,6 +272,7 @@ impl DjinnMcpServer {
 
         let refinement = ProposalRefinementStatusModel {
             active: true,
+            owner_user_id: Some(owner_user_id),
             current_round: Some(1),
             dry_rounds: 0,
             total_entries: 0,
@@ -395,15 +419,28 @@ impl DjinnMcpServer {
             }
         }
 
-        // Record the demand-round action as a lifecycle event.
+        // A demanded run retains the durable owner; legacy proposals may use
+        // their author once, but still must resolve a concrete owner before a
+        // lifecycle row or coordinator spawn is possible.
+        let Some(owner_user_id) = proposal
+            .refinement_owner_user_id
+            .clone()
+            .or_else(|| proposal.author_user_id.clone())
+            .filter(|id| !id.trim().is_empty())
+        else {
+            return Json(DemandRoundResponse {
+                proposal_id: Some(proposal.id),
+                accepted: false,
+                refinement: None,
+                error: Some(
+                    "effective_creator_unavailable: refinement owner could not be resolved".into(),
+                ),
+            });
+        };
         let reviewer_feedback = p.reason.clone();
-        let demand_metadata = serde_json::json!({
-            "source": "human_demand_round",
-            "reason": reviewer_feedback,
-            "reviewer_feedback": reviewer_feedback,
-        });
+        let demand_metadata = serde_json::json!({ "source": "human_demand_round", "reason": reviewer_feedback, "reviewer_feedback": reviewer_feedback });
         if let Err(e) = repo
-            .record_refinement_lifecycle(&proposal.id, "refinement_start", Some(&demand_metadata))
+            .start_refinement_with_owner(&proposal.id, &owner_user_id, Some(&demand_metadata))
             .await
         {
             return Json(DemandRoundResponse {
@@ -421,8 +458,8 @@ impl DjinnMcpServer {
                 let request = ProposalRefinementStartRequest {
                     proposal_id: proposal.id.clone(),
                     current_revision_seq: proposal.latest_revision_seq,
-                    // Demand-round reuses the proposal author for attribution.
-                    owner_user_id: proposal.author_user_id.clone(),
+                    // Demand-round uses the persisted owner.
+                    owner_user_id: Some(owner_user_id.clone()),
                 };
                 if let Err(e) = coordinator_handle
                     .demand_proposal_refinement_round(request)
@@ -468,6 +505,7 @@ impl DjinnMcpServer {
 
         let refinement = ProposalRefinementStatusModel {
             active: true,
+            owner_user_id: Some(owner_user_id),
             current_round: Some(1),
             dry_rounds: 0,
             total_entries: 0,
