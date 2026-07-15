@@ -16489,6 +16489,13 @@
               "description": "Whether refinement has been started for this proposal.",
               "type": "boolean"
             },
+            "owner_user_id": {
+              "description": "Durable user attribution for this refinement run.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "current_round": {
               "description": "Current debate round (1-based). `None` when refinement has not started.",
               "type": [
@@ -16852,6 +16859,13 @@
               "description": "Whether refinement has been started for this proposal.",
               "type": "boolean"
             },
+            "owner_user_id": {
+              "description": "Durable user attribution for this refinement run.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "current_round": {
               "description": "Current debate round (1-based). `None` when refinement has not started.",
               "type": [
@@ -17139,6 +17153,13 @@
             "active": {
               "description": "Whether refinement has been started for this proposal.",
               "type": "boolean"
+            },
+            "owner_user_id": {
+              "description": "Durable user attribution for this refinement run.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "current_round": {
               "description": "Current debate round (1-based). `None` when refinement has not started.",
@@ -18130,6 +18151,13 @@
             "active": {
               "description": "Whether refinement has been started for this proposal.",
               "type": "boolean"
+            },
+            "owner_user_id": {
+              "description": "Durable user attribution for this refinement run.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "current_round": {
               "description": "Current debate round (1-based). `None` when refinement has not started.",
