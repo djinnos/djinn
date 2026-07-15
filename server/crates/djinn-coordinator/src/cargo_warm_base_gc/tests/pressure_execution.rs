@@ -834,6 +834,37 @@ async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
     let fixture: serde_json::Value = serde_json::from_str(PRESSURE_METRICS_FIXTURE).unwrap();
     let case = |name: &str| &fixture["cases"][name];
     let value = |case: &serde_json::Value, field: &str| case[field].as_u64().unwrap();
+    let assert_execution_metrics =
+        |before: &str, after: &str, case: &serde_json::Value, rung: &str| {
+            for outcome in fixture["outcomes"].as_array().unwrap() {
+                let outcome = outcome.as_str().unwrap();
+                assert_eq!(
+                    pressure_counter(after, "delete", rung, outcome)
+                        - pressure_counter(before, "delete", rung, outcome),
+                    case[outcome].as_u64().unwrap_or(0),
+                    "unexpected {outcome} delta for {rung}"
+                );
+            }
+            for field in ["projected", "reclaimed"] {
+                let metric = fixture["byte_metrics"][field].as_str().unwrap();
+                assert_eq!(
+                    pressure_bytes(after, metric, "delete", rung)
+                        - pressure_bytes(before, metric, "delete", rung),
+                    value(case, field),
+                    "unexpected {field} byte delta for {rung}"
+                );
+            }
+            let expected = case["termination"].as_str().unwrap();
+            for termination in fixture["terminations"].as_array().unwrap() {
+                let termination = termination.as_str().unwrap();
+                assert_eq!(
+                    pressure_termination(after, "delete", termination)
+                        - pressure_termination(before, "delete", termination),
+                    u64::from(termination == expected),
+                    "unexpected {termination} termination delta"
+                );
+            }
+        };
     assert_eq!(fixture["metric"], "djinn_cache_pressure_units_total");
     assert_eq!(
         fixture["rungs"],
@@ -886,11 +917,14 @@ async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
     let dry = case("dry_run");
     assert_eq!(dry_run.len() as u64, value(dry, "planned"));
     for rung in ["incremental", "profile", "base"] {
-        assert_eq!(
-            pressure_counter(&after, "dry_run", rung, "planned")
-                - pressure_counter(&before, "dry_run", rung, "planned"),
-            1
-        );
+        for outcome in fixture["outcomes"].as_array().unwrap() {
+            let outcome = outcome.as_str().unwrap();
+            assert_eq!(
+                pressure_counter(&after, "dry_run", rung, outcome)
+                    - pressure_counter(&before, "dry_run", rung, outcome),
+                u64::from(outcome == "planned")
+            );
+        }
         assert_eq!(
             pressure_bytes(
                 &after,
@@ -905,13 +939,31 @@ async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
             ),
             4096
         );
+        assert_eq!(
+            pressure_bytes(
+                &after,
+                fixture["byte_metrics"]["reclaimed"].as_str().unwrap(),
+                "dry_run",
+                rung
+            ) - pressure_bytes(
+                &before,
+                fixture["byte_metrics"]["reclaimed"].as_str().unwrap(),
+                "dry_run",
+                rung
+            ),
+            0
+        );
     }
-    assert_eq!(
-        pressure_termination(&after, "dry_run", dry["termination"].as_str().unwrap())
-            - pressure_termination(&before, "dry_run", dry["termination"].as_str().unwrap()),
-        1
-    );
+    for termination in fixture["terminations"].as_array().unwrap() {
+        let termination = termination.as_str().unwrap();
+        assert_eq!(
+            pressure_termination(&after, "dry_run", termination)
+                - pressure_termination(&before, "dry_run", termination),
+            u64::from(termination == dry["termination"].as_str().unwrap())
+        );
+    }
     assert_eq!(value(dry, "projected"), 3 * 4096);
+    assert_eq!(value(dry, "reclaimed"), 0);
 
     let (pre_base, pre) = unit(
         "018f8b9a-0d70-7f0a-8000-000000000104",
@@ -935,25 +987,37 @@ async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
     let after = djinn_telemetry::render().unwrap();
     let pre_case = case("pre_attempt_measurement_failure");
     assert!(pre_result.attempted.is_empty() && pre_result.deleted.is_empty());
-    for outcome in ["planned", "retained", "failed"] {
-        assert_eq!(
-            pressure_counter(&after, "delete", "base", outcome)
-                - pressure_counter(&before, "delete", "base", outcome),
-            value(pre_case, outcome)
-        );
-    }
-    for outcome in ["post_lock_eligible", "attempted", "deleted"] {
-        assert_eq!(
-            pressure_counter(&after, "delete", "base", outcome)
-                - pressure_counter(&before, "delete", "base", outcome),
-            0
-        );
-    }
-    assert_eq!(
-        pressure_termination(&after, "delete", "remeasure_failed")
-            - pressure_termination(&before, "delete", "remeasure_failed"),
-        1
+    assert_execution_metrics(&before, &after, pre_case, "base");
+
+    let (high_base, high) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000108",
+        PressureRung::StaleProfile,
     );
+    std::fs::write(high_base.join("bytes"), vec![0; 4096]).unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    let high_result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan { units: vec![high] },
+        &Activity(Ok(ActivitySnapshot {
+            latest_activity: Some("2020-01-01T00:00:00Z".into()),
+            ..snapshot()
+        })),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Ok(
+            CapacitySnapshot {
+                total_bytes: 100,
+                available_bytes: 25,
+            },
+        )]))),
+        &config,
+        &clock,
+        temp.path(),
+    )
+    .await;
+    let after = djinn_telemetry::render().unwrap();
+    let high_case = case("pre_attempt_reached_high");
+    assert!(high_result.reached_high_watermark && high_result.attempted.is_empty());
+    assert_execution_metrics(&before, &after, high_case, "profile");
 
     let (failed_base, failed) = unit(
         "018f8b9a-0d70-7f0a-8000-000000000105",
@@ -983,24 +1047,7 @@ async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
     let after = djinn_telemetry::render().unwrap();
     let removal = case("removal_failure");
     assert!(failed_result.deleted.is_empty());
-    for outcome in [
-        "planned",
-        "post_lock_eligible",
-        "retained",
-        "attempted",
-        "failed",
-    ] {
-        assert_eq!(
-            pressure_counter(&after, "delete", "incremental", outcome)
-                - pressure_counter(&before, "delete", "incremental", outcome),
-            value(removal, outcome)
-        );
-    }
-    assert_eq!(
-        pressure_counter(&after, "delete", "incremental", "deleted")
-            - pressure_counter(&before, "delete", "incremental", "deleted"),
-        0
-    );
+    assert_execution_metrics(&before, &after, removal, "incremental");
 
     let (success_base, success) = unit(
         "018f8b9a-0d70-7f0a-8000-000000000106",
@@ -1030,27 +1077,7 @@ async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
         success_result.reclaimed_bytes,
         value(success_case, "reclaimed")
     );
-    for outcome in ["planned", "post_lock_eligible", "attempted", "deleted"] {
-        assert_eq!(
-            pressure_counter(&after, "delete", "base", outcome)
-                - pressure_counter(&before, "delete", "base", outcome),
-            value(success_case, outcome)
-        );
-    }
-    assert_eq!(
-        pressure_bytes(
-            &after,
-            fixture["byte_metrics"]["reclaimed"].as_str().unwrap(),
-            "delete",
-            "base"
-        ) - pressure_bytes(
-            &before,
-            fixture["byte_metrics"]["reclaimed"].as_str().unwrap(),
-            "delete",
-            "base"
-        ),
-        value(success_case, "reclaimed")
-    );
+    assert_execution_metrics(&before, &after, success_case, "base");
 
     let (post_base, post) = unit(
         "018f8b9a-0d70-7f0a-8000-000000000107",
@@ -1075,40 +1102,5 @@ async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
     let after = djinn_telemetry::render().unwrap();
     let post_case = case("post_success_remeasurement_failure");
     assert!(post_result.remeasurement_failed && post_result.deleted.len() == 1);
-    for outcome in [
-        "planned",
-        "post_lock_eligible",
-        "attempted",
-        "deleted",
-        "failed",
-    ] {
-        assert_eq!(
-            pressure_counter(&after, "delete", "base", outcome)
-                - pressure_counter(&before, "delete", "base", outcome),
-            value(post_case, outcome)
-        );
-    }
-    assert_eq!(
-        pressure_bytes(
-            &after,
-            fixture["byte_metrics"]["reclaimed"].as_str().unwrap(),
-            "delete",
-            "base"
-        ) - pressure_bytes(
-            &before,
-            fixture["byte_metrics"]["reclaimed"].as_str().unwrap(),
-            "delete",
-            "base"
-        ),
-        value(post_case, "reclaimed")
-    );
-    assert_eq!(
-        pressure_termination(&after, "delete", post_case["termination"].as_str().unwrap())
-            - pressure_termination(
-                &before,
-                "delete",
-                post_case["termination"].as_str().unwrap()
-            ),
-        1
-    );
+    assert_execution_metrics(&before, &after, post_case, "base");
 }

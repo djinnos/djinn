@@ -8,6 +8,7 @@
   "cases": {
     "dry_run": {"planned": 3, "projected": 12288, "attempted": 0, "deleted": 0, "failed": 0, "reclaimed": 0, "termination": "completed"},
     "pre_attempt_measurement_failure": {"planned": 1, "post_lock_eligible": 0, "retained": 1, "attempted": 0, "deleted": 0, "failed": 1, "projected": 4096, "reclaimed": 0, "termination": "remeasure_failed"},
+    "pre_attempt_reached_high": {"planned": 1, "post_lock_eligible": 0, "retained": 1, "attempted": 0, "deleted": 0, "failed": 0, "projected": 4096, "reclaimed": 0, "termination": "reached_high"},
     "removal_failure": {"planned": 1, "post_lock_eligible": 1, "retained": 1, "attempted": 1, "deleted": 0, "failed": 1, "projected": 4096, "reclaimed": 0, "termination": "completed"},
     "successful_deletion": {"planned": 1, "post_lock_eligible": 1, "retained": 0, "attempted": 1, "deleted": 1, "failed": 0, "projected": 4096, "reclaimed": 4096, "termination": "completed"},
     "post_success_remeasurement_failure": {"planned": 1, "post_lock_eligible": 1, "retained": 0, "attempted": 1, "deleted": 1, "failed": 1, "projected": 4096, "reclaimed": 4096, "termination": "remeasure_failed"}
