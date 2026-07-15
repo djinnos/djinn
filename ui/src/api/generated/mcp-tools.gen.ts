@@ -4345,11 +4345,19 @@ export namespace MemoryRecallTraceInputSchema {
   outcome?: string
   project?: string
   project_id?: string
+  /**
+   * Exact, verbatim rollout label to filter list results by.
+   */
+  rollout_label?: string
   session_id?: string
   skipped_reason?: string
   task_id?: string
   task_run_id?: string
   trace_id?: string
+  /**
+   * Trace-level outcome filter. Candidate-level `outcome` remains separate.
+   */
+  trace_outcome?: string
   [k: string]: any
   }
 
@@ -4372,12 +4380,20 @@ export namespace MemoryRecallTraceOutputSchema {
   durations_ms: AnyJson
   entry_point: string
   estimated_injected_tokens: number
+  /**
+   * Verbatim rollout cohort or suppression label recorded for this trace.
+   */
+  rollout_label: string
   sampling_metadata?: any
   schema_version: number
   session_id?: string
   task_id?: string
   task_run_id?: string
   trace_id: string
+  /**
+   * Trace-level outcome, distinct from candidate-level outcomes.
+   */
+  trace_outcome: string
   trigger?: any
   [k: string]: any
   }
@@ -4400,8 +4416,16 @@ export namespace MemoryRecallTraceOutputSchema {
   created_at: string
   entry_point: string
   injected_count: number
+  /**
+   * Verbatim rollout cohort or suppression label recorded for this trace.
+   */
+  rollout_label: string
   skipped_count: number
   trace_id: string
+  /**
+   * Trace-level outcome, distinct from candidate-level outcomes.
+   */
+  trace_outcome: string
   trigger_summary: string
   [k: string]: any
   }

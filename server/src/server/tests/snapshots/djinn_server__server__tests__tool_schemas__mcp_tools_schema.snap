@@ -9148,6 +9148,13 @@ expression: signatures
             "null"
           ]
         },
+        "rollout_label": {
+          "description": "Exact, verbatim rollout label to filter list results by.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "session_id": {
           "type": [
             "string",
@@ -9173,6 +9180,13 @@ expression: signatures
           ]
         },
         "trace_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trace_outcome": {
+          "description": "Trace-level outcome filter. Candidate-level `outcome` remains separate.",
           "type": [
             "string",
             "null"
@@ -9280,6 +9294,10 @@ expression: signatures
               "format": "int32",
               "type": "integer"
             },
+            "rollout_label": {
+              "description": "Verbatim rollout cohort or suppression label recorded for this trace.",
+              "type": "string"
+            },
             "sampling_metadata": {
               "anyOf": [
                 {
@@ -9315,6 +9333,10 @@ expression: signatures
             "trace_id": {
               "type": "string"
             },
+            "trace_outcome": {
+              "description": "Trace-level outcome, distinct from candidate-level outcomes.",
+              "type": "string"
+            },
             "trigger": {
               "anyOf": [
                 {
@@ -9331,6 +9353,8 @@ expression: signatures
             "schema_version",
             "created_at",
             "entry_point",
+            "rollout_label",
+            "trace_outcome",
             "durations_ms",
             "candidate_cap",
             "candidate_cap_exceeded",
@@ -9358,11 +9382,19 @@ expression: signatures
               "format": "int32",
               "type": "integer"
             },
+            "rollout_label": {
+              "description": "Verbatim rollout cohort or suppression label recorded for this trace.",
+              "type": "string"
+            },
             "skipped_count": {
               "format": "int32",
               "type": "integer"
             },
             "trace_id": {
+              "type": "string"
+            },
+            "trace_outcome": {
+              "description": "Trace-level outcome, distinct from candidate-level outcomes.",
               "type": "string"
             },
             "trigger_summary": {
@@ -9373,6 +9405,8 @@ expression: signatures
             "trace_id",
             "created_at",
             "entry_point",
+            "rollout_label",
+            "trace_outcome",
             "trigger_summary",
             "candidate_count",
             "injected_count",

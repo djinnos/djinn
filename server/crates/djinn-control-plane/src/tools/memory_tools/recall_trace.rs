@@ -1,8 +1,8 @@
 use super::*;
 use djinn_db::NoteRepository;
 use djinn_db::repositories::retrieval_trace::{
-    CandidateOutcome, RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceRepository,
-    SkippedReason,
+    CandidateOutcome, RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceOutcome,
+    RetrievalTraceRepository, SkippedReason,
 };
 use rmcp::{Json, handler::server::wrapper::Parameters, tool, tool_router};
 const EXCERPT: usize = 1000;
@@ -38,6 +38,11 @@ fn outcome(v: Option<&str>) -> Result<Option<CandidateOutcome>, String> {
         _ => Err(format!("invalid outcome: {x}")),
     })
     .transpose()
+}
+/// Parse the trace-level outcome separately from candidate `outcome`.
+fn trace_outcome(v: Option<&str>) -> Result<Option<RetrievalTraceOutcome>, String> {
+    v.map(|x| RetrievalTraceOutcome::parse(x).ok_or_else(|| format!("invalid trace_outcome: {x}")))
+        .transpose()
 }
 fn reason(v: Option<&str>) -> Result<Option<SkippedReason>, String> {
     v.map(|x| SkippedReason::parse(x).ok_or_else(|| format!("invalid skipped_reason: {x}")))
@@ -75,6 +80,10 @@ pub(super) async fn recall(s: &DjinnMcpServer, p: RecallTraceParams) -> MemoryRe
             Ok(x) => x,
             Err(e) => return err(e),
         };
+        let trace_out = match trace_outcome(p.trace_outcome.as_deref()) {
+            Ok(x) => x,
+            Err(e) => return err(e),
+        };
         let skip = match reason(p.skipped_reason.as_deref()) {
             Ok(x) => x,
             Err(e) => return err(e),
@@ -87,6 +96,8 @@ pub(super) async fn recall(s: &DjinnMcpServer, p: RecallTraceParams) -> MemoryRe
                     task_id: p.task_id.as_deref(),
                     task_run_id: p.task_run_id.as_deref(),
                     entry_point: ep,
+                    rollout_label: p.rollout_label.as_deref(),
+                    trace_outcome: trace_out,
                     outcome: out,
                     skipped_reason: skip,
                     limit: p.limit,
@@ -110,6 +121,8 @@ pub(super) async fn recall(s: &DjinnMcpServer, p: RecallTraceParams) -> MemoryRe
                     trace_id: r.id,
                     created_at: r.created_at,
                     entry_point: r.entry_point,
+                    rollout_label: r.rollout_label,
+                    trace_outcome: r.outcome.as_str().to_string(),
                     trigger_summary: r
                         .trigger
                         .map(|x| x.to_string().chars().take(240).collect())
@@ -180,6 +193,8 @@ pub(super) async fn recall(s: &DjinnMcpServer, p: RecallTraceParams) -> MemoryRe
             task_id: r.task_id,
             task_run_id: r.task_run_id,
             entry_point: r.entry_point,
+            rollout_label: r.rollout_label,
+            trace_outcome: r.outcome.as_str().to_string(),
             trigger: r.trigger.map(Into::into),
             durations_ms: r.durations_ms.into(),
             candidate_cap: r.candidate_cap,
