@@ -975,7 +975,7 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
             content: vec![ContentBlock::ToolUse {
                 id: "t3".into(),
                 name: "memory_write".into(),
-                input: serde_json::json!({"identifier": "patterns/new-pattern", "project": fixture.project.slug()}),
+                input: serde_json::json!({"reason": "record extracted memory write", "identifier": "patterns/new-pattern", "project": fixture.project.slug()}),
             }],
             metadata: None,
         },

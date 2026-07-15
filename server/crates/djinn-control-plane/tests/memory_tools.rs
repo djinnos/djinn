@@ -31,7 +31,7 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
                 "project": project,
                 "title": "Write Contract Note",
                 "content": "body",
-                "type": "adr"
+                "reason": "exercise memory write contract", "type": "adr"
             }),
         )
         .await
@@ -64,7 +64,7 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
                 "project": project,
                 "title": "Write Contract Note",
                 "content": "body-2",
-                "type": "adr"
+                "reason": "exercise memory write contract", "type": "adr"
             }),
         )
         .await
@@ -86,7 +86,7 @@ async fn mcp_memory_write_and_move_accept_case_and_pitfall_types() {
                 "project": project,
                 "title": "Recovered Incident",
                 "content": "body",
-                "type": "case"
+                "reason": "exercise memory write contract", "type": "case"
             }),
         )
         .await
@@ -126,7 +126,7 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
                 "project": project,
                 "title": "Read Contract Note",
                 "content": "read me",
-                "type": "reference"
+                "reason": "exercise memory write contract", "type": "reference"
             }),
         )
         .await
@@ -169,21 +169,21 @@ async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Rust Alpha", "content": "rust rust rust memory", "type": "reference"}),
+            json!({"project": project, "title": "Rust Alpha", "content": "rust rust rust memory", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write alpha should dispatch");
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Rust Beta", "content": "rust memory", "type": "reference"}),
+            json!({"project": project, "title": "Rust Beta", "content": "rust memory", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write beta should dispatch");
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "ADR Gamma", "content": "rust decision", "type": "adr"}),
+            json!({"project": project, "title": "ADR Gamma", "content": "rust decision", "reason": "exercise memory write contract", "type": "adr"}),
         )
         .await
         .expect("memory_write gamma should dispatch");
@@ -231,7 +231,7 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Edit Note", "content": "middle", "type": "reference"}),
+            json!({"project": project, "title": "Edit Note", "content": "middle", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("seed memory_write should dispatch");
@@ -239,7 +239,7 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     let appended = harness
         .call_tool(
             "memory_edit",
-            json!({"project": project, "identifier": "Edit Note", "operation": "append", "content": "tail"}),
+            json!({"project": project, "identifier": "Edit Note", "reason": "exercise memory edit contract", "operation": "append", "content": "tail"}),
         )
         .await
         .expect("memory_edit append should dispatch");
@@ -248,7 +248,7 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     let prepended = harness
         .call_tool(
             "memory_edit",
-            json!({"project": project, "identifier": "Edit Note", "operation": "prepend", "content": "head"}),
+            json!({"project": project, "identifier": "Edit Note", "reason": "exercise memory edit contract", "operation": "prepend", "content": "head"}),
         )
         .await
         .expect("memory_edit prepend should dispatch");
@@ -257,7 +257,7 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     let replaced = harness
         .call_tool(
             "memory_edit",
-            json!({"project": project, "identifier": "Edit Note", "operation": "find_replace", "find_text": "middle", "content": "center"}),
+            json!({"project": project, "identifier": "Edit Note", "reason": "exercise memory edit contract", "operation": "find_replace", "find_text": "middle", "content": "center"}),
         )
         .await
         .expect("memory_edit find_replace should dispatch");
@@ -266,7 +266,7 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     let missing = harness
         .call_tool(
             "memory_edit",
-            json!({"project": project, "identifier": "Missing", "operation": "append", "content": "x"}),
+            json!({"project": project, "identifier": "Missing", "reason": "exercise memory edit contract", "operation": "append", "content": "x"}),
         )
         .await
         .expect("memory_edit missing should dispatch");
@@ -282,7 +282,7 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
     let created = harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Move Me", "content": "content", "type": "reference"}),
+            json!({"project": project, "title": "Move Me", "content": "content", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write should dispatch");
@@ -308,7 +308,7 @@ async fn mcp_memory_delete_success_and_missing_note_error() {
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Delete Me", "content": "bye", "type": "reference"}),
+            json!({"project": project, "title": "Delete Me", "content": "bye", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("seed memory_write should dispatch");
@@ -316,7 +316,7 @@ async fn mcp_memory_delete_success_and_missing_note_error() {
     let deleted = harness
         .call_tool(
             "memory_delete",
-            json!({"project": project, "identifier": "Delete Me"}),
+            json!({"project": project, "reason": "remove test note", "identifier": "Delete Me"}),
         )
         .await
         .expect("memory_delete should dispatch");
@@ -325,7 +325,7 @@ async fn mcp_memory_delete_success_and_missing_note_error() {
     let missing = harness
         .call_tool(
             "memory_delete",
-            json!({"project": project, "identifier": "Delete Me"}),
+            json!({"project": project, "reason": "remove test note", "identifier": "Delete Me"}),
         )
         .await
         .expect("memory_delete missing should dispatch");
@@ -342,7 +342,7 @@ async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
     let adr = harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "A", "content": "x", "type": "adr"}),
+            json!({"project": project, "title": "A", "content": "x", "reason": "exercise memory write contract", "type": "adr"}),
         )
         .await
         .expect("memory_write adr should dispatch");
@@ -350,7 +350,7 @@ async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
     let reference = harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "B", "content": "different content", "type": "reference"}),
+            json!({"project": project, "title": "B", "content": "different content", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write reference should dispatch");
@@ -394,28 +394,28 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Node B", "content": "b", "type": "reference"}),
+            json!({"project": project, "title": "Node B", "content": "b", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("seed node B should dispatch");
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "type": "reference"}),
+            json!({"project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("seed node A should dispatch");
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "type": "reference"}),
+            json!({"project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("seed node C should dispatch");
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Node D", "content": "isolated", "type": "reference"}),
+            json!({"project": project, "title": "Node D", "content": "isolated", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("seed node D should dispatch");
@@ -456,7 +456,7 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Older", "content": "o", "type": "reference"}),
+            json!({"project": project, "title": "Older", "content": "o", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write older should dispatch");
@@ -469,7 +469,7 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Newer", "content": "n", "type": "reference"}),
+            json!({"project": project, "title": "Newer", "content": "n", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write newer should dispatch");
@@ -513,7 +513,7 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Catalog Item", "content": "c", "type": "reference"}),
+            json!({"project": project, "title": "Catalog Item", "content": "c", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write should dispatch");
@@ -538,7 +538,7 @@ async fn mcp_memory_history_and_diff_round_trip() {
     let created = harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "History Diff", "content": "line one", "type": "reference"}),
+            json!({"project": project, "title": "History Diff", "content": "line one", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write should dispatch");
@@ -547,7 +547,7 @@ async fn mcp_memory_history_and_diff_round_trip() {
     let edited = harness
         .call_tool(
             "memory_edit",
-            json!({"project": project, "identifier": permalink, "operation": "append", "content": "line two"}),
+            json!({"project": project, "identifier": permalink, "reason": "exercise memory edit contract", "operation": "append", "content": "line two"}),
         )
         .await
         .expect("memory_edit should dispatch");
@@ -589,14 +589,14 @@ async fn mcp_memory_build_context_follows_wikilinks() {
     let target = harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Context Target", "content": "target body", "type": "reference"}),
+            json!({"project": project, "title": "Context Target", "content": "target body", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write target should dispatch");
     let seed = harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Context Seed", "content": "see [[Context Target]]", "type": "reference"}),
+            json!({"project": project, "title": "Context Seed", "content": "see [[Context Target]]", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write seed should dispatch");
@@ -637,7 +637,7 @@ async fn mcp_memory_task_refs_returns_tasks_for_permalink() {
     let note = harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Task Ref Note", "content": "task refs seed", "type": "reference"}),
+            json!({"project": project, "title": "Task Ref Note", "content": "task refs seed", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write should dispatch");
@@ -791,7 +791,7 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
     let epic_note = harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Epic Ref Note", "content": "epic level note", "type": "adr"}),
+            json!({"project": project, "title": "Epic Ref Note", "content": "epic level note", "reason": "exercise memory write contract", "type": "adr"}),
         )
         .await
         .expect("memory_write epic_note should dispatch");
@@ -803,7 +803,7 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
     let task_note = harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Task Ref Note", "content": "task level note", "type": "pitfall"}),
+            json!({"project": project, "title": "Task Ref Note", "content": "task level note", "reason": "exercise memory write contract", "type": "pitfall"}),
         )
         .await
         .expect("memory_write task_note should dispatch");
@@ -815,7 +815,7 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
     let shared_note = harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Shared Ref Note", "content": "shared across epic and task", "type": "reference"}),
+            json!({"project": project, "title": "Shared Ref Note", "content": "shared across epic and task", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write shared_note should dispatch");
@@ -1171,7 +1171,7 @@ async fn memory_read_regression_resolved_mentions_still_works() {
                 "project": project,
                 "title": "Note Mentioning Proposal",
                 "content": format!("This pitfall relates to proposal {} which covers the design.", fixture.proposal_short_id),
-                "type": "pitfall",
+                "reason": "exercise memory write contract", "type": "pitfall",
             }),
         )
         .await
@@ -1302,7 +1302,7 @@ async fn memory_read_resolves_short_id_mentions() {
                 "project": project,
                 "title": "Note Mentioning Proposal",
                 "content": format!("This pitfall relates to proposal {} which covers the design.", fixture.proposal_short_id),
-                "type": "pitfall",
+                "reason": "exercise memory write contract", "type": "pitfall",
             }),
         )
         .await
@@ -1385,7 +1385,7 @@ async fn no_regression_memory_refs_autolink() {
     let note = harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Autolink Note", "content": "autolink seed", "type": "reference"}),
+            json!({"project": project, "title": "Autolink Note", "content": "autolink seed", "reason": "exercise memory write contract", "type": "reference"}),
         )
         .await
         .expect("memory_write should dispatch");

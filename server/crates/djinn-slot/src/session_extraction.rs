@@ -1129,11 +1129,11 @@ mod tests {
         let msgs = vec![
             tool_use(
                 "memory_write",
-                serde_json::json!({"identifier": "research/new-note", "project": "/tmp"}),
+                serde_json::json!({"reason": "record extracted memory write", "identifier": "research/new-note", "project": "/tmp"}),
             ),
             tool_use(
                 "memory_edit",
-                serde_json::json!({"identifier": "research/another", "project": "/tmp"}),
+                serde_json::json!({"reason": "record extracted memory edit", "identifier": "research/another", "project": "/tmp"}),
             ),
         ];
         let signals = extract_session_signals(&msgs);
@@ -1184,7 +1184,7 @@ mod tests {
             ),
             tool_use(
                 "memory_edit",
-                serde_json::json!({"identifier": "decisions/adr-used", "project": "/tmp"}),
+                serde_json::json!({"reason": "record extracted memory edit", "identifier": "decisions/adr-used", "project": "/tmp"}),
             ),
         ];
         let signals = extract_session_signals(&msgs);
@@ -1274,7 +1274,7 @@ mod tests {
                 content: vec![ContentBlock::ToolUse {
                     id: "write-note".to_string(),
                     name: "memory_write".to_string(),
-                    input: serde_json::json!({"title": "Written Case", "type": "case"}),
+                    input: serde_json::json!({"reason": "record extracted memory write", "title": "Written Case", "type": "case"}),
                 }],
                 metadata: None,
             },
@@ -1446,7 +1446,7 @@ mod tests {
             tool_use_with_id(
                 "call-1",
                 "memory_write",
-                serde_json::json!({"title": "My Research", "type": "research", "project": "/tmp", "content": "findings"}),
+                serde_json::json!({"reason": "record extracted memory write", "title": "My Research", "type": "research", "project": "/tmp", "content": "findings"}),
             ),
             tool_result_with_json(
                 "call-1",
@@ -1472,7 +1472,7 @@ mod tests {
             tool_use_with_id(
                 "call-2",
                 "memory_edit",
-                serde_json::json!({"identifier": "decisions/adr-1", "operation": "append", "content": "update", "project": "/tmp"}),
+                serde_json::json!({"reason": "record extracted memory edit", "identifier": "decisions/adr-1", "operation": "append", "content": "update", "project": "/tmp"}),
             ),
             tool_result_with_json(
                 "call-2",
@@ -1520,7 +1520,7 @@ mod tests {
             tool_use_with_id(
                 "call-a",
                 "memory_write",
-                serde_json::json!({"title": "Note", "type": "research", "project": "/tmp", "content": "v1"}),
+                serde_json::json!({"reason": "record extracted memory write", "title": "Note", "type": "research", "project": "/tmp", "content": "v1"}),
             ),
             tool_result_with_json(
                 "call-a",
@@ -1530,7 +1530,7 @@ mod tests {
             tool_use_with_id(
                 "call-b",
                 "memory_edit",
-                serde_json::json!({"identifier": "research/note", "operation": "append", "content": "v2", "project": "/tmp"}),
+                serde_json::json!({"reason": "record extracted memory edit", "identifier": "research/note", "operation": "append", "content": "v2", "project": "/tmp"}),
             ),
             tool_result_with_json(
                 "call-b",
@@ -1551,7 +1551,7 @@ mod tests {
             tool_use_with_id(
                 "call-err",
                 "memory_write",
-                serde_json::json!({"title": "Fail", "type": "research", "project": "/tmp", "content": "x"}),
+                serde_json::json!({"reason": "record extracted memory write", "title": "Fail", "type": "research", "project": "/tmp", "content": "x"}),
             ),
             // Error result
             Message {
@@ -1577,7 +1577,7 @@ mod tests {
             tool_use_with_id(
                 "w1",
                 "memory_write",
-                serde_json::json!({"title": "A", "type": "research", "project": "/tmp", "content": "a"}),
+                serde_json::json!({"reason": "record extracted memory write", "title": "A", "type": "research", "project": "/tmp", "content": "a"}),
             ),
             tool_result_with_json(
                 "w1",
@@ -1586,7 +1586,7 @@ mod tests {
             tool_use_with_id(
                 "w2",
                 "memory_write",
-                serde_json::json!({"title": "B", "type": "decisions", "project": "/tmp", "content": "b"}),
+                serde_json::json!({"reason": "record extracted memory write", "title": "B", "type": "decisions", "project": "/tmp", "content": "b"}),
             ),
             tool_result_with_json(
                 "w2",
@@ -1595,7 +1595,7 @@ mod tests {
             tool_use_with_id(
                 "w3",
                 "memory_edit",
-                serde_json::json!({"identifier": "patterns/c", "operation": "append", "content": "c", "project": "/tmp"}),
+                serde_json::json!({"reason": "record extracted memory edit", "identifier": "patterns/c", "operation": "append", "content": "c", "project": "/tmp"}),
             ),
             tool_result_with_json(
                 "w3",
